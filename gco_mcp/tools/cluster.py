@@ -33,7 +33,8 @@ async def cluster_tunnel_command(
 
     Args:
         region: AWS region of the target cluster (e.g. us-east-1). When omitted,
-            resolves to the first cdk.json regional entry.
+            resolves to the CLI's default region: GCO_DEFAULT_REGION or the
+            config file, else the first cdk.json regional entry.
         instance_id: Optional SSM-managed instance id to tunnel through. It is
             used whenever the cluster has private endpoint access,
             PUBLIC_AND_PRIVATE included, and the plan fails when private

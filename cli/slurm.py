@@ -26,6 +26,7 @@ from typing import Any
 from gco.slurm_config import SLURM_LOGIN_NAME, SLURM_NAMESPACE
 
 from . import cluster_ui
+from .kubectl_helpers import kubectl_context_flags
 
 #: The Slinky LoginSet GCO deploys and its namespace; ``shell`` and ``output``
 #: exec into its Deployment (the operator names it after the LoginSet) because
@@ -515,9 +516,14 @@ def login_exec_command(
     interactive: bool = False,
     server: str | None = None,
     tls_server_name: str | None = None,
+    context: str | None = None,
 ) -> list[str]:
-    """``kubectl exec`` into the login Deployment with the tunnel's flags."""
-    cmd = ["kubectl", "exec"]
+    """``kubectl exec`` into the login Deployment with the tunnel's flags.
+
+    ``context`` is the kubeconfig context
+    :func:`cli.kubectl_helpers.update_kubeconfig` returned for the cluster.
+    """
+    cmd = ["kubectl", *kubectl_context_flags(context), "exec"]
     if interactive:
         cmd.append("-it")
     cmd += [

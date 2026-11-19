@@ -89,14 +89,16 @@ def test_post_connect_tunnel_exit_uses_one_diagnostic_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     proc = SimpleNamespace()
-    connection = MagicMock()
     diagnostic = Mock(side_effect=[None, "exit code 17; session closed"])
+    # The pre-launch check finds the port free; the reported listener accepts.
+    accepts = Mock(side_effect=[False, True])
 
     monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", lambda *_args, **_kwargs: proc)
+    monkeypatch.setattr(ssm_tunnel, "_local_port_accepts", accepts)
     monkeypatch.setattr(
-        ssm_tunnel.socket,
-        "create_connection",
-        lambda *_args, **_kwargs: connection,
+        ssm_tunnel,
+        "_tunnel_output",
+        lambda *_args: SimpleNamespace(opened=SimpleNamespace(is_set=lambda: True)),
     )
     monkeypatch.setattr(ssm_tunnel, "exited_api_tunnel_detail", diagnostic)
     monkeypatch.setattr(ssm_tunnel, "stop_api_tunnel", lambda *_args, **_kwargs: (b"", b""))
@@ -113,7 +115,7 @@ def test_post_connect_tunnel_exit_uses_one_diagnostic_read(
             ready_wait_seconds=0,
         )
 
-    connection.close.assert_called_once_with()
+    assert accepts.call_count == 2
     assert diagnostic.call_args_list == [call(proc), call(proc)]
 
 

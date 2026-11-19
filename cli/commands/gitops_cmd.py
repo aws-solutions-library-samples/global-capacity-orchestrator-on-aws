@@ -102,7 +102,7 @@ def gitops_open(
     bind_port = local_port or DEFAULT_LOCAL_PORT
     namespace, target, remote_port = PORT_FORWARD_TARGET
     try:
-        update_kubeconfig(cluster, target_region)
+        context = update_kubeconfig(cluster, target_region)
         with open_api_server_tunnel(
             formatter,
             cluster=cluster,
@@ -118,6 +118,7 @@ def gitops_open(
                 remote_port,
                 server=session.server,
                 tls_server_name=session.tls_server_name,
+                context=context,
             )
             formatter.print_info(
                 f"Starting kubectl port-forward for Argo CD on localhost:{bind_port}..."
@@ -166,7 +167,7 @@ def gitops_password(
     target_region = resolve_region(config, region)
     cluster = f"{config.project_name}-{target_region}"
     try:
-        update_kubeconfig(cluster, target_region)
+        context = update_kubeconfig(cluster, target_region)
         with open_api_server_tunnel(
             formatter,
             cluster=cluster,
@@ -176,7 +177,7 @@ def gitops_password(
             assume_yes=assume_yes,
         ) as session:
             password = read_admin_password(
-                server=session.server, tls_server_name=session.tls_server_name
+                server=session.server, tls_server_name=session.tls_server_name, context=context
             )
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))
@@ -244,9 +245,10 @@ def gitops_screenshot(
     bind_port = local_port or DEFAULT_LOCAL_PORT
     output = output_path or Path.cwd() / DEFAULT_SCREENSHOT_FILENAME
     namespace, target, remote_port = PORT_FORWARD_TARGET
-    base_url = f"http://localhost:{bind_port}"
+    # The address background_port_forward verified kubectl listens on.
+    base_url = f"http://127.0.0.1:{bind_port}"
     try:
-        update_kubeconfig(cluster, target_region)
+        context = update_kubeconfig(cluster, target_region)
         with open_api_server_tunnel(
             formatter,
             cluster=cluster,
@@ -256,7 +258,7 @@ def gitops_screenshot(
             assume_yes=assume_yes,
         ) as session:
             admin_password = password or read_admin_password(
-                server=session.server, tls_server_name=session.tls_server_name
+                server=session.server, tls_server_name=session.tls_server_name, context=context
             )
             cmd = build_port_forward_command(
                 namespace,
@@ -265,6 +267,7 @@ def gitops_screenshot(
                 remote_port,
                 server=session.server,
                 tls_server_name=session.tls_server_name,
+                context=context,
             )
             with background_port_forward(cmd, bind_port):
                 token = create_session_token(base_url, admin_password)

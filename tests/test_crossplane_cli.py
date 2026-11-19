@@ -23,6 +23,7 @@ from cli.main import cli
 
 _SERVER = "https://127.0.0.1:8443"
 _SNI = "abc.gr7.us-east-1.eks.amazonaws.com"
+_CONTEXT = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
 
 
 def _write_cdk(tmp_path: Path, helm: Any = None) -> Path:
@@ -152,7 +153,12 @@ def _forward_into(forwarded: list[list[str]]) -> Any:
 
 @pytest.fixture
 def cluster(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    state: dict[str, Any] = {"tunnels": [], "kubeconfig": [], "session": (_SERVER, _SNI)}
+    state: dict[str, Any] = {
+        "tunnels": [],
+        "kubeconfig": [],
+        "session": (_SERVER, _SNI),
+        "context": None,
+    }
 
     @contextmanager
     def fake_tunnel(formatter: Any, **kwargs: Any) -> Iterator[Any]:
@@ -160,11 +166,12 @@ def cluster(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         server, sni = state["session"]
         yield types.SimpleNamespace(server=server, tls_server_name=sni)
 
+    def fake_update_kubeconfig(cluster: str, region: str) -> str | None:
+        state["kubeconfig"].append((cluster, region))
+        return state["context"]
+
     monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", fake_tunnel)
-    monkeypatch.setattr(
-        "cli.kubectl_helpers.update_kubeconfig",
-        lambda cluster, region: state["kubeconfig"].append((cluster, region)),
-    )
+    monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", fake_update_kubeconfig)
     return state
 
 
@@ -206,6 +213,7 @@ class TestOpenCommand:
     def test_forwards_the_dashboard_through_the_tunnel(
         self, runner: CliRunner, cluster: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        cluster["context"] = _CONTEXT
         forwarded: list[list[str]] = []
         monkeypatch.setattr(cluster_ui, "exec_port_forward", _forward_into(forwarded))
         result = runner.invoke(
@@ -237,6 +245,7 @@ class TestOpenCommand:
                 _SERVER,
                 "--tls-server-name",
                 _SNI,
+                f"--context={_CONTEXT}",
             ]
         ]
         assert "http://localhost:13001" in result.output
@@ -288,10 +297,12 @@ class TestScreenshotCommand:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.chdir(tmp_path)
+        cluster["context"] = _CONTEXT
         result = runner.invoke(cli, ["crossplane", "screenshot", "-r", "us-east-1"])
         assert result.exit_code == 0, result.output
+        assert capture["forwards"][0][0][-1] == f"--context={_CONTEXT}"
         assert capture["captures"] == [
-            ("http://localhost:3001", tmp_path / "crossview-dashboard.png", True)
+            ("http://127.0.0.1:3001", tmp_path / "crossview-dashboard.png", True)
         ]
         (cmd, port) = capture["forwards"][0]
         assert port == 3001 and cmd[3:6] == [
@@ -320,7 +331,7 @@ class TestScreenshotCommand:
             ],
         )
         assert result.exit_code == 0, result.output
-        assert capture["captures"] == [("http://localhost:13001", target, False)]
+        assert capture["captures"] == [("http://127.0.0.1:13001", target, False)]
 
     def test_failures_exit_1(
         self,

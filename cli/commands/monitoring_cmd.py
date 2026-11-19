@@ -183,7 +183,7 @@ def monitoring_disable(config: Any, yes: bool) -> None:
     show_default=True,
     help="Which component to port-forward.",
 )
-@click.option("--region", help="Cluster region (defaults to the first cdk.json regional entry).")
+@click.option("--region", help=cluster_ui._REGION_HELP)
 @click.option("--local-port", type=int, help="Local port to bind (defaults per-service).")
 @click.option(
     "--via-ssm",
@@ -239,7 +239,7 @@ def monitoring_open(
     bind_port = local_port or svc["default_local_port"]
 
     try:
-        update_kubeconfig(cluster, target_region)
+        context = update_kubeconfig(cluster, target_region)
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))
         sys.exit(1)
@@ -263,6 +263,7 @@ def monitoring_open(
                 svc["remote_port"],
                 server=session.server,
                 tls_server_name=session.tls_server_name,
+                context=context,
             )
             url = f"http://localhost:{bind_port}"
             formatter.print_info(

@@ -15,6 +15,7 @@ import secrets
 import stat
 import sys
 import unicodedata
+import zlib
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,6 +24,7 @@ from types import TracebackType
 from typing import Any, ClassVar, Self
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 from .config import GCOConfig, get_config
@@ -350,6 +352,7 @@ class _PreparedUpload:
     source_parts: tuple[str, ...] | None
     size: int
     sha256: str
+    crc32: int
     signature: _FileSignature
 
 
@@ -362,6 +365,7 @@ class _UploadObject:
     key: str
     size: int
     sha256: str
+    crc32: int
     signature: _FileSignature
     current: bool
 
@@ -370,6 +374,8 @@ class StorageManager:
     """Resolve friendly GCO bucket aliases and transfer their contents."""
 
     _UPLOAD_DIGEST_METADATA = "gco-sync-sha256"
+    # boto3's default; files of at least this size upload in parts.
+    _UPLOAD_MULTIPART_THRESHOLD = 8 * 1024 * 1024
 
     _PURPOSES: ClassVar[dict[str, str]] = {
         "cluster-shared": "Cross-region cluster job artifacts and shared data",
@@ -978,10 +984,9 @@ class StorageManager:
                                 obj.key,
                                 ExtraArgs={
                                     "Metadata": {self._UPLOAD_DIGEST_METADATA: obj.sha256},
-                                    "ChecksumSHA256": base64.b64encode(
-                                        bytes.fromhex(obj.sha256)
-                                    ).decode("ascii"),
+                                    **self._upload_checksum_args(obj),
                                 },
+                                Config=self._upload_transfer_config(),
                             )
                         if self._stat_signature(os.fstat(source_fd)) != obj.signature:
                             raise RuntimeError(f"Local file changed during upload: {obj.source}")
@@ -1214,22 +1219,55 @@ class StorageManager:
         )
 
     @classmethod
-    def _hash_upload_fd(cls, file_fd: int, path: Path) -> tuple[str, _FileSignature]:
+    def _hash_upload_fd(cls, file_fd: int, path: Path) -> tuple[str, int, _FileSignature]:
+        """Return the file's SHA-256 (hex), CRC-32 and stat signature from one read."""
         with os.fdopen(file_fd, "rb") as source_file:
             before = os.fstat(source_file.fileno())
             if not stat.S_ISREG(before.st_mode):
                 raise ValueError(f"Upload source is not a regular file: {path}")
             before_signature = cls._stat_signature(before)
             digest = hashlib.sha256()
+            crc32 = 0
             while chunk := source_file.read(8 * 1024 * 1024):
                 digest.update(chunk)
+                crc32 = zlib.crc32(chunk, crc32)
             after_signature = cls._stat_signature(os.fstat(source_file.fileno()))
         if before_signature != after_signature:
             raise RuntimeError(f"Local file changed while planning upload: {path}")
-        return digest.hexdigest(), before_signature
+        return digest.hexdigest(), crc32, before_signature
 
     @classmethod
-    def _hash_upload_file(cls, path: Path) -> tuple[str, _FileSignature]:
+    def _upload_checksum_args(cls, obj: _UploadObject) -> dict[str, str]:
+        """Return the planned whole-file checksum S3 verifies before storing ``obj``.
+
+        A single-part upload carries the SHA-256. A multipart upload cannot: S3
+        accepts a full-object checksum on a multipart upload only for the CRC
+        algorithms (SHA-256 is composite-only there), so it carries the CRC-32
+        computed in the same planning read. boto3 then asks for that checksum
+        type, sends a CRC-32 with every part, and S3 refuses to complete the
+        upload unless the assembled object matches the planned bytes.
+        """
+        if obj.size >= cls._UPLOAD_MULTIPART_THRESHOLD:
+            crc32 = obj.crc32.to_bytes(4, "big")
+            return {"ChecksumCRC32": base64.b64encode(crc32).decode("ascii")}
+        sha256 = bytes.fromhex(obj.sha256)
+        return {"ChecksumSHA256": base64.b64encode(sha256).decode("ascii")}
+
+    @classmethod
+    def _upload_transfer_config(cls) -> TransferConfig:
+        """Return the transfer settings that make ``_upload_checksum_args`` exact.
+
+        The classic transfer manager switches to a multipart upload at exactly
+        ``multipart_threshold`` bytes; the CRT manager boto3 can pick on some
+        instance types splits uploads by its own rules.
+        """
+        return TransferConfig(
+            multipart_threshold=cls._UPLOAD_MULTIPART_THRESHOLD,
+            preferred_transfer_client="classic",
+        )
+
+    @classmethod
+    def _hash_upload_file(cls, path: Path) -> tuple[str, int, _FileSignature]:
         flags = (
             os.O_RDONLY
             | getattr(os, "O_BINARY", 0)
@@ -1284,7 +1322,7 @@ class StorageManager:
 
         prepared: list[_PreparedUpload] = []
         for path, relative in sorted(paths, key=lambda item: item[1]):
-            digest, signature = cls._hash_upload_file(path)
+            digest, crc32, signature = cls._hash_upload_file(path)
             prepared.append(
                 _PreparedUpload(
                     source=path,
@@ -1292,6 +1330,7 @@ class StorageManager:
                     source_parts=None,
                     size=signature[2],
                     sha256=digest,
+                    crc32=crc32,
                     signature=signature,
                 )
             )
@@ -1312,7 +1351,7 @@ class StorageManager:
         if stat.S_ISREG(source_stat.st_mode):
             relative = source.name
             cls._validate_upload_relative_path(relative, source)
-            digest, signature = cls._hash_upload_fd(
+            digest, crc32, signature = cls._hash_upload_fd(
                 confinement.open_regular_file(source_parts),
                 source,
             )
@@ -1323,6 +1362,7 @@ class StorageManager:
                     source_parts=source_parts,
                     size=signature[2],
                     sha256=digest,
+                    crc32=crc32,
                     signature=signature,
                 )
             ]
@@ -1384,7 +1424,7 @@ class StorageManager:
             if not stat.S_ISREG(child_stat.st_mode):
                 raise ValueError(f"Upload source contains a non-regular file: {child}")
 
-            digest, signature = cls._hash_upload_fd(
+            digest, crc32, signature = cls._hash_upload_fd(
                 confinement.open_child_regular_file(directory_fd, name, child),
                 child,
             )
@@ -1395,6 +1435,7 @@ class StorageManager:
                     source_parts=child_parts,
                     size=signature[2],
                     sha256=digest,
+                    crc32=crc32,
                     signature=signature,
                 )
             )
@@ -1511,6 +1552,7 @@ class StorageManager:
                     key=key,
                     size=prepared.size,
                     sha256=prepared.sha256,
+                    crc32=prepared.crc32,
                     signature=prepared.signature,
                     current=current,
                 )

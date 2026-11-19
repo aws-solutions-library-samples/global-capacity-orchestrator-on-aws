@@ -1402,6 +1402,15 @@ in another shell. With `--print` it instead emits the ready-to-run tunnel +
 `kubectl` commands (a connection plan) without opening anything — JSON under
 `gco --output json`, copy-paste shell commands otherwise.
 
+SIGTERM and SIGHUP (`kill`, a supervisor's timeout, closing the terminal) end
+this command, and every other command that holds a tunnel (`monitoring open`,
+`costs dashboard`, `gitops`, `crossplane`, `slurm shell|output`, `nodepools`
+with `--via-ssm`), the way Ctrl-C does: the port-forward and the SSM session
+are stopped and an `auto` bastion is terminated, also while it is still
+waiting to register with SSM, before the command exits with status 143 or
+129. A handler a calling program installed for those signals, or the SIGHUP
+`nohup` ignores, is left in place.
+
 The tunnel needs the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html),
 which `aws ssm start-session` hands the session to; the `gco-dev` image ships a
 pinned copy. Run through the `gco` shell function, the tunnel listens on the
@@ -1418,9 +1427,9 @@ gco cluster tunnel [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel through an existing SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down on exit. An existing instance must carry the cluster security group (`ClusterSecurityGroupId` stack output) or one that group admits on 443; the cluster security group admits no VPC CIDR. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included (see [Route selection](#route-selection)). |
-| `--local-port` | Local port to bind for the API tunnel (default `8443`). |
+| `--local-port` | Local port to bind for the API tunnel (default `8443`). A port another process already listens on is refused, and the tunnel counts as open only once the Session Manager plugin reports its own listener there, so kubectl never reaches another process by mistake. The other commands that open a tunnel (`monitoring open`, `gitops`, `crossplane`, `costs dashboard`, `slurm`) use `8443` and refuse it the same way while it is taken, for example by a running `gco cluster tunnel`. |
 | `--print` | Print the tunnel + `kubectl` connection plan instead of opening the tunnel. |
 | `--bastion-ttl-minutes` | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`). |
 | `--yes` / `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
@@ -1432,7 +1441,11 @@ cluster security group (no new security group, and **no inbound ports** — SSM 
 outbound-only), requires IMDSv2, self-terminates after `--bastion-ttl-minutes`,
 and is tagged `gco:ephemeral=true`. It is torn down automatically when the tunnel
 closes; if teardown ever fails, the command prints the exact orphan-check
-command.
+command. Its IAM role and instance profile (`<project>-ephemeral-bastion-role`
+and `<project>-ephemeral-bastion-profile`) are shared by every `auto` bastion
+of the project in every Region, so teardown terminates only the instance and
+leaves them in place for the next session; `gco stacks destroy-all` deletes
+them.
 
 ##### Route selection
 
@@ -1461,9 +1474,9 @@ follows the same table.
 # Auto-provision an ephemeral bastion, tunnel, and hold it open:
 gco cluster tunnel --region us-east-1 --via-ssm auto
 
-# In another shell, run kubectl through the tunnel:
-kubectl --server https://127.0.0.1:8443 \
-    --tls-server-name <endpoint-host> get nodes
+# In another shell, run the kubectl command the tunnel prints:
+kubectl --context=arn:aws:eks:us-east-1:<account-id>:cluster/gco-us-east-1 \
+    --server https://127.0.0.1:8443 --tls-server-name <endpoint-host> get nodes
 
 # Or just print the connection plan (no changes made, JSON for scripting):
 gco cluster tunnel --region us-east-1 --print
@@ -1474,6 +1487,17 @@ Opening a tunnel does **not** replace an EKS access entry: the tunnel solves
 reachability, while authentication still needs `gco stacks access -r <region>`
 (or a `developer_access` entry in cdk.json). Run `gco cluster doctor` when
 unsure which layer is failing.
+
+`--server` replaces only the endpoint; the cluster's credentials and CA come
+from the kubeconfig context, so the printed command names the cluster's
+context with `--context`. Commands that run kubectl for you (`cluster tunnel`,
+`jobs submit-direct`, `files`, `monitoring open`, `costs dashboard`, `gitops`,
+`crossplane`, `slurm shell|output`) refresh the cluster's kubeconfig entry and
+pass its context to every kubectl call, so they reach that cluster whatever
+context is current. A kubeconfig entry already pointed at a local tunnel
+(`server` on `127.0.0.1` or `localhost` with `tls-server-name` set) is kept as
+it is and its own context is used; such an entry with no context fails with an
+error instead of falling back to the current context.
 
 #### `gco cluster doctor`
 
@@ -1502,7 +1526,7 @@ gco cluster doctor [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 
 **Example:**
 
@@ -2011,7 +2035,7 @@ gco costs dashboard [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--service` | | `grafana` (default) or `opencost` |
-| `--region` | | Cluster region (defaults to the first cdk.json regional entry) |
+| `--region` | | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry) |
 | `--local-port` | | Local port to bind (defaults per-service) |
 | `--via-ssm` | | Tunnel through an SSM-managed instance: an instance id, or `auto`. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | | Self-terminate backstop for an `auto` bastion (default: 120) |
@@ -2074,7 +2098,7 @@ gco crossplane open [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region`, `-r` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--local-port` | Local port to bind (default `3001`, the port the dashboard's CORS origin names). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
@@ -2484,7 +2508,7 @@ gco gitops open [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region`, `-r` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--local-port` | Local port to bind (default `8080`). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
@@ -2507,7 +2531,10 @@ Forward the UI in the background, log in to the Argo CD API as `admin` and
 capture `/applications` with the session cookie as a full-page PNG — no browser
 sign-in. Needs Playwright (`pip install 'gco[diagrams]'` and
 `playwright install chromium` once). This is the code behind
-`images/argocd-ui.png`.
+`images/argocd-ui.png`. The command refuses a `--local-port` another process
+already listens on and sends the password only after kubectl reports its own
+listener on `127.0.0.1:<port>`, the address it then connects to
+(`crossplane screenshot` forwards the same way).
 
 ```bash
 gco gitops screenshot [OPTIONS]
@@ -4656,7 +4683,7 @@ gco monitoring open [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--service` | `grafana` (default, `localhost:3000`), `prometheus` (`:9090`), `alertmanager` (`:9093`), `opencost` (the OpenCost UI, `:9091`), `opencost-api` (the OpenCost allocation API, `:9003`), or `mlflow` (the MLflow tracking UI, `:5000`). The OpenCost targets exist when `cost_monitoring.enabled` is on — see [docs/COST_MONITORING.md](COST_MONITORING.md); the MLflow target when `cluster_observability.mlflow.enabled` is on — see [docs/MONITORING.md](MONITORING.md#mlflow-experiment-tracking). |
-| `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--local-port` | Override the local bind port. |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
@@ -5243,7 +5270,7 @@ gco slurm shell [--backend slinky|pcs] [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--backend`, `-b` | `slinky` (login pod) or `pcs` (login instance). |
-| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region`, `-r` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
 | `--yes`, `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
@@ -5554,8 +5581,9 @@ After stack deletion, `destroy-all` makes a best-effort sweep of known resources
 that CloudFormation never modeled. It targets the implicit CloudWatch log groups
 created out-of-band by Lambda (`/aws/lambda/<function>`), the EKS control plane
 (`/aws/eks/<cluster>/cluster`), and Container Insights
-(`/aws/containerinsights/<cluster>/...`), plus the ephemeral SSM bastion's IAM
-role and instance profile if a killed tunnel session left them behind.
+(`/aws/containerinsights/<cluster>/...`), plus the IAM role and instance
+profile that every `--via-ssm auto` bastion of the project shares (tunnel
+teardown leaves them in place).
 
 The sweep also deletes a destroyed stack's own log groups that exist again
 after CloudFormation deleted them. A Lambda function's last log lines can arrive
@@ -6295,13 +6323,17 @@ gco storage sync analytics-studio ./studio-output --direction upload --dry-run
   directory name itself is not added. A single file maps to
   `PREFIX/<file-name>`.
 - Upload incrementality uses a SHA-256 digest stored as S3 user metadata named
-  `gco-sync-sha256`. The same precomputed whole-file digest is sent as the
-  base64 `ChecksumSHA256`, so S3 rejects an upload whose received bytes differ
-  from the file that was planned. A remote object is skipped only when its size
-  and digest metadata match the local file; skipped objects are checked again
-  before a successful non-dry-run result. ETags are intentionally not used
-  because multipart and SSE-KMS ETags are not reliable whole-file digests.
-  Existing objects without this metadata are uploaded once to establish it.
+  `gco-sync-sha256`. Every upload also carries a whole-file checksum computed
+  while planning, so S3 rejects an upload whose received bytes differ from the
+  file that was planned: files under 8 MiB are sent in one request with the
+  same digest as `ChecksumSHA256`; larger files are sent as a multipart upload
+  with a full-object `ChecksumCRC32` (S3 accepts full-object checksums on
+  multipart uploads only for CRC algorithms) and a CRC-32 per part. A remote
+  object is skipped only when its size and digest metadata match the local
+  file; skipped objects are checked again before a successful non-dry-run
+  result. ETags are intentionally not used because multipart and SSE-KMS ETags
+  are not reliable whole-file digests. Existing objects without this metadata
+  are uploaded once to establish it.
 - Upload planning rejects top-level or descendant symlinks, non-regular files,
   and unsafe relative names before the first PUT. It hashes every source file
   during planning and rejects a file if its identity, size, or timestamps

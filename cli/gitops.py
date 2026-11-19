@@ -153,7 +153,12 @@ def gitops_status(
     )
 
 
-def read_admin_password(*, server: str | None = None, tls_server_name: str | None = None) -> str:
+def read_admin_password(
+    *,
+    server: str | None = None,
+    tls_server_name: str | None = None,
+    context: str | None = None,
+) -> str:
     """The generated ``admin`` password Argo CD wrote on first start.
 
     Argo CD recommends deleting ``argocd-initial-admin-secret`` once the
@@ -166,6 +171,7 @@ def read_admin_password(*, server: str | None = None, tls_server_name: str | Non
             "password",
             server=server,
             tls_server_name=tls_server_name,
+            context=context,
         )
     except RuntimeError as exc:
         # kubectl reports a missing Secret (or a missing argocd namespace) as

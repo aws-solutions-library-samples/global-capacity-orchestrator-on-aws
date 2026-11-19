@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
@@ -48,13 +49,33 @@ def _kubeconfig_file() -> Path:
     return Path.home() / ".kube" / "config"
 
 
-def _tunnel_pinned_server(cluster_name: str) -> str | None:
-    """Return the pinned local-tunnel server for *cluster_name*, if any.
+#: What ``aws eks update-kubeconfig`` prints after writing the context it also
+#: made current (awscli customizations/eks/update_kubeconfig.py).
+_WRITTEN_CONTEXT_RE = re.compile(
+    r"^(?:Updated context|Added new context) (?P<context>\S+) (?:in|to) ", re.MULTILINE
+)
+
+
+def _mappings(value: object) -> list[dict[str, Any]]:
+    """The mapping items of a kubeconfig list (``[]`` for anything else)."""
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _tunnel_pinned_server(cluster_name: str) -> tuple[str, str] | None:
+    """Return ``(server, context)`` when *cluster_name*'s entry is pinned to a local tunnel.
 
     ``gco cluster tunnel`` (and callers of its machinery, e.g. the example-job
     validation harness) rewrite the cluster's kubeconfig entry to point at a
     localhost tunnel with ``tls-server-name`` pinned to the real endpoint
     host. Any entry matching that shape is a deliberate operator choice.
+
+    The refresh that would make the cluster's context current is skipped for
+    such an entry, so the context returned is one bound to the pinned entry:
+    the current context when it is one of them, else the first.
+
+    Raises:
+        RuntimeError: If no context uses the pinned entry, so kubectl cannot
+            reach it.
     """
     import yaml
 
@@ -63,20 +84,45 @@ def _tunnel_pinned_server(cluster_name: str) -> str | None:
         config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except OSError, yaml.YAMLError:
         return None
+    if not isinstance(config, dict):
+        return None
     expected_suffix = f"cluster/{cluster_name}"
-    for entry in config.get("clusters", []) or []:
+    for entry in _mappings(config.get("clusters")):
         name = str(entry.get("name", ""))
         if name != cluster_name and not name.endswith(expected_suffix):
             continue
         cluster = entry.get("cluster") or {}
         server = str(cluster.get("server", ""))
         host = urlsplit(server).hostname or ""
-        if host in _LOCAL_TUNNEL_HOSTS and cluster.get("tls-server-name"):
-            return server
+        if host not in _LOCAL_TUNNEL_HOSTS or not cluster.get("tls-server-name"):
+            continue
+        contexts = [
+            str(item["name"])
+            for item in _mappings(config.get("contexts"))
+            if item.get("name") and (item.get("context") or {}).get("cluster") == name
+        ]
+        if not contexts:
+            raise RuntimeError(
+                f"kubeconfig {path} points cluster {name} at the local tunnel {server}, "
+                "but no kubeconfig context uses it, so kubectl cannot reach it. Add one "
+                f"(kubectl config set-context <name> --cluster {name} --user <user>) or "
+                "remove the entry and re-run to refresh it."
+            )
+        current = config.get("current-context")
+        return server, current if current in contexts else contexts[0]
     return None
 
 
-def update_kubeconfig(cluster_name: str, region: str) -> None:
+def kubectl_context_flags(context: str | None) -> list[str]:
+    """``--context`` for the context :func:`update_kubeconfig` returned (or nothing).
+
+    The ``=`` form keeps a context name that starts with ``-`` from reading as
+    a flag.
+    """
+    return [] if context is None else [f"--context={context}"]
+
+
+def update_kubeconfig(cluster_name: str, region: str) -> str | None:
     """Update kubeconfig for an EKS cluster, preserving an active tunnel pin.
 
     When the cluster's kubeconfig entry already points at a localhost tunnel
@@ -90,9 +136,19 @@ def update_kubeconfig(cluster_name: str, region: str) -> None:
     the private endpoint. A tunnel-shaped entry is preserved untouched; a
     dead tunnel fails loudly at connect time, which beats a silent rewrite.
 
+    Skipping the refresh also skips the context switch it makes, so the
+    current context can name another cluster. Pass the returned context to
+    every later kubectl call (:func:`kubectl_context_flags`); that also keeps
+    a context switch made elsewhere from redirecting a multi-step operation.
+
     Args:
         cluster_name: Name of the EKS cluster
         region: AWS region where the cluster is located
+
+    Returns:
+        The kubeconfig context that targets the cluster, or ``None`` when the
+        AWS CLI did not report one (its refresh made the cluster's context
+        current).
 
     Raises:
         ValueError: If cluster_name or region contain unexpected characters
@@ -104,12 +160,14 @@ def update_kubeconfig(cluster_name: str, region: str) -> None:
 
     pinned = _tunnel_pinned_server(cluster_name)
     if pinned is not None:
+        server, context = pinned
         logger.info(
-            "kubeconfig for %s points at local tunnel %s; preserving it",
+            "kubeconfig for %s points at local tunnel %s; preserving it (context %s)",
             cluster_name,
-            pinned,
+            server,
+            context,
         )
-        return
+        return context
 
     cmd = [
         "aws",
@@ -136,6 +194,8 @@ def update_kubeconfig(cluster_name: str, region: str) -> None:
         raise RuntimeError(
             "AWS CLI not found. Please install the AWS CLI and ensure it's in your PATH."
         ) from e
+    written = _WRITTEN_CONTEXT_RE.search(result.stdout or "")
+    return written.group("context") if written else None
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +229,7 @@ def build_port_forward_command(
     *,
     server: str | None = None,
     tls_server_name: str | None = None,
+    context: str | None = None,
 ) -> list[str]:
     """Build a validated ``kubectl port-forward`` argv (list form, never a shell string).
 
@@ -176,7 +237,9 @@ def build_port_forward_command(
     ``server`` / ``tls_server_name`` override the API endpoint and its TLS SNI —
     used when tunnelling to a private endpoint through an SSM local port, where
     kubectl talks to ``https://127.0.0.1:<port>`` but must present the real EKS
-    hostname for certificate validation.
+    hostname for certificate validation. ``context`` is the kubeconfig context
+    :func:`update_kubeconfig` returned; it supplies the cluster's credentials
+    and CA even when ``server`` overrides the endpoint.
     """
     if not _NAMESPACE_RE.match(namespace):
         raise ValueError(f"Invalid namespace {namespace!r}")
@@ -197,7 +260,7 @@ def build_port_forward_command(
         if not re.match(r"^[a-zA-Z0-9.\-]{1,255}$", tls_server_name):
             raise ValueError(f"Invalid --tls-server-name {tls_server_name!r}")
         cmd += ["--tls-server-name", tls_server_name]
-    return cmd
+    return cmd + kubectl_context_flags(context)
 
 
 def describe_cluster_access(cluster_name: str, region: str) -> dict[str, object]:

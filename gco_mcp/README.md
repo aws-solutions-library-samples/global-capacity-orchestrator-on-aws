@@ -916,8 +916,9 @@ direction deletes destination-only data. Downloads use size and modification
 time to skip current local files. Uploads map directory contents beneath the
 remote prefix, map a single file to `PREFIX/<file-name>`, and skip only
 same-size objects whose `gco-sync-sha256` metadata matches the local SHA-256;
-the same digest is sent as S3 `ChecksumSHA256`, and skipped objects are
-revalidated before success. Objects without the metadata upload once. Upload
+S3 verifies every upload against a checksum computed while planning (that
+digest as `ChecksumSHA256` below 8 MiB, a full-object `ChecksumCRC32` for
+multipart uploads), and skipped objects are revalidated before success. Objects without the metadata upload once. Upload
 preflight securely enumerates and opens sources without following symlinks and
 rejects non-regular files and unsafe names before the first PUT. Upload probes
 only the generated destination keys with `HeadObject` and does not require
