@@ -151,7 +151,7 @@ than inherited from whatever the platform defaults to at recreate time.
 
 | File | Contents |
 |------|----------|
-| `50-dcgm-exporter.yaml` | DCGM exporter `DaemonSet` + device-counters `ConfigMap` (GPU metrics for Prometheus) — **pruned when observability is disabled** |
+| `50-dcgm-exporter.yaml` | DCGM exporter `DaemonSet` on every NVIDIA GPU node (`eks.amazonaws.com/instance-gpu-manufacturer: nvidia`, tolerating the `nvidia.com/gpu` and `vpc.amazonaws.com/efa` taints) + device-counters `ConfigMap` (GPU metrics for Prometheus) — **pruned when observability is disabled** |
 | `51-hyperpod-health-monitoring-agent.yaml` | The [SageMaker HyperPod](../../../docs/HYPERPOD.md) health-monitoring agent: two `DaemonSet`s in `aws-hyperpod` (NVIDIA instance types, and Trainium/Inferentia types with the NVIDIA hooks disabled) bound to `gco.aws/capacity-provider=hyperpod` nodes of HyperPod's `ml.*` instance types, tolerating every taint, running the Region's `{{HYPERPOD_HMA_IMAGE}}` non-root with no capabilities and a read-only root; the host `/var/log`, `/dev/kmsg` and `/etc/localtime` mounts are the agent's contract (it reads the kernel ring buffer and system logs to label faulty nodes for `NodeRecovery`) — **skipped and pruned when HyperPod is disabled** |
 
 There is deliberately no NVIDIA device plugin manifest: EKS Auto Mode ships
