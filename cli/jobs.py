@@ -1229,8 +1229,9 @@ class JobManager:
         A name the batch Job endpoint does not know (404) is retried as a
         Kubeflow TrainJob through the generic manifests endpoint. Deleting
         the TrainJob cascades to its JobSet, child Jobs, and pods via owner
-        references. ``expected_uid`` (a batch-Job concurrency guard) is not
-        supported on the TrainJob path.
+        references. With no TrainJob either, the batch 404 is raised; a
+        TrainJob delete that fails raises its own error. ``expected_uid`` (a
+        batch-Job concurrency guard) is not supported on the TrainJob path.
 
         Args:
             job_name: Name of the job
@@ -1256,21 +1257,34 @@ class JobManager:
             raise
 
     def _delete_trainjob(self, job_name: str, namespace: str, region: str) -> dict[str, Any] | None:
-        """Delete a TrainJob via the manifests endpoint, or None if that fails.
+        """Delete a TrainJob via the manifests endpoint, or None if there is none.
 
-        Returning None (rather than raising) lets the caller surface the
-        original batch-Job 404, which is the right error for a typo'd name.
+        None only when the API answers that there is no TrainJob to delete:
+        the route reports a missing one as a 200 whose resource status is
+        ``unchanged`` ("not found"), and a 403 or 404 means the deployment
+        admits no TrainJob there, so none can exist (the rule
+        :meth:`_get_trainjob_info` uses). The caller then surfaces the batch
+        Job's 404, the right error for a typo'd name. Any other failure (a
+        delete the cluster refused, a 5xx) propagates, so a TrainJob that
+        could not be deleted is never reported as "not found".
         """
         try:
-            return self._aws_client.call_api(
+            result: dict[str, Any] = self._aws_client.call_api(
                 "DELETE",
                 f"/api/v1/manifests/{api_path_segment(namespace)}/{api_path_segment(job_name)}",
                 region=region,
                 params={"api_version": TRAINJOB_API_VERSION, "kind": "TrainJob"},
             )
-        except RuntimeError as e:
-            logger.debug("TrainJob delete fallback failed for %s: %s", job_name, e)
+        except APIRequestError as e:
+            if e.status_code not in (403, 404):
+                raise
+            logger.debug("No TrainJob %s to delete in %s/%s: %s", job_name, region, namespace, e)
             return None
+        resource = result.get("resource") or {}
+        if resource.get("status") == "unchanged":
+            logger.debug("No TrainJob %s to delete in %s/%s", job_name, region, namespace)
+            return None
+        return result
 
     def wait_for_job(
         self,

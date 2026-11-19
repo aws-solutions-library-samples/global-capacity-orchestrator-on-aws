@@ -3760,6 +3760,11 @@ gco jobs pod-logs multi-job multi-job-pod1 -r us-east-1 --container sidecar
 
 Delete a job.
 
+A name the batch Job API does not know is deleted as a Kubeflow TrainJob of
+that name (which removes its JobSet, child Jobs and pods). When neither exists
+the command reports the batch Job's `404` and exits 1; when the TrainJob exists
+but its deletion fails, it reports that error instead.
+
 ```bash
 gco jobs delete JOB_NAME [OPTIONS]
 ```
