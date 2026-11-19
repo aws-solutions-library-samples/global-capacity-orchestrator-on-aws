@@ -3488,11 +3488,13 @@ class TestClusterSharedBucketRegionalIntegration:
 
         # CDK's hash-suffix on security-group nested logical ids depends
         # on the stack name, so even after ``STACKNAME`` substitution the
-        # trailing hex differs. Normalize ``KubectlLambdaSG<hex>`` to a
-        # constant. The hex is 16+ chars of upper-case hex digits.
+        # trailing hex differs. Normalize the hex after each Lambda security
+        # group that has a cluster-API ingress rule (``KubectlLambdaSG<hex>``,
+        # ``GaRegistrationFunctionSecurityGroup<hex>``) to a constant. The hex
+        # is upper-case hex digits.
         serialized = _re.sub(
-            r"KubectlLambdaSG[0-9A-F]+",
-            "KubectlLambdaSG<hash>",
+            r"(KubectlLambdaSG|GaRegistrationFunctionSecurityGroup)[0-9A-F]+",
+            r"\1<hash>",
             serialized,
         )
         return serialized

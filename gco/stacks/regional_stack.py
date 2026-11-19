@@ -7841,7 +7841,7 @@ class GCORegionalStack(Stack):
         def _parameter_arn(parameter: CfnResource) -> str:
             scope = parameter.node.scope
             if isinstance(scope, ssm.StringParameter):
-                return scope.parameter_arn
+                return str(scope.parameter_arn)
             # The one L1 parameter, the EKS construct's kubectl-ready barrier,
             # has no Name: CloudFormation generates one without a leading slash.
             return (

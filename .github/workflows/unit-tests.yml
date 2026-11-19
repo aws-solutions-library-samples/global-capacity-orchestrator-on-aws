@@ -319,6 +319,7 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        id: checkout
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
@@ -368,7 +369,9 @@ jobs:
           # the last command, so it decides the job result.
           coverage report --show-missing
       - name: Upload coverage artifacts
-        if: always()
+        # A failed shard check stops the job before checkout, and this
+        # local action exists only in the checked-out tree.
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
         uses: ./.github/actions/upload-artifact-with-retry
         with:
           name: pytest-coverage
@@ -536,6 +539,7 @@ jobs:
       # The gate builds the tracked-script inventory from `git ls-files` and
       # reads every script to classify its lines, so it needs the full tree.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        id: checkout
       - name: Download shard coverage data
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
@@ -572,7 +576,9 @@ jobs:
         # pages.yml moves this artifact's report/ into the site, so coverage/
         # stays the single upload root and report/ stays at the artifact's top
         # level.
-        if: always()
+        # A failed shard check stops the job before checkout, and this
+        # local action exists only in the checked-out tree.
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
         uses: ./.github/actions/upload-artifact-with-retry
         with:
           name: bash-coverage-report
