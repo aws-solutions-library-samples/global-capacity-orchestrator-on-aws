@@ -5538,6 +5538,29 @@ class TestSchedulerValidation:
         enablement = checks_schedulers.effective_scheduler_enablement(self._ctx(helm=None))
         assert all(state["enabled"] for state in enablement.values())
 
+    @pytest.mark.parametrize(
+        ("value", "expected"), [(True, True), (False, False), ("true", True), ("TRUE", True)]
+    )
+    def test_a_toggle_reads_the_way_the_stacks_read_it(self, value: object, expected: bool) -> None:
+        from scripts.live_release_validation.checks import schedulers as checks_schedulers
+
+        ctx = self._ctx(helm={"volcano": {"enabled": value}})
+        enablement = checks_schedulers.effective_scheduler_enablement(ctx)
+        assert enablement["volcano"] == {"enabled": expected, "source": "cdk.json helm.volcano"}
+
+    @pytest.mark.parametrize("value", ["false", "no", "", 0, 1, None])
+    def test_a_toggle_the_stacks_reject_is_an_error_not_a_probe(self, value: object) -> None:
+        # bool("false") is True: the harness used to probe a scheduler the
+        # stacks now refuse to read as on.
+        from gco.config.config_loader import ConfigValidationError
+        from scripts.live_release_validation.checks import schedulers as checks_schedulers
+
+        ctx = self._ctx(helm={"kueue": {"enabled": value}})
+        with pytest.raises(
+            ConfigValidationError, match=r"helm\.kueue\.enabled must be true or false"
+        ):
+            checks_schedulers.effective_scheduler_enablement(ctx)
+
     def test_run_overrides_force_optional_schedulers_on(self) -> None:
         from scripts.live_release_validation.checks import schedulers as checks_schedulers
 
