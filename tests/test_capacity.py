@@ -12,7 +12,38 @@ high fault tolerance regimes and includes live-signal fallbacks
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from datetime import UTC, datetime, timedelta
+from unittest.mock import DEFAULT, MagicMock, patch
+
+
+def _serve_spot_history_pages(ec2: MagicMock) -> None:
+    """Serve ``ec2.describe_spot_price_history`` through its paginator.
+
+    The checker reads every page through ``get_paginator``; these fixtures
+    describe one response without timestamps, so each record is stamped an
+    hour apart, newest first, as EC2 returns them. Other paginators keep
+    whatever the test configured.
+    """
+
+    def paginate(**kwargs):
+        response = ec2.describe_spot_price_history(**kwargs)
+        now = datetime.now(UTC)
+        return [
+            {
+                "SpotPriceHistory": [
+                    {"Timestamp": now - timedelta(hours=index), **item}
+                    for index, item in enumerate(response["SpotPriceHistory"])
+                ]
+            }
+        ]
+
+    spot_paginator = MagicMock()
+    spot_paginator.paginate.side_effect = paginate
+
+    def get_paginator(name):
+        return spot_paginator if name == "describe_spot_price_history" else DEFAULT
+
+    ec2.get_paginator.side_effect = get_paginator
 
 
 class TestInstanceTypeInfo:
@@ -448,6 +479,7 @@ class TestCapacityCheckerSpotPrices:
                         },
                     ]
                 }
+                _serve_spot_history_pages(mock_ec2)
 
                 prices = checker.get_spot_price_history("g4dn.xlarge", "us-east-1")
 
@@ -467,6 +499,7 @@ class TestCapacityCheckerSpotPrices:
                 mock_ec2 = MagicMock()
                 mock_session.client.return_value = mock_ec2
                 mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
+                _serve_spot_history_pages(mock_ec2)
 
                 prices = checker.get_spot_price_history("g4dn.xlarge", "us-east-1")
                 assert prices == []
@@ -659,6 +692,7 @@ class TestCapacityCheckerSpotEstimation:
             with patch("boto3.Session") as mock_session:
                 mock_ec2 = MagicMock()
                 mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
+                _serve_spot_history_pages(mock_ec2)
                 mock_session.return_value.client.return_value = mock_ec2
 
                 checker = CapacityChecker()
@@ -684,6 +718,7 @@ class TestCapacityCheckerSpotEstimation:
                         {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.30"},
                     ]
                 }
+                _serve_spot_history_pages(mock_ec2)
                 mock_pricing = MagicMock()
                 mock_pricing.get_products.return_value = {
                     "PriceList": [
@@ -1340,6 +1375,7 @@ class TestCapacityCheckerSpotPriceHistoryEdgeCases:
                     {"Error": {"Code": "InvalidParameterValue", "Message": "Invalid"}},
                     "DescribeSpotPriceHistory",
                 )
+                _serve_spot_history_pages(mock_ec2)
                 mock_session.return_value.client.return_value = mock_ec2
 
                 checker = CapacityChecker()
@@ -1365,6 +1401,7 @@ class TestCapacityCheckerSpotPriceHistoryEdgeCases:
                         {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.29"},
                     ]
                 }
+                _serve_spot_history_pages(mock_ec2)
                 mock_session.return_value.client.return_value = mock_ec2
 
                 checker = CapacityChecker()
@@ -1649,6 +1686,7 @@ class TestCapacityCheckerSpotPricesExtended:
                     {"AvailabilityZone": "us-east-1b", "SpotPrice": "0.11"},
                 ]
             }
+            _serve_spot_history_pages(mock_ec2)
 
             checker = CapacityChecker()
             prices = checker.get_spot_price_history("m5.large", "us-east-1")
@@ -1674,6 +1712,7 @@ class TestCapacityCheckerSpotPricesExtended:
                 {"Error": {"Code": "InvalidParameterValue", "Message": "Invalid"}},
                 "DescribeSpotPriceHistory",
             )
+            _serve_spot_history_pages(mock_ec2)
 
             checker = CapacityChecker()
             prices = checker.get_spot_price_history("invalid-type", "us-east-1")
@@ -1771,6 +1810,7 @@ class TestCapacityCheckerEstimateExtended:
             mock_ec2.describe_spot_price_history.return_value = {
                 "SpotPriceHistory": [{"AvailabilityZone": "us-east-1a", "SpotPrice": "0.05"}]
             }
+            _serve_spot_history_pages(mock_ec2)
 
             mock_ec2.describe_availability_zones.return_value = {
                 "AvailabilityZones": [{"ZoneName": "us-east-1a"}]
@@ -2052,6 +2092,7 @@ class TestCapacityCheckerSpotPriceHistoryErrors:
                     {"Error": {"Code": "InvalidParameterValue", "Message": "Invalid"}},
                     "DescribeSpotPriceHistory",
                 )
+                _serve_spot_history_pages(mock_ec2)
 
                 checker = CapacityChecker()
                 prices = checker.get_spot_price_history("invalid.type", "us-east-1")

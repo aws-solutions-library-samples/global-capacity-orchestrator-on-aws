@@ -1116,7 +1116,13 @@ gco -o json capacity instance-info p5.48xlarge | jq '{efa: .efa_supported, gpus:
 
 #### `gco capacity spot-prices`
 
-Get spot price history for an instance type in a region.
+Get spot price history for an instance type in a region: one row per Availability
+Zone with the current price (the newest price change), the average, minimum and
+maximum over the window, and a stability score (1 minus the coefficient of
+variation). The average and the stability are weighted by how long each price was in
+effect, so a price that held all week counts for more than a short spike. Every page
+of `DescribeSpotPriceHistory` is read. The `*_7d` field names are kept for any
+`--days` value.
 
 ```bash
 gco capacity spot-prices [OPTIONS]

@@ -291,6 +291,32 @@ def _raise_if_every_region_failed(
         raise CapacityCheckError(f"EC2 refused the {what} in every Region ({reasons})")
 
 
+def _time_weighted_mean_and_std(
+    records: list[tuple[datetime, float]], start: datetime, end: datetime
+) -> tuple[float, float]:
+    """Mean and standard deviation of a price step series, weighted by time held.
+
+    ``records`` are price changes, oldest first. Each price holds from its
+    change (or from ``start``, for the change already in effect then) until
+    the next change, and the newest until ``end``. A plain mean of the change
+    points lets a burst of short-lived prices outweigh one that held for days.
+    When no time elapses at all, every change counts equally.
+    """
+    weights: list[float] = []
+    for index, (changed_at, _price) in enumerate(records):
+        held_from = max(changed_at, start)
+        held_until = records[index + 1][0] if index + 1 < len(records) else end
+        weights.append(max((held_until - held_from).total_seconds(), 0.0))
+    total = sum(weights)
+    if total <= 0:
+        weights = [1.0] * len(records)
+        total = float(len(records))
+    prices = [price for _changed_at, price in records]
+    mean = sum(w * p for w, p in zip(weights, prices, strict=True)) / total
+    variance = sum(w * (p - mean) ** 2 for w, p in zip(weights, prices, strict=True)) / total
+    return mean, math.sqrt(variance)
+
+
 def _instance_desc(instance_type: str, gpu_count: int, gpu_type: str, total_gpu_mem: float) -> str:
     """Build a human-readable instance description."""
     if gpu_count > 0 and gpu_type:
@@ -670,42 +696,44 @@ class CapacityChecker:
     def get_spot_price_history(
         self, instance_type: str, region: str, days: int = 7
     ) -> list[SpotPriceInfo]:
-        """Get spot price history for an instance type."""
+        """Get spot price history for an instance type, one summary per zone.
+
+        Reads every page of ``DescribeSpotPriceHistory`` for the window. The
+        average and the stability (1 minus the coefficient of variation) are
+        weighted by how long each price was in effect, not by how many price
+        changes were recorded; ``current_price`` is the newest change.
+        """
         ec2 = self._session.client("ec2", region_name=region)
 
         end_time = datetime.now(UTC)
         start_time = end_time - timedelta(days=days)
 
         try:
-            response = ec2.describe_spot_price_history(
+            paginator = ec2.get_paginator("describe_spot_price_history")
+            # Group by availability zone; EC2 also returns the change in
+            # effect at StartTime, which may be older than the window.
+            az_records: dict[str, list[tuple[datetime, float]]] = {}
+            for page in paginator.paginate(
                 InstanceTypes=[instance_type],
                 ProductDescriptions=["Linux/UNIX"],
                 StartTime=start_time,
                 EndTime=end_time,
-            )
-
-            # Group by availability zone
-            az_prices: dict[str, list[float]] = {}
-            for item in response["SpotPriceHistory"]:
-                az = item["AvailabilityZone"]
-                price = float(item["SpotPrice"])
-                if az not in az_prices:
-                    az_prices[az] = []
-                az_prices[az].append(price)
+            ):
+                for item in page["SpotPriceHistory"]:
+                    az_records.setdefault(item["AvailabilityZone"], []).append(
+                        (item["Timestamp"], float(item["SpotPrice"]))
+                    )
 
             results = []
-            for az, prices in az_prices.items():
-                current = prices[0]
-                avg = statistics.mean(prices)
+            for az, records in az_records.items():
+                records.sort(key=lambda record: record[0])
+                prices = [price for _changed_at, price in records]
+                current = prices[-1]
+                avg, std_dev = _time_weighted_mean_and_std(records, start_time, end_time)
                 min_price = min(prices)
                 max_price = max(prices)
 
-                if avg > 0:
-                    std_dev = statistics.stdev(prices) if len(prices) > 1 else 0
-                    cv = std_dev / avg
-                    stability = max(0, 1 - cv)
-                else:
-                    stability = 0
+                stability = max(0.0, 1 - std_dev / avg) if avg > 0 else 0
 
                 results.append(
                     SpotPriceInfo(

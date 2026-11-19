@@ -147,12 +147,15 @@ def test_get_on_demand_price_client_error_returns_none():
 def test_get_spot_price_history_zero_prices_zero_stability():
     checker = _make_checker()
     mock_ec2 = MagicMock()
-    mock_ec2.describe_spot_price_history.return_value = {
-        "SpotPriceHistory": [
-            {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.0"},
-            {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.0"},
-        ]
-    }
+    now = datetime.now(UTC)
+    mock_ec2.get_paginator.return_value.paginate.return_value = [
+        {
+            "SpotPriceHistory": [
+                _spot_record("us-east-1a", "0.0", now - timedelta(hours=1)),
+                _spot_record("us-east-1a", "0.0", now - timedelta(hours=2)),
+            ]
+        }
+    ]
     checker._session.client = MagicMock(return_value=mock_ec2)
     results = checker.get_spot_price_history("g5.xlarge", "us-east-1")
     assert len(results) == 1
@@ -162,7 +165,7 @@ def test_get_spot_price_history_zero_prices_zero_stability():
 def test_get_spot_price_history_reraises_other_client_error():
     checker = _make_checker()
     mock_ec2 = MagicMock()
-    mock_ec2.describe_spot_price_history.side_effect = ClientError(
+    mock_ec2.get_paginator.return_value.paginate.side_effect = ClientError(
         {"Error": {"Code": "Throttling", "Message": "rate exceeded"}}, "DescribeSpotPriceHistory"
     )
     checker._session.client = MagicMock(return_value=mock_ec2)
@@ -845,3 +848,71 @@ def test_offered_zones_lookup_failure_is_a_capacity_check_error():
         pytest.raises(CapacityCheckError, match=r"us-east-1 offer g5\.xlarge"),
     ):
         checker.get_offered_availability_zones("g5.xlarge", "us-east-1")
+
+
+def _spot_record(az: str, price: str, at: datetime) -> dict:
+    return {
+        "AvailabilityZone": az,
+        "InstanceType": "g5.xlarge",
+        "ProductDescription": "Linux/UNIX",
+        "SpotPrice": price,
+        "Timestamp": at,
+    }
+
+
+def test_spot_price_average_is_weighted_by_the_time_each_price_held():
+    """avg_price_7d used to be the plain mean of the price-change records, so a
+    one-hour spike counted as much as the price that held all week."""
+    checker = _make_checker()
+    now = datetime.now(UTC)
+    ec2 = MagicMock()
+    # EC2 returns the newest change first, plus the change in effect at
+    # StartTime (older than the window).
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"SpotPriceHistory": [_spot_record("us-east-1a", "5.00", now - timedelta(hours=1))]},
+        {"SpotPriceHistory": [_spot_record("us-east-1a", "1.00", now - timedelta(days=8))]},
+    ]
+    checker._session.client = MagicMock(return_value=ec2)
+
+    [info] = checker.get_spot_price_history("g5.xlarge", "us-east-1")
+
+    # 1.00 for 167 of the 168 hours, 5.00 for the last one.
+    assert info.avg_price_7d == pytest.approx((1.00 * 167 + 5.00 * 1) / 168, rel=1e-3)
+    assert info.current_price == 5.00
+    assert (info.min_price_7d, info.max_price_7d) == (1.00, 5.00)
+    assert 0 < info.price_stability < 1
+    ec2.get_paginator.assert_called_once_with("describe_spot_price_history")
+    kwargs = ec2.get_paginator.return_value.paginate.call_args.kwargs
+    assert kwargs["InstanceTypes"] == ["g5.xlarge"]
+    assert kwargs["EndTime"] - kwargs["StartTime"] == timedelta(days=7)
+
+
+def test_spot_price_history_reads_every_page():
+    """Only the newest page used to be read (N17)."""
+    checker = _make_checker()
+    now = datetime.now(UTC)
+    ec2 = MagicMock()
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"SpotPriceHistory": [_spot_record("us-east-1a", "0.40", now - timedelta(days=1))]},
+        {"SpotPriceHistory": [_spot_record("us-east-1b", "0.60", now - timedelta(days=2))]},
+    ]
+    checker._session.client = MagicMock(return_value=ec2)
+
+    results = checker.get_spot_price_history("g5.xlarge", "us-east-1")
+
+    assert sorted(info.availability_zone for info in results) == ["us-east-1a", "us-east-1b"]
+
+
+def test_time_weighted_stats_fall_back_to_equal_weights_without_elapsed_time():
+    from cli.capacity.checker import _time_weighted_mean_and_std
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = start + timedelta(days=7)
+    # Two changes recorded at the very end of the window hold for no time.
+    mean, std = _time_weighted_mean_and_std([(end, 1.0), (end, 3.0)], start, end)
+    assert (mean, std) == (2.0, 1.0)
+
+    mean, std = _time_weighted_mean_and_std(
+        [(start - timedelta(days=1), 2.0), (start + timedelta(days=6), 4.0)], start, end
+    )
+    assert mean == pytest.approx((2.0 * 6 + 4.0 * 1) / 7)
