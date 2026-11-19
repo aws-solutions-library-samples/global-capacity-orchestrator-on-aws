@@ -38,6 +38,7 @@ from gco.stacks.constants import (
     LAMBDA_PYTHON_RUNTIME,
     cluster_shared_ssm_parameter_prefix,
 )
+from gco.stacks.control_plane_alarms import add_jobs_table_alarms, create_alert_topic
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -158,6 +159,12 @@ class GCOGlobalStack(Stack):
 
         # Create DynamoDB tables for templates and webhooks
         self._create_dynamodb_tables()
+
+        # CloudWatch evaluates an alarm only in its own Region. When the
+        # monitoring stack is in another Region, the jobs table's alarms live
+        # here, with an alert topic of their own.
+        if config.get_global_region() != config.get_monitoring_region():
+            self._create_jobs_table_alarms()
 
         # Create S3 bucket for model weights
         self._create_model_bucket()
@@ -298,7 +305,7 @@ class GCOGlobalStack(Stack):
 
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        if self.listener is None:
+        if self.listener is None or self.accelerator is None:
             raise RuntimeError("Traffic-dial controller requires the Global Accelerator listener")
 
         project_name = self.config.get_project_name()
@@ -321,22 +328,37 @@ class GCOGlobalStack(Stack):
             ],
         )
 
-        # Global Accelerator APIs do not support resource-level IAM scoping.
-        # UpdateEndpointGroup — the only mutating action — is granted solely
-        # in enforce mode; monitor mode stays read-only against GA.
-        ga_actions = [
-            "globalaccelerator:DescribeAccelerator",
-            "globalaccelerator:ListEndpointGroups",
-        ]
-        if mode == "enforce":
-            ga_actions.append("globalaccelerator:UpdateEndpointGroup")
+        # Each Global Accelerator action takes the resource it acts on (Service
+        # Authorization Reference): DescribeAccelerator the accelerator,
+        # ListEndpointGroups the listener, UpdateEndpointGroup an endpoint
+        # group. UpdateEndpointGroup, the only mutating action, is granted
+        # solely in enforce mode and only on this stack's endpoint groups;
+        # monitor mode stays read-only against GA.
         controller_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=sorted(ga_actions),
-                resources=["*"],
+                actions=["globalaccelerator:DescribeAccelerator"],
+                resources=[self.accelerator.accelerator_arn],
             )
         )
+        controller_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["globalaccelerator:ListEndpointGroups"],
+                resources=[self.listener.listener_arn],
+            )
+        )
+        if mode == "enforce" and self.endpoint_groups:
+            controller_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["globalaccelerator:UpdateEndpointGroup"],
+                    resources=[
+                        group.endpoint_group_arn
+                        for _, group in sorted(self.endpoint_groups.items())
+                    ],
+                )
+            )
         # Cross-region read of each cluster's ClusterHealthy metric.
         # GetMetricData does not support resource-level permissions.
         controller_role.add_to_policy(
@@ -432,11 +454,13 @@ class GCOGlobalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The Global Accelerator Describe/List/Update APIs and CloudWatch "
-                        "GetMetricData do not support resource-level permissions and "
-                        "require a wildcard resource; PutMetricData is namespace-"
-                        "conditioned and the SSM wildcard is scoped to this project's "
-                        "traffic-dial parameter tree."
+                        "CloudWatch GetMetricData and PutMetricData and the X-Ray tracing "
+                        "actions support no resource-level permissions, so they take a "
+                        "wildcard resource; PutMetricData is conditioned on the "
+                        "GCO/TrafficDial namespace. The Global Accelerator actions name "
+                        "the accelerator, its listener and this stack's endpoint groups, "
+                        "and the SSM wildcard is scoped to this project's traffic-dial "
+                        "parameter tree."
                     ),
                     "appliesTo": [
                         "Resource::*",
@@ -1494,6 +1518,26 @@ class GCOGlobalStack(Stack):
             return str(self.endpoint_groups[region].endpoint_group_arn)
         raise ValueError(f"No endpoint group found for region: {region}")
 
+    def _create_jobs_table_alarms(self) -> None:
+        """Create the jobs table's alarms and their alert topic in this Region.
+
+        Used when ``deployment_regions.global`` is not the monitoring Region;
+        otherwise the monitoring stack creates the same alarms and they notify
+        its topic (``gco/stacks/control_plane_alarms.py``).
+        """
+        topic = create_alert_topic(
+            self,
+            "AlertTopic",
+            display_name="GCO (Global Capacity Orchestrator on AWS) Global Stack Alerts",
+            output_id="GlobalAlertTopicArn",
+        )
+        add_jobs_table_alarms(
+            self,
+            table_name=self.jobs_table.table_name,
+            region=self.config.get_global_region(),
+            topic=topic,
+        )
+
     def _create_dynamodb_tables(self) -> None:
         """Create DynamoDB tables for templates, webhooks, jobs, inference endpoints, and missions."""
         project_name = self.config.get_project_name()
@@ -1949,6 +1993,11 @@ class GCOGlobalStack(Stack):
         - Daily backups retained for 35 days
         - Weekly backups retained for 90 days
         - All DynamoDB tables added to the backup selection
+
+        Point-in-time recovery for the tables comes from each table's own
+        ``point_in_time_recovery_specification``, not from this plan: AWS
+        Backup's continuous backup covers S3, RDS/Aurora and SAP HANA, not
+        DynamoDB, so both rules take snapshot backups of the tables.
         """
         # Create backup vault for storing backups
         self.backup_vault = backup.BackupVault(
@@ -1971,7 +2020,9 @@ class GCOGlobalStack(Stack):
                         minute="0",
                     ),
                     delete_after=Duration.days(35),
-                    enable_continuous_backup=True,  # Enable PITR for DynamoDB
+                    # No effect on DynamoDB, the only type in the selection
+                    # (see the docstring); the tables enable their own PITR.
+                    enable_continuous_backup=True,
                 ),
                 # Weekly backup - retained for 90 days
                 backup.BackupPlanRule(
@@ -2027,10 +2078,13 @@ class GCOGlobalStack(Stack):
           feature while still providing a safety net against accidental deletion.
         - Uses ``RemovalPolicy.DESTROY`` so a ``cdk destroy gco-global`` cleans up
           the key without operator intervention (iteration-loop posture).
-        - Grants encrypt/decrypt to the ``s3.amazonaws.com`` and
-          ``logs.<region>.amazonaws.com`` service principals via the key policy
-          so S3 server-side encryption and CloudWatch access-log delivery can use
-          the key without role-side grants.
+        - Grants encrypt/decrypt in the key policy to the ``s3.amazonaws.com``
+          service principal and to CloudWatch Logs in this Region
+          (``logs.<region>.amazonaws.com``). Neither stands in for the
+          role-side grants: SSE-KMS calls KMS with the permissions of the
+          principal that reads or writes an object, S3 server access logs are
+          written by ``logging.s3.amazonaws.com``, and no CloudWatch log group
+          uses this key.
 
         The key is exposed as ``self.cluster_shared_kms_key`` for tests and for
         ``_create_cluster_shared_bucket`` to reference. Role-side usage grants
@@ -2052,10 +2106,12 @@ class GCOGlobalStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # Key-policy grants for service principals that need to encrypt/decrypt
-        # on behalf of the bucket (S3 server-side encryption) and the access-logs
-        # bucket (CloudWatch Logs delivery). The actions match the standard
-        # service-principal pattern used by cdk's default key policies.
+        # Key-policy grants for the S3 service principal and for CloudWatch Logs
+        # in this Region. Objects in the two buckets are encrypted with the
+        # permissions of whoever writes them (the role-side grants), and the
+        # access-logs bucket is written by the S3 logging service, not by
+        # CloudWatch Logs. The actions match the standard service-principal
+        # pattern used by cdk's default key policies.
         kms_actions = [
             "kms:Encrypt",
             "kms:Decrypt",
@@ -2119,9 +2175,8 @@ class GCOGlobalStack(Stack):
         s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
         access_logs_retention_days = int(s3_access_logs_ctx.get("retention_days", 90))
 
-        # Dedicated access-logs bucket for Cluster_Shared_Bucket. Encrypted with
-        # the cluster-shared KMS key (the key policy grants the logs service
-        # principal encrypt/decrypt). Kept separate from model_bucket_access_logs
+        # Dedicated access-logs bucket for Cluster_Shared_Bucket, encrypted with
+        # the cluster-shared KMS key. Kept separate from model_bucket_access_logs
         # so operators can reason about each bucket's logs independently. Matches
         # the LifecycleRule used on `model_bucket_access_logs` so retention is
         # consistent across the two log sinks.
@@ -2437,6 +2492,7 @@ class GCOGlobalStack(Stack):
             handler="handler.lambda_handler",
             code=lambda_source_code("lambda/image-lookup"),
             timeout=Duration.minutes(5),
+            memory_size=128,
             description=(
                 "Lookup-or-create custom resource handler for ECR "
                 "repositories under the project's gco/* prefix."

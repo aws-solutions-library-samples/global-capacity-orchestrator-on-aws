@@ -530,8 +530,8 @@ class TestMonitoringStackMethods:
         # Should have multiple alarms
         template.has_resource("AWS::CloudWatch::Alarm", {})
 
-    def test_monitoring_stack_creates_log_groups(self):
-        """Test that MonitoringStack creates log groups."""
+    def test_monitoring_stack_creates_no_log_groups(self):
+        """MonitoringStack creates no log group (nothing wrote to the old ones)."""
         from gco.stacks.monitoring_stack import GCOMonitoringStack
 
         app = cdk.App()
@@ -548,8 +548,9 @@ class TestMonitoringStackMethods:
         )
 
         template = assertions.Template.from_stack(stack)
-        # Should have log groups for health monitor and manifest processor
-        template.has_resource("AWS::Logs::LogGroup", {})
+        # No log group: the services log through Container Insights in their
+        # own Region (tests/test_monitoring_stack.py).
+        template.resource_count_is("AWS::Logs::LogGroup", 0)
 
 
 class TestConfigLoaderValidation:
@@ -2862,15 +2863,25 @@ class TestNagSuppressions:
         assert not rules & {"AwsSolutions-SQS4", "AwsSolutions-SNS3"}
 
     def test_apply_all_suppressions_monitoring_stack(self):
-        """Monitoring stacks acknowledge the SNS and CloudWatch alarm families."""
+        """Monitoring stacks acknowledge the SNS family stack-wide.
+
+        An alarm without an action is acknowledged on that alarm only (the
+        composite inputs, gco/stacks/control_plane_alarms.py), so the stack
+        does not hide one added later.
+        """
         from gco.stacks.nag_suppressions import apply_all_suppressions
 
         app = cdk.App()
         stack = cdk.Stack(app, "test-monitoring-suppressions")
         apply_all_suppressions(stack, stack_type="monitoring")
         rules = self._rules(self._acknowledged_ids(stack))
-        assert {"AwsSolutions-SNS3", "HIPAA.Security-CloudWatchAlarmAction"} <= rules
-        assert not rules & {"AwsSolutions-SQS4", "AwsSolutions-APIG2"}
+        assert {"AwsSolutions-SNS3", "HIPAA.Security-SNSEncryptedKMS"} <= rules
+        assert not rules & {
+            "AwsSolutions-SQS4",
+            "AwsSolutions-APIG2",
+            "HIPAA.Security-CloudWatchAlarmAction",
+            "NIST.800.53.R5-CloudWatchAlarmAction",
+        }
 
     def test_add_iam_suppressions_with_dynamodb_patterns(self):
         """A global Region adds the cross-Region DynamoDB index wildcards to IAM5."""

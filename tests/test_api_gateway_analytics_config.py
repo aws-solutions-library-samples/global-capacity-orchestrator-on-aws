@@ -39,9 +39,6 @@ STUB_USER_POOL_ID = "us-east-2_STUBPOOL01"
 STUB_USER_POOL_ARN = (
     f"arn:aws:cognito-idp:{STUB_REGION}:{STUB_ACCOUNT}:userpool/{STUB_USER_POOL_ID}"
 )
-STUB_CLIENT_ID = "1abcdefghijklmnopqrstu234"
-STUB_STUDIO_DOMAIN = "gco-analytics-us-east-2"
-STUB_CALLBACK_URL = "https://example.execute-api.us-east-2.amazonaws.com/prod/studio/callback"
 
 
 def _synth_absent() -> assertions.Template:
@@ -88,10 +85,7 @@ def _synth_present() -> assertions.Template:
 
     analytics_config = AnalyticsApiConfig(
         user_pool_arn=STUB_USER_POOL_ARN,
-        user_pool_client_id=STUB_CLIENT_ID,
         presigned_url_lambda=stub_lambda,
-        studio_domain_name=STUB_STUDIO_DOMAIN,
-        callback_url=STUB_CALLBACK_URL,
     )
     stack.set_analytics_config(analytics_config)
 
@@ -188,6 +182,23 @@ class TestAnalyticsApiConfigPresent:
             },
         )
 
+    def test_studio_login_declares_every_status_the_lambda_returns(
+        self, present_template: assertions.Template
+    ) -> None:
+        """``/studio/login`` documents the presigned-URL Lambda's 202 and 409.
+
+        The Lambda answers 202 while the caller's Studio profile provisions
+        and 409 for a profile it cannot recover; the method's responses (and
+        so docs/openapi/api-gateway-global.json) listed neither.
+        """
+        (login,) = [
+            method["Properties"]
+            for method in present_template.find_resources("AWS::ApiGateway::Method").values()
+            if method["Properties"].get("AuthorizationType") == "COGNITO_USER_POOLS"
+        ]
+        statuses = [response["StatusCode"] for response in login["MethodResponses"]]
+        assert statuses == ["200", "202", "400", "401", "404", "409", "500"]
+
     def test_cognito_authorizer_created(self, present_template: assertions.Template) -> None:
         """An authorizer of type ``COGNITO_USER_POOLS`` exists on the REST API."""
         present_template.resource_count_is("AWS::ApiGateway::Authorizer", 1)
@@ -269,10 +280,7 @@ class TestSetAnalyticsConfigMutator:
         )
         cfg = AnalyticsApiConfig(
             user_pool_arn=STUB_USER_POOL_ARN,
-            user_pool_client_id=STUB_CLIENT_ID,
             presigned_url_lambda=stub_lambda,
-            studio_domain_name=STUB_STUDIO_DOMAIN,
-            callback_url=STUB_CALLBACK_URL,
         )
         stack.set_analytics_config(cfg)
         with pytest.raises(RuntimeError, match="already has an analytics_config"):

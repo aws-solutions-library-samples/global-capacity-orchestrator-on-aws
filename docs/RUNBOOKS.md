@@ -131,7 +131,7 @@ aws secretsmanager get-secret-value \
    kubectl rollout restart deployment/manifest-processor -n gco-system
    ```
 
-**Prevention:** The monitoring stack includes a CloudWatch alarm for rotation failures. Ensure the SNS topic has subscribers.
+**Prevention:** The `RotationLambdaErrorsAlarm` CloudWatch alarm fires on a rotation failure. It notifies the monitoring stack's `AlertTopicArn` topic, or the API Gateway stack's `ApiGatewayAlertTopicArn` topic when `deployment_regions.api_gateway` is not the monitoring Region. Ensure that topic has subscribers.
 
 ---
 

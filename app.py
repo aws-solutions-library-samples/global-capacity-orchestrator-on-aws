@@ -159,6 +159,7 @@ def main() -> None:
         certificate_regions=regional_regions,
         backend_tls_config=config.get_backend_tls_config(),
         max_request_body_bytes=manifest_processor_config.get("max_request_body_bytes", 1_048_576),
+        monitoring_region=monitoring_region,
         env=cdk.Environment(account=account, region=api_gateway_region),
         description="Global API Gateway with IAM authentication",
     )
@@ -253,14 +254,7 @@ def main() -> None:
         # ARN is now a cross-stack reference on the API gateway side.
         analytics_api_config = AnalyticsApiConfig(
             user_pool_arn=analytics_stack.cognito_pool.user_pool_arn,
-            user_pool_client_id=analytics_stack.cognito_client.user_pool_client_id,
             presigned_url_lambda=analytics_stack.presigned_url_lambda,
-            studio_domain_name=analytics_stack.studio_domain.domain_name or "",
-            callback_url=(
-                f"https://{api_gateway_stack.api.rest_api_id}."
-                f"execute-api.{api_gateway_region}."
-                f"{api_gateway_stack.url_suffix}/prod/studio/callback"
-            ),
         )
         api_gateway_stack.set_analytics_config(analytics_api_config)
         api_gateway_stack.add_stack_dependency(analytics_stack)

@@ -405,6 +405,40 @@ class TestTrafficDialControllerSynth:
         stack = GCOGlobalStack(app, stack_id, config=config)
         return assertions.Template.from_stack(stack)
 
+    @staticmethod
+    def _ga_grants(template) -> dict[str, list]:
+        """Global Accelerator action -> resources granted to the controller role."""
+        resources = template.to_json()["Resources"]
+        (role_id,) = [
+            logical_id
+            for logical_id, resource in resources.items()
+            if resource["Type"] == "AWS::IAM::Role"
+            and logical_id.startswith("TrafficDialControllerRole")
+        ]
+        grants: dict[str, list] = {}
+        for resource in resources.values():
+            if (
+                resource["Type"] != "AWS::IAM::Policy"
+                or {"Ref": role_id} not in resource["Properties"]["Roles"]
+            ):
+                continue
+            for statement in resource["Properties"]["PolicyDocument"]["Statement"]:
+                actions = statement["Action"]
+                for action in actions if isinstance(actions, list) else [actions]:
+                    if action.startswith("globalaccelerator:"):
+                        granted = statement["Resource"]
+                        grants.setdefault(action, []).extend(
+                            granted if isinstance(granted, list) else [granted]
+                        )
+        return grants
+
+    @staticmethod
+    def _get_att(template, resource_type: str, attribute: str) -> list[dict]:
+        return [
+            {"Fn::GetAtt": [logical_id, attribute]}
+            for logical_id in sorted(template.find_resources(resource_type))
+        ]
+
     def test_controller_absent_by_default(self):
         """The stock config (traffic_dial disabled) creates no controller."""
         template = self._synth(MockConfigLoader(cdk.App()), "test-dial-default-off")
@@ -449,9 +483,17 @@ class TestTrafficDialControllerSynth:
             {"ScheduleExpression": "rate(5 minutes)"},
         )
         rendered = json.dumps(template.to_json())
-        assert "globalaccelerator:ListEndpointGroups" in rendered
         assert "globalaccelerator:UpdateEndpointGroup" not in rendered
         assert "GCO/TrafficDial" in rendered
+        # Each Global Accelerator action names the resource it takes, never *.
+        assert self._ga_grants(template) == {
+            "globalaccelerator:DescribeAccelerator": self._get_att(
+                template, "AWS::GlobalAccelerator::Accelerator", "AcceleratorArn"
+            ),
+            "globalaccelerator:ListEndpointGroups": self._get_att(
+                template, "AWS::GlobalAccelerator::Listener", "ListenerArn"
+            ),
+        }
 
     def test_enforce_mode_grants_update_endpoint_group(self):
         """Enforce mode is the only shape that carries the mutating action."""
@@ -459,8 +501,13 @@ class TestTrafficDialControllerSynth:
             cdk.App()
         )
         template = self._synth(config, "test-dial-enforce")
-        rendered = json.dumps(template.to_json())
-        assert "globalaccelerator:UpdateEndpointGroup" in rendered
+        grants = self._ga_grants(template)
+        endpoint_groups = self._get_att(
+            template, "AWS::GlobalAccelerator::EndpointGroup", "EndpointGroupArn"
+        )
+        assert len(endpoint_groups) == 1
+        assert grants["globalaccelerator:UpdateEndpointGroup"] == endpoint_groups
+        assert "*" not in [resource for granted in grants.values() for resource in granted]
         template.has_resource_properties(
             "AWS::Events::Rule",
             {"ScheduleExpression": "rate(7 minutes)"},
@@ -471,6 +518,21 @@ class TestTrafficDialControllerSynth:
                 "Environment": {"Variables": assertions.Match.object_like({"MODE": "enforce"})},
             },
         )
+
+    def test_enforce_mode_without_endpoint_groups_grants_no_update(self):
+        """With no workload Region there is no endpoint group to dial, so enforce
+        mode adds no UpdateEndpointGroup statement (one without a resource would
+        be an invalid policy)."""
+
+        class NoRegions(self._dial_config_class(enabled=True, mode="enforce")):
+            def get_regions(self):
+                return []
+
+        template = self._synth(NoRegions(cdk.App()), "test-dial-enforce-no-regions")
+        assert set(self._ga_grants(template)) == {
+            "globalaccelerator:DescribeAccelerator",
+            "globalaccelerator:ListEndpointGroups",
+        }
 
     def test_controller_absent_without_global_accelerator(self):
         """No accelerator (non-commercial partition) means nothing to dial,
@@ -530,6 +592,66 @@ class TestApiGatewayStackSynth:
 
         # Verify API Gateway REST API is created
         template.resource_count_is("AWS::ApiGateway::RestApi", 1)
+
+    def test_rotation_role_wildcard_is_only_on_resourceless_actions(self):
+        """The rotation role's IAM5 acknowledgment covers what its reason says.
+
+        ``Resource: *`` appears only on the X-Ray tracing actions and on
+        ``secretsmanager:GetRandomPassword`` (CDK's rotation schedule grants
+        it), none of which takes a resource; every other statement names the
+        signing-key secret. The reason used to blame a secret ARN suffix
+        unknown at synth time, which was never where the wildcard came from.
+        """
+        from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
+
+        stack = GCOApiGatewayGlobalStack(
+            cdk.App(),
+            "test-rotation-role",
+            global_accelerator_dns="test-accelerator.awsglobalaccelerator.com",
+        )
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        (role_id,) = [
+            logical_id
+            for logical_id, resource in resources.items()
+            if resource["Type"] == "AWS::IAM::Role" and logical_id.startswith("RotationLambdaRole")
+        ]
+        (secret_id,) = [
+            logical_id
+            for logical_id, resource in resources.items()
+            if resource["Type"] == "AWS::SecretsManager::Secret"
+            and logical_id.startswith("GCOAuthSecret")
+        ]
+        statements = [
+            statement
+            for resource in resources.values()
+            if resource["Type"] == "AWS::IAM::Policy"
+            and {"Ref": role_id} in resource["Properties"]["Roles"]
+            for statement in resource["Properties"]["PolicyDocument"]["Statement"]
+        ]
+        wildcard_actions = set()
+        for statement in statements:
+            actions = statement["Action"]
+            actions = actions if isinstance(actions, list) else [actions]
+            if statement["Resource"] == "*":
+                wildcard_actions.update(actions)
+            else:
+                assert statement["Resource"] == {"Ref": secret_id}, statement
+        assert wildcard_actions == {
+            "xray:PutTraceSegments",
+            "xray:PutTelemetryRecords",
+            "secretsmanager:GetRandomPassword",
+        }
+        from gco.stacks.nag_suppressions import _ACK_METADATA_KEY
+
+        role = stack.node.find_child("RotationLambdaRole")
+        (reason,) = {
+            text
+            for entry in role.node.metadata
+            if entry.type == _ACK_METADATA_KEY
+            for key, text in entry.data.items()
+            if key == "AwsSolutions-IAM5[Resource::*]"
+        }
+        assert all(action in reason for action in wildcard_actions), reason
 
     def test_api_gateway_consumes_stage_config_and_registry_region(self):
         """Stage knobs and the SSM registry region must reach synthesized resources."""

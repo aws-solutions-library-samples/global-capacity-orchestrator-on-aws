@@ -407,8 +407,13 @@ class GCOAnalyticsStack(Stack):
         attached here:
 
         * RW on ``Studio_Only_Bucket`` + KMS on ``Analytics_KMS_Key``
-        * Read-only ``execute-api:Invoke`` on GCO API Gateway ``/api/v1/*`` GET routes
-        * ``sqs:SendMessage`` on regional job queues (wildcard ARN pattern)
+        * ``execute-api:Invoke`` with every HTTP method on the GCO API's
+          ``/prod/*/api/v1/*`` and ``/prod/*/inference/*`` routes in the API
+          Gateway Region, so notebooks can submit and delete jobs and manage
+          inference endpoints as well as read (any REST API id: this stack
+          deploys before the API Gateway stack, whose API id it cannot know)
+        * ``sqs:SendMessage`` on each workload Region's job queue
+          (``<project>-jobs-<region>``; not the dead-letter queues)
         * ``ssm:GetParameter`` on the ``Cluster_Shared_Bucket`` metadata
           parameters in the global region — lets notebooks look up the
           bucket name/arn/region at runtime without a per-user export step
@@ -445,9 +450,10 @@ class GCOAnalyticsStack(Stack):
             description=(
                 "SageMaker_Execution_Role - assumed by notebooks in the Studio "
                 "domain. Grants RW on Studio_Only_Bucket and (via a separate "
-                "cross-region policy) Cluster_Shared_Bucket, plus read-only GCO "
-                "API access, SQS job submission, and cross-region ssm:GetParameter "
-                "on the Cluster_Shared_Bucket metadata parameters."
+                "cross-region policy) Cluster_Shared_Bucket, plus GCO API access "
+                "(every method under /api/v1 and /inference), SQS job submission, "
+                "and cross-region ssm:GetParameter on the Cluster_Shared_Bucket "
+                "metadata parameters."
             ),
         )
 
@@ -475,11 +481,11 @@ class GCOAnalyticsStack(Stack):
         # tear things down from inside a notebook without bouncing
         # through a service account.
         #
-        # The exact API id is not known here (it lives in the api-gateway
-        # stack and is discovered through SSM or CfnOutput at synth time
-        # — see the api_gateway_global_stack wiring). Scope to the
-        # api-gateway region with any REST API id for now; tighter scope
-        # is applied once ``AnalyticsApiConfig`` is wired in.
+        # The API id cannot be named: the API Gateway stack depends on this
+        # stack (it wires this stack's presigned-URL Lambda into
+        # /studio/login), so this stack deploys first and the API does not
+        # exist yet. The grant takes any REST API id in the API Gateway
+        # Region and account, under the prod stage and the two path trees.
         api_gw_region = self.config.get_api_gateway_region()
         self.sagemaker_execution_role.add_to_policy(
             iam.PolicyStatement(
@@ -502,21 +508,24 @@ class GCOAnalyticsStack(Stack):
             )
         )
 
-        # SQS job submission — scoped to the regional queue name pattern
-        # ``<project>-jobs-<region>`` written by
-        # ``GCORegionalStack._create_sqs_queue``. The exact region isn't
-        # known at synth time (queues live in regional stacks), so we use
-        # ``*`` in the region component with the project name fixed.
+        # SQS job submission — each workload Region's job queue, named
+        # ``<project>-jobs-<region>`` by ``GCORegionalStack._create_sqs_queue``.
+        # The queues live in the regional stacks, so the ARNs are built from
+        # the names; the dead-letter queues (``<project>-jobs-dlq-<region>``)
+        # are not included.
         project_name = self.config.get_project_name()
-        self.sagemaker_execution_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["sqs:SendMessage"],
-                resources=[
-                    f"arn:{self.partition}:sqs:*:{self.account}:{project_name}-jobs-*",
-                ],
+        job_queue_arns = [
+            f"arn:{self.partition}:sqs:{region}:{self.account}:{project_name}-jobs-{region}"
+            for region in self.config.get_regions()
+        ]
+        if job_queue_arns:
+            self.sagemaker_execution_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["sqs:SendMessage"],
+                    resources=job_queue_arns,
+                )
             )
-        )
 
         # ssm:GetParameter on the Cluster_Shared_Bucket metadata params. The
         # three parameters (name/arn/region) live in the global region where
@@ -783,9 +792,10 @@ class GCOAnalyticsStack(Stack):
         """Attach RW + KMS on ``Cluster_Shared_Bucket`` to ``SageMaker_Execution_Role``.
 
         The bucket lives in ``GCOGlobalStack`` in the global region. Its
-        ARN is resolved at synth time via an ``AwsCustomResource`` that
-        issues ``ssm:GetParameter`` against the global region — mirroring
-        the pattern used by ``GCORegionalStack._resolve_cluster_shared_bucket_from_ssm``.
+        ARN is resolved at deploy time by an ``AwsCustomResource`` that
+        issues ``ssm:GetParameter`` against the global region, allowed on
+        that one parameter's ARN — mirroring the pattern used by
+        ``GCORegionalStack._resolve_cluster_shared_bucket_from_ssm``.
 
         Two statements attach to the role:
 
@@ -819,34 +829,14 @@ class GCOAnalyticsStack(Stack):
                 region=global_region,
                 physical_resource_id=cr.PhysicalResourceId.of("analytics-cluster-shared-arn"),
             ),
+            # The custom resource reads one parameter with a literal name in
+            # the global Region, so its policy names exactly that ARN.
             policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
-                resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
+                resources=[
+                    f"arn:{self.partition}:ssm:{global_region}:{self.account}:"
+                    f"parameter{parameter_name}"
+                ]
             ),
-        )
-
-        # Scoped suppression: same shape as
-        # ``GCORegionalStack._resolve_cluster_shared_bucket_from_ssm``. The
-        # CR policy is ``Resource::*`` because cross-region SSM does not
-        # support resource-level scoping cleanly; the action is a fixed
-        # ``ssm:GetParameter`` for a single literal parameter Name.
-        acknowledge_nag_findings(
-            read_cr,
-            [
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": (
-                        "Cross-region ssm:GetParameter for "
-                        f"{parameter_name} in the global region. The "
-                        "AwsCustomResource SDK-call policy is scoped to a "
-                        "single fixed action (ssm:GetParameter) with a "
-                        "fixed parameter Name — the Resource: * is the "
-                        "CDK-documented escape hatch because the parameter "
-                        "ARN is not known to the calling principal's "
-                        "region. Effective blast radius: one parameter."
-                    ),
-                    "appliesTo": ["Resource::*"],
-                },
-            ],
         )
 
         shared_arn = read_cr.get_response_field("Parameter.Value")
@@ -1036,6 +1026,7 @@ class GCOAnalyticsStack(Stack):
             # security-group cleanup. In the common case (a handful of
             # users) this finishes in well under a minute.
             timeout=Duration.minutes(15),
+            memory_size=128,
             environment={
                 "DOMAIN_ID": self.studio_domain.attr_domain_id,
                 "EFS_ID": self.studio_efs.file_system_id,
@@ -1332,14 +1323,14 @@ class GCOAnalyticsStack(Stack):
 
         IAM scoping:
 
-        * ``sagemaker:ListDomains`` — no resource-level scoping available;
-          scoped with a documented ``Resource::*`` nag suppression.
         * ``sagemaker:DescribeDomain`` + ``CreatePresignedDomainUrl`` +
-          ``DescribeUserProfile`` + ``CreateUserProfile`` + ``ListTags`` +
-          ``AddTags`` scoped to the domain and user-profile ARN families
-          in this region+account. We cannot pin the ``DomainId`` at synth
-          time because ``list_domains`` runs at invoke time, so the ARN
-          shape includes a wildcard segment covering "any domain id".
+          ``DescribeUserProfile`` + ``CreateUserProfile`` +
+          ``DeleteUserProfile`` + ``ListTags`` + ``AddTags`` on this
+          stack's Studio domain and its user profiles
+          (``user-profile/<domain-id>/*``: a profile is named after the
+          Cognito user and created at first login). ``DeleteUserProfile``
+          lets the handler replace a ``Failed`` profile. The handler reads
+          the domain id from ``STUDIO_DOMAIN_ID``, so it lists no domains.
         * ``iam:PassRole`` on ``SageMaker_Execution_Role.role_arn`` with a
           ``StringEquals iam:PassedToService=sagemaker.amazonaws.com``
           condition so the role can only ever be handed to SageMaker.
@@ -1372,28 +1363,12 @@ class GCOAnalyticsStack(Stack):
             ],
         )
 
-        # ListDomains does not support resource-level scoping (AWS API
-        # constraint). We use Resource::* and document the effective
-        # blast radius in the nag suppression below — one list call per
-        # invocation against the region's SageMaker control plane.
-        self.presigned_url_lambda_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["sagemaker:ListDomains"],
-                resources=["*"],
-            )
-        )
-
-        # Domain + user-profile actions. At synth time we don't know the
-        # DomainId (list_domains is an invoke-time call), so the ARN
-        # wildcards cover "any domain in this region+account" and "any
-        # user profile under any domain in this region+account". The
-        # account is still pinned, so the blast radius is bounded to
-        # this account's SageMaker Studio installation.
-        domain_arn_prefix = f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:domain/*"
-        user_profile_arn_prefix = (
-            f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:user-profile/*/*"
-        )
+        # Domain + user-profile actions on this stack's Studio domain. A
+        # profile is named after the Cognito user and created at first
+        # login, so the profile name is the one wildcard.
+        # DeleteUserProfile lets the handler replace a Failed profile.
+        domain_id = self.studio_domain.attr_domain_id
+        sagemaker_arn_prefix = f"arn:{self.partition}:sagemaker:{self.region}:{self.account}"
         self.presigned_url_lambda_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -1402,10 +1377,14 @@ class GCOAnalyticsStack(Stack):
                     "sagemaker:CreatePresignedDomainUrl",
                     "sagemaker:DescribeUserProfile",
                     "sagemaker:CreateUserProfile",
+                    "sagemaker:DeleteUserProfile",
                     "sagemaker:ListTags",
                     "sagemaker:AddTags",
                 ],
-                resources=[domain_arn_prefix, user_profile_arn_prefix],
+                resources=[
+                    f"{sagemaker_arn_prefix}:domain/{domain_id}",
+                    f"{sagemaker_arn_prefix}:user-profile/{domain_id}/*",
+                ],
             )
         )
 
@@ -1494,29 +1473,17 @@ class GCOAnalyticsStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "sagemaker:ListDomains does not support resource-"
-                        "level scoping — the AWS API only accepts "
-                        "Resource: *. Effective blast radius: a single "
-                        "paginated list call per Lambda invocation "
-                        "against this account's SageMaker control plane "
-                        "in this region. The remaining SageMaker actions "
-                        "(DescribeDomain, CreatePresignedDomainUrl, "
-                        "DescribeUserProfile, CreateUserProfile, "
-                        "ListTags, AddTags) are scoped to the literal "
-                        "arn:<partition>:sagemaker:<region>:<account>:domain/* "
-                        "and arn:<partition>:sagemaker:<region>:<account>:"
-                        "user-profile/*/* ARN families, which is the "
-                        "tightest we can achieve at synth time because "
-                        "DomainId is only resolvable at invoke time."
+                        "The SageMaker profile actions take user-profile/<domain-id>/* "
+                        "on this stack's Studio domain: each profile is named after "
+                        "the Cognito user and created at first login, so its name is "
+                        "known only at invoke time. Resource: * is only on the X-Ray "
+                        "actions that active tracing adds, which take no resource."
                     ),
                     "appliesTo": [
                         "Resource::*",
                         (
-                            "Resource::arn:<AWS::Partition>:sagemaker:<AWS::Region>:<AWS::AccountId>:domain/*"
-                        ),
-                        (
                             "Resource::arn:<AWS::Partition>:sagemaker:<AWS::Region>:"
-                            "<AWS::AccountId>:user-profile/*/*"
+                            "<AWS::AccountId>:user-profile/<StudioDomain.DomainId>/*"
                         ),
                     ],
                 },

@@ -120,11 +120,13 @@ The generated [flowchart](../../diagrams/code_diagrams/README.md#lambda) for
 
 ## IAM permissions
 
-Read-only against Global Accelerator (`DescribeAccelerator`,
-`ListEndpointGroups`), CloudWatch `GetMetricData`/`PutMetricData`, and SSM
+Read-only against Global Accelerator (`DescribeAccelerator` on the
+accelerator, `ListEndpointGroups` on its listener), CloudWatch
+`GetMetricData`/`PutMetricData` (which take no resource; `PutMetricData` only
+in the `GCO/TrafficDial` namespace), and SSM
 `GetParameter`/`GetParametersByPath`/`PutParameter` under the project's
 `traffic-dial` tree. `globalaccelerator:UpdateEndpointGroup` is granted only
-when `mode` is `enforce`. The Global Accelerator control plane is homed in
+when `mode` is `enforce`, and only on the global stack's endpoint groups. The Global Accelerator control plane is homed in
 `us-west-2` in the commercial partition (same convention as
 `lambda/ga-registration`).
 

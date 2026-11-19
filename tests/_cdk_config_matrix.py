@@ -115,6 +115,38 @@ CONFIGS: list[tuple[str, dict[str, Any]]] = [
         },
     ),
     (
+        # The global stack, and with it the DynamoDB tables, outside the
+        # monitoring Region. CloudWatch alarms see only their own Region's
+        # metrics, so the jobs table's alarms move from the monitoring stack to
+        # the global stack with an alert topic of their own
+        # (gco/stacks/control_plane_alarms.py); an alarm left in the monitoring
+        # stack on the table's metrics fails synthesis here.
+        "global-region-split",
+        {
+            "deployment_regions": {
+                "global": "us-west-2",
+                "api_gateway": "us-east-2",
+                "monitoring": "us-east-2",
+                "regional": ["us-east-1"],
+            }
+        },
+    ),
+    (
+        # The monitoring stack alone in its Region: the global and API Gateway
+        # stacks both create their own alarms and alert topics, side by side in
+        # one Region, and the monitoring stack keeps only the dashboard and the
+        # cost pipeline. Also in NAG_CONFIGS for those topics' acknowledgments.
+        "monitoring-region-split",
+        {
+            "deployment_regions": {
+                "global": "us-west-2",
+                "api_gateway": "us-west-2",
+                "monitoring": "us-east-2",
+                "regional": ["us-east-1"],
+            }
+        },
+    ),
+    (
         # Control-plane-only topology: zero workload Regions. This is the
         # shape a deployment passes through when it is scaled to zero (and
         # what ``gco upgrade`` leaves standing while it recreates the regional
@@ -1020,6 +1052,8 @@ MATRIX_COVERAGE_ALLOWLIST: dict[str, str] = {
 #   5. three-regions       — 3 regional stacks, max cross-region surface
 #   6. single-region / api-gateway-region-split — the auth-secret grants'
 #      same-region and split-control-plane forms (see their entries)
+#   7. monitoring-region-split — the alert topics and alarms the global and
+#      API Gateway stacks create outside the monitoring Region
 #
 # Plus two analytics-environment fixtures that exercise the
 # optional ``GCOAnalyticsStack`` IAM surface — SageMaker Studio execution
@@ -1047,6 +1081,10 @@ _NAG_CONFIG_NAMES = {
     # ``-??????``, which IAM5 does not flag; the synthesis matrix checks their
     # Region instead.)
     "api-gateway-region-split",
+    # The global and API Gateway stacks outside the monitoring Region, so both
+    # create their own alarms and an alert topic, with the topics' SNS
+    # encryption and the composite inputs' alarm-action acknowledgments.
+    "monitoring-region-split",
     "fsx-enabled",
     "all-features-enabled",
     "three-regions",

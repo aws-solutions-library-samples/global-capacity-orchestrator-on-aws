@@ -128,8 +128,7 @@ INFERENCE_ENDPOINT = Hop(
 REGIONAL_API = Hop(
     "api-gateway-regional",
     "Each region's API Gateway bridge, called with SigV4 by the aggregator's own "
-    "execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, "
-    "api/v1/policy)",
+    "execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status)",
     ("api-gateway-regional",),
 )
 REGIONAL_PROXY = Hop(
@@ -298,6 +297,10 @@ PATH_PARAMETERS: dict[str, str] = {
 
 RESPONSE_DESCRIPTIONS: dict[str, str] = {
     "200": "Success; the backend's response is returned unchanged.",
+    "202": (
+        "Accepted: the caller's SageMaker Studio user profile is still being created or "
+        'updated (`{"status": "provisioning"}`); retry until the response is 200.'
+    ),
     "400": (
         "Bad request: rejected by the proxy before forwarding (for example an "
         "`X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
@@ -310,6 +313,11 @@ RESPONSE_DESCRIPTIONS: dict[str, str] = {
     "404": (
         "Not found: the endpoint does not exist in this region or the path is outside "
         "the inference serving-path allowlist."
+    ),
+    "409": (
+        "Conflict: the caller's SageMaker Studio user profile is in a failed state the "
+        'backend cannot recover from (`{"error": "UserProfileFailed"}`); an operator must '
+        "delete it, and the next login creates it again."
     ),
     "500": "Internal error in the proxy Lambda or the backend.",
     "502": "Bad gateway: the in-cluster proxy or the model server did not answer.",
@@ -915,10 +923,7 @@ def synthesize(project_root: Path) -> dict[str, dict[str, Any]]:
                     f"arn:aws:cognito-idp:{regions['api_gateway']}:{PLACEHOLDER_ACCOUNT}"
                     ":userpool/studio-user-pool"
                 ),
-                user_pool_client_id="<studio-user-pool-client>",
                 presigned_url_lambda=stand_in,
-                studio_domain_name=f"{project}-analytics",
-                callback_url="https://<api-id>.execute-api.<region>.amazonaws.com/prod/studio/callback",
             )
         )
         without_analytics = global_stack("variant-without-analytics", accelerator=True)

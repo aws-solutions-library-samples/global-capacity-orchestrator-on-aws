@@ -40,7 +40,9 @@ GCO ships **three** complementary observability surfaces:
   Accelerator, API Gateway, Lambda, SQS, DynamoDB, Container Insights node/GPU
   aggregates). Alarms must sit in the Region of their metrics, so each
   workload Region's queue, node and manifest alarms are created by that
-  Region's stack with its own SNS topic (`RegionalAlertTopicArn` output); see
+  Region's stack with its own SNS topic (`RegionalAlertTopicArn` output), and
+  a global or API Gateway stack outside the monitoring Region creates its own
+  alarms and topic (`GlobalAlertTopicArn`, `ApiGatewayAlertTopicArn`); see
   [MAINTENANCE.md → Monitoring and alerting](MAINTENANCE.md#monitoring-and-alerting).
   This stack is unaffected by the `cluster_observability` toggle.
 - **Cluster observability (this feature)** — per-cluster Prometheus/Grafana at a

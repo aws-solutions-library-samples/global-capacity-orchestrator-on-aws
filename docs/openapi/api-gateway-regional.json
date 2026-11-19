@@ -726,7 +726,6 @@
         "execute-api:/*/DELETE/api/v1/jobs",
         "execute-api:/*/GET/api/v1/health",
         "execute-api:/*/GET/api/v1/jobs",
-        "execute-api:/*/GET/api/v1/policy",
         "execute-api:/*/GET/api/v1/status"
       ]
     }

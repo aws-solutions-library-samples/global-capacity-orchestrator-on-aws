@@ -220,18 +220,15 @@ MAX_CONFIGURABLE_REQUEST_BODY_BYTES = 10 * 1024 * 1024
 # The cross-region aggregator has a deliberately read-mostly regional contract.
 # Keep both its identity policy and each regional API resource policy generated
 # from this exact allowlist so a compromised aggregator cannot reach unrelated
-# control-plane mutations exposed by the regional greedy route.
+# control-plane mutations exposed by the regional greedy route. The entries are
+# exactly the regional routes lambda/cross-region-aggregator/handler.py calls;
+# other callers (for example ``gco jobs policy`` reading GET api/v1/policy)
+# sign with their own identity, not the aggregator's role.
 AGGREGATOR_REGIONAL_API_ROUTES = (
     ("GET", "api/v1/jobs"),
     ("DELETE", "api/v1/jobs"),
     ("GET", "api/v1/health"),
     ("GET", "api/v1/status"),
-    # Read-only introspection of the region's deployed job validation policy.
-    # Callers need it before submission to know whether a manifest will be
-    # admitted; it exposes the same class of deployment metadata as
-    # api/v1/status (which already reports the caps and namespace allowlist)
-    # and mutates nothing.
-    ("GET", "api/v1/policy"),
 )
 
 

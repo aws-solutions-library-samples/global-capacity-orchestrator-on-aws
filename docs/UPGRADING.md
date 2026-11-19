@@ -520,7 +520,9 @@ Command changes that go with it:
   throughput from an earlier run no longer carries over.
 - The committed `cdk.json` is stored exactly as the CLI writes it, so the
   first `gco stacks ... enable` changes only the keys it touches.
+
 ### API calls need an IAM permission
+
 Earlier releases put a statement in the global API's resource policy that
 admitted every principal of the deployment account, and the regional bridges
 had the same statement when `api_gateway.regional_api_enabled` was `true` (and
@@ -528,6 +530,7 @@ always outside the `aws` partition). For a caller in the same account, API
 Gateway allows a request that either the caller's identity policy or the
 resource policy allows, so any role or user in the account could call every
 IAM-authorized route without an `execute-api:Invoke` permission of its own.
+
 - **BREAKING: callers without `execute-api:Invoke` are refused (403).** After
   the redeploy, a caller in the account needs an identity-based policy that
   allows `execute-api:Invoke` on the route. Administrator credentials already
@@ -542,11 +545,14 @@ IAM-authorized route without an `execute-api:Invoke` permission of its own.
 - **The analytics `/studio/*` pages keep working.** Their requests carry no IAM
   identity, so the resource policy still admits `GET /studio/*`; the Cognito
   authorizer decides who signs in.
+
 ### Workload alarms move to their Regions
+
 Earlier releases created every workload Region's SQS, EKS node and
 manifest-processor alarms in the monitoring stack. CloudWatch evaluates an
 alarm only against metrics in its own Region, so in any Region other than the
 monitoring Region those alarms never left `OK`.
+
 - **The alarms are recreated in each regional stack.** A redeploy adds them,
   with the same metrics and thresholds, to every `<project>-<region>` stack and
   then deletes the old copies from `<project>-monitoring`. Their names change
@@ -556,12 +562,26 @@ monitoring Region those alarms never left `OK`.
   in the same Region, exported as the regional stack's `RegionalAlertTopicArn`
   output. **Subscribe your on-call channel to it in every Region**; the
   monitoring stack's `AlertTopicArn` keeps the API Gateway, Lambda and
-  DynamoDB alarms only.
+  DynamoDB alarms whose metrics are in its Region.
+- **A global or API Gateway stack outside the monitoring Region gets its own
+  alarms.** The jobs table's alarms read metrics of `deployment_regions.global`
+  and the API Gateway and Lambda alarms metrics of
+  `deployment_regions.api_gateway`. When either Region is not the monitoring
+  Region, a redeploy creates that group of alarms in `<project>-global` or
+  `<project>-api-gateway`, with an alert topic exported as
+  `GlobalAlertTopicArn` or `ApiGatewayAlertTopicArn`, and deletes the copies
+  from `<project>-monitoring`, which never saw data (and a global Region other
+  than the monitoring Region used to fail `cdk synth`). **Subscribe your
+  on-call channel to the new topic.** With the default `deployment_regions`,
+  where the three are one Region, these alarms stay where they are.
+
 ### ECR replication rules of your own are kept
+
 The global stack's `AWS::ECR::ReplicationConfiguration` is the registry's whole
 replication configuration in the global Region. Earlier releases did not retain
 it, so changing GCO's rule rewrote every rule in the registry and deleting the
 stack, or turning `images.replication` off, deleted all of them.
+
 - **The configuration is retained from this release on.** The first redeploy
   only marks it retained (`DeletionPolicy` and `UpdateReplacePolicy`); it does
   not touch the registry.

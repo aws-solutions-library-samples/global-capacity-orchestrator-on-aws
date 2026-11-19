@@ -58,7 +58,7 @@
                 "api-gateway-regional"
               ],
               "id": "api-gateway-regional",
-              "label": "Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy)"
+              "label": "Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status)"
             },
             {
               "documents": [],
@@ -130,7 +130,7 @@
                 "api-gateway-regional"
               ],
               "id": "api-gateway-regional",
-              "label": "Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy)"
+              "label": "Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status)"
             },
             {
               "documents": [],
@@ -200,7 +200,7 @@
                 "api-gateway-regional"
               ],
               "id": "api-gateway-regional",
-              "label": "Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy)"
+              "label": "Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status)"
             },
             {
               "documents": [],
@@ -269,7 +269,7 @@
                 "api-gateway-regional"
               ],
               "id": "api-gateway-regional",
-              "label": "Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy)"
+              "label": "Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status)"
             },
             {
               "documents": [],
@@ -961,6 +961,9 @@
           "200": {
             "description": "Success; the backend's response is returned unchanged."
           },
+          "202": {
+            "description": "Accepted: the caller's SageMaker Studio user profile is still being created or updated (`{\"status\": \"provisioning\"}`); retry until the response is 200."
+          },
           "400": {
             "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
           },
@@ -969,6 +972,9 @@
           },
           "404": {
             "description": "Not found: the endpoint does not exist in this region or the path is outside the inference serving-path allowlist."
+          },
+          "409": {
+            "description": "Conflict: the caller's SageMaker Studio user profile is in a failed state the backend cannot recover from (`{\"error\": \"UserProfileFailed\"}`); an operator must delete it, and the next login creates it again."
           },
           "500": {
             "description": "Internal error in the proxy Lambda or the backend."

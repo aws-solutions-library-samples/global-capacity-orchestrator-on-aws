@@ -61,8 +61,10 @@ class _AnalyticsMockConfig:
         hyperpod_enabled: bool = False,
         canvas_enabled: bool = False,
         region: str = "us-east-2",
+        workload_regions: tuple[str, ...] = ("us-east-1", "us-west-2"),
     ) -> None:
         self._enabled = enabled
+        self._workload_regions = workload_regions
         self._efs_removal = efs_removal
         self._cognito_removal = cognito_removal
         self._hyperpod_enabled = hyperpod_enabled
@@ -91,6 +93,10 @@ class _AnalyticsMockConfig:
         scope the ``execute-api:Invoke`` statement on the SageMaker role.
         """
         return self._region
+
+    def get_regions(self) -> list[str]:
+        """Workload Regions, whose job queues the SageMaker role may send to."""
+        return list(self._workload_regions)
 
     def get_analytics_config(self) -> dict[str, Any]:
         return {
@@ -869,6 +875,82 @@ class TestSageMakerExecutionRole:
             f"attached statements={statements!r}"
         )
 
+    def test_presigned_url_role_acts_only_on_this_studio_domain(self) -> None:
+        """The presigned-URL role's SageMaker grant names this stack's domain.
+
+        The handler reads the domain id from ``STUDIO_DOMAIN_ID`` and never
+        lists domains, so ``ListDomains`` on ``*`` and the ``domain/*`` and
+        ``user-profile/*/*`` wildcards are gone; ``DeleteUserProfile`` is
+        granted because the handler replaces a ``Failed`` profile.
+        """
+        resources = _synth_analytics().to_json()["Resources"]
+        (role_id,) = [
+            logical_id
+            for logical_id, resource in resources.items()
+            if resource["Type"] == "AWS::IAM::Role"
+            and logical_id.startswith("PresignedUrlLambdaRole")
+        ]
+        statements = [
+            statement
+            for resource in resources.values()
+            if resource["Type"] == "AWS::IAM::Policy"
+            and {"Ref": role_id} in resource["Properties"]["Roles"]
+            for statement in resource["Properties"]["PolicyDocument"]["Statement"]
+        ]
+        (sagemaker,) = [
+            statement
+            for statement in statements
+            if any(str(action).startswith("sagemaker:") for action in statement["Action"])
+        ]
+        assert "sagemaker:DeleteUserProfile" in sagemaker["Action"]
+        assert "sagemaker:ListDomains" not in json.dumps(statements)
+        domain = {"Fn::GetAtt": ["StudioDomain", "DomainId"]}
+        rendered = json.dumps(sagemaker["Resource"])
+        assert rendered.count(json.dumps(domain)) == 2, rendered
+        assert ":domain/*" not in rendered and ":user-profile/*/*" not in rendered
+        wildcard_actions = {
+            action
+            for statement in statements
+            if statement["Resource"] == "*"
+            for action in (
+                statement["Action"]
+                if isinstance(statement["Action"], list)
+                else [statement["Action"]]
+            )
+        }
+        assert wildcard_actions == {"xray:PutTraceSegments", "xray:PutTelemetryRecords"}
+
+    def test_cluster_shared_arn_reader_reads_only_its_parameter(self) -> None:
+        """The cross-Region SSM reader's policy names the one parameter it reads.
+
+        It used ``AwsCustomResourcePolicy.ANY_RESOURCE``, which let the
+        custom-resource provider read every SSM parameter in every Region.
+        """
+        template = _synth_analytics().to_json()
+        statements = [
+            statement
+            for logical_id, resource in template["Resources"].items()
+            if resource["Type"] == "AWS::IAM::Policy"
+            and logical_id.startswith("ReadClusterSharedBucketArnCustomResourcePolicy")
+            for statement in resource["Properties"]["PolicyDocument"]["Statement"]
+        ]
+        assert statements == [
+            {
+                "Action": "ssm:GetParameter",
+                "Effect": "Allow",
+                "Resource": {
+                    "Fn::Join": [
+                        "",
+                        [
+                            "arn:",
+                            {"Ref": "AWS::Partition"},
+                            ":ssm:us-east-2:123456789012:parameter/gco-test/cluster-shared-bucket/arn",
+                        ],
+                    ]
+                },
+            }
+        ]
+
     def test_role_has_execute_api_invoke_on_api_v1_and_inference(self) -> None:
         """Full-method ``execute-api:Invoke`` grant on ``/prod/*/api/v1/*``
         and ``/prod/*/inference/*`` for the API gateway region/account.
@@ -931,35 +1013,48 @@ class TestSageMakerExecutionRole:
                     f"to GET — got {res!r}; blocks POST submissions"
                 )
 
-    def test_role_has_sqs_sendmessage_on_jobs_queue_pattern(self) -> None:
-        """``sqs:SendMessage`` on the regional job-queue naming
-        pattern ``<project>-jobs-*``."""
-        template = _synth_analytics()
-        role_lid, _ = self._find_sagemaker_role(template)
-        statements = self._collect_role_statements(template, role_lid)
-
-        matches = []
+    @staticmethod
+    def _sqs_send_resources(statements: list[dict]) -> list[Any]:
+        resources: list[Any] = []
         for stmt in statements:
-            if stmt.get("Effect") != "Allow":
-                continue
             actions = stmt.get("Action")
             action_set = set(actions) if isinstance(actions, list) else {actions}
-            if "sqs:SendMessage" not in action_set:
-                continue
-            resources = stmt.get("Resource") or []
-            if not isinstance(resources, list):
-                resources = [resources]
-            for res in resources:
-                rendered = res if isinstance(res, str) else json.dumps(res, sort_keys=True)
-                if "-jobs-*" in rendered and ":sqs:" in rendered:
-                    matches.append(stmt)
-                    break
+            if stmt.get("Effect") == "Allow" and "sqs:SendMessage" in action_set:
+                granted = stmt.get("Resource") or []
+                resources.extend(granted if isinstance(granted, list) else [granted])
+        return resources
 
-        assert matches, (
-            "expected an Allow statement granting sqs:SendMessage on a "
-            "resource matching the <project>-jobs-* ARN pattern; "
-            f"attached statements={statements!r}"
-        )
+    def test_role_sends_only_to_each_workload_regions_job_queue(self) -> None:
+        """``sqs:SendMessage`` names each workload Region's job queue.
+
+        It used to be ``sqs:*:<account>:<project>-jobs-*``, which also
+        matched every Region's dead-letter queue
+        (``<project>-jobs-dlq-<region>``), broader than the job queues the
+        role needs.
+        """
+        template = _synth_analytics()
+        role_lid, _ = self._find_sagemaker_role(template)
+        resources = self._sqs_send_resources(self._collect_role_statements(template, role_lid))
+        assert resources == [
+            {
+                "Fn::Join": [
+                    "",
+                    [
+                        "arn:",
+                        {"Ref": "AWS::Partition"},
+                        f":sqs:{region}:123456789012:gco-test-jobs-{region}",
+                    ],
+                ]
+            }
+            for region in ("us-east-1", "us-west-2")
+        ]
+
+    def test_role_has_no_sqs_grant_without_workload_regions(self) -> None:
+        """With no workload Region there is no queue, so no statement (an
+        empty Resource list would be an invalid policy)."""
+        template = _synth_analytics(config=_AnalyticsMockConfig(workload_regions=()))
+        role_lid, _ = self._find_sagemaker_role(template)
+        assert self._sqs_send_resources(self._collect_role_statements(template, role_lid)) == []
 
     def test_role_has_ssm_getparameter_on_cluster_shared_bucket_prefix(self) -> None:
         """``ssm:GetParameter`` on the ``Cluster_Shared_Bucket`` metadata

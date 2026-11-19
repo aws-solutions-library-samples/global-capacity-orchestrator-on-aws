@@ -220,12 +220,16 @@ class TestMonitoringStackSynthesis:
         template = assertions.Template.from_stack(monitoring_stack)
         template.resource_count_is("AWS::CloudWatch::Dashboard", 1)
 
-    def test_monitoring_stack_creates_log_groups(self, monitoring_stack):
-        """Test that monitoring stack creates log groups for each region."""
+    def test_monitoring_stack_creates_no_log_groups(self, monitoring_stack):
+        """The monitoring stack creates no log group.
+
+        It used to create a health-monitor and a manifest-processor log group
+        per Region with CloudFormation-generated names that no service, role
+        or manifest referenced, so nothing ever wrote to them; the services
+        log to stdout, which Container Insights collects in their own Region.
+        """
         template = assertions.Template.from_stack(monitoring_stack)
-        # Should create log groups for health monitor and manifest processor per region
-        # 2 regions * 2 services = 4 log groups
-        template.resource_count_is("AWS::Logs::LogGroup", 4)
+        template.resource_count_is("AWS::Logs::LogGroup", 0)
 
     def test_monitoring_stack_creates_alarms(self, monitoring_stack):
         """Test that monitoring stack creates CloudWatch alarms."""
@@ -801,7 +805,7 @@ class TestDynamoDbMetricsCoverEveryOperation:
         ],
     )
     def test_jobs_table_alarm_sums_every_operation(self, template, alarm_prefix, metric_name):
-        from gco.stacks.monitoring_stack import DYNAMODB_ALARM_OPERATIONS
+        from gco.stacks.control_plane_alarms import DYNAMODB_ALARM_OPERATIONS
 
         (alarm,) = [
             resource["Properties"]
