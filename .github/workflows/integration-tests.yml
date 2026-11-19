@@ -22,19 +22,19 @@
 #   - integration:docker:cost-monitor             — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:dev-container            — Dockerfile.dev native-arch matrix (amd64 + arm64 runners)
 #   - integration:docker:health-monitor           — build + import smoke + functional boot/probe/shutdown contract
-#   - integration:docker:helm-installer           — build + `helm version`/`kubectl version` + RIE invoke + read-only helm render
+#   - integration:docker:helm-installer           — build + handler import + `helm version`/`kubectl version` + RIE invoke + read-only helm render
 #   - integration:docker:inference-monitor        — build + import smoke + functional metrics/resilience/shutdown contract
 #   - integration:docker:inference-proxy          — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:manifest-processor       — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:queue-processor          — build + import smoke + consume/reject/exit-code contract against the Floci SQS emulator
-#   - integration:docker:tls-certificate-manager  — build + Lambda handler import + RIE invoke
+#   - integration:docker:tls-certificate-manager  — build + handler import + RIE invoke
 #   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
 #   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC + SQS consumer + inference dry-run
 #   - integration:kind:cost-pipeline              — kind + Calico + pinned kube-prometheus-stack/OpenCost + real cost-monitor report to Floci S3
 #   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow/trust-manager + TrainJob e2e + SAR sweep + mlflow over HTTPS
 #   - integration:kind:platform-addons            — kind + pinned Argo CD/Crossplane/Crossview + repo-server HPA + PR-commit sync + fences + captures
-#   - integration:lambda:imports                  — import each Lambda handler with only the runtime's packages + what it deploys
+#   - integration:lambda:imports                  — import each zipped Lambda handler in the Lambda base image with only its SDK + what it deploys
 #   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
 #   - integration:pytest:cross-module             — pytest tests/test_integration.py
 #
@@ -319,23 +319,23 @@ jobs:
 
   integration-lambda-imports:
     name: "integration:lambda:imports"
-    # x86_64, the architecture every GCO Python Lambda runs on: the build
-    # action stages kubectl-applier-simple's wheels for manylinux x86_64.
+    # x86_64, the architecture every GCO Python Lambda runs on, so the
+    # linux/amd64 base image (and the manylinux x86_64 wheels the build action
+    # stages for kubectl-applier-simple) run natively.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # Each handler is imported in an environment of only what it deploys
-    # with: the Lambda runtime's packages, pinned in
-    # .github/config/lambda-python-runtime.txt, plus the files (and, for the
-    # kubectl build and the two images, the requirements.txt) its deployment
-    # ships. The project install below runs the build action and the script;
-    # no handler imports from it. Several Lambda modules (notably
-    # lambda/api-gateway-proxy/proxy_utils.py) instantiate boto3 clients at
-    # module import time, so boto3 needs a region even though no AWS calls
-    # are made.
-    env:
-      AWS_DEFAULT_REGION: us-east-1
-      AWS_REGION: us-east-1
+    # Each zipped handler is imported inside the Lambda Python base image the
+    # image Lambdas' Dockerfiles build FROM (pulled once by the script), one
+    # container per handler, with no network and only what it deploys with:
+    # the runtime's SDK (boto3 and the packages it requires, read from the
+    # image) plus its zip's files mounted read-only at /var/task. The script
+    # passes AWS_REGION into each container, because several Lambda modules
+    # (notably lambda/api-gateway-proxy/proxy_utils.py) create boto3 clients
+    # at import time. The project install below runs the build action and the
+    # script; no handler imports from it. The two image Lambdas are imported
+    # inside their own images by integration:docker:helm-installer and
+    # integration:docker:tls-certificate-manager.
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
@@ -356,22 +356,8 @@ jobs:
         run: |
           pip install -c requirements-lock.txt -e .
       - uses: ./.github/actions/build-lambda-package
-      - name: Install uv (builds the per-Lambda import environments)
-        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
-        run: bash .github/scripts/use-pinned-uv.sh
-      - name: Cache the import environments' wheels
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ${{ runner.temp }}/uv-cache
-          key: >-
-            lambda-imports-uv-${{ runner.os }}-${{ hashFiles('.python-version',
-            '.github/config/lambda-python-runtime.txt', 'lambda/*/requirements.txt') }}
-          restore-keys: |
-            lambda-imports-uv-${{ runner.os }}-
       - name: Import each Lambda handler
-        env:
-          UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
-        run: python3 .github/scripts/verify_lambda_imports.py --require-all
+        run: python3 .github/scripts/verify_lambda_imports.py
 
   integration-pytest-cross-module:
     name: "integration:pytest:cross-module"
@@ -1258,6 +1244,25 @@ jobs:
           load: true
           cache-from: type=gha,scope=helm-installer
           cache-to: type=gha,mode=max,scope=helm-installer,ignore-error=true
+      - name: Import the handler inside the image
+        # The image is the deployment, so its handler is imported here rather
+        # than by integration:lambda:imports: no network, -I -B keep the working
+        # directory, PYTHON* variables and bytecode writes out, and the task
+        # root goes first on sys.path with its .pth files processed, as the
+        # Lambda bootstrap does. The entrypoint is the Dockerfile's CMD;
+        # tests/test_ci_runtime_verifiers.py holds this step to gco/stacks.
+        run: |
+          docker run --rm --network none -e AWS_REGION=us-east-1 -e AWS_DEFAULT_REGION=us-east-1 \
+            --entrypoint python helm-installer:ci -I -B -c '
+          import os, site, sys
+          root = os.environ["LAMBDA_TASK_ROOT"]
+          sys.path.insert(0, root)
+          site.addsitedir(root)
+          from handler import lambda_handler
+          if not callable(lambda_handler):
+              sys.exit("handler.lambda_handler is not callable")
+          print("handler.lambda_handler imports from", root)
+          '
       - name: Verify helm + kubectl binaries
         # Require each installed binary to match the reviewed, authenticated
         # release URL in the image's Dockerfile—not merely execute successfully.
@@ -1318,10 +1323,25 @@ jobs:
           load: true
           cache-from: type=gha,scope=tls-certificate-manager
           cache-to: type=gha,mode=max,scope=tls-certificate-manager,ignore-error=true
-      - name: Verify Lambda handler imports
+      - name: Import the handler inside the image
+        # The image is the deployment, so its handler is imported here rather
+        # than by integration:lambda:imports: no network, -I -B keep the working
+        # directory, PYTHON* variables and bytecode writes out, and the task
+        # root goes first on sys.path with its .pth files processed, as the
+        # Lambda bootstrap does. The entrypoint is the Dockerfile's CMD;
+        # tests/test_ci_runtime_verifiers.py holds this step to gco/stacks.
         run: |
-          docker run --rm --entrypoint python tls-certificate-manager:ci \
-            -c "import handler; print('tls-certificate-manager import OK:', handler.__name__)"
+          docker run --rm --network none -e AWS_REGION=us-east-1 -e AWS_DEFAULT_REGION=us-east-1 \
+            --entrypoint python tls-certificate-manager:ci -I -B -c '
+          import os, site, sys
+          root = os.environ["LAMBDA_TASK_ROOT"]
+          sys.path.insert(0, root)
+          site.addsitedir(root)
+          from handler import lambda_handler
+          if not callable(lambda_handler):
+              sys.exit("handler.lambda_handler is not callable")
+          print("handler.lambda_handler imports from", root)
+          '
       - name: Invoke the handler through the Runtime Interface Emulator
         # Boots the image exactly as Lambda does (read-only root, tmpfs /tmp)
         # and invokes handler.lambda_handler through the bundled RIE. The

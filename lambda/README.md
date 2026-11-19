@@ -48,15 +48,19 @@ directly.
 
 A zipped source directory installs nothing: its `requirements.txt` is not
 installed, so its handler can import only its own files, the standard library and
-the packages the Lambda Python runtime provides (boto3, botocore and their
-dependencies; CI pins the runtime's versions in
-`.github/config/lambda-python-runtime.txt`). A handler that needs anything else
-must ship it, as `kubectl-applier-simple` does through the build step below and
-the two container images (`helm-installer`, `tls-certificate-manager`) do by
-installing their `requirements.txt` in the Dockerfile.
-`integration:lambda:imports` (`.github/scripts/verify_lambda_imports.py`)
-imports every deployed handler in exactly that environment, so a missing
-package fails CI rather than the first invocation in AWS.
+the SDK the Lambda Python runtime provides (boto3 and the packages it requires).
+The runtime's other modules (pip, and the runtime interface client with its
+dependencies) belong to the runtime, not to handler code. A handler that needs
+anything else must ship it, as `kubectl-applier-simple` does through the build
+step below and the two container images (`helm-installer`,
+`tls-certificate-manager`) do by installing their `requirements.txt` in the
+Dockerfile. `integration:lambda:imports`
+(`.github/scripts/verify_lambda_imports.py`) imports every zipped handler in
+exactly that environment, inside the Lambda Python base image those two
+Dockerfiles build FROM, so a missing package fails CI rather than the first
+invocation in AWS; the image Lambdas' `integration:docker:*` jobs import their
+handlers inside the built images. To run it locally you need Docker or Finch:
+`CDK_DOCKER=finch python3 .github/scripts/verify_lambda_imports.py`.
 
 The `kubectl-applier-simple` Lambda requires a build step to package dependencies.
 `gco stacks deploy` runs it automatically (`StackManager._build_kubectl_lambda`
