@@ -123,7 +123,7 @@
   <rect x="725" y="308" width="225" height="70" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
     <text x="735" y="327" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#b45309">analytics-presigned-url</text>
     <text x="735" y="346" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Lambda · handler.py</text>
-    <text x="735" y="361" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">python3.13</text>
+    <text x="735" y="361" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">python3.14</text>
   <rect x="725" y="404" width="225" height="70" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
     <text x="735" y="423" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#b45309">regional-api-proxy</text>
     <text x="735" y="442" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Lambda · handler.py</text>

@@ -74,6 +74,16 @@ from gco.stacks.nag_suppressions import apply_all_suppressions
 # <pyflowchart-code-diagram> END
 
 
+#: Handler, timeout and memory of the presigned-URL function behind
+#: ``/studio/login`` (``_create_presigned_url_lambda``). Module constants so the
+#: stand-in that ``scripts/generate_api_gateway_openapi.py`` synthesizes in its
+#: place reports what this stack deploys; its runtime is ``LAMBDA_PYTHON_RUNTIME``.
+PRESIGNED_URL_HANDLER = "handler.lambda_handler"
+#: API Gateway's maximum integration timeout, so the function times out first.
+PRESIGNED_URL_TIMEOUT_SECONDS = 29
+PRESIGNED_URL_MEMORY_MB = 256
+
+
 def _parse_removal(value: str) -> RemovalPolicy:
     """Map a cdk.json removal-policy string to ``aws_cdk.RemovalPolicy``.
 
@@ -1626,11 +1636,11 @@ class GCOAnalyticsStack(Stack):
             self,
             "PresignedUrlFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
-            handler="handler.lambda_handler",
+            handler=PRESIGNED_URL_HANDLER,
             code=lambda_source_code("lambda/analytics-presigned-url"),
             role=self.presigned_url_lambda_role,
-            timeout=Duration.seconds(29),
-            memory_size=256,
+            timeout=Duration.seconds(PRESIGNED_URL_TIMEOUT_SECONDS),
+            memory_size=PRESIGNED_URL_MEMORY_MB,
             tracing=lambda_.Tracing.ACTIVE,
             log_group=presigned_url_log_group,
             description=(

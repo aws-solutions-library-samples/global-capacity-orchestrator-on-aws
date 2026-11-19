@@ -31,6 +31,7 @@ from gco.stacks.api_gateway_global_stack import (
     AnalyticsApiConfig,
     GCOApiGatewayGlobalStack,
 )
+from gco.stacks.constants import LAMBDA_PYTHON_RUNTIME
 
 GA_DNS = "test-accelerator.awsglobalaccelerator.com"
 STUB_ACCOUNT = "123456789012"
@@ -76,7 +77,7 @@ def _synth_present() -> assertions.Template:
     stub_lambda = lambda_.Function(
         stack,
         "StubPresignedUrlLambda",
-        runtime=lambda_.Runtime.PYTHON_3_13,
+        runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
         handler="index.handler",
         code=lambda_.Code.from_inline(
             "def handler(event, context):\n    return {'statusCode': 200}\n"
@@ -272,7 +273,7 @@ class TestSetAnalyticsConfigMutator:
         stub_lambda = lambda_.Function(
             stack,
             "StubPresignedUrlLambda",
-            runtime=lambda_.Runtime.PYTHON_3_13,
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="index.handler",
             code=lambda_.Code.from_inline(
                 "def handler(event, context):\n    return {'statusCode': 200}\n"

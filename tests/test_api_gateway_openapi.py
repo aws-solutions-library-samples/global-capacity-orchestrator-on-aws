@@ -251,14 +251,7 @@ def _global_template(*, accelerator: bool = True, analytics: bool = True) -> dic
         resources.update(_resource("Studio", None, "studio"))
         resources.update(_resource("StudioLogin", "Studio", "login"))
         resources.update(_resource("StudioCallback", "Studio", "callback"))
-        resources.update(
-            _function(
-                "StandIn000",
-                "AnalyticsPresignedUrlStandIn",
-                runtime="python3.13",
-                handler="index.handler",
-            )
-        )
+        resources.update(_function("StandIn000", "AnalyticsPresignedUrlStandIn"))
         resources["Authorizer"] = {
             "Type": "AWS::ApiGateway::Authorizer",
             "Properties": {

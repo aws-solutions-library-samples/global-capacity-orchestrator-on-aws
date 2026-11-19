@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, cast
 
 import aws_cdk as cdk
@@ -37,6 +38,8 @@ from aws_cdk import assertions
 
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.analytics_stack import GCOAnalyticsStack, _parse_removal
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # ---------------------------------------------------------------------------
 # Test fixtures
@@ -1072,6 +1075,43 @@ class TestSageMakerExecutionRole:
         assert kms["Condition"]["StringLike"] == {
             "kms:EncryptionContext:aws:s3:arn": [shared, {"Fn::Join": ["", [shared, "/*"]]}]
         }
+
+    def test_api_document_describes_the_deployed_presigned_url_function(self) -> None:
+        """The OpenAPI document reports the function this stack deploys.
+
+        ``scripts/generate_api_gateway_openapi.py`` synthesizes the API stack
+        with an inline stand-in for this function, and the document reports the
+        stand-in's runtime, handler, timeout and memory as the backend's. They
+        once came from the stand-in alone, so ``/studio/login`` read
+        ``python3.13`` / ``index.handler`` while the function ran on
+        ``LAMBDA_PYTHON_RUNTIME`` with ``handler.lambda_handler``.
+        """
+        resources = _synth_analytics().to_json()["Resources"]
+        (function,) = [
+            resource["Properties"]
+            for logical_id, resource in resources.items()
+            if resource["Type"] == "AWS::Lambda::Function"
+            and logical_id.startswith("PresignedUrlFunction")
+        ]
+        document = json.loads(
+            (_REPO_ROOT / "docs" / "openapi" / "api-gateway-global.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        backends = [
+            operation["x-gco-backend"]["lambda"]
+            for operations in document["paths"].values()
+            for operation in operations.values()
+            if isinstance(operation, dict)
+            and (operation.get("x-gco-backend") or {}).get("lambda", {}).get("name")
+            == "analytics-presigned-url"
+        ]
+        assert backends, "no route of the global API names the presigned-URL function"
+        for backend in backends:
+            assert backend["runtime"] == function["Runtime"]
+            assert backend["handler"] == function["Handler"]
+            assert backend["timeoutSeconds"] == function["Timeout"]
+            assert backend["memorySizeMb"] == function["MemorySize"]
 
     def test_presigned_url_role_acts_only_on_this_studio_domain(self) -> None:
         """The presigned-URL role's SageMaker grant names this stack's domain.

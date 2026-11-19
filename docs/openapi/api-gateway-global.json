@@ -1004,16 +1004,16 @@
           "ValidateRequestParameters": true
         },
         "x-gco-backend": {
-          "description": "The analytics stack's presigned-URL Lambda (GCOAnalyticsStack): exchanges the Cognito identity for a SageMaker Studio presigned login URL. Synthesized here with an inline stand-in because the analytics stack is not part of this API's template.",
+          "description": "The analytics stack's presigned-URL Lambda (GCOAnalyticsStack): exchanges the Cognito identity for a SageMaker Studio presigned login URL. Synthesized here with an inline stand-in that carries the function's runtime, handler, timeout and memory, because the analytics stack is not part of this API's template.",
           "hops": [],
           "integration": "lambda",
           "lambda": {
-            "handler": "index.handler",
-            "memorySizeMb": null,
+            "handler": "handler.lambda_handler",
+            "memorySizeMb": 256,
             "name": "analytics-presigned-url",
-            "runtime": "python3.13",
+            "runtime": "python3.14",
             "source": "lambda/analytics-presigned-url/handler.py",
-            "timeoutSeconds": null
+            "timeoutSeconds": 29
           }
         },
         "x-gco-condition": {

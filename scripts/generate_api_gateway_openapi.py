@@ -178,8 +178,8 @@ BACKENDS: dict[tuple[str, str], Backend] = {
         description=(
             "The analytics stack's presigned-URL Lambda (GCOAnalyticsStack): exchanges the "
             "Cognito identity for a SageMaker Studio presigned login URL. Synthesized here "
-            "with an inline stand-in because the analytics stack is not part of this API's "
-            "template."
+            "with an inline stand-in that carries the function's runtime, handler, timeout "
+            "and memory, because the analytics stack is not part of this API's template."
         ),
         hops=(),
     ),
@@ -881,8 +881,13 @@ def synthesize(project_root: Path) -> dict[str, dict[str, Any]]:
 
     from cli.stacks import cdk_asset_consumer
     from gco.config.config_loader import ConfigLoader
+    from gco.stacks.analytics_stack import (
+        PRESIGNED_URL_HANDLER,
+        PRESIGNED_URL_MEMORY_MB,
+        PRESIGNED_URL_TIMEOUT_SECONDS,
+    )
     from gco.stacks.api_gateway_global_stack import AnalyticsApiConfig, GCOApiGatewayGlobalStack
-    from gco.stacks.constants import cross_region_aggregator_role_name
+    from gco.stacks.constants import LAMBDA_PYTHON_RUNTIME, cross_region_aggregator_role_name
     from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
 
     with cdk_asset_consumer(project_root):
@@ -908,12 +913,18 @@ def synthesize(project_root: Path) -> dict[str, dict[str, Any]]:
             )
 
         full = global_stack(f"{project}-api-gateway", accelerator=True)
+        # The document reports the stand-in's runtime, handler, timeout and
+        # memory as the backend's, so it takes them from what the analytics
+        # stack deploys. Nothing deploys from this synthesis; the inline code
+        # only gives the function a body.
         stand_in = lambda_.Function(
             full,
             ANALYTICS_STAND_IN_ID,
-            runtime=lambda_.Runtime.PYTHON_3_13,
-            handler="index.handler",
-            code=lambda_.Code.from_inline("def handler(event, context):\n    return {}\n"),
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
+            handler=PRESIGNED_URL_HANDLER,
+            timeout=cdk.Duration.seconds(PRESIGNED_URL_TIMEOUT_SECONDS),
+            memory_size=PRESIGNED_URL_MEMORY_MB,
+            code=lambda_.Code.from_inline("def lambda_handler(event, context):\n    return {}\n"),
         )
         full.set_analytics_config(
             AnalyticsApiConfig(

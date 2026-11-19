@@ -507,8 +507,8 @@ Authenticated with a Cognito ID token from the Studio user pool rather than SigV
 
 **Backend**
 
-- **Lambda:** `analytics-presigned-url` (`lambda/analytics-presigned-url/handler.py`; python3.13, index.handler)
-- **Behaviour:** The analytics stack's presigned-URL Lambda (GCOAnalyticsStack): exchanges the Cognito identity for a SageMaker Studio presigned login URL. Synthesized here with an inline stand-in because the analytics stack is not part of this API's template.
+- **Lambda:** `analytics-presigned-url` (`lambda/analytics-presigned-url/handler.py`; python3.14, handler.lambda_handler, 29 s timeout)
+- **Behaviour:** The analytics stack's presigned-URL Lambda (GCOAnalyticsStack): exchanges the Cognito identity for a SageMaker Studio presigned login URL. Synthesized here with an inline stand-in that carries the function's runtime, handler, timeout and memory, because the analytics stack is not part of this API's template.
 
 **Responses**
 
