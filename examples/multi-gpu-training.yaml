@@ -6,7 +6,8 @@
 #
 # Prerequisites:
 #   - GPU nodes available
-#   - NVIDIA device plugin (installed by default)
+#   - Nothing to install for the GPUs: EKS Auto Mode nodes ship the NVIDIA
+#     driver and device plugin, which advertises nvidia.com/gpu
 #
 # Usage:
 #   kubectl apply -f examples/multi-gpu-training.yaml

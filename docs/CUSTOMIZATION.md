@@ -1243,7 +1243,7 @@ post-helm-name.yaml     # Post-Helm pass (applied after Helm installs CRDs)
 - `20-29` — Storage (EFS, FSx, Valkey)
 - `30-39` — System services (health-monitor, manifest-processor, inference-monitor)
 - `40-49` — NodePools (GPU, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html), Neuron, CPU)
-- `50-59` — Device plugins (NVIDIA)
+- `50-59` — GPU observability and node health (DCGM exporter, the SageMaker HyperPod health-monitoring agent). No manifest installs an NVIDIA device plugin: EKS Auto Mode nodes ship one
 - `post-helm-*` — Resources requiring Helm CRDs (Gateway API entrypoint, [KEDA](https://keda.sh/) ScaledJob, etc.)
 
 **Optional features:** Files with unresolved uppercase `{{PLACEHOLDER}}` feature gates are skipped. For shipped optional features, the applier also prunes an exact, audited list of resources previously owned by that feature. It does not use broad label deletion, so unrelated resources are left untouched. When adding a new optional platform feature, add its exact owned-resource inventory to the applier so disable-time convergence is explicit.

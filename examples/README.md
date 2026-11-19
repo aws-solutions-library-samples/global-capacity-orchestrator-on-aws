@@ -382,7 +382,7 @@ gco jobs submit-sqs examples/gpu-job.yaml --region us-east-1
 kubectl logs job/gpu-test-job
 ```
 
-**Requirements:** GPU nodepools (included by default), NVIDIA device plugin (included by default).
+**Requirements:** GPU nodepools (included by default). Nothing to install for the GPU itself: EKS Auto Mode nodes ship the NVIDIA driver and device plugin, which advertises `nvidia.com/gpu`. GCO installs its own `nvidia-device-plugin` chart only for [SageMaker HyperPod](../docs/HYPERPOD.md) nodes, which run outside Auto Mode.
 
 **When to use:** ML model training, GPU-accelerated workloads, testing GPU availability.
 
@@ -712,7 +712,7 @@ kubectl get pods -n gco-jobs -l job-name=pytorch-ddp-training
 kubectl logs -f job/pytorch-ddp-training -n gco-jobs
 ```
 
-**Requirements:** GPU nodes available, NVIDIA device plugin (installed by default).
+**Requirements:** GPU nodes available. EKS Auto Mode nodes ship the NVIDIA driver and device plugin, so there is nothing to install for the GPUs.
 
 **When to use:** Multi-node distributed training, PyTorch DDP workloads, scaling training across GPUs.
 
