@@ -128,8 +128,7 @@ INFERENCE_ENDPOINT = Hop(
 REGIONAL_API = Hop(
     "api-gateway-regional",
     "Each region's API Gateway bridge, called with SigV4 by the aggregator's own "
-    "execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, "
-    "api/v1/policy)",
+    "execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status)",
     ("api-gateway-regional",),
 )
 REGIONAL_PROXY = Hop(

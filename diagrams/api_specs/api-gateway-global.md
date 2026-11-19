@@ -114,7 +114,7 @@ Fans out to `/api/v1/health` on every regional API Gateway and returns one healt
 - **Lambda:** `cross-region-aggregator` (`lambda/cross-region-aggregator/handler.py`; python3.14, handler.lambda_handler, 29 s timeout)
 - **Behaviour:** Discovers every <project>-regional-api-<region> stack's RegionalApiEndpoint output, fans the request out to each regional API with SigV4 and merges the answers into one response.
 - **Then:**
-    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy) — [`api-gateway-regional`](api-gateway-regional.md)
+    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status) — [`api-gateway-regional`](api-gateway-regional.md)
     2. regional-api-proxy VPC Lambda: resolves the ALB from SSM /<project>/alb-hostname-<region> and signs the HMAC envelope
     3. Internal ALB — the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix — [`cluster-gateway`](cluster-gateway.md)
     4. manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz) — [`manifest-processor`](manifest-processor.md), [`health-monitor`](health-monitor.md)
@@ -142,7 +142,7 @@ Fans out to `/api/v1/jobs` on every regional API Gateway and merges the results.
 - **Lambda:** `cross-region-aggregator` (`lambda/cross-region-aggregator/handler.py`; python3.14, handler.lambda_handler, 29 s timeout)
 - **Behaviour:** Discovers every <project>-regional-api-<region> stack's RegionalApiEndpoint output, fans the request out to each regional API with SigV4 and merges the answers into one response.
 - **Then:**
-    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy) — [`api-gateway-regional`](api-gateway-regional.md)
+    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status) — [`api-gateway-regional`](api-gateway-regional.md)
     2. regional-api-proxy VPC Lambda: resolves the ALB from SSM /<project>/alb-hostname-<region> and signs the HMAC envelope
     3. Internal ALB — the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix — [`cluster-gateway`](cluster-gateway.md)
     4. manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz) — [`manifest-processor`](manifest-processor.md), [`health-monitor`](health-monitor.md)
@@ -171,7 +171,7 @@ Fans out to `/api/v1/jobs` on every regional API Gateway and merges the results.
 - **Lambda:** `cross-region-aggregator` (`lambda/cross-region-aggregator/handler.py`; python3.14, handler.lambda_handler, 29 s timeout)
 - **Behaviour:** Discovers every <project>-regional-api-<region> stack's RegionalApiEndpoint output, fans the request out to each regional API with SigV4 and merges the answers into one response.
 - **Then:**
-    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy) — [`api-gateway-regional`](api-gateway-regional.md)
+    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status) — [`api-gateway-regional`](api-gateway-regional.md)
     2. regional-api-proxy VPC Lambda: resolves the ALB from SSM /<project>/alb-hostname-<region> and signs the HMAC envelope
     3. Internal ALB — the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix — [`cluster-gateway`](cluster-gateway.md)
     4. manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz) — [`manifest-processor`](manifest-processor.md), [`health-monitor`](health-monitor.md)
@@ -200,7 +200,7 @@ Fans out to `/api/v1/status` on every regional API Gateway (answered by the mani
 - **Lambda:** `cross-region-aggregator` (`lambda/cross-region-aggregator/handler.py`; python3.14, handler.lambda_handler, 29 s timeout)
 - **Behaviour:** Discovers every <project>-regional-api-<region> stack's RegionalApiEndpoint output, fans the request out to each regional API with SigV4 and merges the answers into one response.
 - **Then:**
-    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy) — [`api-gateway-regional`](api-gateway-regional.md)
+    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status) — [`api-gateway-regional`](api-gateway-regional.md)
     2. regional-api-proxy VPC Lambda: resolves the ALB from SSM /<project>/alb-hostname-<region> and signs the HMAC envelope
     3. Internal ALB — the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix — [`cluster-gateway`](cluster-gateway.md)
     4. manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz) — [`manifest-processor`](manifest-processor.md), [`health-monitor`](health-monitor.md)
