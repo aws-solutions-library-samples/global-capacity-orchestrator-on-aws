@@ -49,6 +49,10 @@ def runner() -> CliRunner:
 class _FakeTunnel:
     """Stand-in for the SSM tunnel Popen; records termination and reaping."""
 
+    # No pipes to drain: stop_api_tunnel only waits for the exit.
+    stdout = None
+    stderr = None
+
     def __init__(self) -> None:
         self.terminated = False
         self.reaped = False
@@ -59,9 +63,9 @@ class _FakeTunnel:
     def terminate(self) -> None:
         self.terminated = True
 
-    def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+    def wait(self, timeout: float | None = None) -> int:
         self.reaped = True
-        return b"", b""
+        return -15
 
 
 class _FakeFormatter:

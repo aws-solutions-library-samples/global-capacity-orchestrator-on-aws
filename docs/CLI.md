@@ -1418,7 +1418,7 @@ gco cluster tunnel [OPTIONS]
 |--------|-------------|
 | `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel through an existing SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down on exit. An existing instance must carry the cluster security group (`ClusterSecurityGroupId` stack output) or one that group admits on 443; the cluster security group admits no VPC CIDR. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included (see [Route selection](#route-selection)). |
-| `--local-port` | Local port to bind for the API tunnel (default `8443`). |
+| `--local-port` | Local port to bind for the API tunnel (default `8443`). A port another process already listens on is refused, and the tunnel counts as open only once the Session Manager plugin reports its own listener there, so kubectl never reaches another process by mistake. The other commands that open a tunnel (`monitoring open`, `gitops`, `crossplane`, `costs dashboard`, `slurm`) use `8443` and refuse it the same way while it is taken, for example by a running `gco cluster tunnel`. |
 | `--print` | Print the tunnel + `kubectl` connection plan instead of opening the tunnel. |
 | `--bastion-ttl-minutes` | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`). |
 | `--yes` / `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |

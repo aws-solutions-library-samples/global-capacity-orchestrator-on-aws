@@ -6,6 +6,7 @@ import io
 import json
 import re
 import subprocess
+import threading
 from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
@@ -612,22 +613,20 @@ def test_stop_tunnel_requires_positive_wait() -> None:
         ssm_tunnel.stop_api_tunnel(MagicMock(), wait_seconds=0)
 
 
-class _Stream:
-    def __init__(self) -> None:
-        self.closed = False
+class _HeldPipe:
+    """A pipe another process keeps open: reads block until it is released."""
 
-    def close(self) -> None:
-        self.closed = True
+    def __init__(self) -> None:
+        self.release = threading.Event()
+
+    def read1(self, size: int) -> bytes:
+        self.release.wait()
+        return b""
 
 
 def test_stop_tunnel_reports_process_that_survives_forced_wait() -> None:
-    stream = _Stream()
-    proc = MagicMock(stdout=stream, stderr=None)
-    proc.poll.side_effect = [None, None]
-    proc.communicate.side_effect = [
-        subprocess.TimeoutExpired("aws", 1),
-        subprocess.TimeoutExpired("aws", 1),
-    ]
+    proc = MagicMock(stdout=None, stderr=None)
+    proc.poll.return_value = None
     proc.wait.side_effect = subprocess.TimeoutExpired("aws", 1)
 
     with (
@@ -636,27 +635,35 @@ def test_stop_tunnel_reports_process_that_survives_forced_wait() -> None:
     ):
         ssm_tunnel.stop_api_tunnel(proc, wait_seconds=1)
 
-    assert stream.closed is True
     proc.kill.assert_called_once_with()
 
 
+@pytest.mark.parametrize("error", [ValueError("I/O operation on closed file"), OSError(9, "EBADF")])
+def test_tunnel_output_reader_stops_quietly_on_a_closed_stream(error: Exception) -> None:
+    stream = MagicMock()
+    stream.read1.side_effect = error
+    output = ssm_tunnel._TunnelOutput(MagicMock(stdout=stream, stderr=None), 8443)
+    assert output.join(5) is True
+    assert output.output() == (b"", b"")
+    assert not output.opened.is_set()
+
+
 def test_stop_tunnel_reports_inherited_pipes_after_wrapper_exit() -> None:
-    stdout = _Stream()
-    stderr = _Stream()
-    proc = MagicMock(stdout=stdout, stderr=stderr)
+    """The AWS wrapper exited, but the plugin still holds the output pipe."""
+    held = _HeldPipe()
+    proc = MagicMock(stdout=held, stderr=None)
     proc.poll.return_value = 1
-    proc.communicate.side_effect = [
-        subprocess.TimeoutExpired("aws", 1),
-        subprocess.TimeoutExpired("aws", 1),
-    ]
-
-    with (
-        patch("cli.ssm_tunnel._signal_api_tunnel_tree"),
-        pytest.raises(RuntimeError, match="retained inherited output pipes"),
-    ):
-        ssm_tunnel.stop_api_tunnel(proc, wait_seconds=1)
-
-    assert stdout.closed and stderr.closed
+    proc.wait.return_value = 1
+    try:
+        with (
+            patch("cli.ssm_tunnel._signal_api_tunnel_tree") as signal_tree,
+            pytest.raises(RuntimeError, match="retained inherited output pipes"),
+        ):
+            ssm_tunnel.stop_api_tunnel(proc, wait_seconds=0.2)
+        assert [call.kwargs["force"] for call in signal_tree.call_args_list] == [True]
+        proc.kill.assert_not_called()
+    finally:
+        held.release.set()
 
 
 def test_exited_tunnel_detail_includes_cleanup_failure() -> None:
@@ -693,7 +700,8 @@ def test_start_tunnel_validates_timing_options(kwargs: dict[str, float]) -> None
 def test_start_tunnel_reports_cleanup_failure_over_primary_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    proc = MagicMock()
+    proc = MagicMock(stdout=None, stderr=None)
+    monkeypatch.setattr(ssm_tunnel, "_local_port_accepts", lambda *_args: False)
     monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", lambda *_args, **_kwargs: proc)
     monkeypatch.setattr(
         ssm_tunnel,
