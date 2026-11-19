@@ -162,7 +162,9 @@ def spot_prices(config: Any, instance_type: Any, region: Any, days: Any) -> None
 
         if not prices:
             formatter.print_warning(f"No spot price data for {instance_type} in {region}")
-            return
+            if config.output_format == "table":
+                return
+            # JSON/YAML keep the list shape: an empty result is `[]`.
 
         formatter.print(
             prices,

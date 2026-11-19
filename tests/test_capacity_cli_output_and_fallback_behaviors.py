@@ -694,3 +694,39 @@ def test_ai_recommend_table_mode_keeps_the_disclaimer_on_stdout() -> None:
     assert result.exit_code == 0, result.output
     assert "AI-POWERED RECOMMENDATION DISCLAIMER" in result.stdout
     assert "Region:        us-west-2" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
+)
+def test_spot_prices_empty_result_keeps_the_list_shape(output_format: str, parse) -> None:
+    """An empty history used to return after the warning, so the root output
+    transaction printed {"status": "ok"} instead of an empty list."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    checker.get_spot_price_history.return_value = []
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(
+            cli,
+            ["-o", output_format, "capacity", "spot-prices", "-i", "g5.xlarge", "-r", "us-east-1"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert parse(result.stdout) == []
+    assert "No spot price data for g5.xlarge in us-east-1" in result.stderr
+
+
+def test_spot_prices_empty_result_in_table_mode_prints_only_the_warning() -> None:
+    from cli.main import cli
+
+    checker = MagicMock()
+    checker.get_spot_price_history.return_value = []
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(
+            cli, ["capacity", "spot-prices", "-i", "g5.xlarge", "-r", "us-east-1"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "No spot price data" in result.stderr
