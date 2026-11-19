@@ -38,7 +38,7 @@ two API Gateways; a Lambda proxy adds the request-bound HMAC envelope and forwar
 it — over Global Accelerator from the global API, inside the VPC from the regional
 bridge — to the region's internal ALB, the Kubernetes Gateway whose HTTPRoute picks
 the Service by longest path prefix. The aggregator answers `/api/v1/global/*` by
-fanning out to the regional API Gateways. Dashed arrows are opt-in or dynamic
+fanning out to the regional API Gateways. Dashed arrows are indirect or dynamic
 paths; `†` marks routes that exist only under a deployment condition. Every box
 is a document in the table above, and each is a link to its sheet on the site.
 

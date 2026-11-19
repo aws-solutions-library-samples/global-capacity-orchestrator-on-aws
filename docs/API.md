@@ -111,7 +111,7 @@ Accelerator from the global API, inside the VPC from the regional bridge — to
 the region's internal ALB: the Kubernetes Gateway `gco-system/gco-gateway`,
 whose HTTPRoute picks the Service by longest path prefix. `/api/v1/global/*` is
 answered by the cross-region aggregator, which fans out to every regional API
-Gateway with SigV4 instead. Dashed arrows are opt-in or dynamic paths; `†`
+Gateway with SigV4 instead. Dashed arrows are indirect or dynamic paths; `†`
 marks routes that exist only under a deployment condition (Global Accelerator
 in the commercial `aws` partition, the analytics environment).
 
