@@ -24,18 +24,24 @@ _CLUSTER_HELP = "EKS cluster name (defaults to <project_name>-<region>)"
 _OUTPUT_FILE_HELP = "Write the manifest to this file instead of printing it"
 
 
-def _write_or_print_manifest(formatter: Any, manifest: str, output_file: str | None) -> None:
-    """Print the generated manifest, or write it to ``output_file``, with the apply hint."""
+def _write_or_print_manifest(
+    config: Any, formatter: Any, manifest: str, output_file: str | None
+) -> None:
+    """Print the generated manifest, or write it to ``output_file``, with the apply hint.
+
+    A printed manifest is all of stdout, so ``> pool.yaml`` saves valid YAML;
+    the apply hint goes to stderr (in table mode, as before).
+    """
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(manifest)
         formatter.print_success(f"NodePool manifest written to {output_file}")
         formatter.print_info(f"Apply with: kubectl apply -f {output_file}")
     else:
-        # Print the manifest for review
         print(manifest)
-        formatter.print_info("\nTo apply this manifest, save it to a file and run:")
-        formatter.print_info("  kubectl apply -f <filename>.yaml")
+        if config.output_format == "table":
+            click.echo("\nℹ To apply this manifest, save it to a file and run:", err=True)
+            click.echo("ℹ   kubectl apply -f <filename>.yaml", err=True)
 
 
 @nodepools.command("create-odcr")
@@ -116,7 +122,7 @@ def create_odcr_nodepool(
             fallback_on_demand=fallback_on_demand,
             efa=efa,
         )
-        _write_or_print_manifest(formatter, manifest, output_file)
+        _write_or_print_manifest(config, formatter, manifest, output_file)
 
     except Exception as e:
         formatter.print_error(f"Failed to create ODCR NodePool: {e}")
@@ -204,7 +210,7 @@ def create_capacity_block_nodepool(
             fallback_on_demand=fallback_on_demand,
             efa=efa,
         )
-        _write_or_print_manifest(formatter, manifest, output_file)
+        _write_or_print_manifest(config, formatter, manifest, output_file)
 
     except Exception as e:
         formatter.print_error(f"Failed to create Capacity Block NodePool: {e}")

@@ -4801,7 +4801,7 @@ gco nodepools describe NODEPOOL_NAME [OPTIONS]
 
 Generate nodepool manifest for ODCR (On-Demand Capacity Reservation). The manifest holds two objects: an [EKS Auto Mode `NodeClass`](https://docs.aws.amazon.com/eks/latest/userguide/create-node-class.html) named `<name>-nodeclass` that binds the reservation through `capacityReservationSelectorTerms`, and a `NodePool` that launches reserved capacity (`karpenter.sh/capacity-type: reserved`) through it. GCO clusters run EKS Auto Mode, so the NodeClass is Auto Mode's `eks.amazonaws.com/v1` kind rather than self-managed Karpenter's `EC2NodeClass`. It reuses the cluster's own node role, subnets and cluster security group, which the command reads from the cluster with `eks:DescribeCluster`, so nodes join the cluster the same way the built-in pools' nodes do. See [Control deployment of workloads into Capacity Reservations with EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/auto-odcr.html).
 
-Nothing is applied: the command prints the manifest or writes it to `--output-file`. The EKS endpoint is private by default, so apply it through [`gco cluster tunnel`](#gco-cluster-tunnel), which holds the tunnel open and prints the `kubectl` flags to use:
+Nothing is applied: the command prints the manifest or writes it to `--output-file`. A printed manifest is all of stdout (the apply hint goes to stderr), so `> nodepool.yaml` saves valid YAML. The EKS endpoint is private by default, so apply it through [`gco cluster tunnel`](#gco-cluster-tunnel), which holds the tunnel open and prints the `kubectl` flags to use:
 
 ```bash
 gco cluster tunnel --via-ssm auto                  # keep this running

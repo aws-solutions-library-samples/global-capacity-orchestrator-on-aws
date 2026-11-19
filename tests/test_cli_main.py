@@ -2508,6 +2508,41 @@ class TestNodepoolsCommands:
         assert result.exit_code == 0, result.output
         self.resolver.assert_called_once_with("custom-cluster", "us-east-1")
 
+    @pytest.mark.parametrize(
+        ("command", "generator"),
+        [
+            ("create-odcr", "generate_odcr_nodepool_manifest"),
+            ("create-capacity-block", "generate_capacity_block_nodepool_manifest"),
+        ],
+    )
+    def test_a_printed_manifest_is_all_of_stdout(self, command, generator):
+        """N41: `> pool.yaml` used to append the two apply-hint lines after the
+        YAML, so `kubectl apply -f pool.yaml` failed to parse it."""
+        from cli.main import cli
+
+        manifest = "apiVersion: karpenter.sh/v1\nkind: NodePool\nmetadata:\n  name: pool\n"
+        with patch(f"cli.nodepools.{generator}", return_value=manifest):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "nodepools",
+                    command,
+                    "-n",
+                    "pool",
+                    "-r",
+                    "us-east-1",
+                    "-c",
+                    "cr-0123456789abcdef0",
+                    "-i",
+                    "p5.48xlarge",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert list(yaml.safe_load_all(result.stdout)) == [yaml.safe_load(manifest)]
+        assert "To apply this manifest, save it to a file and run:" in result.stderr
+        assert "kubectl apply -f <filename>.yaml" in result.stderr
+
     @pytest.mark.parametrize("command", ["create-odcr", "create-capacity-block"])
     def test_create_reports_a_cluster_without_auto_mode(self, command):
         """A failed NodeClass lookup exits non-zero before any manifest is printed."""
