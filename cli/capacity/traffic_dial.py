@@ -314,11 +314,11 @@ class TrafficDialManager:
                     else f"the override was restored to {previous}"
                 )
                 raise TrafficDialError(
-                    f"Failed to update the {region} traffic dial; the dial is unchanged "
+                    f"Failed to change the {region} traffic dial; the dial is unchanged "
                     f"and {restored}: {exc}"
                 ) from exc
             raise TrafficDialError(
-                f"Failed to update the {region} traffic dial ({exc}), and putting the "
+                f"Failed to change the {region} traffic dial ({exc}), and putting the "
                 f"override back failed ({rollback_error}): the override now reads "
                 f"{percentage} while the dial is unchanged. Run 'gco capacity "
                 f"traffic-dial clear {region}' or set the dial again."

@@ -268,7 +268,7 @@ class TestSetDial:
             "AccessDeniedException", "UpdateEndpointGroup"
         )
 
-        with pytest.raises(TrafficDialError, match="Failed to update"):
+        with pytest.raises(TrafficDialError, match="Failed to change"):
             dial_manager.set_dial("us-west-2", 25)
 
     def test_records_the_override_before_changing_the_dial(self, manager):
