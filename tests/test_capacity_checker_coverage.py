@@ -916,3 +916,35 @@ def test_time_weighted_stats_fall_back_to_equal_weights_without_elapsed_time():
         [(start - timedelta(days=1), 2.0), (start + timedelta(days=6), 4.0)], start, end
     )
     assert mean == pytest.approx((2.0 * 6 + 4.0 * 1) / 7)
+
+
+def test_estimate_capacity_describes_the_type_in_the_checked_region():
+    """The description used to come from the default Region, which may not
+    offer the type: GPU facts were dropped for a check in another Region."""
+    checker = _make_checker()  # default region us-east-1
+    info = InstanceTypeInfo("p5.48xlarge", 192, 2048, 8, "H100", 640)
+    with (
+        patch.object(checker, "check_instance_available_in_region", return_value=True),
+        patch.object(checker, "get_instance_info", return_value=info) as describe,
+        patch.object(checker, "_estimate_spot_capacity", return_value=[]),
+        patch.object(checker, "_estimate_on_demand_capacity", return_value=None),
+        patch.object(checker, "get_spot_price_history", return_value=[]),
+        patch.object(checker, "get_spot_placement_score", return_value={}),
+    ):
+        checker.estimate_capacity("p5.48xlarge", "us-west-2", "both")
+        checker.estimate_capacity("p5.48xlarge", "us-west-2", "spot")
+
+    # One description per (type, region), in the Region being checked.
+    describe.assert_called_once_with("p5.48xlarge", region="us-west-2")
+
+
+def test_block_offerings_describe_the_type_in_the_offering_region():
+    checker = _make_checker()  # default region us-east-1
+    info = InstanceTypeInfo("p5.48xlarge", 192, 2048, 8, "H100", 640)
+    ec2 = MagicMock()
+    ec2.describe_capacity_block_offerings.return_value = {"CapacityBlockOfferings": []}
+    checker._session.client = MagicMock(return_value=ec2)
+    with patch.object(checker, "get_instance_info", return_value=info) as describe:
+        checker.list_capacity_block_offerings("us-west-2", instance_type="p5.48xlarge")
+
+    describe.assert_called_once_with("p5.48xlarge", region="us-west-2")

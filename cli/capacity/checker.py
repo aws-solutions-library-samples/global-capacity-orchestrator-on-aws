@@ -837,7 +837,9 @@ class CapacityChecker:
                 )
             ]
 
-        instance_info = self.get_instance_info(instance_type)
+        # Describe the type where it is being checked: the default Region may
+        # not offer it, and the GPU facts would be lost.
+        instance_info = self._region_instance_info(instance_type, region)
 
         if capacity_type in ("spot", "both"):
             spot_estimates = self._estimate_spot_capacity(instance_type, region, instance_info)
@@ -1413,11 +1415,15 @@ class CapacityChecker:
         per-GPU-hour price of infinity, or silently dividing by a wrong count,
         would be worse than omitting it.
         """
+        info = self._region_instance_info(instance_type, region)
+        return info.gpu_count if info else None
+
+    def _region_instance_info(self, instance_type: str, region: str) -> InstanceTypeInfo | None:
+        """``get_instance_info`` in ``region``, memoized per type+region."""
         key = (instance_type, region)
         if key not in self._instance_info_cache:
             self._instance_info_cache[key] = self.get_instance_info(instance_type, region=region)
-        info = self._instance_info_cache[key]
-        return info.gpu_count if info else None
+        return self._instance_info_cache[key]
 
     def _enrich_reservation_pricing(self, reservation: dict[str, Any], region: str) -> None:
         """Add On-Demand pricing keys to a reservation dict, in place.
@@ -1547,8 +1553,7 @@ class CapacityChecker:
         offerings: list[dict[str, Any]] = []
 
         if gpus_per_instance is None:
-            info = self.get_instance_info(instance_type)
-            gpus_per_instance = info.gpu_count if info else None
+            gpus_per_instance = self.gpus_per_instance(instance_type, region)
 
         api_kwargs: dict[str, Any] = {
             "InstanceType": instance_type,
