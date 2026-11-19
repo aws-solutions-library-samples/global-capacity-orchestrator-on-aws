@@ -2464,7 +2464,7 @@ jobs:
         # failure; scheduling, image-pull and kubectl failures produce other
         # states and fail the step instead of being accepted as a deny.
         #
-        # The five assertions are the documented posture, both directions:
+        # The six assertions are the documented posture, both directions:
         #   1. gco-jobs pod -> gco-system pod on an unlisted port: BLOCKED
         #      (default-deny ingress in gco-system; the client's egress rules
         #      do not cover a pod address on 8080 either).
@@ -2484,6 +2484,9 @@ jobs:
         #      pod -> the same pod on 8443: BLOCKED (the proxy reaches model
         #      pods only on their endpoint-tls-proxy sidecar's port, and
         #      nothing outside gco-inference but the proxy reaches them).
+        #   6. default-namespace pod -> a gco-inference pod without the model
+        #      label: BLOCKED (default-deny ingress in gco-inference; only
+        #      the pods the inference monitor labels are re-admitted).
         # Targets serve plain HTTP on the TLS port numbers: the verdict under
         # test is the policy's, per port, not the protocol's.
         run: |
@@ -2590,10 +2593,13 @@ jobs:
           # and allow-inference-proxy-ingress. 8000 stands in for the model
           # server's own port behind the endpoint-tls-proxy sidecar.
           start_target gco-inference netpol-target-model app=netpol-model,gco.io/type=inference 8443 8000
+          # A tenant pod the monitor did not label: no allow rule selects it.
+          start_target gco-inference netpol-target-tenant app=netpol-tenant 8080
           system_ip=$(target_ip gco-system netpol-target-system)
           jobs_ip=$(target_ip gco-jobs netpol-target-jobs)
           metrics_ip=$(target_ip gco-system netpol-target-metrics)
           model_ip=$(target_ip gco-inference netpol-target-model)
+          tenant_ip=$(target_ip gco-inference netpol-target-tenant)
 
           probe gco-jobs netpol-test-cross-system app=netpol-probe-client "$system_ip" 8080 blocked \
             "gco-jobs -> gco-system:8080 (default-deny ingress, no egress rule)"
@@ -2616,10 +2622,12 @@ jobs:
             "inference-proxy -> model:8000 (only the endpoint-tls-proxy port is admitted)"
           probe default netpol-test-model-foreign app=netpol-probe-client "$model_ip" 8443 blocked \
             "default -> model:8443 (only the inference proxy is admitted)"
+          probe default netpol-test-inference-tenant app=netpol-probe-client "$tenant_ip" 8080 blocked \
+            "default -> unlabelled gco-inference pod:8080 (default-deny ingress in gco-inference)"
 
           kubectl -n gco-system delete pod netpol-target-system netpol-target-metrics --wait=false
           kubectl -n gco-jobs delete pod netpol-target-jobs --wait=false
-          kubectl -n gco-inference delete pod netpol-target-model --wait=false
+          kubectl -n gco-inference delete pod netpol-target-model netpol-target-tenant --wait=false
       - name: Apply ResourceQuotas and LimitRanges
         # Apply governance only after the synthetic NetworkPolicy client exits.
         # Otherwise this LimitRange injects a 100m CPU request into that probe,

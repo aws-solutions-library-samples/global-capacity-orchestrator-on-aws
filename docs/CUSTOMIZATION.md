@@ -639,9 +639,10 @@ reference.
 ### Network Policy Enforcement
 
 GCO ships Kubernetes NetworkPolicies for every namespace it owns (default-deny
-ingress in `gco-system` and `gco-jobs`, per-service allow rules, DNS + HTTPS
-egress; see [Network Security](ARCHITECTURE.md#network-security)). On EKS Auto
-Mode those objects are only enforced once the cluster's network policy
+ingress in `gco-system`, `gco-jobs` and `gco-inference`, per-service allow
+rules, DNS + HTTPS egress; see
+[Network Security](ARCHITECTURE.md#network-security)). On EKS Auto Mode those
+objects are only enforced once the cluster's network policy
 controller is switched on, which the regional stack does through the
 `kube-system/amazon-vpc-cni` ConfigMap it applies
 (`06-network-policy-controller.yaml`):

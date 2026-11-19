@@ -31,6 +31,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [API calls need an IAM permission](#api-calls-need-an-iam-permission)
   - [Workload alarms move to their Regions](#workload-alarms-move-to-their-regions)
   - [ECR replication rules of your own are kept](#ecr-replication-rules-of-your-own-are-kept)
+  - [Default-deny ingress in `gco-inference`](#default-deny-ingress-in-gco-inference)
 
 ## How an upgrade works
 
@@ -575,3 +576,18 @@ stack, or turning `images.replication` off, deleted all of them.
   check.
 - **Destroy removes only GCO's rule.** After the global stack is deleted, the
   CLI removes this project's `<project>/` rule and keeps every other rule.
+
+### Default-deny ingress in `gco-inference`
+
+Earlier releases isolated only the pods the inference monitor labels
+(`gco.io/type: inference`) and the shared Mooncake master. Any other pod in
+`gco-inference`, such as a Deployment of your own whose pods lack that label,
+accepted connections from every namespace on every port.
+
+- **BREAKING: unlabelled pods in `gco-inference` accept no connections.** The
+  base pass adds `gco-inference/default-deny-ingress`. Managed endpoints and the
+  inference example manifests are unaffected: their pods carry
+  `gco.io/type: inference`. Before redeploying, give such a workload's pod
+  template that label (its pods then get the model pods' rules: the inference
+  proxy on 8443 and the other model pods), or add a NetworkPolicy that admits
+  its clients. The kubelet's probes and `kubectl port-forward` keep working.
