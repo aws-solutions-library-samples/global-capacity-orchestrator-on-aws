@@ -295,6 +295,124 @@ class TestGCOConfigSave:
         assert loaded.verbose is True
 
 
+def _checkout(root: Path, project: str, regional: list[str], global_region: str) -> Path:
+    root.mkdir(parents=True)
+    (root / "cdk.json").write_text(
+        json.dumps(
+            {
+                "context": {
+                    "project_name": project,
+                    "deployment_regions": {
+                        "global": global_region,
+                        "api_gateway": global_region,
+                        "monitoring": global_region,
+                        "regional": regional,
+                    },
+                }
+            }
+        )
+    )
+    return root
+
+
+class TestConfigInitWritesOnlyWhatTheUserSet:
+    """`config-cmd init` wrote the fully merged config, including project_name
+    and every Region read from the cdk.json where it ran. A config-file value
+    counts as explicitly set, so that snapshot then overrode the cdk.json of
+    every other checkout (N4)."""
+
+    @pytest.fixture
+    def home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        for variable in (
+            "GCO_PROJECT_NAME",
+            "GCO_DEFAULT_REGION",
+            "GCO_API_GATEWAY_REGION",
+            "GCO_GLOBAL_REGION",
+            "GCO_MONITORING_REGION",
+            "GCO_DEFAULT_NAMESPACE",
+            "GCO_OUTPUT_FORMAT",
+            "GCO_VERBOSE",
+            "GCO_CACHE_DIR",
+            "GCO_REGIONAL_API",
+        ):
+            monkeypatch.delenv(variable, raising=False)
+        return home
+
+    @staticmethod
+    def _init(*args):
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        result = CliRunner().invoke(cli, [*args, "config-cmd", "init", "--force"])
+        assert result.exit_code == 0, result.output
+        return result
+
+    def test_another_checkout_keeps_its_own_project_and_regions(self, home, tmp_path, monkeypatch):
+        monkeypatch.chdir(_checkout(tmp_path / "alpha", "alpha", ["eu-west-1"], "eu-west-2"))
+        self._init()
+
+        monkeypatch.chdir(_checkout(tmp_path / "beta", "beta", ["ap-south-1"], "ap-southeast-1"))
+        config = get_config()
+
+        assert config.project_name == "beta"
+        assert config.default_region == "ap-south-1"
+        assert config.global_region == "ap-southeast-1"
+        assert config.global_stack_name == "beta-global"
+
+    def test_with_nothing_given_the_file_sets_nothing(self, home, tmp_path, monkeypatch):
+        monkeypatch.chdir(_checkout(tmp_path / "alpha", "alpha", ["eu-west-1"], "eu-west-2"))
+        self._init()
+
+        text = (home / ".gco" / "config.yaml").read_text()
+        assert yaml.safe_load(text) is None
+        # A commented template of the per-machine settings, without the project.
+        assert "# output_format: table\n" in text
+        assert "# default_namespace: gco-jobs\n" in text
+        assert "project_name" not in text.split("Uncomment", 1)[1]
+        assert "alpha" not in text and "eu-west-2" not in text
+        assert "GCO_* environment variables" in text
+
+    def test_settings_given_to_the_invocation_are_written(self, home, tmp_path, monkeypatch):
+        monkeypatch.chdir(_checkout(tmp_path / "alpha", "alpha", ["eu-west-1"], "eu-west-2"))
+        monkeypatch.setenv("GCO_DEFAULT_NAMESPACE", "ml-jobs")
+        # Project-level settings stay out of the file even when given.
+        monkeypatch.setenv("GCO_PROJECT_NAME", "gamma")
+        monkeypatch.setenv("GCO_GLOBAL_REGION", "us-west-1")
+
+        self._init("-r", "eu-west-3", "--regional-api")
+
+        settings = yaml.safe_load((home / ".gco" / "config.yaml").read_text())
+        assert settings == {
+            "default_region": "eu-west-3",
+            "default_namespace": "ml-jobs",
+            "use_regional_api": True,
+        }
+
+    def test_force_replaces_an_old_snapshot(self, home, tmp_path, monkeypatch):
+        config_dir = home / ".gco"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.safe_dump({"project_name": "alpha", "global_region": "eu-west-2"})
+        )
+        monkeypatch.chdir(_checkout(tmp_path / "beta", "beta", ["ap-south-1"], "ap-southeast-1"))
+        assert get_config().project_name == "alpha"
+
+        self._init()
+
+        assert get_config().project_name == "beta"
+
+    def test_save_without_keys_still_writes_every_setting(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        GCOConfig(project_name="saved").save(str(config_path))
+
+        data = yaml.safe_load(config_path.read_text())
+        assert data == GCOConfig(project_name="saved").to_dict()
+
+
 class TestGCOConfigToDict:
     """Tests for GCOConfig.to_dict."""
 

@@ -1532,7 +1532,7 @@ invocation.
 
 #### `gco config-cmd init`
 
-Initialize the config file with a starter template.
+Initialize the config file with a starter template. The template lists the per-machine settings (`default_region`, `default_namespace`, `output_format`, `verbose`, `use_regional_api`, the cache and timeout settings, the mount paths) as commented-out lines with their built-in defaults. Settings you give this command are written as values instead: the root `-r`, `-o`, `-v` and `--regional-api`/`--global-api` options, and the `GCO_*` environment variables for those settings. `project_name` and the deployment Regions are never written, because each checkout's `cdk.json` supplies them and a value in this file would override the `cdk.json` of every checkout (see [Config File](#config-file) for the precedence). The file is created with owner-only permissions, together with `~/.gco` when it does not exist yet.
 
 ```bash
 gco config-cmd init [OPTIONS]
@@ -1549,7 +1549,10 @@ gco config-cmd init [OPTIONS]
 ```bash
 gco config-cmd init
 gco config-cmd init -f          # overwrite existing
+gco -r eu-west-1 config-cmd init   # template with default_region set
 ```
+
+Earlier releases wrote every resolved setting, including `project_name` and the Regions from the `cdk.json` where `init` ran. If your `~/.gco/config.yaml` came from one of them, run `gco config-cmd init --force` (or delete those keys) so each checkout's `cdk.json` applies again.
 
 #### `gco config-cmd show`
 
@@ -6996,7 +6999,21 @@ The CLI looks for `.gco.yaml` or `.gco.json` in the current directory, then
 `~/.gco/config.yaml` or `~/.gco/config.json`; `gco --config PATH` (`-c`)
 points at a file explicitly. Keys mirror the `GCOConfig` fields in
 `cli/config.py`; unknown keys are ignored, so the region *list* still comes
-from `cdk.json` (`deployment_regions`), not from this file:
+from `cdk.json` (`deployment_regions`), not from this file.
+
+Each setting takes the value of the last of these sources that sets it:
+
+1. Built-in defaults.
+2. The `cdk.json` in the current directory: `project_name`, the
+   `deployment_regions` entries, and its first `regional` entry as
+   `default_region`.
+3. The config file.
+4. `GCO_*` environment variables (see [Environment Variables](#environment-variables)).
+5. The root options `-r`, `-o`, `-v` and `--regional-api`/`--global-api`.
+
+A config-file key therefore overrides the `cdk.json` of every checkout you
+run the CLI in. Keep `project_name` and the Regions out of `~/.gco/config.yaml`
+unless you mean that; `gco config-cmd init` never writes them.
 
 ```yaml
 default_region: us-east-1

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
@@ -100,6 +101,42 @@ def _load_cdk_tags() -> dict[str, Any]:
         except Exception as e:
             logger.debug("Failed to load tags from cdk.json: %s", e)
     return {}
+
+
+#: The per-machine settings ``gco config-cmd init`` lists in its template.
+#: project_name and the deployment Regions are not among them: each
+#: checkout's cdk.json supplies those, and a value in the user config file
+#: overrides the cdk.json of every checkout.
+MACHINE_CONFIG_KEYS: tuple[str, ...] = (
+    "default_region",
+    "default_namespace",
+    "output_format",
+    "verbose",
+    "use_regional_api",
+    "cache_dir",
+    "cache_ttl_seconds",
+    "spot_price_history_days",
+    "capacity_check_timeout",
+    "efs_mount_path",
+    "fsx_mount_path",
+)
+
+_CONFIG_TEMPLATE_HEADER = """\
+# GCO CLI configuration, written by `gco config-cmd init`.
+#
+# Later sources win: built-in defaults, the cdk.json in the current
+# directory (project_name and deployment_regions; the first regional
+# entry is the default Region), this file, GCO_* environment variables,
+# then the root options -r, -o, -v and --regional-api/--global-api.
+# A key set here applies in every checkout and overrides its cdk.json,
+# so leave project_name and the Regions to cdk.json.
+# Uncomment a line to set it.
+"""
+
+
+def environment_settings() -> set[str]:
+    """Names of the settings the ``GCO_*`` environment variables give."""
+    return set(GCOConfig.from_env()._specified_fields)
 
 
 @dataclass
@@ -259,9 +296,12 @@ class GCOConfig:
             "use_regional_api": self.use_regional_api,
         }
 
-    def save(self, config_path: str | None = None) -> None:
+    def save(self, config_path: str | None = None, *, keys: Collection[str] | None = None) -> None:
         """Save configuration to ``config_path`` (default ``~/.gco/config.yaml``).
 
+        With ``keys``, only those settings are written as values, under a
+        commented header and template of the other :data:`MACHINE_CONFIG_KEYS`
+        with their built-in defaults; without it, every setting is written.
         Creates the parent directory when it is missing and leaves the file
         readable by its owner only.
         """
@@ -275,7 +315,24 @@ class GCOConfig:
         with os.fdopen(descriptor, "w", encoding="utf-8") as f:
             # The creation mode does not apply to a file that already exists.
             os.chmod(path, 0o600)
-            yaml.dump(self.to_dict(), f, default_flow_style=False)
+            if keys is None:
+                yaml.dump(self.to_dict(), f, default_flow_style=False)
+            else:
+                f.write(self._template(keys))
+
+    def _template(self, keys: Collection[str]) -> str:
+        """The header, ``keys`` as settings, then the rest of the template commented out."""
+        values = self.to_dict()
+        settings = {key: value for key, value in values.items() if key in keys}
+        parts = [_CONFIG_TEMPLATE_HEADER, "\n"]
+        if settings:
+            parts += [yaml.safe_dump(settings, default_flow_style=False, sort_keys=False), "\n"]
+        defaults = GCOConfig().to_dict()
+        for key in MACHINE_CONFIG_KEYS:
+            if key not in settings:
+                line = yaml.safe_dump({key: defaults[key]}, default_flow_style=False)
+                parts.append(f"# {line}")
+        return "".join(parts)
 
 
 def get_config(config_path: str | None = None) -> GCOConfig:
