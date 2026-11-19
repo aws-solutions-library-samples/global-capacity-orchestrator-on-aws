@@ -93,6 +93,13 @@ def _call(
     return result
 
 
+def _job_path(job_id: int) -> str:
+    """``/api/v1/slurm/jobs/{job_id}``, built with the shared path-segment encoder."""
+    from ..aws_client import api_path_segment
+
+    return f"/api/v1/slurm/jobs/{api_path_segment(job_id)}"
+
+
 def _fail(formatter: Any, verb: str, exc: Exception) -> None:
     formatter.print_error(f"Failed to {verb}: {exc}")
     sys.exit(1)
@@ -329,7 +336,7 @@ def slurm_job(config: Any, job_id: int, region: str | None, backend: str | None)
     formatter = get_output_formatter(config)
     target = _slurm_region(config, region)
     try:
-        result = _call(config, "GET", f"/api/v1/slurm/jobs/{job_id}", target, backend=backend)
+        result = _call(config, "GET", _job_path(job_id), target, backend=backend)
     except Exception as exc:
         _fail(formatter, f"read Slurm job {job_id}", exc)
     if config.output_format != "table":
@@ -496,7 +503,7 @@ def slurm_cancel(
         result = _call(
             config,
             "DELETE",
-            f"/api/v1/slurm/jobs/{job_id}",
+            _job_path(job_id),
             target,
             backend=backend,
             params={"signal": signal.upper() if signal else None},
@@ -761,10 +768,7 @@ def slurm_output(
     backend, _entry = _resolve_backend(config, formatter, target_region, backend)
     try:
         job = (
-            _call(
-                config, "GET", f"/api/v1/slurm/jobs/{job_id}", target_region, backend=backend
-            ).get("job")
-            or {}
+            _call(config, "GET", _job_path(job_id), target_region, backend=backend).get("job") or {}
         )
     except Exception as exc:
         _fail(formatter, f"read Slurm job {job_id}", exc)

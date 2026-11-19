@@ -2,7 +2,7 @@
 
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import click
@@ -29,6 +29,46 @@ def _resolve_result_job_name(result: Any) -> str | None:
     """Pick the generated/submitted Job name from a submission response."""
     job_name, _namespace = resolve_submission_identity(result)
     return job_name
+
+
+_NOTHING_TO_WAIT_FOR = (
+    "--wait follows a Job or a TrainJob, and this submission created neither; not waiting"
+)
+
+
+def _wait_target(
+    result: Any, *, fallback_namespace: str, manifests: Iterable[Any] = ()
+) -> tuple[str, str] | None:
+    """The Job, else the Kubeflow TrainJob, that ``--wait`` follows.
+
+    A batch Job comes from the submission response. A TrainJob comes from
+    the response's resources (API submissions) or, when the response is
+    kubectl's text (direct submissions), from the first TrainJob manifest;
+    the API never renames a TrainJob. ``wait_for_job`` reads either kind:
+    ``get_job`` falls back to the TrainJob when no batch Job has the name.
+    Returns ``(name, namespace)``, or None when there is neither.
+    """
+    job_name = _resolve_result_job_name(result)
+    if job_name:
+        # The response says where the Job landed (the manifest's namespace
+        # wins over --namespace); the fallback covers responses without one.
+        return job_name, _resolve_result_namespace(result, fallback=fallback_namespace)
+
+    envelope = result if isinstance(result, Mapping) else {}
+    resources = envelope.get("resources")
+    candidates = [
+        (entry.get("name"), entry.get("namespace"))
+        for entry in (resources if isinstance(resources, list) else [])
+        if isinstance(entry, Mapping) and str(entry.get("kind", "")).lower() == "trainjob"
+    ]
+    for manifest in manifests:
+        if isinstance(manifest, Mapping) and manifest.get("kind") == "TrainJob":
+            metadata = manifest.get("metadata") or {}
+            candidates.append((metadata.get("name"), metadata.get("namespace")))
+    for name, namespace in candidates:
+        if name:
+            return str(name), str(namespace or envelope.get("namespace") or fallback_namespace)
+    return None
 
 
 #: ``submit`` / ``submit-direct --wait`` exit status when the job ran and
@@ -108,7 +148,10 @@ def jobs(config: Any) -> None:
     "--wait",
     "-w",
     is_flag=True,
-    help="Wait for job completion; exits 3 if the job fails, 4 on --timeout",
+    help=(
+        "Wait for the Job (or, without one, the Kubeflow TrainJob) to finish; "
+        "exits 3 if it fails, 4 on --timeout"
+    ),
 )
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
 @pass_config
@@ -193,16 +236,11 @@ def submit_job(
 
         # Wait for completion if requested
         if wait and not dry_run:
-            job_name = _resolve_result_job_name(result)
-            if job_name:
-                # The API response tells us exactly where the resource landed
-                # (may differ from --namespace since the manifest's own value
-                # takes precedence). Fall back to the CLI flag or the config
-                # default only if the response didn't include a namespace.
-                resolved_ns = _resolve_result_namespace(
-                    result, fallback=namespace or config.default_namespace
-                )
-                wait_target = (job_name, resolved_ns)
+            wait_target = _wait_target(
+                result, fallback_namespace=namespace or config.default_namespace
+            )
+            if wait_target is None:
+                formatter.print_warning(_NOTHING_TO_WAIT_FOR)
 
     except Exception as e:
         formatter.print_error(f"Failed to submit job: {e}")
@@ -234,7 +272,10 @@ def submit_job(
     "--wait",
     "-w",
     is_flag=True,
-    help="Wait for job completion; exits 3 if the job fails, 4 on --timeout",
+    help=(
+        "Wait for the Job (or, without one, the Kubeflow TrainJob) to finish; "
+        "exits 3 if it fails, 4 on --timeout"
+    ),
 )
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
 @pass_config
@@ -297,6 +338,12 @@ def submit_job_direct(
 
     wait_target: tuple[str, str] | None = None
     try:
+        # kubectl answers with text, so a TrainJob to follow is named by its
+        # manifest; read them before submitting so a read error cannot be
+        # reported after a submission that succeeded.
+        follow = wait and not dry_run
+        manifests_to_follow = job_manager.load_manifests(manifest_path) if follow else []
+
         formatter.print_info(f"Submitting directly to cluster in {region} via kubectl...")
 
         result = job_manager.submit_job_direct(
@@ -322,13 +369,14 @@ def submit_job_direct(
         formatter.print(result)
 
         # Wait for completion if requested
-        if wait and not dry_run:
-            job_name = _resolve_result_job_name(result)
-            if job_name:
-                resolved_ns = _resolve_result_namespace(
-                    result, fallback=namespace or config.default_namespace
-                )
-                wait_target = (job_name, resolved_ns)
+        if follow:
+            wait_target = _wait_target(
+                result,
+                fallback_namespace=namespace or config.default_namespace,
+                manifests=manifests_to_follow,
+            )
+            if wait_target is None:
+                formatter.print_warning(_NOTHING_TO_WAIT_FOR)
 
     except Exception as e:
         formatter.print_error(f"Failed to submit job directly: {e}")
@@ -1085,13 +1133,9 @@ def retry_job(config: Any, job_name: Any, namespace: Any, region: Any, yes: Any)
 
     try:
         result = job_manager.retry_job(job_name, namespace, region)
-
-        if result.get("success"):
-            formatter.print_success(f"Job retry created: {result.get('new_job')}")
-        else:
-            formatter.print_error(f"Failed to retry job: {result.get('message')}")
-            sys.exit(1)
-
+        # The API answers 201 only when it created the retry Job; a refusal
+        # raises with the server's validation errors, reported below.
+        formatter.print_success(f"Job retry created: {result.get('new_job')}")
         formatter.print(result)
 
     except Exception as e:
@@ -1347,24 +1391,30 @@ def _policy_regions(config: Any, requested: tuple[str, ...] | None) -> list[str]
     return regions or [config.default_region]
 
 
-def _render_verdicts(verdicts: Any, *, indent: str = "  ") -> None:
-    """Print one line per region plus its reasons, for a terminal reader."""
+def _render_verdicts(verdicts: Any, *, indent: str = "  ", err: bool = False) -> None:
+    """Print one line per region plus its reasons, for a terminal reader.
+
+    ``err`` writes them to stderr, so the stdout of a command that prints a
+    JSON or YAML document after them stays that one document.
+    """
     from ..job_policy import VERDICT_ADMIT, VERDICT_REJECT, VERDICT_UNKNOWN
 
+    out = sys.stderr if err else sys.stdout
     marks = {VERDICT_ADMIT: "admit ", VERDICT_REJECT: "REJECT", VERDICT_UNKNOWN: "  ?   "}
     for verdict in verdicts:
-        print(f"{indent}[{marks.get(verdict.verdict, '?')}] {verdict.region}")
+        print(f"{indent}[{marks.get(verdict.verdict, '?')}] {verdict.region}", file=out)
         if verdict.verdict == VERDICT_UNKNOWN:
-            print(f"{indent}    policy unreadable: {verdict.reason}")
+            print(f"{indent}    policy unreadable: {verdict.reason}", file=out)
             continue
         for issue in verdict.issues:
             where = f"{issue.manifest} " if issue.manifest else ""
-            print(f"{indent}    {where}[{issue.check}] {issue.message}")
+            print(f"{indent}    {where}[{issue.check}] {issue.message}", file=out)
         if verdict.enforcement_gaps:
             print(
                 f"{indent}    note: live quota/LimitRange unreadable for "
                 f"{', '.join(verdict.enforcement_gaps)} — only the front-door "
-                f"caps were checked"
+                f"caps were checked",
+                file=out,
             )
 
 
@@ -1411,13 +1461,17 @@ def _run_pre_submit_policy_check(
         formatter.print_warning(f"Policy pre-check could not run ({e}); submitting anyway")
         return
 
+    # The findings are advice next to the submission's own output: in JSON
+    # or YAML mode they go to stderr with the warnings, so stdout stays the
+    # one submission document.
+    machine_output = config.output_format != "table"
     rejecting = [v for v in verdicts if v.verdict == VERDICT_REJECT]
     if rejecting:
         formatter.print_warning(
             f"Policy pre-check: {len(rejecting)} of {len(verdicts)} region(s) would "
             f"reject these manifests. Submitting anyway (advisory)."
         )
-        _render_verdicts(verdicts)
+        _render_verdicts(verdicts, err=machine_output)
     else:
         readable = [v for v in verdicts if v.verdict != "unknown"]
         if readable:
@@ -1428,7 +1482,7 @@ def _run_pre_submit_policy_check(
             formatter.print_warning(
                 "Policy pre-check: no region's policy could be read; submitting anyway"
             )
-            _render_verdicts(verdicts)
+            _render_verdicts(verdicts, err=machine_output)
 
 
 def _cdk_job_validation_policy() -> tuple[dict[str, Any], str]:
@@ -1585,6 +1639,9 @@ def check_policy(
 
     Advisory only: the cluster is the real gate and this reads a snapshot of
     its policy, so it exits 0 unless you pass --fail-on-reject.
+
+    Regions are read in parallel; one that has not answered after 45 seconds
+    is reported as unreadable instead of holding up the others.
 
     Examples:
         gco jobs check-policy examples/gpu-job.yaml

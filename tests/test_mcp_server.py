@@ -2424,6 +2424,20 @@ class TestQueueTools:
             assert cmd[cmd.index("--status") : cmd.index("--status") + 2] == ["--status", "running"]
             assert cmd[cmd.index("-n") : cmd.index("-n") + 2] == ["-n", "ns"]
             assert cmd[cmd.index("--limit") : cmd.index("--limit") + 2] == ["--limit", "10"]
+            assert "--cursor" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_queue_list_reads_the_next_page_with_its_cursor(self):
+        """`gco queue list --cursor` pages; the tool passes the cursor through (MCP-CURSOR)."""
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            await run_mcp.queue_list(status="running", cursor="eyJvZmZzZXQiOiA1MH0=")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("--cursor") : cmd.index("--cursor") + 2] == [
+                "--cursor",
+                "eyJvZmZzZXQiOiA1MH0=",
+            ]
+            assert cmd[cmd.index("--status") : cmd.index("--status") + 2] == ["--status", "running"]
 
     @pytest.mark.asyncio
     async def test_queue_get_minimal(self):

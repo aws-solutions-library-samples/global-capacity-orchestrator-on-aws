@@ -15,8 +15,10 @@ from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
+from cli.aws_client import APIRequestError
 from cli.commands.jobs_cmd import (
     _cdk_job_validation_policy,
     _policy_regions,
@@ -250,6 +252,110 @@ class TestSubmissionContracts:
         assert result.exit_code == 0, result.output
         formatter.print.assert_called_once_with("kubectl accepted the manifest")
         manager.wait_for_job.assert_not_called()
+
+    def test_api_submission_of_a_trainjob_waits_for_the_trainjob(self, manifest_path: str) -> None:
+        """``--wait`` follows a TrainJob the API created (TRAINJOB-WAIT)."""
+        manager = MagicMock()
+        manager.submit_job.return_value = {
+            "success": True,
+            "resources": [
+                {
+                    "api_version": "trainer.kubeflow.org/v1alpha1",
+                    "kind": "TrainJob",
+                    "name": "fine-tune",
+                    "namespace": "ml-jobs",
+                    "status": "created",
+                }
+            ],
+        }
+        manager.wait_for_job.return_value = SimpleNamespace(status="failed")
+
+        result, _, formatter = _invoke(
+            ["jobs", "submit", manifest_path, "-r", "us-east-1", "--wait", "--timeout", "9"],
+            manager,
+        )
+
+        assert result.exit_code == 3, result.output
+        manager.wait_for_job.assert_called_once_with(
+            job_name="fine-tune", namespace="ml-jobs", region="us-east-1", timeout_seconds=9
+        )
+        formatter.print_error.assert_called_once_with("Job fine-tune finished with status: failed")
+
+    @pytest.mark.parametrize(
+        ("metadata", "envelope_namespace", "expected_namespace"),
+        [
+            ({"name": "fine-tune", "namespace": "ml-jobs"}, "gco-jobs", "ml-jobs"),
+            ({"name": "fine-tune"}, "team-a", "team-a"),
+            ({"name": "fine-tune"}, None, "gco-jobs"),
+        ],
+    )
+    def test_direct_submission_of_a_trainjob_waits_for_the_manifest_trainjob(
+        self,
+        manifest_path: str,
+        metadata: dict[str, str],
+        envelope_namespace: str | None,
+        expected_namespace: str,
+    ) -> None:
+        """kubectl's answer is text, so the manifest names the TrainJob to follow."""
+        manager = MagicMock()
+        manager.load_manifests.return_value = [
+            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "settings"}},
+            {"apiVersion": "trainer.kubeflow.org/v1alpha1", "kind": "TrainJob"},
+            {
+                "apiVersion": "trainer.kubeflow.org/v1alpha1",
+                "kind": "TrainJob",
+                "metadata": metadata,
+            },
+        ]
+        manager.submit_job_direct.return_value = {
+            "success": True,
+            "namespace": envelope_namespace,
+            "job_name": None,
+            "resources": ["trainjob.trainer.kubeflow.org/fine-tune created"],
+        }
+        manager.wait_for_job.return_value = SimpleNamespace(status="succeeded")
+
+        result, _, _formatter = _invoke(
+            ["jobs", "submit-direct", manifest_path, "-r", "us-east-1", "--wait"], manager
+        )
+
+        assert result.exit_code == 0, result.output
+        manager.load_manifests.assert_called_once_with(manifest_path)
+        manager.wait_for_job.assert_called_once_with(
+            job_name="fine-tune",
+            namespace=expected_namespace,
+            region="us-east-1",
+            timeout_seconds=3600,
+        )
+
+    @pytest.mark.parametrize(
+        ("subcommand", "extra", "submit_method"),
+        [
+            ("submit", [], "submit_job"),
+            ("submit-direct", ["--region", "us-east-1"], "submit_job_direct"),
+        ],
+    )
+    def test_wait_says_so_when_there_is_nothing_to_follow(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        """A submission with neither a Job nor a TrainJob is not silently "waited for"."""
+        manager = MagicMock()
+        manager.load_manifests.return_value = [
+            {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web"}}
+        ]
+        getattr(manager, submit_method).return_value = {
+            "resources": [{"kind": "Deployment", "name": "web", "status": "created"}]
+        }
+
+        result, _, formatter = _invoke(
+            ["jobs", subcommand, manifest_path, *extra, "--wait"], manager
+        )
+
+        assert result.exit_code == 0, result.output
+        manager.wait_for_job.assert_not_called()
+        formatter.print_warning.assert_called_with(
+            "--wait follows a Job or a TrainJob, and this submission created neither; not waiting"
+        )
 
     def test_direct_submission_surfaces_warnings(self, manifest_path: str) -> None:
         manager = MagicMock()
@@ -677,6 +783,73 @@ class TestAdvisoryPreSubmitPolicy:
         assert declared_namespace["metadata"]["namespace"] == "declared"
         messages = [str(args[0]) for args, _ in getattr(formatter, expected_method).call_args_list]
         assert any(expected_fragment in message for message in messages)
+
+    @pytest.mark.parametrize(
+        "verdict",
+        [
+            RegionVerdict(
+                region="us-east-1",
+                verdict=VERDICT_REJECT,
+                issues=[AdmissionIssue("images", "untrusted registry", "Job/trainer")],
+            ),
+            RegionVerdict(region="us-east-1", verdict=VERDICT_UNKNOWN, reason="timed out"),
+        ],
+    )
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_machine_output_keeps_the_findings_off_stdout(
+        self, manifest_path: str, verdict: RegionVerdict, output_format: str
+    ) -> None:
+        """stdout stays the submission document; the verdict lines go to stderr (X19).
+
+        Before, the verdict lines went to stdout and the output transaction
+        turned the whole stdout into a ``{"status": "ok", "output": ...}`` text
+        envelope, hiding the submission result from a JSON or YAML caller.
+        """
+        from cli.main import cli
+
+        manager = MagicMock()
+        manager.load_manifests.return_value = [{"kind": "Job", "metadata": {"name": "trainer"}}]
+        submission = {"success": True, "resources": [{"kind": "Job", "name": "trainer"}]}
+        manager.submit_job.return_value = submission
+        with (
+            patch("cli.commands.jobs_cmd.get_job_manager", return_value=manager),
+            patch("cli.job_policy.fetch_region_policies", return_value=[]),
+            patch("cli.job_policy.region_verdicts", return_value=[verdict]),
+        ):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    *("-o", output_format, "jobs", "submit", manifest_path),
+                    *("-r", "us-east-1", "--check-policy"),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        parse = json.loads if output_format == "json" else yaml.safe_load
+        assert parse(result.stdout) == submission
+        assert "us-east-1" in result.stderr
+        assert ("untrusted registry" in result.stderr) or ("timed out" in result.stderr)
+
+    def test_table_output_keeps_the_findings_on_stdout(self, manifest_path: str) -> None:
+        manager = MagicMock()
+        manager.load_manifests.return_value = [{"kind": "Job", "metadata": {"name": "trainer"}}]
+        manager.submit_job.return_value = {"name": "trainer"}
+        verdict = RegionVerdict(
+            region="us-east-1",
+            verdict=VERDICT_REJECT,
+            issues=[AdmissionIssue("caps", "too many GPUs", "Job/trainer")],
+        )
+        with (
+            patch("cli.job_policy.fetch_region_policies", return_value=[]),
+            patch("cli.job_policy.region_verdicts", return_value=[verdict]),
+        ):
+            result, _, _formatter = _invoke(
+                ["jobs", "submit", manifest_path, "-r", "us-east-1", "--check-policy"], manager
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "[REJECT] us-east-1" in result.stdout
+        assert "too many GPUs" in result.stdout
 
     def test_precheck_failure_is_non_blocking(self, manifest_path: str) -> None:
         manager = MagicMock()
@@ -1693,13 +1866,21 @@ class TestRemainingJobsStateMatrix:
         formatter.print_success.assert_called_once_with("Job retry created: trainer-retry")
         formatter.print.assert_called_once()
 
-        manager.retry_job.return_value = {"success": False, "message": "still running"}
+        # A refused retry is a 400 that call_api raises with the server's
+        # message and validation errors (RETRY-ERRORS).
+        manager.retry_job.side_effect = APIRequestError(
+            400, "Failed to create retry job: image not from a trusted registry"
+        )
         result, _, formatter = _invoke(
             ["jobs", "retry", "trainer", "--region", "us-east-1", "--yes"],
             manager,
         )
         assert result.exit_code == 1
-        formatter.print_error.assert_called_once_with("Failed to retry job: still running")
+        formatter.print_error.assert_called_once_with(
+            "Failed to retry job: API request failed: Failed to create retry job: "
+            "image not from a trusted registry"
+        )
+        formatter.print_success.assert_not_called()
 
         manager.retry_job.side_effect = RuntimeError("source missing")
         result, _, formatter = _invoke(

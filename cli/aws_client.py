@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import boto3
 import requests
@@ -215,6 +215,76 @@ def _decode_log_payload(payload: Any) -> str:
     if isinstance(payload, (bytes, bytearray)):
         return bytes(payload).decode("utf-8", errors="replace")
     raise TypeError(f"API returned an unsupported log payload: {type(payload)!r}")
+
+
+_DOT_SEGMENTS = frozenset({".", ".."})
+
+
+def _has_dot_segment(value: str) -> bool:
+    """Whether a ``/``- or ``\\``-separated part of *value* is ``.`` or ``..``."""
+    return not _DOT_SEGMENTS.isdisjoint(value.replace("\\", "/").split("/"))
+
+
+def api_path_segment(value: str | int) -> str:
+    """Encode one user-supplied name or ID as exactly one API path segment.
+
+    ``quote(..., safe="")`` encodes ``/``, ``?``, ``#`` and ``%``, so the value
+    can neither add segments nor start a query string. It leaves ``.`` and
+    ``..`` as they are, and the HTTP client and SigV4 signing both remove dot
+    segments before the request is sent, so ``gco templates delete
+    ../webhooks/ID`` would have deleted a webhook. Such values are refused:
+    the empty value, ``.``, ``..``, and any value with a ``.`` or ``..`` part
+    between slashes (``a/..``), in case a hop decodes ``%2F`` before it
+    forwards the path. No GCO name or ID has any of these forms.
+
+    Raises:
+        ValueError: The value cannot be sent as one literal path segment.
+    """
+    text = str(value)
+    if not text or _has_dot_segment(text):
+        raise ValueError(
+            f"{text!r} cannot be used as a name or ID in an API request path "
+            "(it is empty or has a '.' or '..' segment)"
+        )
+    return quote(text, safe="")
+
+
+def checked_api_sub_path(path: str) -> str:
+    """Return a caller-supplied API sub-path that stays under its prefix.
+
+    A sub-path such as ``gco inference invoke --path`` may carry several
+    segments and a query string, so it is appended as given rather than
+    encoded. It must start with ``/`` (``/inference/NAME`` + ``2/v1/x``
+    would address the endpoint ``NAME2``), and its path part must have no
+    ``.`` or ``..`` segment, literal or percent-encoded (the HTTP client
+    decodes ``%2e``), which would otherwise climb out of the prefix.
+
+    Raises:
+        ValueError: The sub-path could reach a different route.
+    """
+    path_part = re.split(r"[?#]", path, maxsplit=1)[0]
+    if not path.startswith("/") or _has_dot_segment(unquote(path_part)):
+        raise ValueError(
+            f"API sub-path {path!r} must start with '/' and have no '.' or '..' segment"
+        )
+    return path
+
+
+#: ``gco jobs`` reports a finished Job as ``succeeded`` (``JobInfo``, the
+#: ``--status`` choices, the API's own ``computed_status``), but the job
+#: listing's ``status`` filter and the bulk-delete filter compare against the
+#: manifest processor's ``_get_job_status``, which calls it ``completed``.
+_SERVER_JOB_STATUS = {"succeeded": "completed"}
+
+
+def _server_job_status(status: str) -> str:
+    """Translate a ``gco jobs`` status into the value the server filters on."""
+    return _SERVER_JOB_STATUS.get(status, status)
+
+
+def _job_path(namespace: str, job_name: str) -> str:
+    """``/api/v1/jobs/{namespace}/{job_name}`` with both values encoded."""
+    return f"/api/v1/jobs/{api_path_segment(namespace)}/{api_path_segment(job_name)}"
 
 
 @dataclass
@@ -898,7 +968,9 @@ class GCOAWSClient:
         Args:
             region: Specific region to query (None for all regions)
             namespace: Filter by namespace
-            status: Filter by status (running, completed, failed)
+            status: Filter by status: pending, running, succeeded or failed
+                (``succeeded`` is sent as ``completed``, the value the
+                server's filter matches)
             limit: Page size (the API accepts 1-1000; its default is 50)
             offset: Number of jobs to skip, for the following pages
 
@@ -912,7 +984,7 @@ class GCOAWSClient:
         if namespace:
             params["namespace"] = namespace
         if status:
-            params["status"] = status
+            params["status"] = _server_job_status(status)
         if limit is not None:
             params["limit"] = str(limit)
         if offset:
@@ -943,7 +1015,7 @@ class GCOAWSClient:
             Job details dictionary
         """
         response = self.make_authenticated_request(
-            method="GET", path=f"/api/v1/jobs/{namespace}/{job_name}", target_region=region
+            method="GET", path=_job_path(namespace, job_name), target_region=region
         )
 
         response.raise_for_status()
@@ -977,7 +1049,7 @@ class GCOAWSClient:
             query += f"&container={quote(container, safe='')}"
         response = self.make_authenticated_request(
             method="GET",
-            path=f"/api/v1/jobs/{namespace}/{job_name}/logs?{query}",
+            path=f"{_job_path(namespace, job_name)}/logs?{query}",
             target_region=region,
         )
 
@@ -1010,7 +1082,7 @@ class GCOAWSClient:
         Returns:
             Deletion result dictionary
         """
-        path = f"/api/v1/jobs/{quote(namespace, safe='')}/{quote(job_name, safe='')}"
+        path = _job_path(namespace, job_name)
         if expected_uid is not None:
             path += f"?expected_uid={quote(expected_uid, safe='')}"
         response = self.make_authenticated_request(
@@ -1062,19 +1134,20 @@ class GCOAWSClient:
 
         Args:
             namespace: Filter by namespace
-            status: Filter by status
+            status: Filter by status: pending, running, succeeded (sent as
+                the server's ``completed``) or failed
             limit: Maximum jobs to return
 
         Returns:
             Aggregated job list with region information
         """
-        params = [f"limit={limit}"]
+        params = {"limit": str(limit)}
         if namespace:
-            params.append(f"namespace={namespace}")
+            params["namespace"] = namespace
         if status:
-            params.append(f"status={status}")
+            params["status"] = _server_job_status(status)
 
-        query_string = f"?{'&'.join(params)}"
+        query_string = f"?{urlencode(params, quote_via=quote)}"
 
         response = self.make_authenticated_request(
             method="GET", path=f"/api/v1/global/jobs{query_string}"
@@ -1123,7 +1196,8 @@ class GCOAWSClient:
 
         Args:
             namespace: Filter by namespace
-            status: Filter by status
+            status: Filter by status (``succeeded`` is sent as the server's
+                ``completed``)
             older_than_days: Delete jobs older than N days
             label_selector: Kubernetes label selector
             dry_run: If True, only return what would be deleted
@@ -1135,7 +1209,7 @@ class GCOAWSClient:
         if namespace:
             body["namespace"] = namespace
         if status:
-            body["status"] = status
+            body["status"] = _server_job_status(status)
         if older_than_days:
             body["older_than_days"] = older_than_days
         if label_selector:
@@ -1167,7 +1241,7 @@ class GCOAWSClient:
         """
         response = self.make_authenticated_request(
             method="GET",
-            path=f"/api/v1/jobs/{namespace}/{job_name}/events",
+            path=f"{_job_path(namespace, job_name)}/events",
             target_region=region,
         )
 
@@ -1189,7 +1263,7 @@ class GCOAWSClient:
         """
         response = self.make_authenticated_request(
             method="GET",
-            path=f"/api/v1/jobs/{namespace}/{job_name}/pods",
+            path=f"{_job_path(namespace, job_name)}/pods",
             target_region=region,
         )
 
@@ -1222,13 +1296,14 @@ class GCOAWSClient:
         """
         params = [f"tail={tail_lines}"]
         if container:
-            params.append(f"container={container}")
+            params.append(f"container={quote(container, safe='')}")
 
         query_string = f"?{'&'.join(params)}"
+        pod_path = f"{_job_path(namespace, job_name)}/pods/{api_path_segment(pod_name)}"
 
         response = self.make_authenticated_request(
             method="GET",
-            path=f"/api/v1/jobs/{namespace}/{job_name}/pods/{pod_name}/logs{query_string}",
+            path=f"{pod_path}/logs{query_string}",
             target_region=region,
         )
 
@@ -1252,7 +1327,7 @@ class GCOAWSClient:
         """
         response = self.make_authenticated_request(
             method="GET",
-            path=f"/api/v1/jobs/{namespace}/{job_name}/metrics",
+            path=f"{_job_path(namespace, job_name)}/metrics",
             target_region=region,
         )
 
@@ -1264,7 +1339,10 @@ class GCOAWSClient:
         """
         Retry a failed job.
 
-        Creates a new job from the failed job's spec with a new name.
+        Creates a new job from the failed job's spec with a new name. The API
+        answers 201 only when it created the job; a copied manifest that fails
+        validation is a 400 whose ``errors`` list :meth:`call_api` puts in the
+        raised message.
 
         Args:
             job_name: Name of the failed job
@@ -1273,16 +1351,16 @@ class GCOAWSClient:
 
         Returns:
             Result with new job name
-        """
-        response = self.make_authenticated_request(
-            method="POST",
-            path=f"/api/v1/jobs/{namespace}/{job_name}/retry",
-            target_region=region,
-        )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        Raises:
+            APIRequestError: The API refused the retry or failed, with its
+                own message and errors.
+        """
+        return self.call_api(
+            method="POST",
+            path=f"{_job_path(namespace, job_name)}/retry",
+            region=region,
+        )
 
     def bulk_delete_jobs(
         self,
@@ -1298,7 +1376,8 @@ class GCOAWSClient:
 
         Args:
             namespace: Filter by namespace
-            status: Filter by status
+            status: Filter by status (``succeeded`` is sent as the server's
+                ``completed``)
             older_than_days: Delete jobs older than N days
             label_selector: Kubernetes label selector
             region: Target region
@@ -1311,7 +1390,7 @@ class GCOAWSClient:
         if namespace:
             body["namespace"] = namespace
         if status:
-            body["status"] = status
+            body["status"] = _server_job_status(status)
         if older_than_days:
             body["older_than_days"] = older_than_days
         if label_selector:

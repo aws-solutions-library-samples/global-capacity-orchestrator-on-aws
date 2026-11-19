@@ -232,13 +232,31 @@ def _next_page_command(
     return shlex.join(args)
 
 
+#: Every status a central-queue record can hold, in lifecycle order: the
+#: ``JobStatus`` values in gco/services/template_store.py (a test keeps the two
+#: equal; importing that module here would load boto3 for every command).
+QUEUE_JOB_STATUSES = (
+    "queued",
+    "claimed",
+    "applying",
+    "pending",
+    "running",
+    "succeeded",
+    "failed",
+    "cancelled",
+)
+
+
 @queue.command("list")
 @click.option("--region", "-r", help="Filter by target region")
 @click.option(
     "--status",
     "-s",
-    type=click.Choice(["queued", "claimed", "running", "succeeded", "failed", "cancelled"]),
-    help="Filter by status",
+    type=click.Choice(QUEUE_JOB_STATUSES),
+    help=(
+        "Filter by status. A region claims a queued job, applies it (applying), "
+        "and it is pending until its pods run"
+    ),
 )
 @click.option("--namespace", "-n", help="Filter by namespace")
 @click.option(
@@ -347,14 +365,14 @@ def queue_get(config: Any, job_id: Any, region: Any) -> None:
     formatter = get_output_formatter(config)
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
         query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="GET",
-            path=f"/api/v1/queue/jobs/{job_id}",
+            path=f"/api/v1/queue/jobs/{api_path_segment(job_id)}",
             region=query_region,
         )
 
@@ -410,7 +428,11 @@ def queue_get(config: Any, job_id: Any, region: Any) -> None:
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @pass_config
 def queue_cancel(config: Any, job_id: Any, reason: Any, region: Any, yes: Any) -> None:
-    """Cancel a queued job (only works for jobs not yet running).
+    """Cancel a job that is still queued, before a region claims it.
+
+    Only a `queued` job can be cancelled. Once a region has claimed it
+    (`claimed`, `applying`, `pending`, `running`) or it has finished, the API
+    refuses with 409 and the command exits 1.
 
     Examples:
         gco queue cancel abc123-def456
@@ -422,7 +444,7 @@ def queue_cancel(config: Any, job_id: Any, reason: Any, region: Any, yes: Any) -
         confirm(f"Cancel job {job_id}?", abort=True)
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
@@ -433,7 +455,7 @@ def queue_cancel(config: Any, job_id: Any, reason: Any, region: Any, yes: Any) -
 
         result = aws_client.call_api(
             method="DELETE",
-            path=f"/api/v1/queue/jobs/{job_id}",
+            path=f"/api/v1/queue/jobs/{api_path_segment(job_id)}",
             region=query_region,
             params=params,
         )

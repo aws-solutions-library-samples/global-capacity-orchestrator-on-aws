@@ -2218,26 +2218,84 @@ class TestTrainJobLifecycleFallbacks:
         )
         assert manager._parse_trainjob_info(resource, "us-east-1").status == "running"
 
+    @staticmethod
+    def _manifest_delete_response(status, message):
+        """The DELETE /api/v1/manifests/{ns}/{name} body (200 for these statuses)."""
+        return {
+            "success": True,
+            "cluster_id": "gco-us-east-1",
+            "region": "us-east-1",
+            "resource": {
+                "api_version": "trainer.kubeflow.org/v1alpha1",
+                "kind": "TrainJob",
+                "name": "train-demo",
+                "namespace": "gco-jobs",
+                "status": status,
+                "message": message,
+            },
+        }
+
     def test_delete_job_falls_back_to_trainjob_delete_on_404(self):
         manager = self._manager()
         manager._aws_client.delete_job.side_effect = self._http_404()
-        manager._aws_client.call_api.return_value = {"success": True, "resource": {}}
+        manager._aws_client.call_api.return_value = self._manifest_delete_response(
+            "deleted", "Resource deleted successfully"
+        )
 
         result = manager.delete_job("train-demo", "gco-jobs", "us-east-1")
 
-        assert result["success"] is True
+        assert result["resource"]["status"] == "deleted"
         method, path = manager._aws_client.call_api.call_args.args[:2]
         assert (method, path) == ("DELETE", "/api/v1/manifests/gco-jobs/train-demo")
 
-    def test_delete_job_reraises_when_trainjob_delete_also_fails(self):
+    def test_delete_job_reports_no_trainjob_as_the_batch_404(self):
+        """The route answers 200 "unchanged" for a missing TrainJob (TRAINJOB-DELETE).
+
+        That is not a deletion: a typo'd name must surface the batch Job's
+        404 instead of "Job deleted".
+        """
         import requests
 
         manager = self._manager()
         manager._aws_client.delete_job.side_effect = self._http_404()
-        manager._aws_client.call_api.side_effect = RuntimeError("API request failed: 404")
+        manager._aws_client.call_api.return_value = self._manifest_delete_response(
+            "unchanged", "Resource not found (already deleted)"
+        )
+
+        with pytest.raises(requests.exceptions.HTTPError) as raised:
+            manager.delete_job("typo-name", "gco-jobs", "us-east-1")
+        assert raised.value.response.status_code == 404
+
+    @pytest.mark.parametrize("status_code", [403, 404])
+    def test_delete_job_reraises_the_batch_404_when_no_trainjob_can_exist(self, status_code):
+        """403 (TrainJob kind not admitted) and 404 mean there is no TrainJob."""
+        import requests
+
+        from cli.aws_client import APIRequestError
+
+        manager = self._manager()
+        manager._aws_client.delete_job.side_effect = self._http_404()
+        manager._aws_client.call_api.side_effect = APIRequestError(status_code, "no TrainJob")
 
         with pytest.raises(requests.exceptions.HTTPError):
             manager.delete_job("typo-name", "gco-jobs", "us-east-1")
+
+    @pytest.mark.parametrize(
+        "error",
+        [(400, "Delete failed: Forbidden"), (500, "Internal server error"), (502, "Bad Gateway")],
+    )
+    def test_delete_job_surfaces_a_trainjob_delete_that_failed(self, error):
+        """A TrainJob that exists but could not be deleted is not "not found"."""
+        from cli.aws_client import APIRequestError
+
+        manager = self._manager()
+        manager._aws_client.delete_job.side_effect = self._http_404()
+        manager._aws_client.call_api.side_effect = APIRequestError(*error)
+
+        with pytest.raises(APIRequestError) as raised:
+            manager.delete_job("train-demo", "gco-jobs", "us-east-1")
+        assert raised.value.status_code == error[0]
+        assert error[1] in str(raised.value)
 
     def test_delete_job_non_404_never_probes_the_manifests_endpoint(self):
         import requests

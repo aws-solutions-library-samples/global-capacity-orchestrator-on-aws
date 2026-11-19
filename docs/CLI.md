@@ -3191,7 +3191,7 @@ gco inference invoke ENDPOINT_NAME [OPTIONS]
 |--------|-------|-------------|
 | `--prompt` | `-p` | Text prompt to send |
 | `--data` | `-d` | Raw JSON body (overrides --prompt) |
-| `--path` | | API sub-path (default: auto-detected from image) |
+| `--path` | | API sub-path under the endpoint (default: auto-detected from image). It must start with `/` and may not contain a `.` or `..` segment, literal or percent-encoded, because the request would then leave the endpoint for another route |
 | `--region` | `-r` | Target region for the request |
 | `--max-tokens` | | Max tokens to generate (default: 100) |
 | `--stream/--no-stream` | | Enable or disable incremental response streaming; when omitted, raw JSON with `"stream": true` enables it automatically |
@@ -3471,11 +3471,16 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 | `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (manifest `metadata.namespace` takes precedence) |
 | `--region` | `-r` | Target specific region |
 | `--dry-run` | | Validate without applying |
-| `--check-policy` | | Check the manifests against the target region's deployed policy first and report anything that would be rejected (advisory; submission continues) |
+| `--check-policy` | | Check the manifests against the target region's deployed policy first and report anything that would be rejected (advisory; submission continues). With `-o json` or `-o yaml` the findings go to stderr, so stdout stays the submission document |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 | `--wait` | `-w` | Wait for job completion (exit status below) |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
+
+`--wait` follows the first batch Job the submission created or, when there is
+none, the first Kubeflow TrainJob (finished when its `Complete` or `Failed`
+condition is true). A submission with neither (a Deployment, a Pod) prints a
+warning that there is nothing to wait for and exits 0 once submitted.
 
 **Exit status:**
 
@@ -3553,7 +3558,7 @@ gco jobs submit-direct MANIFEST_PATH [OPTIONS]
 | `--dry-run` | | Validate without applying |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
-| `--wait` | `-w` | Wait for job completion (same exit status as [`gco jobs submit`](#gco-jobs-submit)) |
+| `--wait` | `-w` | Wait for job completion; follows a Job, else a TrainJob, as [`gco jobs submit`](#gco-jobs-submit) does, with the same exit status |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 
 `submit-direct` skips GCO's server-side admission, so `--sandbox` runs the
@@ -3617,7 +3622,7 @@ gco jobs list [OPTIONS]
 | `--region` | `-r` | Target region (required unless --all-regions) |
 | `--all-regions` | `-a` | Query all regions via global API |
 | `--namespace` | `-n` | Filter by namespace |
-| `--status` | `-s` | Filter by status |
+| `--status` | `-s` | Filter by status: `pending`, `running`, `succeeded` or `failed` (the status `gco jobs get` reports) |
 | `--limit` | `-l` | Maximum jobs to return (default: 50, at least 1). With `--region` the CLI reads as many API pages (up to 1000 jobs each) as that takes, newest first |
 
 With `--region`, a read that fails (an HTTP error from the regional API, a Region
@@ -3768,6 +3773,11 @@ gco jobs pod-logs multi-job multi-job-pod1 -r us-east-1 --container sidecar
 
 Delete a job.
 
+A name the batch Job API does not know is deleted as a Kubeflow TrainJob of
+that name (which removes its JobSet, child Jobs and pods). When neither exists
+the command reports the batch Job's `404` and exits 1; when the TrainJob exists
+but its deletion fails, it reports that error instead.
+
 ```bash
 gco jobs delete JOB_NAME [OPTIONS]
 ```
@@ -3901,6 +3911,12 @@ gco jobs metrics training-job -r us-west-2 -n ml-jobs
 
 Retry a failed job.
 
+Creates a new Job from the failed job's spec under a new name and keeps the
+original for debugging. The copy goes through the same validation as a new
+submission; when the API refuses it (for example, an image registry or
+namespace the current policy no longer allows), the command prints the API's
+message with each validation error and exits 1.
+
 ```bash
 gco jobs retry JOB_NAME [OPTIONS]
 ```
@@ -3935,7 +3951,7 @@ gco jobs bulk-delete [OPTIONS]
 | `--region` | `-r` | Target region (required unless --all-regions) |
 | `--all-regions` | `-a` | Delete across all regions |
 | `--namespace` | `-n` | Filter by namespace |
-| `--status` | `-s` | Filter by status |
+| `--status` | `-s` | Filter by status: `succeeded` (or its synonym `completed`) or `failed` |
 | `--older-than-days` | `-d` | Delete jobs older than N days |
 | `--label-selector` | `-l` | Kubernetes label selector |
 | `--dry-run` | | Only show what would be deleted (default) |
@@ -4001,6 +4017,11 @@ Advisory. The cluster is the authoritative gate and this reads a snapshot of its
 policy over the network, so it exits 0 unless you pass `--fail-on-reject`. A
 check that blocked on its own opinion would refuse valid jobs whenever it was
 stale or wrong.
+
+When it checks more than one region, it reads them in parallel, and a region
+whose policy read has not finished after 45 seconds is reported as unreadable
+("timed out after 45s") with an `unknown` verdict, so one hung region does not
+hold up the answer for the others.
 
 ```bash
 gco jobs check-policy [MANIFEST_PATH] [OPTIONS]
@@ -4912,7 +4933,7 @@ gco queue list [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Filter by target region |
-| `--status` | `-s` | Filter by status (queued, claimed, running, succeeded, failed, cancelled) |
+| `--status` | `-s` | Filter by status (queued, claimed, applying, pending, running, succeeded, failed, cancelled). A region claims a queued job, applies it (`applying`), and it is `pending` until its pods run |
 | `--namespace` | `-n` | Filter by namespace |
 | `--limit` | `-l` | Maximum jobs in this page, 1-1000 (default: 50) |
 | `--cursor` | | Read the page after a previous one (its `next_cursor`); use the same filters |
@@ -6017,7 +6038,7 @@ gco stacks outputs gco-global -r us-east-2
 
 One read-only command that answers "what is my deployment doing right now?" across every
 configured region — the aggregate view that otherwise takes `gco stacks status`,
-`gco queue stats`, `gco jobs list --all-regions`, `gco capacity status`, and
+`gco jobs queue-status --all-regions`, `gco queue stats`, `gco capacity status`, and
 `gco inference list` run separately and joined by hand. The same document backs the
 `fleet_status` MCP tool, so an agent learns the whole fleet state in one call.
 
@@ -6066,8 +6087,8 @@ Kubernetes API, so both are opt-in flags.
 |---------|------|--------|
 | `regions` | 1 | `cdk.json` deployment topology (no AWS call) |
 | `stacks` | 1 | CloudFormation status per expected stack, plus deployed optional stacks |
-| `queue` | 1 | SQS job-queue and dead-letter-queue depth per region |
-| `jobs` | 1 | Job counts by region and status from the queue-statistics API |
+| `queue` | 1 | SQS job-queue and dead-letter-queue depth per region, as `gco jobs queue-status --all-regions` shows it |
+| `jobs` | 1 | Central job-queue records by region and status from the queue-statistics API, as `gco queue stats` shows them (`source: central job queue`). Only `gco queue submit` and `gco jobs submit-queue` create these records, so jobs sent with `gco jobs submit`, `submit-sqs` or `submit-direct` are not counted; list those with `gco jobs list --all-regions` |
 | `capacity` | 1 | Queue depth and GPU/CPU utilization per region, with telemetry provenance |
 | `inference` | 1 | Inference endpoint desired state from the global registry |
 | `costs` | 2 | Cost Explorer 30-day total by service, plus cost-allocation-tag status (`--with-costs`) |
@@ -6077,8 +6098,8 @@ Kubernetes API, so both are opt-in flags.
 **Section status vocabulary.** Every section carries a `status`; anything that
 is not `ok` or `empty` also carries a human-readable `reason` and the raw
 `errors`. The distinction between `empty` and `unavailable` is the point:
-"there are no jobs" and "I could not find out whether there are jobs" lead to
-opposite decisions.
+"the queue is empty" and "I could not find out whether the queue is empty" lead
+to opposite decisions.
 
 | Status | Meaning |
 |--------|---------|
@@ -6962,14 +6983,24 @@ gco webhooks create [OPTIONS]
 | `--url` | `-u` | Webhook URL (required; also read from `$GCO_WEBHOOK_URL`, which keeps a URL that embeds a token off the command line) |
 | `--event` | `-e` | Event type (job.started, job.completed, job.failed), can be repeated |
 | `--namespace` | `-n` | Filter events by namespace |
-| `--secret` | `-s` | HMAC secret for signature verification (also read from `$GCO_WEBHOOK_SECRET`) |
+| `--secret` | `-s` | HMAC secret for signature verification (also read from `$GCO_WEBHOOK_SECRET`; see below) |
 | `--region` | `-r` | Region to create in |
+
+A secret typed after `--secret` lands in shell history and in the process list
+while the command runs. Two ways keep it out of both: set `$GCO_WEBHOOK_SECRET`,
+or leave both unset on a terminal, and the command asks for the secret with
+hidden input (typed twice; press Enter at both prompts to register without a
+secret). The prompt is written to stderr, so it never mixes with JSON or YAML
+output. Without a terminal on stdin (scripts, CI, the MCP server) it never asks
+and registers the webhook without a secret. A script that runs on a terminal
+and wants no secret passes `--secret ''`.
 
 **Example:**
 
 ```bash
 gco webhooks create --url https://example.com/webhook -e job.completed -e job.failed
 gco webhooks create -u https://slack.com/webhook -e job.failed -n gco-jobs
+GCO_WEBHOOK_SECRET="$(cat secret.txt)" gco webhooks create -u https://example.com/hook -e job.failed
 ```
 
 #### `gco webhooks delete`

@@ -721,7 +721,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
-| `queue_list` | List jobs in the global queue (filter by status, namespace, region) | safe | — |
+| `queue_list` | List jobs in the global queue one page at a time (filter by status, namespace, region; `cursor` reads the next page) | safe | — |
 | `queue_get` | Fetch a single job record from the global queue | safe | — |
 | `queue_stats` | Aggregate queue stats per region | safe | — |
 | `queue_submit` | Submit a manifest to the global queue | low-risk | — |
