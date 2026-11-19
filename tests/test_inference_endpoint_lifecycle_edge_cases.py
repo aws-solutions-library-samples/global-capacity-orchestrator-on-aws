@@ -866,9 +866,10 @@ def _mutable_endpoint(spec: Any = None, **updates: Any) -> dict[str, Any]:
     return endpoint
 
 
-def test_manager_get_store_uses_explicit_or_global_region() -> None:
+def test_manager_get_store_uses_explicit_or_global_region(monkeypatch) -> None:
+    monkeypatch.delenv("INFERENCE_ENDPOINTS_TABLE_NAME", raising=False)
     manager = InferenceManager.__new__(InferenceManager)
-    manager.config = SimpleNamespace(global_region="us-west-2")
+    manager.config = SimpleNamespace(project_name="acme", global_region="us-west-2")
     manager._aws_client = MagicMock()
 
     with patch("gco.services.inference_store.InferenceEndpointStore") as store_class:
@@ -876,8 +877,8 @@ def test_manager_get_store_uses_explicit_or_global_region() -> None:
         assert manager._get_store() is store_class.return_value
 
     assert store_class.call_args_list == [
-        call(region="eu-central-1"),
-        call(region="us-west-2"),
+        call(table_name="acme-inference-endpoints", region="eu-central-1"),
+        call(table_name="acme-inference-endpoints", region="us-west-2"),
     ]
 
 

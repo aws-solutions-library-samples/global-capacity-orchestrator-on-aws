@@ -2952,7 +2952,7 @@ gco images replication sync
 
 ### Inference Commands
 
-Manage multi-region inference endpoints. Endpoints are stored in DynamoDB and reconciled by the `inference_monitor` in each target region.
+Manage multi-region inference endpoints. Endpoints are stored in the `<project_name>-inference-endpoints` DynamoDB table in the global Region and reconciled by the `inference_monitor` in each target region. The commands (and `gco images orphans`) read the table of the deployment the CLI configuration names: cdk.json `project_name` and `deployment_regions.global`, or the config file, `GCO_PROJECT_NAME` and `GCO_GLOBAL_REGION`. `INFERENCE_ENDPOINTS_TABLE_NAME`, when set, still names the table.
 
 See [Inference Guide](INFERENCE.md) for architecture details and workflows.
 

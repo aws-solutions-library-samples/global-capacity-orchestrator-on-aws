@@ -26,6 +26,11 @@ must be project-scoped so two deployments don't share an image registry (#139):
   * ``cli.images.ImageManager`` — repos live under ``<project>/``.
   * ``cli._image_mirror.read_mirror_config`` — mirror namespace defaults to
     ``<project>/dockerhub``.
+
+And the inference endpoints table the CLI reads (moto): ``gco inference`` and
+``gco images orphans`` use ``<project>-inference-endpoints`` in the global
+Region of cdk.json (or ``GCO_PROJECT_NAME`` / ``GCO_GLOBAL_REGION``), not the
+``gco`` deployment's table.
 """
 
 from __future__ import annotations
@@ -253,3 +258,159 @@ class TestImageRepoNamespace:
         cdk_json.write_text(json.dumps({"context": {"project_name": project}}))
         config = _image_mirror.read_mirror_config(cdk_json)
         assert config["ecr_namespace"] == f"{project}/dockerhub"
+
+
+_ACME_CDK = {
+    "app": "python3 app.py",
+    "context": {
+        "project_name": "acme",
+        "deployment_regions": {
+            "global": "us-east-2",
+            "api_gateway": "us-east-2",
+            "monitoring": "us-east-2",
+            "regional": ["us-west-2"],
+        },
+    },
+}
+
+
+def _inference_table(project: str, region: str, *endpoints: str) -> None:
+    """Create ``<project>-inference-endpoints`` the way the global stack does."""
+    import boto3
+
+    from gco.services.inference_store import InferenceEndpointStore
+
+    boto3.client("dynamodb", region_name=region).create_table(
+        TableName=f"{project}-inference-endpoints",
+        KeySchema=[{"AttributeName": "endpoint_name", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "endpoint_name", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    store = InferenceEndpointStore(table_name=f"{project}-inference-endpoints", region=region)
+    for name in endpoints:
+        store.create_endpoint(name, {"image": f"{name}:v1", "replicas": 1}, ["us-west-2"])
+
+
+class TestInferenceEndpointsTable:
+    """``gco inference`` and ``gco images orphans`` read the configured project's table.
+
+    The global stack creates ``<project_name>-inference-endpoints`` in
+    ``deployment_regions.global``. moto stands in for an ``acme`` deployment
+    (global stack in us-east-2, operator default Region us-west-2) that shares
+    its account with a ``gco`` deployment. The CLI used to build the store
+    with no table name, so it read ``gco-inference-endpoints`` (the other
+    deployment's endpoints) whatever cdk.json named the project.
+    """
+
+    @pytest.fixture
+    def acme_root(self, tmp_path, monkeypatch):
+        import json
+
+        from moto import mock_aws
+
+        root = tmp_path / "acme"
+        root.mkdir()
+        (root / "cdk.json").write_text(json.dumps(_ACME_CDK), encoding="utf-8")
+        for name, value in {
+            "AWS_ACCESS_KEY_ID": "testing",
+            "AWS_SECRET_ACCESS_KEY": "testing",
+            "AWS_SESSION_TOKEN": "testing",
+            "AWS_DEFAULT_REGION": "us-west-2",
+            "AWS_REGION": "us-west-2",
+        }.items():
+            monkeypatch.setenv(name, value)
+        for name in (
+            "GCO_PROJECT_NAME",
+            "GCO_GLOBAL_REGION",
+            "DYNAMODB_REGION",
+            "GLOBAL_REGION",
+            "REGION",
+            "INFERENCE_ENDPOINTS_TABLE_NAME",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("HOME", str(root))  # no ~/.gco/config.yaml of the host
+        with mock_aws():
+            _inference_table("gco", "us-east-2", "gco-llm")
+            _inference_table("acme", "us-east-2", "acme-llm")
+            yield root
+
+    @staticmethod
+    def _gco(*args: str):
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        return CliRunner().invoke(cli, ["--output", "json", *args])
+
+    def test_list_reads_the_cdk_json_projects_table(self, acme_root) -> None:
+        import json
+
+        result = self._gco("inference", "list")
+
+        assert result.exit_code == 0, result.output
+        assert [ep["endpoint_name"] for ep in json.loads(result.stdout)] == ["acme-llm"]
+
+    def test_status_and_writes_use_the_projects_table(self, acme_root) -> None:
+        import json
+
+        import boto3
+
+        assert self._gco("inference", "status", "gco-llm").exit_code == 1
+
+        status = self._gco("inference", "status", "acme-llm")
+        assert status.exit_code == 0, status.output
+        assert json.loads(status.stdout)["endpoint_name"] == "acme-llm"
+
+        scaled = self._gco("inference", "scale", "acme-llm", "--replicas", "3")
+        assert scaled.exit_code == 0, scaled.output
+        table = boto3.resource("dynamodb", region_name="us-east-2").Table(
+            "acme-inference-endpoints"
+        )
+        assert table.get_item(Key={"endpoint_name": "acme-llm"})["Item"]["spec"]["replicas"] == 3
+
+    def test_a_project_without_the_gco_table_still_reads_its_own(self, acme_root) -> None:
+        import json
+
+        import boto3
+
+        boto3.client("dynamodb", region_name="us-east-2").delete_table(
+            TableName="gco-inference-endpoints"
+        )
+
+        result = self._gco("inference", "list")
+
+        assert result.exit_code == 0, result.output
+        assert [ep["endpoint_name"] for ep in json.loads(result.stdout)] == ["acme-llm"]
+
+    def test_images_orphans_collects_the_projects_endpoint_images(self, acme_root) -> None:
+        from cli.config import get_config
+        from cli.images import ImageManager
+
+        manager = ImageManager(config=get_config(), region="us-east-2")
+
+        assert manager._collect_inference_image_refs() == {"acme-llm:v1"}
+
+    def test_cli_environment_overrides_reach_the_store(self, acme_root, monkeypatch) -> None:
+        import json
+
+        _inference_table("beta", "eu-west-1", "beta-llm")
+        monkeypatch.setenv("GCO_PROJECT_NAME", "beta")
+        monkeypatch.setenv("GCO_GLOBAL_REGION", "eu-west-1")
+
+        result = self._gco("inference", "list")
+
+        assert result.exit_code == 0, result.output
+        assert [ep["endpoint_name"] for ep in json.loads(result.stdout)] == ["beta-llm"]
+
+    def test_the_services_table_variable_still_names_the_table(self, acme_root, monkeypatch):
+        import json
+
+        # INFERENCE_ENDPOINTS_TABLE_NAME is what the in-cluster services are
+        # given; a shell that sets it keeps reading the table it names.
+        monkeypatch.setenv("INFERENCE_ENDPOINTS_TABLE_NAME", "gco-inference-endpoints")
+
+        result = self._gco("inference", "list")
+
+        assert result.exit_code == 0, result.output
+        assert [ep["endpoint_name"] for ep in json.loads(result.stdout)] == ["gco-llm"]

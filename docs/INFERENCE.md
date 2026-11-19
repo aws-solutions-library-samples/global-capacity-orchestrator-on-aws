@@ -69,8 +69,13 @@ global inference-streaming Lambda (request-bound HMAC) → Global Accelerator (T
 
 ### How It Works
 
-1. `gco inference deploy` writes the endpoint spec to the global
-   `gco-inference-endpoints` DynamoDB table.
+1. `gco inference deploy` writes the endpoint spec to the
+   `<project_name>-inference-endpoints` DynamoDB table in the global Region
+   (`gco-inference-endpoints` for the default project). Every `gco inference`
+   command reads the table of the project and global Region the CLI
+   configuration names (cdk.json `project_name` and
+   `deployment_regions.global`, or `GCO_PROJECT_NAME` and
+   `GCO_GLOBAL_REGION`).
 2. The `inference_monitor` in each target region polls the table every 15
    seconds and reconciles the local workload.
 3. For a plain endpoint, the monitor creates or updates a Deployment and

@@ -22,7 +22,13 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 @click.group()
 @pass_config
 def inference(config: Any) -> None:
-    """Manage multi-region inference endpoints."""
+    """Manage multi-region inference endpoints.
+
+    Endpoints live in the <project_name>-inference-endpoints DynamoDB table
+    in the global Region of the deployment the CLI configuration names: the
+    project_name and deployment_regions.global of cdk.json (or the config
+    file, GCO_PROJECT_NAME and GCO_GLOBAL_REGION).
+    """
 
 
 #: Metric types --autoscale-metric accepts: cpu and memory scale through the
