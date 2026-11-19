@@ -869,57 +869,92 @@ class TestPrune:
 
 
 class TestOrphans:
-    def _seed_list_repos(self, ecr: Any) -> None:
-        def paginator_side(op: str) -> Any:
-            if op == "describe_repositories":
-                return _make_paginator([{"repositories": [{"repositoryName": "gco/svc"}]}])
-            # describe_images for image_count
-            return _make_paginator([{"imageDetails": []}])
+    _OLD = (datetime.now(UTC) - timedelta(days=60)).isoformat()
 
-        ecr.get_paginator.side_effect = paginator_side
-
-    def test_orphans_excludes_referenced(self, manager: ImageManager) -> None:
-        old = (datetime.now(UTC) - timedelta(days=60)).isoformat()
-        recent_uri = f"{manager._registry_host()}/gco/svc:in-use"
-        ecr = _ecr_mock()
-        self._seed_list_repos(ecr)
-        # Stub list_tags directly to keep the test readable.
+    def _orphans(
+        self,
+        manager: ImageManager,
+        tags: list[dict[str, Any]],
+        *,
+        endpoint_refs: set[str] | None = None,
+        job_refs: set[str] | None = None,
+    ) -> list[str]:
         with (
-            patch.object(manager, "_ecr_client", return_value=ecr),
+            patch.object(manager, "list_repos", return_value=[{"name": "gco/svc"}]),
+            patch.object(manager, "list_tags", return_value=tags),
             patch.object(
-                manager,
-                "list_tags",
-                return_value=[
-                    {"tag": "in-use", "digest": "sha256:1", "pushed_at": old},
-                    {"tag": "stale", "digest": "sha256:2", "pushed_at": old},
-                ],
+                manager, "_collect_inference_image_refs", return_value=set(endpoint_refs or ())
             ),
             patch.object(
-                manager,
-                "_collect_inference_image_refs",
-                return_value={recent_uri},
+                manager, "_collect_recent_job_image_refs", return_value=set(job_refs or ())
             ),
         ):
-            rows = manager.orphans(threshold_days=30)
-        tags = [r["tag"] for r in rows]
-        assert "in-use" not in tags
-        assert "stale" in tags
+            return [row["tag"] for row in manager.orphans(threshold_days=30)]
+
+    def test_orphans_excludes_referenced(self, manager: ImageManager) -> None:
+        tags = [
+            {"tag": "in-use", "digest": "sha256:1", "pushed_at": self._OLD},
+            {"tag": "stale", "digest": "sha256:2", "pushed_at": self._OLD},
+        ]
+        in_use = f"{manager._registry_host()}/gco/svc:in-use"
+        assert self._orphans(manager, tags, endpoint_refs={in_use}) == ["stale"]
+        assert self._orphans(manager, tags, job_refs={in_use}) == ["stale"]
 
     def test_orphans_excludes_recent(self, manager: ImageManager) -> None:
         recent = (datetime.now(UTC) - timedelta(days=1)).isoformat()
-        ecr = _ecr_mock()
-        self._seed_list_repos(ecr)
+        tags = [{"tag": "fresh", "digest": "sha256:1", "pushed_at": recent}]
+        assert self._orphans(manager, tags) == []
+
+    def test_a_tag_named_through_another_regions_replica_is_in_use(
+        self, manager: ImageManager
+    ) -> None:
+        """CC19: endpoints and jobs pull from their own Region's replica, so
+        the scan's us-east-2 URI never matched a us-west-2 reference."""
+        tags = [
+            {"tag": "v1", "digest": "sha256:1", "pushed_at": self._OLD},
+            {"tag": "v2", "digest": "sha256:2", "pushed_at": self._OLD},
+        ]
+        replica = "123456789012.dkr.ecr.us-west-2.amazonaws.com/gco/svc:v1"
+        other_account = "210987654321.dkr.ecr.us-east-2.amazonaws.com/gco/svc:v2"
+        assert self._orphans(manager, tags, job_refs={replica, other_account}) == ["v2"]
+
+    def test_a_tag_whose_image_is_named_by_digest_is_in_use(self, manager: ImageManager) -> None:
+        host = manager._registry_host()
+        tags = [
+            {"tag": "pinned", "digest": "sha256:1", "pushed_at": self._OLD},
+            {"tag": "also-pinned", "digest": "sha256:1", "pushed_at": self._OLD},
+            {"tag": "moved", "digest": "sha256:2", "pushed_at": self._OLD},
+            {"tag": "named", "digest": "sha256:3", "pushed_at": self._OLD},
+            {"tag": "stale", "digest": "sha256:4", "pushed_at": self._OLD},
+        ]
+        refs = {
+            f"{host}/gco/svc@sha256:1",
+            # A tag and a digest: both are in use.
+            f"{host}/gco/svc:named@sha256:2",
+        }
+        assert self._orphans(manager, tags, endpoint_refs=refs) == ["stale"]
+
+    def test_a_reference_without_a_tag_names_latest(self, manager: ImageManager) -> None:
+        tags = [
+            {"tag": "latest", "digest": "sha256:1", "pushed_at": self._OLD},
+            {"tag": "v1", "digest": "sha256:2", "pushed_at": self._OLD},
+        ]
+        refs = {f"{manager._registry_host()}/gco/svc"}
+        assert self._orphans(manager, tags, job_refs=refs) == ["v1"]
+
+    def test_an_unreadable_source_fails_the_scan(self, manager: ImageManager) -> None:
         with (
-            patch.object(manager, "_ecr_client", return_value=ecr),
+            patch.object(manager, "list_repos") as list_repos,
             patch.object(
                 manager,
-                "list_tags",
-                return_value=[{"tag": "fresh", "digest": "sha256:1", "pushed_at": recent}],
+                "_collect_inference_image_refs",
+                side_effect=RuntimeError("could not read the inference endpoints: denied"),
             ),
-            patch.object(manager, "_collect_inference_image_refs", return_value=set()),
+            patch.object(manager, "_collect_recent_job_image_refs", return_value=set()),
+            pytest.raises(RuntimeError, match="could not read the inference endpoints"),
         ):
-            rows = manager.orphans(threshold_days=30)
-        assert rows == []
+            manager.orphans()
+        list_repos.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -928,183 +963,184 @@ class TestOrphans:
 
 
 class TestInferenceImageRefs:
-    def test_collects_image_and_canary_uris(self, manager: ImageManager) -> None:
+    def test_collects_every_image_in_the_record(self, manager: ImageManager) -> None:
+        """The flat image, the canary's, the per-Region replica URIs and any
+        nested image (the Mooncake proxy, a status field) all count."""
         fake_inference = MagicMock()
         fake_inference.list_endpoints.return_value = [
             {
                 "spec": {
                     "image": "registry/img:v1",
+                    "region_image_uris": {"us-west-2": "replica/img:v1", "bad": 7},
                     "canary": {"image": "registry/img:v2"},
-                }
+                    "mooncake": {"proxy": {"image": "registry/proxy:v1"}},
+                    "env": [{"name": "X", "value": "registry/not-an-image:v1"}],
+                },
+                "status": {"rollout": [{"image": "registry/img:v0"}]},
             },
             {"spec": {"image": "registry/other:v1"}},
             # Endpoint with no image is skipped.
-            {"spec": {}},
+            {"spec": {"image": ""}},
         ]
         with patch("cli.inference.InferenceManager", return_value=fake_inference):
             refs = manager._collect_inference_image_refs()
-        assert refs == {"registry/img:v1", "registry/img:v2", "registry/other:v1"}
+        assert refs == {
+            "registry/img:v1",
+            "replica/img:v1",
+            "registry/img:v2",
+            "registry/proxy:v1",
+            "registry/img:v0",
+            "registry/other:v1",
+        }
 
-    def test_empty_when_inference_module_blows_up(self, manager: ImageManager) -> None:
-        with patch("cli.inference.InferenceManager", side_effect=RuntimeError("boom")):
-            assert manager._collect_inference_image_refs() == set()
+    def test_raises_when_the_inference_manager_cannot_start(self, manager: ImageManager) -> None:
+        """CC19: an unreadable endpoint table used to mean "nothing is
+        referenced", so every old tag was listed, in-use ones included."""
+        with (
+            patch("cli.inference.InferenceManager", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="could not read the inference endpoints: boom"),
+        ):
+            manager._collect_inference_image_refs()
 
-    def test_empty_when_list_endpoints_blows_up(self, manager: ImageManager) -> None:
+    def test_raises_when_list_endpoints_fails(self, manager: ImageManager) -> None:
         fake_inference = MagicMock()
         fake_inference.list_endpoints.side_effect = RuntimeError("ddb down")
-        with patch("cli.inference.InferenceManager", return_value=fake_inference):
-            assert manager._collect_inference_image_refs() == set()
+        with (
+            patch("cli.inference.InferenceManager", return_value=fake_inference),
+            pytest.raises(RuntimeError, match="could not read the inference endpoints: ddb down"),
+        ):
+            manager._collect_inference_image_refs()
 
-    def test_recent_job_image_refs_unions_across_regions(self, manager: ImageManager) -> None:
-        from datetime import UTC, datetime
 
-        from cli.jobs import JobInfo
+# ---------------------------------------------------------------------------
+# Job cross-reference lookup
+# ---------------------------------------------------------------------------
 
-        recent = datetime.now(UTC)
+
+def _job(name: str, status: str, created: Any, refs: list[Any]) -> Any:
+    from cli.jobs import JobInfo
+
+    return JobInfo(
+        name=name,
+        namespace="gco-jobs",
+        region="us-east-1",
+        status=status,
+        created_time=created,
+        image_refs=refs,
+    )
+
+
+class TestJobImageRefs:
+    def _refs(
+        self,
+        manager: ImageManager,
+        jobs_by_region: dict[str, Any],
+        threshold_days: int = 30,
+    ) -> tuple[set[str], Any]:
         fake_jm = MagicMock()
-        fake_jm.list_jobs.return_value = [
-            JobInfo(
-                name="j1",
-                namespace="gco-jobs",
-                region="us-east-1",
-                status="succeeded",
-                created_time=recent,
-                image_refs=["registry/a:v1", "registry/b:v2"],
-            ),
-            JobInfo(
-                name="j2",
-                namespace="gco-jobs",
-                region="us-west-2",
-                status="running",
-                created_time=recent,
-                image_refs=["registry/a:v1", "registry/c:v3"],
-            ),
-        ]
-        with patch("cli.jobs.JobManager", return_value=fake_jm):
-            refs = manager._collect_recent_job_image_refs()
+
+        def list_jobs(*, region: str) -> list[Any]:
+            jobs = jobs_by_region[region]
+            if isinstance(jobs, Exception):
+                raise jobs
+            return list(jobs)
+
+        fake_jm.list_jobs.side_effect = list_jobs
+        aws = MagicMock()
+        aws.discover_regional_stacks.return_value = dict.fromkeys(jobs_by_region)
+        with (
+            patch("cli.jobs.JobManager", return_value=fake_jm),
+            patch("cli.aws_client.get_aws_client", return_value=aws),
+        ):
+            refs = manager._collect_recent_job_image_refs(threshold_days=threshold_days)
+        return refs, fake_jm
+
+    def test_unions_every_regions_jobs(self, manager: ImageManager) -> None:
+        recent = datetime.now(UTC)
+        refs, fake_jm = self._refs(
+            manager,
+            {
+                "us-west-2": [_job("j2", "running", recent, ["registry/a:v1", "registry/c:v3"])],
+                "us-east-1": [_job("j1", "succeeded", recent, ["registry/a:v1", "registry/b:v2"])],
+            },
+        )
         assert refs == {"registry/a:v1", "registry/b:v2", "registry/c:v3"}
-        fake_jm.list_jobs.assert_called_once_with(all_regions=True)
+        assert [c.kwargs for c in fake_jm.list_jobs.call_args_list] == [
+            {"region": "us-east-1"},
+            {"region": "us-west-2"},
+        ]
 
-    def test_recent_job_image_refs_skips_jobs_older_than_threshold(
-        self, manager: ImageManager
-    ) -> None:
-        from datetime import UTC, datetime, timedelta
-
-        from cli.jobs import JobInfo
-
+    def test_an_unfinished_job_counts_however_old(self, manager: ImageManager) -> None:
+        """CC19: a job running for longer than the threshold uses its image;
+        only finished jobs older than the threshold stop counting."""
         old = datetime.now(UTC) - timedelta(days=120)
         recent = datetime.now(UTC) - timedelta(days=1)
-        fake_jm = MagicMock()
-        fake_jm.list_jobs.return_value = [
-            JobInfo(
-                name="ancient",
-                namespace="gco-jobs",
-                region="us-east-1",
-                status="succeeded",
-                created_time=old,
-                image_refs=["should/not:appear"],
-            ),
-            JobInfo(
-                name="recent",
-                namespace="gco-jobs",
-                region="us-east-1",
-                status="succeeded",
-                created_time=recent,
-                image_refs=["should/appear:v1"],
-            ),
-        ]
-        with patch("cli.jobs.JobManager", return_value=fake_jm):
-            refs = manager._collect_recent_job_image_refs(threshold_days=30)
-        assert refs == {"should/appear:v1"}
+        refs, _ = self._refs(
+            manager,
+            {
+                "us-east-1": [
+                    _job("ancient-done", "succeeded", old, ["should/not:appear"]),
+                    _job("ancient-failed", "failed", old, ["also/not:appear"]),
+                    _job("ancient-running", "running", old, ["running/img:v1"]),
+                    _job("ancient-pending", "pending", old, ["pending/img:v1"]),
+                    _job("recent-done", "succeeded", recent, ["recent/img:v1"]),
+                ]
+            },
+        )
+        assert refs == {"running/img:v1", "pending/img:v1", "recent/img:v1"}
 
-    def test_recent_job_image_refs_treats_missing_created_time_as_in_window(
-        self, manager: ImageManager
-    ) -> None:
+    def test_treats_missing_created_time_as_in_window(self, manager: ImageManager) -> None:
         """A freshly-submitted job that hasn't been picked up by the
-        cluster's status loop yet has ``created_time=None``. The helper
-        keeps it so its image isn't accidentally orphan-pruned."""
-        from cli.jobs import JobInfo
-
-        fake_jm = MagicMock()
-        fake_jm.list_jobs.return_value = [
-            JobInfo(
-                name="just-submitted",
-                namespace="gco-jobs",
-                region="us-east-1",
-                status="pending",
-                created_time=None,
-                image_refs=["fresh/img:v1"],
-            ),
-        ]
-        with patch("cli.jobs.JobManager", return_value=fake_jm):
-            refs = manager._collect_recent_job_image_refs()
+        cluster's status loop yet has ``created_time=None``."""
+        refs, _ = self._refs(
+            manager, {"us-east-1": [_job("just-submitted", "succeeded", None, ["fresh/img:v1"])]}
+        )
         assert refs == {"fresh/img:v1"}
 
-    def test_recent_job_image_refs_handles_naive_datetime(self, manager: ImageManager) -> None:
-        """Some test fixtures build ``JobInfo`` without a tz. The helper
-        normalises so the cutoff comparison doesn't blow up with a
-        ``can't compare naive and aware`` ``TypeError``."""
-        from datetime import datetime
-
-        from cli.jobs import JobInfo
-
+    def test_handles_naive_datetime(self, manager: ImageManager) -> None:
+        """A naive ``created_time`` is read as UTC, not a TypeError."""
         # Deliberately naive — the branch under test is a caller that did not
         # attach tzinfo, which the collector must still compare against now().
-        naive_recent = datetime.now()  # noqa: DTZ005
-        fake_jm = MagicMock()
-        fake_jm.list_jobs.return_value = [
-            JobInfo(
-                name="j",
-                namespace="gco-jobs",
-                region="us-east-1",
-                status="succeeded",
-                created_time=naive_recent,
-                image_refs=["img:v1"],
-            ),
-        ]
-        with patch("cli.jobs.JobManager", return_value=fake_jm):
-            refs = manager._collect_recent_job_image_refs()
-        assert refs == {"img:v1"}
+        naive_old = datetime.now() - timedelta(days=90)  # noqa: DTZ005
+        refs, _ = self._refs(
+            manager, {"us-east-1": [_job("j", "succeeded", naive_old, ["img:v1"])]}
+        )
+        assert refs == set()
 
-    def test_recent_job_image_refs_empty_when_jobs_module_blows_up(
-        self, manager: ImageManager
-    ) -> None:
-        with patch("cli.jobs.JobManager", side_effect=RuntimeError("boom")):
-            assert manager._collect_recent_job_image_refs() == set()
+    def test_raises_when_a_region_cannot_be_listed(self, manager: ImageManager) -> None:
+        """CC19: a skipped Region used to make its jobs' images look unused."""
+        with pytest.raises(RuntimeError, match="could not list the jobs in us-west-2: api down"):
+            self._refs(
+                manager,
+                {
+                    "us-east-1": [_job("j", "running", None, ["img:v1"])],
+                    "us-west-2": RuntimeError("api down"),
+                },
+            )
 
-    def test_recent_job_image_refs_empty_when_list_jobs_blows_up(
-        self, manager: ImageManager
-    ) -> None:
-        fake_jm = MagicMock()
-        fake_jm.list_jobs.side_effect = RuntimeError("api gateway down")
-        with patch("cli.jobs.JobManager", return_value=fake_jm):
-            assert manager._collect_recent_job_image_refs() == set()
+    def test_raises_when_jobs_cannot_be_read_at_all(self, manager: ImageManager) -> None:
+        with (
+            patch("cli.jobs.JobManager", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            manager._collect_recent_job_image_refs()
 
-    def test_recent_job_image_refs_skips_invalid_entries(self, manager: ImageManager) -> None:
-        """Entries with non-string or empty ``image_refs`` items are
-        ignored rather than crashing the union."""
-        from datetime import UTC, datetime
+    def test_no_regional_stack_means_no_jobs(self, manager: ImageManager) -> None:
+        refs, fake_jm = self._refs(manager, {})
+        assert refs == set()
+        fake_jm.list_jobs.assert_not_called()
 
-        from cli.jobs import JobInfo
-
-        fake_jm = MagicMock()
-        fake_jm.list_jobs.return_value = [
-            JobInfo(
-                name="j",
-                namespace="gco-jobs",
-                region="us-east-1",
-                status="succeeded",
-                created_time=datetime.now(UTC),
-                image_refs=["good/img:v1", "", "  ", "another/img:v2"],
-            ),
-        ]
-        with patch("cli.jobs.JobManager", return_value=fake_jm):
-            refs = manager._collect_recent_job_image_refs()
-        # Empty strings are filtered, whitespace-only is preserved as-is
-        # (it is a string, just an unusual one — set membership semantics).
-        assert "good/img:v1" in refs
-        assert "another/img:v2" in refs
-        assert "" not in refs
+    def test_skips_invalid_entries(self, manager: ImageManager) -> None:
+        """Non-string and empty ``image_refs`` items are ignored."""
+        refs, _ = self._refs(
+            manager,
+            {
+                "us-east-1": [
+                    _job("j", "running", None, ["good/img:v1", "", None, 7, "another/img:v2"])
+                ]
+            },
+        )
+        assert refs == {"good/img:v1", "another/img:v2"}
 
 
 # ---------------------------------------------------------------------------

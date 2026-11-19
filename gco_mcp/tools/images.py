@@ -126,6 +126,10 @@ async def images_replication_status() -> str:
 async def images_orphans(threshold_days: int = 30) -> str:
     """`gco images orphans` — list gco/* tags older than ``threshold_days`` with no references.
 
+    A tag an inference endpoint or a job in any Region names, by tag or by
+    digest, is in use. Fails when the inference endpoints or a Region's jobs
+    cannot be read, instead of reporting tags that may be in use.
+
     Args:
         threshold_days: Age threshold in days. Defaults to 30.
     """

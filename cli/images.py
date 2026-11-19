@@ -46,7 +46,7 @@ from ._image_uri import (
     ecr_registry_host,
 )
 from ._image_uri import (
-    rewrite_image_uri_for_region as _rewrite_image_uri_for_region,  # noqa: F401
+    rewrite_image_uri_for_region as _rewrite_image_uri_for_region,
 )
 from .config import GCOConfig, _load_cdk_json, get_config
 
@@ -1076,17 +1076,20 @@ class ImageManager:
         }
 
     def orphans(self, threshold_days: int = 30) -> list[dict[str, Any]]:
-        """List ``gco/*`` tags older than ``threshold_days`` with no references.
+        """List ``<project>/*`` tags older than ``threshold_days`` that nothing uses.
 
-        Cross-references against:
-          * inference endpoint specs (via :class:`cli.inference.InferenceManager`),
-          * recent jobs (best-effort; returns empty for the jobs side when
-            the queue table schema is unavailable).
+        A tag is in use when an inference endpoint's record or a job names it,
+        by tag or by digest, through any Region's replica of the registry
+        (:meth:`_references_here`). Jobs count while they are unfinished, and
+        finished ones while they are newer than ``threshold_days``. Every
+        source must be read: a failure raises rather than report the tags of
+        an unread endpoint or Region as orphans.
         """
         cutoff = datetime.now(UTC) - timedelta(days=threshold_days)
-        referenced: set[str] = set()
-        referenced.update(self._collect_inference_image_refs())
-        referenced.update(self._collect_recent_job_image_refs(threshold_days))
+        tags_in_use, digests_in_use = self._references_here(
+            self._collect_inference_image_refs()
+            | self._collect_recent_job_image_refs(threshold_days)
+        )
 
         rows: list[dict[str, Any]] = []
         for repo in self.list_repos():
@@ -1098,89 +1101,108 @@ class ImageManager:
                 pushed = self._parse_iso(tag_row.get("pushed_at"))
                 if pushed and pushed >= cutoff:
                     continue
-                uri = f"{self._registry_host()}/{repo_name}:{tag}"
-                if uri in referenced:
+                repository = f"{self._registry_host()}/{repo_name}"
+                uri = f"{repository}:{tag}"
+                digest = tag_row.get("digest")
+                if uri in tags_in_use or f"{repository}@{digest}" in digests_in_use:
                     continue
                 rows.append(
                     {
                         "repository": repo_name,
                         "tag": tag,
-                        "digest": tag_row.get("digest"),
+                        "digest": digest,
                         "pushed_at": tag_row.get("pushed_at"),
                         "uri": uri,
                     }
                 )
         return rows
 
+    def _references_here(self, refs: set[str]) -> tuple[set[str], set[str]]:
+        """Return ``(tag_uris, digest_uris)`` for ``refs`` as this Region names them.
+
+        Endpoints and jobs name the replica in their own Region
+        (:func:`cli._image_uri.rewrite_image_uri_for_region`), so an ECR
+        reference is first rewritten to this manager's Region. A reference
+        with a digest (``repo@sha256:...``, also ``repo:tag@sha256:...``)
+        names that image whatever its tags; one without a tag or digest
+        names ``:latest``.
+        """
+        tag_uris: set[str] = set()
+        digest_uris: set[str] = set()
+        for ref in refs:
+            name, _, digest = _rewrite_image_uri_for_region(ref, self.region).partition("@")
+            slash, colon = name.rfind("/"), name.rfind(":")
+            repository, tag = (name[:colon], name[colon + 1 :]) if colon > slash else (name, "")
+            if digest:
+                digest_uris.add(f"{repository}@{digest}")
+                if tag:
+                    tag_uris.add(name)
+            else:
+                tag_uris.add(f"{repository}:{tag or 'latest'}")
+        return tag_uris, digest_uris
+
     def _collect_inference_image_refs(self) -> set[str]:
-        """Return every image URI referenced by a registered inference endpoint."""
+        """Return every image an inference endpoint's record names.
+
+        That is each ``image`` value anywhere in the record (the endpoint's,
+        the canary's, the Mooncake proxy's) and each per-Region replica URI in
+        ``region_image_uris``. Raises when the endpoints cannot be read.
+        """
+        from .inference import InferenceManager
+
         try:
-            from .inference import InferenceManager
+            endpoints = InferenceManager(self.config).list_endpoints()
         except Exception as e:
-            logger.debug("InferenceManager unavailable: %s", e)
-            return set()
-        try:
-            manager = InferenceManager(self.config)
-            endpoints = manager.list_endpoints()
-        except Exception as e:
-            logger.debug("list_endpoints failed: %s", e)
-            return set()
+            raise RuntimeError(f"could not read the inference endpoints: {e}") from e
+
         refs: set[str] = set()
-        for ep in endpoints or []:
-            spec = ep.get("spec") or {}
-            image = spec.get("image") if isinstance(spec, dict) else None
-            if image:
-                refs.add(image)
-            canary = spec.get("canary") if isinstance(spec, dict) else None
-            if isinstance(canary, dict) and canary.get("image"):
-                refs.add(canary["image"])
+
+        def collect(node: Any) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key == "image" and isinstance(value, str) and value:
+                        refs.add(value)
+                    elif key == "region_image_uris" and isinstance(value, dict):
+                        refs.update(uri for uri in value.values() if isinstance(uri, str) and uri)
+                    else:
+                        collect(value)
+            elif isinstance(node, list):
+                for item in node:
+                    collect(item)
+
+        collect(endpoints)
         return refs
 
     def _collect_recent_job_image_refs(self, threshold_days: int = 30) -> set[str]:
-        """Return image URIs referenced by jobs newer than ``threshold_days``.
+        """Return the images of every unfinished job and of jobs newer than ``threshold_days``.
 
-        Walks every deployed region via :class:`cli.jobs.JobManager` and
-        unions the ``image_refs`` field on each ``JobInfo`` whose
-        ``created_time`` is within the cutoff. Treats jobs without a
-        ``created_time`` as in-window so a freshly-submitted job that
-        hasn't yet been picked up by the cluster's status loop isn't
-        accidentally considered orphaned.
-
-        Best-effort: any per-region failure is logged at debug and
-        skipped so the orphan scan still completes against the
-        regions that did respond. The deferred import breaks an
+        Lists each regional stack's jobs with :class:`cli.jobs.JobManager`, one
+        Region at a time, so a Region that cannot be read raises instead of
+        being skipped: a job there may use any tag. A job without a
+        ``created_time`` counts as new. The deferred imports break an
         otherwise-circular ``cli.images`` ↔ ``cli.jobs`` dependency.
         """
-        try:
-            from .jobs import JobManager
-        except Exception as e:
-            logger.debug("JobManager unavailable: %s", e)
-            return set()
+        from .aws_client import get_aws_client
+        from .jobs import JobManager
 
-        try:
-            manager = JobManager(self.config)
-        except Exception as e:
-            logger.debug("JobManager init failed: %s", e)
-            return set()
-
-        try:
-            jobs = manager.list_jobs(all_regions=True)
-        except Exception as e:
-            logger.debug("list_jobs(all_regions=True) failed: %s", e)
-            return set()
-
+        manager = JobManager(self.config)
+        regions = sorted(get_aws_client(self.config).discover_regional_stacks())
         cutoff = datetime.now(UTC) - timedelta(days=threshold_days)
         refs: set[str] = set()
-        for job in jobs or []:
-            created = getattr(job, "created_time", None)
-            if isinstance(created, datetime):
-                created_aware = created if created.tzinfo else created.replace(tzinfo=UTC)
-                if created_aware < cutoff:
+        for region in regions:
+            try:
+                jobs = manager.list_jobs(region=region)
+            except Exception as e:
+                raise RuntimeError(f"could not list the jobs in {region}: {e}") from e
+            for job in jobs:
+                created = self._parse_iso(getattr(job, "created_time", None))
+                finished = getattr(job, "status", None) in ("succeeded", "failed")
+                if finished and created is not None and created < cutoff:
                     continue
-            image_refs = getattr(job, "image_refs", None) or []
-            for ref in image_refs:
-                if isinstance(ref, str) and ref:
-                    refs.add(ref)
+                refs.update(
+                    ref for ref in getattr(job, "image_refs", None) or [] if isinstance(ref, str)
+                )
+        refs.discard("")
         return refs
 
     @staticmethod

@@ -2585,7 +2585,7 @@ architecture and lifecycle policy options.
 | [`gco images delete-repo`](#gco-images-delete-repo) | Delete a whole repository. |
 | [`gco images cleanup`](#gco-images-cleanup) | Remove untagged images across one or all project repos. |
 | [`gco images prune`](#gco-images-prune) | Remove untagged images older than 30 days. |
-| [`gco images orphans`](#gco-images-orphans) | List tags older than `threshold_days` that are not referenced by any deployed inference endpoint or recent job. |
+| [`gco images orphans`](#gco-images-orphans) | List tags older than `threshold_days` that no inference endpoint or job uses. |
 | [`gco images lifecycle`](#gco-images-lifecycle) | Lifecycle policy management. |
 | [`gco images mirror`](#gco-images-mirror) | Mirror third-party images (e.g. Volcano's `docker.io` images) into the project ECR. |
 | [`gco images replication`](#gco-images-replication) | Replication management for the project's ECR registry. |
@@ -2830,9 +2830,14 @@ gco images prune --no-dry-run -y       # actually delete
 
 #### `gco images orphans`
 
-List tags older than `threshold_days` that are not referenced by any
-deployed inference endpoint or recent job. Cross-references against
-both data sources before declaring a tag an orphan.
+List tags older than `threshold_days` that nothing uses. A tag is in use
+when an inference endpoint names it (its image, canary image, per-Region
+replica URIs or any other image in its record) or a job in any regional
+cluster does (every unfinished job, and finished jobs created within
+`threshold_days`), by tag or by digest, through any Region's replica of the
+registry. The command reads every source before it answers: when the
+inference endpoints or a Region's jobs cannot be read, it fails instead of
+listing tags that may be in use.
 
 ```bash
 gco images orphans [OPTIONS]

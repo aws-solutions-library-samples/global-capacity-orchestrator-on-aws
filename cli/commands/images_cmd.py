@@ -476,7 +476,11 @@ def images_prune(config: Any, dry_run: Any, yes: Any) -> None:
 )
 @pass_config
 def images_orphans(config: Any, threshold_days: Any) -> None:
-    """List tags older than threshold_days that are not referenced anywhere."""
+    """List tags older than threshold_days that no inference endpoint or job uses.
+
+    Fails, rather than guess, when the inference endpoints or a Region's jobs
+    cannot be read.
+    """
     from ..images import get_image_manager
 
     formatter = get_output_formatter(config)
