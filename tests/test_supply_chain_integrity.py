@@ -2319,13 +2319,13 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
     ]
 
     assert "ARG BUILDX_SHA256" not in dev_dockerfile
-    assert "ARG BUILDX_VERSION=v0.38.1" in buildx_section
+    assert "ARG BUILDX_VERSION=v0.38.2" in buildx_section
     assert "buildx-${BUILDX_VERSION}.linux-${TARGETARCH}" in buildx_section
     assert (
-        'amd64) BUILDX_SHA256="e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4"'
+        'amd64) BUILDX_SHA256="7992ec09413b80ff57ba4e081f56fc833d7bac1d5e71143c6c809e7e6065f6d6"'
     ) in buildx_section
     assert (
-        'arm64) BUILDX_SHA256="3b83b3731916ba433feccaaa689fe5bcdc81c641d92c8e6c2ea865dfa141c97a"'
+        'arm64) BUILDX_SHA256="46c0f334772de3cb0b341cc415caf7339fb5cfc8b8438ebcb5a10e7f23800d36"'
     ) in buildx_section
     assert (
         'echo "${BUILDX_SHA256}  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c -'
