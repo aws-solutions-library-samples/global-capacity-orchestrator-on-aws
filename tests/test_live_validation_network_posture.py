@@ -83,7 +83,7 @@ PROBE_NAMES = (
     "model-from-inference",
     "model-from-default",
     "model-from-jobs",
-    "unlabelled-from-default",
+    "nolabel-from-default",
     "https-egress",
     "http-egress",
     "pod-identity-agent",
@@ -96,7 +96,7 @@ DENY_PROBES = (
     "cost-from-default",
     "model-from-default",
     "model-from-jobs",
-    "unlabelled-from-default",
+    "nolabel-from-default",
     "http-egress",
 )
 #: Loopback binds: blocked whatever the policy controller does.
@@ -114,7 +114,7 @@ ENFORCED = {
     "model-from-inference": ("Succeeded", 0),
     "model-from-default": ("Failed", 42),
     "model-from-jobs": ("Failed", 42),
-    "unlabelled-from-default": ("Failed", 42),
+    "nolabel-from-default": ("Failed", 42),
     "https-egress": ("Succeeded", 0),
     "http-egress": ("Failed", 42),
     "pod-identity-agent": ("Succeeded", 0),
@@ -394,7 +394,7 @@ class TestProbeMatrix:
         # A gco-inference pod without the label is the default deny's: its
         # positive control is the same model-from-inference probe, which shows
         # that pod shape serving on the pod network in gco-inference.
-        unlabelled = by_name["unlabelled-from-default"]
+        unlabelled = by_name["nolabel-from-default"]
         assert unlabelled.url == "http://6.6.6.6:8443/"
         assert unlabelled.client_namespace == "default"
         assert unlabelled.expected == "blocked"
@@ -409,10 +409,18 @@ class TestProbeMatrix:
         }
         assert {spec.name for spec in specs if spec.enforcement_only} == set(DENY_PROBES)
         assert {spec.name for spec in specs if spec.requires_cost_monitor} == set(COST_PROBES)
+        # The Job controller copies a Job's name into its pods' job-name label,
+        # whose value Kubernetes caps at 63 characters, and a run token can be
+        # 24 characters long. A live run's 64-character
+        # gco-live-netpol-unlabelled-from-default-<token> was refused.
+        longest_token = checks_jobs._run_token("v9-release-76771e1e-20261120T092237Z")
+        assert len(longest_token) == 24
         for spec in specs:
             assert spec.expected in ("reachable", "blocked")
-            assert len(f"gco-live-netpol-{spec.name}-{TOKEN}") <= 63
+            assert len(f"gco-live-netpol-{spec.name}-{longest_token}") <= 63, spec.name
             assert spec.rule
+        for role in ("target", "model", "unlabelled"):
+            assert len(f"gco-live-netpol-{role}-{longest_token}") <= 63, role
 
     def test_cost_probes_carry_a_placeholder_host_without_a_cost_monitor(self) -> None:
         specs = checks._probe_specs(
@@ -512,7 +520,7 @@ class TestEnforcedCluster:
             ("gco-inference", f"gco-live-netpol-model-from-inference-{TOKEN}"),
             ("default", f"gco-live-netpol-model-from-default-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-model-from-jobs-{TOKEN}"),
-            ("default", f"gco-live-netpol-unlabelled-from-default-{TOKEN}"),
+            ("default", f"gco-live-netpol-nolabel-from-default-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-https-egress-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-http-egress-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-pod-identity-agent-{TOKEN}"),
@@ -900,7 +908,7 @@ class TestVerdictMismatches:
         assert f"cost-plaintext (default -> http://{COST_IP}:8080/)" in failure
         assert "model-from-default (default -> http://10.0.4.2:8443/)" in failure
         assert "model-from-jobs (gco-jobs -> http://10.0.4.2:8443/)" in failure
-        assert "unlabelled-from-default (default -> http://10.0.4.3:8443/)" in failure
+        assert "nolabel-from-default (default -> http://10.0.4.3:8443/)" in failure
         assert "same-namespace" not in failure
         assert API_PROBE not in failure
         # Everything the run created was still deleted.

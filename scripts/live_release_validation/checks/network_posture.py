@@ -279,7 +279,7 @@ def _probe_specs(
         # Positive control: model-from-inference, the same pod shape reachable
         # with the label (see the module docstring).
         ProbeSpec(
-            "unlabelled-from-default",
+            "nolabel-from-default",
             _UNPOLICED_NAMESPACE,
             f"http://{unlabelled_target_ip}:{_MODEL_PORT}/",
             "blocked",
