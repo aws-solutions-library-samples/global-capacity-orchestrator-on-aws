@@ -128,7 +128,7 @@ def _runner_boundaries() -> Iterator[SimpleNamespace]:
     """Replace every AWS-facing client the runner constructs with mocks."""
     with (
         patch.object(runner, "ThrottleResilientSession") as session,
-        patch.object(runner, "GCOAWSClient") as aws_client,
+        patch.object(runner, "WafPatientApiClient") as aws_client,
         patch.object(runner, "JobManager") as job_manager,
         patch.object(runner, "StackManager") as stack_manager,
     ):

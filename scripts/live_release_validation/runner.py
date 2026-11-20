@@ -15,13 +15,12 @@ import traceback
 from pathlib import Path
 from typing import Any, Literal
 
-from cli.aws_client import GCOAWSClient
 from cli.config import GCOConfig
 from cli.jobs import JobManager
 from cli.stacks import StackManager
 
 from .actions import action_final_inventory, destroy_deployment
-from .aws_session import ThrottleResilientSession
+from .aws_session import ThrottleResilientSession, WafPatientApiClient
 from .models import (
     ActionFailure,
     ActionResult,
@@ -184,7 +183,9 @@ class LiveValidationRunner:
             # every enabled Region, and a Regional TPS squeeze must surface
             # as a bounded wait, not a failed action. See aws_session.py.
             self.session = ThrottleResilientSession()
-            self.aws_client = GCOAWSClient(self.config)
+            # The API's per-IP WAF rate rule can block a busy run; see
+            # WafPatientApiClient.
+            self.aws_client = WafPatientApiClient(self.config)
             self.aws_client._session = self.session
             self.job_manager = JobManager(self.config)
             self.job_manager._aws_client = self.aws_client

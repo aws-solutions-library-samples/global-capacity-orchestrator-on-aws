@@ -1055,8 +1055,8 @@ timeout. API Gateway does not stream request bodies.
 
 The API Gateway WAF rate-limits each source IP to `waf.per_ip_rate_limit`
 requests per 5-minute window (`cdk.json`, default 100). A client that exceeds it
-receives `HTTP 403` with an empty body for the rest of the window, from the edge
-rather than from the endpoint, so nothing appears in the inference-proxy or
+receives `HTTP 403` with the body `{"message":"Forbidden"}` for the rest of the
+window, from API Gateway rather than from the endpoint, so nothing appears in the inference-proxy or
 model-server logs. Raise the limit before running load tests or tight
 `gco inference invoke` loops from one machine.
 
