@@ -1177,6 +1177,20 @@ def _nodeset_values(
             # sizes the node from the pod's resources, so a burstable pod
             # would advertise capacity it may not get.
             "resources": {"requests": dict(resources), "limits": dict(resources)},
+            # The worker image's entrypoint reserves the part of the host
+            # outside the pod's limits from what slurmd may hand out
+            # (CoreSpecCount, MemSpecLimit), computed from the operator's
+            # POD_CPUS and POD_MEMORY. The node record above already
+            # advertises only the pod's share, so that reservation would be
+            # taken out a second time: on a 16-vCPU, 64 GiB host a worker
+            # kept 4 CPUs and 642 MiB, and a default job was never runnable
+            # ("Requested node configuration is not available", observed
+            # live). Zero turns the reservation off; the pod's cgroup still
+            # holds slurmd and its jobs to the limits.
+            "env": [
+                {"name": "POD_CPUS", "value": "0"},
+                {"name": "POD_MEMORY", "value": "0"},
+            ],
             "volumeMounts": copy.deepcopy(mounts),
         },
         "extraConfMap": extra_conf,

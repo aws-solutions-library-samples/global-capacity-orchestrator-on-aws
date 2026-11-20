@@ -827,6 +827,23 @@ class TestChartValues:
         }
         assert cpu["podSpec"]["tolerations"] == []
 
+    def test_every_worker_turns_off_the_images_host_reservation(
+        self, values: dict[str, Any]
+    ) -> None:
+        """The worker image reserves the host outside the pod's limits from slurmd.
+
+        Its entrypoint sets CoreSpecCount and MemSpecLimit from the host minus
+        the operator's POD_CPUS and POD_MEMORY. The node record already
+        advertises only the pod's share, so on a 16-vCPU, 64 GiB host a live
+        worker kept 4 CPUs and 642 MiB and never ran a default job. Every
+        NodeSet sets both variables to 0, which the operator's merge by name
+        puts in place of its own values.
+        """
+        assert values["nodesets"]
+        for name, nodeset in values["nodesets"].items():
+            env = {item["name"]: item["value"] for item in nodeset["slurmd"]["env"]}
+            assert env == {"POD_CPUS": "0", "POD_MEMORY": "0"}, name
+
     def test_gpu_nodeset(self, values: dict[str, Any]) -> None:
         gpu = values["nodesets"]["gpu"]
         assert gpu["slurmd"]["resources"]["limits"]["nvidia.com/gpu"] == "1"

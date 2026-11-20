@@ -111,7 +111,7 @@ A partition is one `NodeSet` of identical worker pods on one GCO node pool. The 
 | `gpu` | `gpu` (`workload-type: gpu`, NVIDIA taint) | 8 CPU, 32Gi, 1 GPU | 0–4 | no | whole-node (`OverSubscribe=EXCLUSIVE`), `MaxTime=2-00:00:00` |
 | `gpu-efa` | `gpu-efa` (NVIDIA + EFA taints) | 180 CPU, 1800Gi, 8 GPU, 32 EFA | 0–2 | no | **disabled** template for p5-class nodes; see the quota note |
 
-Each worker advertises exactly its pod's resources to Slurm (`CPUs`, `RealMemory` = the pod limit minus headroom for slurmd, `Gres=gpu:N`), so the node record is identical whichever EC2 instance Karpenter chose and re-registration after a scale-to-zero cycle always matches it. `DefMemPerCPU` is set per partition so a job that names no `--mem` gets its share of the node rather than all of it. Partitions merge over the shipped ones in `cdk.json`:
+Each worker advertises exactly its pod's resources to Slurm (`CPUs`, `RealMemory` = the pod limit minus headroom for slurmd, `Gres=gpu:N`), so the node record is identical whichever EC2 instance Karpenter chose and re-registration after a scale-to-zero cycle always matches it. The worker image's own reservation of the rest of the host (`CoreSpecCount` and `MemSpecLimit`, from the operator's `POD_CPUS` and `POD_MEMORY`) is turned off by setting both to `0`: the record already leaves the rest of the host out, and reserving it again left a worker on a larger instance too little memory to run any job. `DefMemPerCPU` is set per partition so a job that names no `--mem` gets its share of the node rather than all of it. Partitions merge over the shipped ones in `cdk.json`:
 
 ```json
 {
