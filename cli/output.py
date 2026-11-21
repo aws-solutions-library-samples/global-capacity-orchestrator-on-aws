@@ -25,14 +25,20 @@ from .config import GCOConfig, get_config
 
 
 def _serialize_value(value: Any) -> Any:
-    """Serialize a value for output."""
+    """Serialize a value for output.
+
+    Datetimes become ISO 8601 strings at any depth. ``asdict`` copies
+    datetime fields (and tuples) through unchanged, so its result is
+    serialized again; otherwise JSON would render those through ``str()``
+    and YAML as native timestamps, unlike every other datetime.
+    """
     if isinstance(value, datetime):
         return value.isoformat()
     if is_dataclass(value) and not isinstance(value, type):
-        return asdict(value)
+        return _serialize_value(asdict(value))
     if isinstance(value, dict):
         return {k: _serialize_value(v) for k, v in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_serialize_value(v) for v in value]
     return value
 

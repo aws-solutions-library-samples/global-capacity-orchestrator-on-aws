@@ -53,7 +53,8 @@ works identically.
 | anything else | Skipped (counted in the summary), so dropping a PDF or image into the prefix is harmless. |
 
 Chunking is a pure function of the object bytes, which is what makes
-re-delivery and re-upload idempotent (see below).
+re-delivery and re-upload idempotent (see below). An object may hold at
+most 4 MiB and 500 chunks (see [Failure handling](#failure-handling)).
 
 ## Item shape
 
@@ -102,6 +103,23 @@ summary line (ingested/skipped/failed per object). If any object failed,
 the handler re-raises after the batch so Lambda's async retry (twice)
 and then the dead-letter queue see the failure; retries are safe because
 succeeded objects overwrite idempotently.
+
+Each chunk costs one Bedrock `InvokeModel` and one `PutItem`, in sequence,
+inside the function's 5-minute timeout, so an object has two limits. Both
+are checked before any Bedrock call and fail the object with status
+`too_large` and a message naming the limit:
+
+- at most 4 MiB (`MAX_OBJECT_BYTES`, read from GetObject's `ContentLength`
+  before the body is read);
+- at most 500 chunks (`MAX_CHUNKS_PER_OBJECT`, about 1 MB of text or 500
+  `.jsonl` lines).
+
+Split a larger document into several objects. If Bedrock or DynamoDB is
+slow enough that less than 30 seconds of the invocation remain
+(`TIME_RESERVE_MS`), no further chunk is started: the object fails with
+status `out_of_time` (the chunks already written stay), the summary line
+is still logged, and the retry starts that object again from its first
+chunk.
 
 A vector-width mismatch (model output vs. `vector_store.dimensions`) is
 a hard per-object error with remediation text - the index width is a

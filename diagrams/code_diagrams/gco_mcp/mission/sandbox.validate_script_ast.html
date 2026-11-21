@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-10-25T14:01:08Z">
-        <meta name="gco-source-commit" content="eab745982edd984ebc1ea0f81a9df2ac3f67c4cd">
-        <meta name="gco-flow-digest" content="191d111c4657b1eb">
+        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
+        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
+        <meta name="gco-flow-digest" content="812c69f08b08068a">
         <title>Mission script AST validator (parse-time allowlist enforcement)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,27 +208,27 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Parse and validate a Mission script source string.\n\n    On success, the function returns ``None`` and the caller may pass\n    ``script`` to the sandbox runtime layer. On any disallowed\n    construct, raises :class:`ScriptRejected` carrying ``reason``,\n    ``failing_node``, ``lineno``, and ``col_offset``. The script is\n    *never* executed by this function; it only walks the AST.\n\n    ``allowlist`` is the per-session list of MCP tool names the script\n    may call. Each name becomes a visible bare-Name and a permitted\n    call target. Names not in the allowlist (and not in the safe\n    builtin / exception / mission set) are rejected at every Name\n    lookup.\n    '
-cond5=>operation: raise ScriptRejected('not_a_string', message='script source must be a str') if  not isinstance(script, str)
-op18=>operation: parsed = ast.parse(script, mode='exec')
-cond15=>condition: exception raised?
-cond20=>condition: except SyntaxError as exc
-op24=>operation: rejection = ScriptRejected('syntax_error', message=f'could not parse script: {exc.msg}')
-op26=>operation: rejection.lineno = exc.lineno
-op28=>operation: rejection.col_offset = exc.offset
-sub30=>subroutine: raise rejection from exc
-sub35=>subroutine: _ScriptValidator(allowlist).visit(parsed)
+        <div><textarea id="code" style="width: 100%;" rows="11">op4279=>operation: 'Parse and validate a Mission script source string.\n\n    On success, the function returns ``None`` and the caller may pass\n    ``script`` to the sandbox runtime layer. On any disallowed\n    construct, raises :class:`ScriptRejected` carrying ``reason``,\n    ``failing_node``, ``lineno``, and ``col_offset``. The script is\n    *never* executed by this function; it only walks the AST.\n\n    ``allowlist`` is the per-session list of MCP tool names the script\n    may call. Each name becomes a visible bare-Name and a permitted\n    call target. Names not in the allowlist (and not in the safe\n    builtin / exception / mission set) are rejected at every Name\n    lookup.\n    '
+cond4282=>operation: raise ScriptRejected('not_a_string', message='script source must be a str') if  not isinstance(script, str)
+op4295=>operation: parsed = ast.parse(script, mode='exec')
+cond4292=>condition: exception raised?
+cond4297=>condition: except SyntaxError as exc
+op4301=>operation: rejection = ScriptRejected('syntax_error', message=f'could not parse script: {exc.msg}')
+op4303=>operation: rejection.lineno = exc.lineno
+op4305=>operation: rejection.col_offset = exc.offset
+sub4307=>subroutine: raise rejection from exc
+sub4312=>subroutine: _ScriptValidator(allowlist).visit(parsed)
 
-op2->cond5
-cond5->op18
-op18->cond15
-cond15(yes)->cond20
-cond20(yes)->op24
-op24->op26
-op26->op28
-op28->sub30
-cond20(no)->sub35
-cond15(no)->sub35
+op4279->cond4282
+cond4282->op4295
+op4295->cond4292
+cond4292(yes)->cond4297
+cond4297(yes)->op4301
+op4301->op4303
+op4303->op4305
+op4305->sub4307
+cond4297(no)->sub4312
+cond4292(no)->sub4312
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -238,17 +238,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-10-25T14:01:08Z -->
-        <!-- Generated from Git commit: eab745982edd984ebc1ea0f81a9df2ac3f67c4cd -->
+        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-10-25T14:01:08Z">2026-10-25T14:01:08Z</time>
+            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>eab745982edd984ebc1ea0f81a9df2ac3f67c4cd</code>
+            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>191d111c4657b1eb</code>
+            Flow content SHA-256: <code>812c69f08b08068a</code>
           </p>
           <div id="canvas"></div>
         </div>

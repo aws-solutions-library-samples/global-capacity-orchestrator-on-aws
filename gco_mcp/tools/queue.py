@@ -14,14 +14,21 @@ async def queue_list(
     status: str | None = None,
     namespace: str | None = None,
     limit: int = 50,
+    cursor: str | None = None,
 ) -> str:
-    """`gco queue list` — list jobs in the global queue.
+    """`gco queue list` — list one page of jobs in the global queue.
+
+    A page holds up to ``limit`` jobs; when more may match, the result's
+    ``next_cursor`` is set. Pass it back as ``cursor`` with the same filters
+    to read the next page (a cursor is bound to its filters).
 
     Args:
         region: Filter by target region.
-        status: Filter by status (queued, claimed, running, succeeded, failed, cancelled).
+        status: Filter by status (queued, claimed, applying, pending, running,
+            succeeded, failed, cancelled).
         namespace: Filter by Kubernetes namespace.
-        limit: Maximum results (default 50).
+        limit: Maximum results in this page (1-1000, default 50).
+        cursor: ``next_cursor`` from the previous page, to read the page after it.
     """
     args = ["queue", "list"]
     if region:
@@ -31,6 +38,8 @@ async def queue_list(
     if namespace:
         args += ["-n", namespace]
     args += ["--limit", str(limit)]
+    if cursor:
+        args += ["--cursor", cursor]
     return await asyncio.to_thread(cli_runner._run_cli, *args)
 
 
@@ -43,6 +52,9 @@ async def queue_get(job_id: str, region: str | None = None) -> str:
         job_id: Job identifier.
         region: Region to query (any region works).
     """
+    rejected = cli_runner.reject_traversal_segments(job_id=job_id)
+    if rejected is not None:
+        return rejected
     args = ["queue", "get", job_id]
     if region:
         args += ["-r", region]
@@ -80,12 +92,18 @@ async def queue_submit(
     """`gco queue submit` — submit a job manifest to the global queue.
 
     Args:
-        manifest_path: Path to the job manifest YAML.
+        manifest_path: Path to the job manifest YAML, relative to the project
+            root (an absolute path must also be inside it).
         region: Target region for job execution.
-        namespace: Kubernetes namespace (defaults to ``gco-jobs`` server-side).
+        namespace: Namespace for a manifest that declares none (defaults to
+            the configured default namespace, ``gco-jobs``); must match a
+            namespace the manifest declares.
         priority: Job priority (0-100, higher = more important).
         labels: Optional ``key=value`` labels to attach to the queued job.
     """
+    rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
+    if rejected is not None:
+        return rejected
     args = ["queue", "submit", manifest_path, "-r", region]
     if namespace:
         args += ["-n", namespace]
@@ -126,9 +144,10 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
     async def cancel_queue_job(job_id: str, region: str | None = None) -> str:
         """[gated by GCO_ENABLE_DESTRUCTIVE_OPERATIONS] destructive.
 
-        `gco queue cancel` — cancel a queued job (only works for jobs not
-        yet running). Cannot be undone — the job's queue record is
-        transitioned to ``cancelled`` and any pending claim attempts stop.
+        `gco queue cancel` — cancel a job that is still queued, before a
+        region claims it. A claimed, applying, pending, running or finished
+        job is refused (409). Cannot be undone — the job's queue record is
+        transitioned to ``cancelled`` and no region will claim it.
 
         Args:
             job_id: Job identifier.

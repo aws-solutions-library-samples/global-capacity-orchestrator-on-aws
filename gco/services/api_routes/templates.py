@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -39,7 +40,7 @@ async def list_templates() -> Response:
     """List all job templates."""
     store = _get_template_store()
     try:
-        templates = store.list_templates()
+        templates = await asyncio.to_thread(store.list_templates)
         return JSONResponse(
             status_code=200,
             content={
@@ -49,8 +50,7 @@ async def list_templates() -> Response:
             },
         )
     except Exception as e:
-        logger.error(f"Failed to list templates: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list templates: {e!s}") from e
+        raise internal_server_error("listing templates", e) from e
 
 
 @router.post("/api/v1/templates")
@@ -58,7 +58,8 @@ async def create_template(request: JobTemplateRequest) -> Response:
     """Create a new job template."""
     store = _get_template_store()
     try:
-        template = store.create_template(
+        template = await asyncio.to_thread(
+            store.create_template,
             name=request.name,
             manifest=request.manifest,
             description=request.description,
@@ -75,8 +76,7 @@ async def create_template(request: JobTemplateRequest) -> Response:
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
-        logger.error(f"Failed to create template: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create template: {e!s}") from e
+        raise internal_server_error("creating template", e) from e
 
 
 @router.get("/api/v1/templates/{name}")
@@ -84,7 +84,7 @@ async def get_template(name: str) -> Response:
     """Get a specific job template."""
     store = _get_template_store()
     try:
-        template = store.get_template(name)
+        template = await asyncio.to_thread(store.get_template, name)
         if template is None:
             raise HTTPException(status_code=404, detail=f"Template '{name}' not found")
         return JSONResponse(
@@ -94,8 +94,7 @@ async def get_template(name: str) -> Response:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get template: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get template: {e!s}") from e
+        raise internal_server_error("getting template", e) from e
 
 
 @router.delete("/api/v1/templates/{name}")
@@ -103,7 +102,7 @@ async def delete_template(name: str) -> Response:
     """Delete a job template."""
     store = _get_template_store()
     try:
-        deleted = store.delete_template(name)
+        deleted = await asyncio.to_thread(store.delete_template, name)
         if not deleted:
             raise HTTPException(status_code=404, detail=f"Template '{name}' not found")
         return JSONResponse(
@@ -116,8 +115,7 @@ async def delete_template(name: str) -> Response:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete template: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete template: {e!s}") from e
+        raise internal_server_error("deleting template", e) from e
 
 
 @router.post("/api/v1/jobs/from-template/{name}")
@@ -126,7 +124,7 @@ async def create_job_from_template(name: str, request: JobFromTemplateRequest) -
     processor = _check_processor()
     store = _get_template_store()
 
-    template = store.get_template(name)
+    template = await asyncio.to_thread(store.get_template, name)
     if template is None:
         raise HTTPException(status_code=404, detail=f"Template '{name}' not found")
 
@@ -147,9 +145,14 @@ async def create_job_from_template(name: str, request: JobFromTemplateRequest) -
             manifest["metadata"]["labels"] = {}
         manifest["metadata"]["labels"]["gco.io/template"] = name
 
-        submission_request = ManifestSubmissionRequest(
-            manifests=[manifest], namespace=request.namespace, dry_run=False, validate=True
-        )
+        try:
+            submission_request = ManifestSubmissionRequest(
+                manifests=[manifest], namespace=request.namespace, dry_run=False, validate=True
+            )
+        except ValueError as e:
+            # Templates are stored unvalidated, so a bad manifest is the
+            # caller's input, answered as POST /api/v1/manifests answers it.
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
         result = await processor.process_manifest_submission(submission_request)
 

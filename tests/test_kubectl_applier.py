@@ -20,9 +20,17 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
+from urllib.parse import parse_qs, urlsplit
 
+import boto3
 import pytest
+import urllib3
 import yaml
+
+from gco.gateway_health_check_config import (
+    GATEWAY_HEALTH_CHECK_TOKENS,
+    render_gateway_health_check_defaults,
+)
 
 
 def _fully_enabled_replacements(manifests_dir: Path) -> dict[str, str]:
@@ -50,6 +58,7 @@ def _fully_enabled_replacements(manifests_dir: Path) -> dict[str, str]:
         "{{MP_HPA_MAX_REPLICAS}}",
         "{{MP_HPA_CPU_TARGET_UTILIZATION}}",
     }
+    integer_tokens |= set(GATEWAY_HEALTH_CHECK_TOKENS.values())
     integer_prefixes = ("{{QP_", "{{LIMIT_", "{{QUOTA_MAX_PODS}}")
     replacements: dict[str, str] = {
         "{{VPC_ENDPOINT_CIDR_BLOCKS}}": '- ipBlock:\n            cidr: "10.0.0.0/16"',
@@ -490,6 +499,41 @@ class TestDisabledFeaturePruning:
 class TestLegacyRemovedResources:
     """Objects shipped by earlier releases are swept from upgraded clusters."""
 
+    @pytest.mark.parametrize(
+        ("gate", "filename", "name"),
+        [
+            ("{{VALKEY_ENDPOINT}}", "23-storage-valkey.yaml", "gco-valkey"),
+            (
+                "{{AURORA_PGVECTOR_ENDPOINT}}",
+                "24-storage-aurora-pgvector.yaml",
+                "gco-aurora-pgvector",
+            ),
+        ],
+    )
+    def test_data_service_configmaps_live_only_where_they_are_shipped(
+        self, handler_module, gate, filename, name
+    ):
+        # Valkey and Aurora are reachable from gco-jobs only, so only gco-jobs
+        # gets their ConfigMap: disabling the feature prunes exactly that copy,
+        # and the copies earlier releases put in gco-system and gco-inference
+        # are swept whether the feature is on or off.
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        shipped = {
+            (doc["apiVersion"], doc["kind"], doc["metadata"]["namespace"], doc["metadata"]["name"])
+            for doc in _parse_manifest_documents(manifests_dir / filename)
+        }
+        assert shipped == {("v1", "ConfigMap", "gco-jobs", name)}
+        assert set(handler_module._FEATURE_RESOURCE_INVENTORY[(gate, False)]) == shipped
+        for namespace in ("gco-system", "gco-inference"):
+            assert (
+                "v1",
+                "ConfigMap",
+                namespace,
+                name,
+            ) in handler_module._LEGACY_REMOVED_RESOURCES
+
     def test_inventory_targets_the_removed_nvidia_device_plugin(self, handler_module):
         # EKS Auto Mode provides the NVIDIA device plugin built into the node;
         # the community DaemonSet GCO used to ship crash-loops there (NVML
@@ -524,6 +568,80 @@ class TestLegacyRemovedResources:
             "gco-api-selfsigned",
         ) in handler_module._LEGACY_REMOVED_RESOURCES
 
+    def test_inventory_targets_the_v4_alb_entry_point(self, handler_module):
+        # v0.1.0 through v4.1.0 shipped 10-ingressclass.yaml and
+        # 11-ingress.yaml with exactly these three objects (an
+        # internet-facing EKS Auto Mode ALB); v5.0.0 replaced them with the
+        # Gateway API entry point. Referrers go first, in the order the EKS
+        # Auto Mode guide removes an ALB: Ingress, IngressClass, params.
+        v4_entry_point = [
+            ("networking.k8s.io/v1", "Ingress", "gco-system", "gco-ingress"),
+            ("networking.k8s.io/v1", "IngressClass", None, "alb"),
+            ("eks.amazonaws.com/v1", "IngressClassParams", None, "alb"),
+        ]
+        inventory = list(handler_module._LEGACY_REMOVED_RESOURCES)
+        positions = [inventory.index(entry) for entry in v4_entry_point]
+        assert positions == sorted(positions)
+
+    def test_v4_alb_entry_point_sweep_deletes_cluster_scoped_objects_without_namespace(
+        self, handler_module
+    ):
+        resources: dict[tuple[str, str], MagicMock] = {}
+
+        def resources_get(*, api_version: str, kind: str) -> MagicMock:
+            return resources.setdefault((api_version, kind), MagicMock())
+
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.side_effect = resources_get
+        delete_options = MagicMock()
+        with (
+            patch.object(handler_module.dynamic, "DynamicClient", return_value=mock_dynamic),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=delete_options),
+        ):
+            result = handler_module._prune_legacy_removed_resources()
+
+        assert resources[("networking.k8s.io/v1", "Ingress")].delete.call_args_list == [
+            call(name="gco-ingress", namespace="gco-system", body=delete_options)
+        ]
+        assert resources[("networking.k8s.io/v1", "IngressClass")].delete.call_args_list == [
+            call(name="alb", body=delete_options)
+        ]
+        assert resources[("eks.amazonaws.com/v1", "IngressClassParams")].delete.call_args_list == [
+            call(name="alb", body=delete_options)
+        ]
+        assert result["pruned"][-3:] == [
+            "networking.k8s.io/v1/Ingress/gco-system/gco-ingress",
+            "networking.k8s.io/v1/IngressClass/<cluster>/alb",
+            "eks.amazonaws.com/v1/IngressClassParams/<cluster>/alb",
+        ]
+        assert result["failed"] == []
+
+    def test_ingress_class_params_sweep_without_the_auto_mode_api_is_a_noop(self, handler_module):
+        """A cluster without EKS Auto Mode's API group (kind CI) has nothing to sweep."""
+        from kubernetes.client.rest import ApiException
+
+        def resources_get(*, api_version: str, kind: str) -> MagicMock:
+            if api_version == "eks.amazonaws.com/v1":
+                raise handler_module.ResourceNotFoundError(f"no {kind} API")
+            resource = MagicMock()
+            resource.delete.side_effect = ApiException(status=404, reason="Not Found")
+            return resource
+
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.side_effect = resources_get
+        with (
+            patch.object(handler_module.dynamic, "DynamicClient", return_value=mock_dynamic),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=MagicMock()),
+        ):
+            result = handler_module._prune_legacy_removed_resources()
+
+        assert result == {"pruned": [], "failed": []}
+        assert call(api_version="eks.amazonaws.com/v1", kind="IngressClassParams") in (
+            mock_dynamic.resources.get.call_args_list
+        )
+
     def test_issuer_sweep_before_cert_manager_exists_is_a_noop(self, handler_module):
         """Base pass on a fresh cluster: the cert-manager CRDs do not exist yet."""
         mock_dynamic = MagicMock()
@@ -551,14 +669,27 @@ class TestLegacyRemovedResources:
         )
 
     def test_no_legacy_entry_still_ships_as_a_manifest(self, handler_module):
+        # Compared by kind, namespace and name, not as text: the IngressClass
+        # name "alb" also occurs inside shipped names (gco-aws-alb,
+        # allow-alb-to-*), and a ConfigMap swept from one namespace may still
+        # ship in another (gco-valkey stays in gco-jobs).
         manifests_dir = (
             Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
         )
-        shipped = "\n".join(
-            path.read_text(encoding="utf-8") for path in sorted(manifests_dir.glob("*.yaml"))
-        )
-        for _, _, _, name in handler_module._LEGACY_REMOVED_RESOURCES:
-            assert name not in shipped, f"{name} is swept as legacy but still shipped"
+        shipped = {
+            (
+                doc.get("kind"),
+                (doc.get("metadata") or {}).get("namespace"),
+                (doc.get("metadata") or {}).get("name"),
+            )
+            for path in sorted(manifests_dir.glob("*.yaml"))
+            for doc in _parse_manifest_documents(path)
+        }
+        assert ("Gateway", "gco-system", "gco-gateway") in shipped
+        for _, kind, namespace, name in handler_module._LEGACY_REMOVED_RESOURCES:
+            assert (kind, namespace, name) not in shipped, (
+                f"{kind} {namespace}/{name} is swept as legacy but still shipped"
+            )
 
     def test_sweep_deletes_exact_resource(self, handler_module):
         mock_resource = MagicMock()
@@ -579,11 +710,13 @@ class TestLegacyRemovedResources:
         ]
         assert mock_resource.delete.call_args_list == [
             call(name=name, namespace=namespace, body=delete_options)
+            if namespace is not None
+            else call(name=name, body=delete_options)
             for _api, _kind, namespace, name in handler_module._LEGACY_REMOVED_RESOURCES
         ]
         assert result == {
             "pruned": [
-                f"{api_version}/{kind}/{namespace}/{name}"
+                f"{api_version}/{kind}/{namespace or '<cluster>'}/{name}"
                 for api_version, kind, namespace, name in handler_module._LEGACY_REMOVED_RESOURCES
             ],
             "failed": [],
@@ -2336,7 +2469,9 @@ class TestInferenceProxyAutoscalingManifest:
             / "manifests"
             / "post-helm-gateway.yaml"
         )
-        documents = list(yaml.safe_load_all(gateway_path.read_text()))
+        documents = list(
+            yaml.safe_load_all(render_gateway_health_check_defaults(gateway_path.read_text()))
+        )
         target_group = next(
             document
             for document in documents
@@ -4848,49 +4983,68 @@ class TestEksClientPlumbing:
         boto_client.assert_called_once_with("eks")
         assert first is second is boto_client.return_value
 
-    def test_eks_token_wraps_a_presigned_get_caller_identity_url(self, handler_module):
+    @pytest.mark.parametrize(
+        ("region", "sts_endpoint"),
+        [
+            ("cn-north-1", "https://sts.cn-north-1.amazonaws.com.cn"),
+            ("us-east-1", "https://sts.us-east-1.amazonaws.com/"),
+            # Legacy STS endpoint resolution: the global host, us-east-1 scope.
+            ("us-west-2", "https://sts.amazonaws.com"),
+        ],
+    )
+    def test_eks_token_wraps_a_presigned_get_caller_identity_url(
+        self, handler_module, region, sts_endpoint
+    ):
         """The token is k8s-aws-v1. + unpadded urlsafe base64 of the signed URL,
-        which must carry the cluster name in the x-k8s-aws-id header."""
+        which must carry the cluster name in the x-k8s-aws-id header and the
+        STS client's resolved endpoint as its host."""
+        presigned = f"{sts_endpoint.rstrip('/')}/?Action=GetCallerIdentity&X-Amz-Signature=beef"
+        sts_client = MagicMock()
+        sts_client.meta.endpoint_url = sts_endpoint
+        sts_client._request_signer.generate_presigned_url.return_value = presigned
         session = MagicMock()
-        session.client.return_value.meta.service_model.service_id = "STS"
-        signer = MagicMock()
-        presigned = (
-            "https://sts.us-west-2.amazonaws.com/?Action=GetCallerIdentity"
-            "&Version=2011-06-15&X-Amz-Signature=deadbeef"
-        )
-        signer.generate_presigned_url.return_value = presigned
+        session.client.return_value = sts_client
 
-        with (
-            patch.object(handler_module.boto3, "Session", return_value=session),
-            patch("botocore.signers.RequestSigner", return_value=signer) as signer_cls,
-        ):
-            token = handler_module.get_eks_token("gco-us-west-2", "us-west-2")
+        with patch.object(handler_module.boto3, "Session", return_value=session):
+            token = handler_module.get_eks_token(f"gco-{region}", region)
 
         prefix, _, encoded = token.partition(".")
         assert prefix == "k8s-aws-v1"
         assert "=" not in encoded
         padded = encoded + "=" * (-len(encoded) % 4)
         assert base64.urlsafe_b64decode(padded).decode("utf-8") == presigned
-        session.client.assert_called_once_with("sts", region_name="us-west-2")
-        signer_cls.assert_called_once_with(
-            "STS",
-            "us-west-2",
-            "sts",
-            "v4",
-            session.get_credentials.return_value,
-            session.events,
+        session.client.assert_called_once_with("sts", region_name=region)
+        # The client's own signer: its signing region matches its endpoint.
+        sts_client._request_signer.generate_presigned_url.assert_called_once_with(
+            request_dict={
+                "method": "GET",
+                "url": f"{sts_endpoint.rstrip('/')}/?Action=GetCallerIdentity&Version=2011-06-15",
+                "body": {},
+                "headers": {"x-k8s-aws-id": f"gco-{region}"},
+                "context": {},
+            },
+            operation_name="GetCallerIdentity",
+            expires_in=60,
         )
-        params = signer.generate_presigned_url.call_args.args[0]
-        assert params["method"] == "GET"
-        assert params["url"].startswith(
-            "https://sts.us-west-2.amazonaws.com/?Action=GetCallerIdentity"
+
+    def test_aws_cn_token_is_signed_for_the_china_sts_host(self, handler_module):
+        """Real botocore, offline: the token EKS in cn-north-1 accepts."""
+        session = boto3.Session(
+            aws_access_key_id="AKIDEXAMPLE",
+            aws_secret_access_key="example-secret",
+            region_name="cn-north-1",
         )
-        assert params["headers"] == {"x-k8s-aws-id": "gco-us-west-2"}
-        assert signer.generate_presigned_url.call_args.kwargs == {
-            "region_name": "us-west-2",
-            "expires_in": 60,
-            "operation_name": "",
-        }
+        with patch.object(handler_module.boto3, "Session", return_value=session):
+            token = handler_module.get_eks_token("gco-cn-north-1", "cn-north-1")
+
+        encoded = token.removeprefix("k8s-aws-v1.")
+        url = urlsplit(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode())
+        query = parse_qs(url.query)
+        assert url.netloc == "sts.cn-north-1.amazonaws.com.cn"
+        assert query["Action"] == ["GetCallerIdentity"]
+        assert query["X-Amz-Credential"][0].endswith("/cn-north-1/sts/aws4_request")
+        assert query["X-Amz-SignedHeaders"] == ["host;x-k8s-aws-id"]
+        assert query["X-Amz-Expires"] == ["60"]
 
     @staticmethod
     def _cluster(ca_pem: bytes) -> dict:
@@ -4914,6 +5068,7 @@ class TestEksClientPlumbing:
             patch.object(handler_module, "get_eks_client", return_value=eks),
             patch.object(handler_module, "get_eks_token", return_value="k8s-aws-v1.tok") as token,
             patch.object(handler_module.client.Configuration, "set_default") as set_default,
+            patch.object(handler_module.client.ApiClient, "set_default") as set_api_client,
             patch("tempfile.mkstemp", return_value=(fd, str(ca_path))) as mkstemp,
             patch("socket.setdefaulttimeout") as set_timeout,
         ):
@@ -4921,7 +5076,8 @@ class TestEksClientPlumbing:
 
         eks.describe_cluster.assert_called_once_with(name="gco-us-east-1")
         mkstemp.assert_called_once_with(suffix=".crt")
-        set_timeout.assert_called_once_with(30)
+        # The process-wide socket default never bounded the client's sockets.
+        set_timeout.assert_not_called()
         token.assert_called_once_with("gco-us-east-1", "us-east-1")
         assert ca_path.read_bytes() == ca_pem
         configuration = set_default.call_args.args[0]
@@ -4932,6 +5088,9 @@ class TestEksClientPlumbing:
         assert configuration.retries == 3
         assert configuration.ssl_ca_cert == str(ca_path)
         assert configuration.api_key == {"authorization": "Bearer k8s-aws-v1.tok"}
+        api_client = set_api_client.call_args.args[0]
+        assert isinstance(api_client, handler_module._BoundedApiClient)
+        assert api_client.configuration is configuration
 
     def test_configure_closes_the_descriptor_when_the_ca_write_fails(
         self, handler_module, tmp_path
@@ -4945,8 +5104,8 @@ class TestEksClientPlumbing:
             patch.object(handler_module, "get_eks_client", return_value=eks),
             patch.object(handler_module, "get_eks_token") as token,
             patch.object(handler_module.client.Configuration, "set_default") as set_default,
+            patch.object(handler_module.client.ApiClient, "set_default") as set_api_client,
             patch("tempfile.mkstemp", return_value=(fd, str(ca_path))),
-            patch("socket.setdefaulttimeout"),
             patch.object(handler_module.os, "fdopen", side_effect=OSError("disk full")),
             patch.object(handler_module.os, "close", wraps=os.close) as close,
             pytest.raises(OSError, match="disk full"),
@@ -4956,6 +5115,107 @@ class TestEksClientPlumbing:
         close.assert_called_once_with(fd)
         token.assert_not_called()
         set_default.assert_not_called()
+        set_api_client.assert_not_called()
+
+
+class TestKubernetesRequestTimeout:
+    """Every Kubernetes call carries a bounded timeout down to urllib3.
+
+    Kubernetes 37 hands urllib3 ``timeout=None`` for a call without
+    ``_request_timeout``, and urllib3 then blocks on the socket with no limit,
+    whatever ``socket.setdefaulttimeout`` says. No call in the applier passed
+    one, so a stalled API-server connection held the invocation until the
+    15-minute Lambda limit.
+    """
+
+    @staticmethod
+    def _bounded_client(handler_module):
+        configuration = handler_module.client.Configuration()
+        configuration.host = "https://ABCDEF.gr7.us-east-1.eks.amazonaws.com"
+        api_client = handler_module._BoundedApiClient(configuration)
+        response = urllib3.HTTPResponse(
+            body=b'{"kind":"Namespace","apiVersion":"v1","metadata":{"name":"gco-system"}}',
+            status=200,
+            headers={"Content-Type": "application/json"},
+            preload_content=False,
+        )
+        pool_request = MagicMock(return_value=response)
+        api_client.rest_client.pool_manager.request = pool_request
+        return api_client, pool_request
+
+    def test_typed_api_calls_send_the_default_timeout_to_urllib3(self, handler_module):
+        api_client, pool_request = self._bounded_client(handler_module)
+
+        namespace = handler_module.client.CoreV1Api(api_client).read_namespace("gco-system")
+
+        assert namespace.metadata.name == "gco-system"
+        timeout = pool_request.call_args.kwargs["timeout"]
+        assert isinstance(timeout, urllib3.Timeout)
+        assert (timeout.connect_timeout, timeout.read_timeout) == (
+            handler_module._K8S_REQUEST_TIMEOUT_SECONDS
+        )
+
+    def test_an_explicit_request_timeout_is_kept(self, handler_module):
+        api_client, pool_request = self._bounded_client(handler_module)
+
+        handler_module.client.CoreV1Api(api_client).read_namespace("gco-system", _request_timeout=5)
+
+        assert pool_request.call_args.kwargs["timeout"].total == 5
+
+    def test_dynamic_client_requests_go_through_the_same_bound(self, handler_module):
+        api_client, pool_request = self._bounded_client(handler_module)
+        dynamic_client = handler_module.dynamic.DynamicClient(api_client, discoverer=MagicMock())
+
+        dynamic_client.request("GET", "/api/v1/namespaces/gco-system")
+
+        timeout = pool_request.call_args.kwargs["timeout"]
+        assert (timeout.connect_timeout, timeout.read_timeout) == (
+            handler_module._K8S_REQUEST_TIMEOUT_SECONDS
+        )
+
+    def test_typed_apis_after_configure_send_a_bounded_timeout(
+        self, handler_module, monkeypatch, tmp_path
+    ):
+        """The applier's own call shape: configure, then ``client.XxxApi()``."""
+        monkeypatch.setattr(handler_module.client.ApiClient, "_default", None)
+        eks = MagicMock()
+        eks.describe_cluster.return_value = TestEksClientPlumbing._cluster(b"ca")
+        ca_path = tmp_path / "eks-ca.crt"
+        fd = os.open(ca_path, os.O_RDWR | os.O_CREAT, 0o600)
+        response = urllib3.HTTPResponse(
+            body=b'{"kind":"Gateway","metadata":{"name":"gco-gateway"}}',
+            status=200,
+            headers={"Content-Type": "application/json"},
+            preload_content=False,
+        )
+
+        with (
+            patch.object(handler_module, "get_eks_client", return_value=eks),
+            patch.object(handler_module, "get_eks_token", return_value="k8s-aws-v1.tok"),
+            patch.object(handler_module.client.Configuration, "set_default"),
+            patch("tempfile.mkstemp", return_value=(fd, str(ca_path))),
+            patch.object(urllib3.PoolManager, "request", return_value=response) as pool_request,
+        ):
+            handler_module.configure_k8s_client("gco-us-east-1", "us-east-1")
+            handler_module.client.CustomObjectsApi().get_namespaced_custom_object(
+                "gateway.networking.k8s.io", "v1", "gco-system", "gateways", "gco-gateway"
+            )
+
+        timeout = pool_request.call_args.kwargs["timeout"]
+        assert timeout is not None
+        assert (timeout.connect_timeout, timeout.read_timeout) == (
+            handler_module._K8S_REQUEST_TIMEOUT_SECONDS
+        )
+        installed = handler_module.client.ApiClient.get_default()
+        assert isinstance(installed, handler_module._BoundedApiClient)
+        assert handler_module._api_client() is installed
+
+    def test_dynamic_client_without_an_installed_default_is_still_bounded(
+        self, handler_module, monkeypatch
+    ):
+        monkeypatch.setattr(handler_module.client.ApiClient, "_default", None)
+
+        assert isinstance(handler_module._api_client(), handler_module._BoundedApiClient)
 
 
 class TestSendResponse:

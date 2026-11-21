@@ -15,6 +15,7 @@ from botocore.exceptions import ClientError
 
 from ._shared import (
     _GLOBAL_ACCELERATOR_CONTROL_REGIONS,
+    _TERMINAL_VOLUME_STATES,
     _arn_is_project_owned,
     _ec2_resource_is_project_owned,
     _iam_resource_is_project_owned,
@@ -71,6 +72,18 @@ def _list_dynamodb_tables(session: Any, region: str, project_name: str) -> list[
     return sorted(set(names))
 
 
+#: Tags the AWS Load Balancer Controller and EKS Auto Mode put on the load
+#: balancers and target groups they create for a cluster's Ingresses and
+#: Services, whose generated names (``k8s-<namespace>-<name>-<hash>``) carry
+#: no project prefix.
+_ELBV2_CLUSTER_TAGS = ("elbv2.k8s.aws/cluster", "eks:eks-cluster-name")
+
+
+def _created_for_project_cluster(tags: dict[str, str], project_name: str) -> bool:
+    """Whether an ELBv2 resource's cluster tags name one of the project's clusters."""
+    return any(_project_owned_name(tags.get(key, ""), project_name) for key in _ELBV2_CLUSTER_TAGS)
+
+
 def _list_load_balancers(session: Any, region: str, project_name: str) -> list[str]:
     client = session.client("elbv2", region_name=region)
     load_balancers: list[dict[str, Any]] = []
@@ -88,8 +101,11 @@ def _list_load_balancers(session: Any, region: str, project_name: str) -> list[s
         for load_balancer in batch:
             arn = str(load_balancer["LoadBalancerArn"])
             name = str(load_balancer.get("LoadBalancerName") or "")
-            if _project_owned_name(name, project_name) or _tags_are_project_owned(
-                tags_by_arn.get(arn, {}), project_name
+            tags = tags_by_arn.get(arn, {})
+            if (
+                _project_owned_name(name, project_name)
+                or _tags_are_project_owned(tags, project_name)
+                or _created_for_project_cluster(tags, project_name)
             ):
                 owned.append(arn)
     return sorted(set(owned))
@@ -114,15 +130,11 @@ def _list_target_groups(session: Any, region: str, project_name: str) -> list[st
         }
         for target_group, arn in zip(batch, arns, strict=True):
             tags = tags_by_arn.get(arn, {})
-            cluster_names = {
-                tags.get("elbv2.k8s.aws/cluster", ""),
-                tags.get("eks:eks-cluster-name", ""),
-            }
             name = str(target_group.get("TargetGroupName") or "")
             if (
                 _project_owned_name(name, project_name)
                 or _tags_are_project_owned(tags, project_name)
-                or any(_project_owned_name(cluster, project_name) for cluster in cluster_names)
+                or _created_for_project_cluster(tags, project_name)
             ):
                 owned.add(arn)
     return sorted(owned)
@@ -308,11 +320,6 @@ def _ec2_items(client: Any, operation: str, response_key: str) -> list[dict[str,
 
 _CLUSTER_TAG_PREFIX = "kubernetes.io/cluster/"
 
-#: Volume states that mean EC2 is already removing the volume, so it is not
-#: residual. Everything else -- ``available``, ``in-use``, ``creating``,
-#: ``error`` -- counts against the all-zero teardown gate.
-_VOLUME_TERMINAL_STATES = frozenset({"deleting", "deleted"})
-
 
 def _list_cluster_volumes(session: Any, region: str, project_name: str) -> list[str]:
     """Return EBS volumes tagged for a project cluster by the EKS CSI driver.
@@ -348,7 +355,7 @@ def _list_cluster_volumes(session: Any, region: str, project_name: str) -> list[
         volume_id = str(volume.get("VolumeId") or "")
         if not volume_id:
             raise RuntimeError(f"EC2 returned a volume without an ID in {region}")
-        if str(volume.get("State") or "") in _VOLUME_TERMINAL_STATES:
+        if str(volume.get("State") or "") in _TERMINAL_VOLUME_STATES:
             continue
         for key in _tags_to_dict(volume.get("Tags", [])):
             if not key.startswith(_CLUSTER_TAG_PREFIX):
@@ -585,6 +592,33 @@ def _list_secrets(session: Any, region: str, project_name: str) -> list[str]:
                     )
                 secrets.add(arn)
     return sorted(secrets)
+
+
+def _list_project_ssm_parameters(session: Any, region: str, project_name: str) -> list[str]:
+    """Parameter Store names under ``/<project>/``, where GCO writes every parameter.
+
+    The stacks publish table, bucket and endpoint-group names there, and the
+    Helm orchestrator, the Helm installer, the kubectl applier, the
+    traffic-dial controller and ``gco capacity traffic-dial`` write runtime
+    records there that CloudFormation never owned. Those carry no tags, so the
+    Tagging API scanner cannot see them. Only the names are kept.
+    """
+    client = session.client("ssm", region_name=region)
+    prefix = f"/{project_name}/"
+    names: set[str] = set()
+    for page in client.get_paginator("get_parameters_by_path").paginate(
+        Path=f"/{project_name}", Recursive=True
+    ):
+        for parameter in page.get("Parameters", []):
+            name = str(parameter.get("Name") or "")
+            if not name:
+                raise RuntimeError(
+                    f"Parameter Store returned a parameter without a name under /{project_name} "
+                    f"in {region}"
+                )
+            if name.startswith(prefix):
+                names.add(name)
+    return sorted(names)
 
 
 def _list_s3_bucket_tags(client: Any, bucket_name: str) -> dict[str, str]:

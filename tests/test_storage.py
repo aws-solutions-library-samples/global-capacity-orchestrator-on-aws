@@ -5,13 +5,17 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import threading
+import zlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import boto3
 import pytest
+from botocore.awsrequest import AWSResponse
 from botocore.exceptions import ClientError
 
 from cli.config import GCOConfig
@@ -128,13 +132,76 @@ class FakeS3:
         key: str,
         *,
         ExtraArgs: dict[str, Any],
+        Config: Any,
     ) -> None:
         assert bucket == BUCKET["bucket"]
+        assert Config.multipart_threshold == StorageManager._UPLOAD_MULTIPART_THRESHOLD
+        assert Config.preferred_transfer_client == "classic"
         data = source.read()
         self.upload_calls.append((key, ExtraArgs))
         self.objects[key] = _FakeObject(data, NOW, dict(ExtraArgs["Metadata"]))
         if self.on_upload is not None:
             self.on_upload(key)
+
+
+# s3transfer's default multipart threshold and part size (8 MiB).
+_MULTIPART_THRESHOLD = 8 * 1024 * 1024
+
+
+class _LocalS3:
+    """A real boto3 S3 client whose requests are answered locally.
+
+    Uploads run through boto3's real transfer manager, so the requests are the
+    ones S3 would receive. ``CreateMultipartUpload`` applies S3's documented
+    checksum rule for multipart uploads: the ``FULL_OBJECT`` checksum type is
+    accepted only with CRC64NVME, CRC32 or CRC32C (SHA-1 and SHA-256 are
+    composite-only), and anything else is refused with ``InvalidRequest``.
+    """
+
+    FULL_OBJECT_MULTIPART_ALGORITHMS = frozenset({"CRC64NVME", "CRC32", "CRC32C"})
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self._lock = threading.Lock()
+        self.client = boto3.client(
+            "s3",
+            region_name=BUCKET["region"],
+            aws_access_key_id="testing",
+            aws_secret_access_key="testing",
+        )
+        self.client.meta.events.register("before-parameter-build.s3", self._record)
+        self.client.meta.events.register("before-call.s3", self._answer)
+
+    def params(self, operation: str) -> list[dict[str, Any]]:
+        return [params for name, params in self.calls if name == operation]
+
+    def _record(self, params: dict[str, Any], model: Any, **_kwargs: Any) -> None:
+        with self._lock:
+            self.calls.append(
+                (model.name, {name: value for name, value in params.items() if name != "Body"})
+            )
+
+    @staticmethod
+    def _reply(status: int, parsed: dict[str, Any]) -> tuple[AWSResponse, dict[str, Any]]:
+        parsed["ResponseMetadata"] = {"HTTPStatusCode": status}
+        return AWSResponse("https://s3.example.com", status, {}, None), parsed
+
+    def _answer(
+        self, model: Any, params: dict[str, Any], **_kwargs: Any
+    ) -> tuple[AWSResponse, dict[str, Any]]:
+        headers = params["headers"]
+        if model.name == "HeadObject":
+            return self._reply(404, {"Error": {"Code": "404", "Message": "Not Found"}})
+        if model.name == "CreateMultipartUpload":
+            algorithm = headers.get("x-amz-checksum-algorithm")
+            if (
+                headers.get("x-amz-checksum-type") == "FULL_OBJECT"
+                and algorithm not in self.FULL_OBJECT_MULTIPART_ALGORITHMS
+            ):
+                message = f"FULL_OBJECT checksums are not supported for {algorithm}"
+                return self._reply(400, {"Error": {"Code": "InvalidRequest", "Message": message}})
+            return self._reply(200, {"UploadId": "upload-1"})
+        return self._reply(200, {"ETag": '"etag"'})
 
 
 @pytest.fixture
@@ -549,6 +616,60 @@ class TestUploadSync:
         assert forced["files_uploaded"] == 2
         assert forced["objects_probed"] == 0
         assert len(s3.head_calls) == head_count
+
+    def test_multipart_upload_sends_a_full_object_crc32_s3_accepts(
+        self,
+        manager: StorageManager,
+        tmp_path: Path,
+    ) -> None:
+        # At the threshold boto3 switches to a multipart upload. A whole-file
+        # SHA-256 there became FULL_OBJECT + SHA256, which S3 refuses; the
+        # planned CRC-32 is a full-object checksum S3 verifies instead.
+        data = os.urandom(_MULTIPART_THRESHOLD)
+        source = tmp_path / "weights.bin"
+        source.write_bytes(data)
+        s3 = _LocalS3()
+
+        with patch("cli.storage.boto3.client", return_value=s3.client):
+            result = manager.sync("cluster-shared", str(source), direction="upload")
+
+        assert result["files_uploaded"] == 1
+        assert result["bytes_uploaded"] == len(data)
+        assert s3.params("PutObject") == []
+        (create,) = s3.params("CreateMultipartUpload")
+        assert create["ChecksumType"] == "FULL_OBJECT"
+        assert create["ChecksumAlgorithm"] == "CRC32"
+        assert create["Metadata"] == {"gco-sync-sha256": hashlib.sha256(data).hexdigest()}
+        assert "ChecksumSHA256" not in create
+        assert {part["ChecksumAlgorithm"] for part in s3.params("UploadPart")} == {"CRC32"}
+        (complete,) = s3.params("CompleteMultipartUpload")
+        assert complete["ChecksumType"] == "FULL_OBJECT"
+        assert complete["ChecksumCRC32"] == base64.b64encode(
+            zlib.crc32(data).to_bytes(4, "big")
+        ).decode("ascii")
+        assert "ChecksumSHA256" not in complete
+
+    def test_single_part_upload_keeps_the_whole_file_sha256(
+        self,
+        manager: StorageManager,
+        tmp_path: Path,
+    ) -> None:
+        data = os.urandom(_MULTIPART_THRESHOLD - 1)
+        source = tmp_path / "weights.bin"
+        source.write_bytes(data)
+        s3 = _LocalS3()
+
+        with patch("cli.storage.boto3.client", return_value=s3.client):
+            result = manager.sync("cluster-shared", str(source), direction="upload")
+
+        assert result["files_uploaded"] == 1
+        assert s3.params("CreateMultipartUpload") == []
+        (put,) = s3.params("PutObject")
+        assert put["ChecksumSHA256"] == base64.b64encode(hashlib.sha256(data).digest()).decode(
+            "ascii"
+        )
+        assert put["Metadata"] == {"gco-sync-sha256": hashlib.sha256(data).hexdigest()}
+        assert "ChecksumCRC32" not in put
 
     def test_upload_single_file_mapping_and_missing_metadata(
         self,

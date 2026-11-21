@@ -15,9 +15,15 @@ home-directory access point.
 ## Request Flow
 
 1. Read the [Cognito](https://docs.aws.amazon.com/cognito/latest/developerguide/what-is-amazon-cognito.html) username claim from the API Gateway authorizer context.
-2. Resolve the configured SageMaker Studio domain.
-3. describe, create, or recover the user's Studio profile.
-4. Return `202` while profile provisioning is in progress.
+2. Read the Studio domain ID from `STUDIO_DOMAIN_ID`, which the stack always
+   sets. There is no lookup fallback.
+3. Describe the user's Studio profile and create it if it does not exist. A
+   `Failed` profile is deleted and created again.
+4. Return `202` while the profile was just created or is `Pending`,
+   `Updating` or `Deleting`. Return `409` for a profile no poll will change:
+   `Update_Failed`, `Delete_Failed`, or `Failed` with its delete refused (for
+   example `AccessDeniedException` when the role lacks
+   `sagemaker:DeleteUserProfile`).
 5. Ensure a deterministic per-user EFS access point.
 6. Return a time-limited `CreatePresignedDomainUrl` result.
 
@@ -36,7 +42,10 @@ home-directory access point.
 - `200`: URL is ready, with `url` and `expires_in`.
 - `202`: the user profile is still provisioning and the client should poll.
 - `401`: no usable Cognito username claim.
-- `404`: the Studio domain could not be resolved.
+- `404`: `SagemakerDomainNotFound`, `STUDIO_DOMAIN_ID` is empty.
+- `409`: `UserProfileFailed`, the profile is stuck in a failed state the
+  Lambda cannot recover from; an operator must delete it (the next login
+  creates it again). The CLI stops polling and reports the status.
 - `500`: an opaque generation failure token; exception details remain in logs.
 
 ## Security

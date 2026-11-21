@@ -9,17 +9,17 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
-from urllib.parse import quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit
 
 import boto3
 import urllib3
 from backend_tls import get_backend_http_pool
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-08-30T12:00:00Z
-# Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5
+# Generated at (UTC): 2026-11-19T12:23:38Z
+# Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894
 # Flowchart(s) generated from this file:
 #   * ``build_signed_headers`` -> ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.png``)
@@ -81,6 +81,16 @@ _INTERNAL_SIGNATURE_HEADERS = frozenset(
 )
 _RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
 _RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# The backend pool disables urllib3's retries (backend_tls.py), so urllib3
+# raises transport failures unwrapped: NewConnectionError when a connection
+# cannot be opened (refused, unreachable, unresolvable), ProtocolError when one
+# is reset, closed or cut short mid-exchange, and ConnectTimeoutError or
+# ReadTimeoutError when the backend does not answer in time. The first two
+# mean 503 and the timeouts 504, as in the Node streaming proxy
+# (transportFailureKind). NewConnectionError subclasses ConnectTimeoutError,
+# so it must be classified before the timeouts.
+_TRANSPORT_FAILURES = (urllib3.exceptions.TimeoutError, urllib3.exceptions.ProtocolError)
+_CONNECTION_FAILURES = (urllib3.exceptions.NewConnectionError, urllib3.exceptions.ProtocolError)
 # The one upstream answer a mutating request may be replayed after: the
 # Application Load Balancer's own 503. The load balancer serves it when it has
 # no target to send the request to (no registered or healthy target, or the
@@ -318,15 +328,19 @@ def forward_request(
     headers: dict[str, str],
     body: str | None,
     timeout: float = 29.0,
+    resign_headers: Callable[[], dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Forward over authenticated TLS within one deadline.
 
-    Read-only methods replay retryable statuses and transport failures.
+    Read-only methods replay retryable statuses and transport failures, each
+    replay with the fresh HMAC envelope ``resign_headers`` returns: the
+    backend accepts a nonce once and refuses a replayed envelope with 403.
     Mutating methods are replayed only after the load balancer's own 503,
-    which it serves before selecting a target (see ``_is_load_balancer_503``);
-    every other answer or failure may have reached a target and is relayed
-    after exactly one attempt. Plaintext, non-443, and credential-bearing
-    targets are rejected before any network request.
+    which it serves before selecting a target (see ``_is_load_balancer_503``),
+    and that replay is byte-identical because no target saw the first
+    envelope. Every other answer or failure may have reached a target and is
+    relayed after exactly one attempt. Plaintext, non-443, and
+    credential-bearing targets are rejected before any network request.
     """
     parsed_target = urlsplit(target_url)
     try:
@@ -372,17 +386,22 @@ def forward_request(
     last_exception: Exception | None = None
     last_response: urllib3.BaseHTTPResponse | None = None
     attempts_made = 0
+    request_headers = _outbound_headers(headers)
 
     for attempt in range(max_attempts):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         attempts_made = attempt + 1
+        if attempt > 0 and read_only and resign_headers is not None:
+            # A retry that reaches the pod which consumed the first nonce would
+            # otherwise get "403 Forbidden" instead of the real answer.
+            request_headers = _outbound_headers({**headers, **resign_headers()})
         try:
             response = transport.request(
                 method,
                 target_url,
-                headers=_outbound_headers(headers),
+                headers=request_headers,
                 body=encoded_body,
                 timeout=urllib3.Timeout(total=remaining),
             )
@@ -410,10 +429,7 @@ def forward_request(
         except urllib3.exceptions.SSLError:
             logger.exception("Backend TLS verification failed")
             return _tls_failure_response()
-        except (urllib3.exceptions.MaxRetryError, urllib3.exceptions.TimeoutError) as error:
-            if isinstance(getattr(error, "reason", None), urllib3.exceptions.SSLError):
-                logger.exception("Backend TLS verification failed")
-                return _tls_failure_response()
+        except _TRANSPORT_FAILURES as error:
             last_exception = error
             if not read_only:
                 # The write may have been applied: report this failure
@@ -421,17 +437,19 @@ def forward_request(
                 # load balancer 503 that would claim nothing reached the
                 # backend.
                 logger.warning(
-                    "Upstream %s failed on attempt %d; not replaying a mutating request",
+                    "Upstream %s failed on attempt %d (%s); not replaying a mutating request",
                     method,
                     attempt + 1,
+                    type(error).__name__,
                 )
                 last_response = None
                 break
             logger.warning(
-                "Upstream %s failed on attempt %d/%d",
+                "Upstream %s failed on attempt %d/%d (%s)",
                 method,
                 attempt + 1,
                 max_attempts,
+                type(error).__name__,
             )
         except Exception:
             logger.exception("Unexpected proxy forwarding failure")
@@ -451,7 +469,7 @@ def forward_request(
     if last_response is not None:
         return _build_success_response(last_response)
     if last_exception is not None:
-        status_code = 503 if isinstance(last_exception, urllib3.exceptions.MaxRetryError) else 504
+        status_code = 503 if isinstance(last_exception, _CONNECTION_FAILURES) else 504
         return {
             "statusCode": status_code,
             "headers": {"Content-Type": "application/json"},
@@ -481,6 +499,23 @@ def _build_success_response(response: urllib3.BaseHTTPResponse) -> dict[str, Any
         "headers": response_headers,
         "body": response.data.decode("utf-8"),
     }
+
+
+#: Path segments RFC 3986 (section 5.2.4) removes when it resolves a URL.
+_DOT_SEGMENTS = frozenset({".", ".."})
+
+
+def has_dot_segment(path: str) -> bool:
+    """Whether *path* has a ``.`` or ``..`` segment, literal or percent-encoded.
+
+    urllib3 removes dot segments from the request target it sends, so
+    ``/api/v1/jobs/../../../inference/x`` would reach ``/inference/x``, a
+    route other than the one API Gateway authorized. API Gateway does not
+    document whether the Lambda proxy event's ``path`` is percent-decoded,
+    so ``%2E%2E`` and ``..%2F`` count too. No GCO route has such a segment;
+    the proxies answer 400 instead of forwarding.
+    """
+    return any(segment in _DOT_SEGMENTS for segment in unquote(path).split("/"))
 
 
 def build_target_url(

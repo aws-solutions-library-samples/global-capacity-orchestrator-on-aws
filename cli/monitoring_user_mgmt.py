@@ -6,7 +6,9 @@ than Cognito. Because Grafana is a private ``ClusterIP`` Service, these calls go
 through a ``gco monitoring open`` port-forward (default ``http://localhost:3000``).
 
 Admin credentials come from the chart-generated ``kube-prometheus-stack-grafana``
-Secret (read here via ``kubectl``) unless the caller supplies them explicitly.
+Secret (read here via ``kubectl``, through the cluster's kubeconfig context and,
+from outside the VPC, an SSM tunnel's ``--server`` / ``--tls-server-name``)
+unless the caller supplies them explicitly.
 
 The HTTP functions are thin, mockable wrappers over ``requests`` (unit-tested by
 patching ``requests``), mirroring :mod:`cli.analytics_user_mgmt`'s shape.
@@ -22,11 +24,18 @@ import subprocess
 
 import requests
 
+from . import cluster_ui
+from .kubectl_helpers import kubectl_context_flags
+
 DEFAULT_GRAFANA_URL = "http://localhost:3000"
 DEFAULT_NAMESPACE = "monitoring"
 DEFAULT_ADMIN_SECRET = "kube-prometheus-stack-grafana"  # nosec B105  # Kubernetes Secret name, not its contents
 
 _HTTP_TIMEOUT_SECONDS = 15
+#: How long the Secret read may wait for the API server. A private endpoint is
+#: unreachable from outside the VPC without a tunnel, and TCP alone gives up
+#: only after minutes.
+_KUBECTL_TIMEOUT_SECONDS = 60
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$")
 _SECRET_RE = re.compile(r"^[a-z0-9]([a-z0-9.\-]{0,251}[a-z0-9])?$")
 
@@ -37,29 +46,55 @@ def generate_password(n_bytes: int = 24) -> str:
 
 
 def read_grafana_admin_credentials(
-    namespace: str = DEFAULT_NAMESPACE, secret_name: str = DEFAULT_ADMIN_SECRET
+    namespace: str = DEFAULT_NAMESPACE,
+    secret_name: str = DEFAULT_ADMIN_SECRET,
+    *,
+    server: str | None = None,
+    tls_server_name: str | None = None,
+    context: str | None = None,
 ) -> tuple[str, str]:
     """Read ``(admin_user, admin_password)`` from the Grafana Secret via kubectl.
 
-    Requires cluster access (the same connectivity ``gco monitoring open`` needs).
-    Raises ``RuntimeError`` if kubectl fails or the keys are absent.
+    ``context`` is the cluster's kubeconfig context
+    (:func:`cli.kubectl_helpers.update_kubeconfig`); ``server`` and
+    ``tls_server_name`` route the read through an SSM tunnel. Raises
+    ``RuntimeError`` if kubectl fails, does not answer within
+    ``_KUBECTL_TIMEOUT_SECONDS``, or the keys are absent.
     """
     if not _NAMESPACE_RE.match(namespace):
         raise ValueError(f"Invalid namespace {namespace!r}")
     if not _SECRET_RE.match(secret_name):
         raise ValueError(f"Invalid secret name {secret_name!r}")
 
-    cmd = ["kubectl", "get", "secret", secret_name, "-n", namespace, "-o", "json"]
+    cmd = [
+        "kubectl",
+        *kubectl_context_flags(context),
+        "get",
+        "secret",
+        secret_name,
+        "-n",
+        namespace,
+        "-o",
+        "json",
+        *cluster_ui.kubectl_server_flags(server, tls_server_name),
+    ]
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             check=False,
+            timeout=_KUBECTL_TIMEOUT_SECONDS,
         )  # nosemgrep: dangerous-subprocess-use-audit - inputs validated above; list form, no shell=True
     except FileNotFoundError as exc:
         raise RuntimeError(
             "kubectl not found. Install kubectl and ensure it's on your PATH."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Timed out after {_KUBECTL_TIMEOUT_SECONDS}s reading Secret "
+            f"{namespace}/{secret_name}; from outside the VPC pass --via-ssm, or pass "
+            "--admin-password"
         ) from exc
     if result.returncode != 0:
         raise RuntimeError(

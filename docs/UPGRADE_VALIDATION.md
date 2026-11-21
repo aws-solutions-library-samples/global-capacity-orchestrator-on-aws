@@ -85,12 +85,23 @@ Actions run in registry order. Selecting one action includes its dependencies.
 | `deploy` | `baseline`, `prepare` | Require every ECR repository either release's image mirror copies into to be in the baseline, run the base release's `gco stacks deploy-all`, adopt every stack it created by run tag, checkpoint the retained EKS keys and log groups, and require every target stack deployed and owned |
 | `sentinels` | `deploy` | Create a job template through the base release's API, waiting for the API to answer |
 | `upgrade` | `sentinels` | Tag the candidate in the private mirror, require `gco upgrade --check` to plan exactly this upgrade (the target, an editable install, a control-plane and workload split covering the targets), checkpoint the base generation's retained resources, run the base release's `gco upgrade --yes --skip-container`, and adopt the stacks it recreated |
-| `topology` | `upgrade` | The release harness's topology check against the upgraded deployment: stacks, EKS, HTTPS ALB targets, APIs, queues, and DynamoDB |
+| `topology` | `upgrade` | The release harness's topology check against the upgraded deployment: stacks, EKS, HTTPS ALB targets, APIs, queues, and DynamoDB. The settings it compares the deployment with (the EKS minor) come from the clone's cdk.json, the file `gco upgrade` kept from the base checkout and the redeploy synthesized, not from this checkout's |
 | `verify-upgrade` | `topology` | The clone is at this commit with only cdk.json differing, byte for byte what the run wrote; every control-plane stack kept its stack ID; every workload stack is a new generation of the one it replaced; the upgrade reports the target checked out, the editable install refreshed, and exactly the workload tier destroyed; and the sentinel reads back unchanged with its original creation time, then is deleted |
 | `destroy` | `deploy` | Remove all run-owned infrastructure in dependency order, as the release harness does |
 | `final-inventory` | `destroy` | Prove target-stack absence, accepted retained resources (both generations' EKS keys pending deletion), exact protected-baseline preservation, and Transaction Search restored |
 
 Only a complete `--actions all` run reports `PASSED`.
+
+What the run does not cover: it deploys no inference endpoint, so it does not
+prove that an update leaves an endpoint's model pods running (the same pod
+UIDs and container restart counts after the new inference monitor's first
+reconcile). `gco upgrade` recreates the regional stacks, so no model pod
+survives it anyway; the case that matters is an in-place update of the
+regional stack, where a TLS-sidecar pod-template digest that changed with the
+Kubernetes client version would restart every model pod. Only unit tests pin
+it: `tests/test_inference_endpoint_tls.py` replays the digests the v8.22.x and
+v8.23.0 monitors stamped and requires the monitor to leave such a pod alone
+unless its sidecar really changed.
 
 ## Local Prerequisites
 
@@ -164,13 +175,22 @@ itself is interrupted during a phase, `--resume` adopts what the phase left and
 then fails the phase instead of running it again: an interrupted upgrade is a
 failed validation, and the guaranteed cleanup tears the run down. Stopping the
 harness (Ctrl-C, `SIGTERM`, a closed terminal) stops the command and every CDK
-process it started. Killing it outright (`kill -9`) cannot, so the command keeps
+process it started. `gco release validate-upgrade` passes those signals on to
+the harness and waits for its cleanup and report the way `gco release validate`
+does ([bounded at 6 hours](LIVE_RELEASE_VALIDATION.md#run-the-script-locally)).
+Killing it outright (`kill -9`) cannot, so the command keeps
 going on its own; `--resume` then refuses to continue until it has finished or
 been stopped, and names its process ID.
 
 The workspace is deleted once teardown completes. A run that stops before then
 keeps it, and the report names its path; delete it yourself when the run is
 torn down (it holds no AWS state).
+
+If the harness cannot start on a resume after the base deploy began (an
+unreadable cdk.json, a changed identity), it writes a failed report whose
+`cleanup` is marked blocked, as the release harness does; when the checkpoint
+is this invocation's, the report carries the exact `--resume` command that
+reaches the guaranteed cleanup.
 
 If cleanup cannot finish, follow the release harness's
 [recovery procedure](LIVE_RELEASE_VALIDATION.md#cleanup-retained-resources-and-recovery).

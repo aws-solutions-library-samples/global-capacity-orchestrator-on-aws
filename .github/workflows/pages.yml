@@ -49,15 +49,25 @@
 #   status: a Pages outage (or a wiki build failure) surfaces here, on
 #   "Deploy Pages", and the "Unit Tests" gate keeps reporting purely on tests.
 #
+# Why two jobs:
+#   The build installs the docs toolchain and the locked npm tooling and runs
+#   repository scripts; none of that may hold a credential that can publish.
+#   pages:build therefore runs with read-only permissions and no persisted
+#   checkout token, and only uploads the Pages artifact. pages:deploy, the one
+#   job with pages: write and id-token: write, checks nothing out and runs
+#   only actions/deploy-pages, so no build-time code (a compromised
+#   transitive package included) can request the Pages OIDC token or publish.
+#
 # How it gets the reports:
-#   `workflow_run` fires when "Unit Tests" finishes on main. This job then
+#   `workflow_run` fires when "Unit Tests" finishes on main. pages:build then
 #   downloads the `pytest-coverage` and `bash-coverage-report` artifacts from
 #   that run (via actions/download-artifact with run-id + github-token — the
 #   documented way to pull an artifact from another run), locates the
 #   "Inference Streaming Proxy" run for the same commit and downloads its
 #   `node-inference-streaming-proxy-coverage` artifact, builds the wiki from
 #   the same commit, renders the three badges, merges everything into one
-#   site tree, and deploys it. Every report describes the one commit.
+#   site tree, and uploads it; pages:deploy deploys it. Every report describes
+#   the one commit.
 #
 # Note: workflow_run always uses the workflow definition from the default
 # branch, so edits here only take effect once merged to main (they can't be
@@ -98,37 +108,35 @@ env:
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
 
 jobs:
-  deploy:
-    name: "pages:deploy"
-    # workflow_run is privileged: it uses the default-branch workflow and can
-    # write to Pages. Require a successful push from this repository's actual
-    # default branch; the trigger's branch filter remains defense in depth.
+  build:
+    name: "pages:build"
+    # workflow_run is privileged: it uses the default-branch workflow, and its
+    # deploy job can write to Pages. Require a successful push from this
+    # repository's actual default branch; the trigger's branch filter remains
+    # defense in depth. pages:deploy needs this job, so it inherits the guard.
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.head_branch == github.event.repository.default_branch
     runs-on: ubuntu-26.04
-    # Backstop only: the deploy step's own 10-minute timeout (see its
-    # comment) must fire first, so this covers the sibling-run wait (10
-    # minutes), the builds and downloads, and that timeout with room over.
-    timeout-minutes: 30
-    # Job-level permissions replace the top-level block for this job:
+    # The sibling-run wait (at most 10 minutes) plus a few minutes of builds
+    # and downloads, with room over.
+    timeout-minutes: 25
+    # Read-only. Job-level permissions replace the top-level block:
     #   contents: read — checkout of the triggering commit, so the wiki is
     #                    built from the exact code the published coverage
     #                    measured
-    #   pages: write    — actions/deploy-pages finalizes the deployment
-    #   id-token: write — OIDC token the deploy action authenticates with
-    #   actions: read   — download-artifact reads an artifact from another
+    #   actions: read  — download-artifact reads an artifact from another
     #                    run, and `gh run list` finds the sibling run
     permissions:
       contents: read
-      pages: write
-      id-token: write
       actions: read
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      # Handed to pages:deploy rather than recomputed there: "Re-run failed
+      # jobs" re-runs only the deploy, under a new run_attempt, and reuses
+      # this job's outputs and artifact, so the name has to come from here.
+      artifact_name: ${{ steps.artifact.outputs.name }}
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
@@ -144,13 +152,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          # Nothing in this job pushes; a token left in .git/config would be
+          # readable by every build step that follows.
+          persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install the docs toolchain
-        run: pip install -e ".[docs]"
+        run: pip install -c requirements-lock.txt -e ".[docs]"
       - name: Build the wiki (strict)
         # Identical build to the PR-side lint:zensical:strict job:
         # scripts/build_wiki.py stages the site's source tree (wiki/ pages,
@@ -278,6 +289,9 @@ jobs:
             --bash site/bash-coverage/summary.json \
             --node node-coverage-data/lcov.info \
             --out site
+      - name: Name the Pages artifact for this attempt
+        id: artifact
+        run: echo "name=github-pages-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
       - name: Package the merged site as a Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
         with:
@@ -291,13 +305,36 @@ jobs:
           # whole run, so a re-run after a failed deploy used to find two
           # "github-pages" artifacts and refuse ("Multiple artifacts named
           # ... were unexpectedly found"). With the attempt number in the
-          # name, re-running the job is a working recovery path.
-          name: github-pages-${{ github.run_attempt }}
+          # name, re-running the workflow is a working recovery path.
+          name: ${{ steps.artifact.outputs.name }}
+
+  deploy:
+    name: "pages:deploy"
+    needs: build
+    runs-on: ubuntu-26.04
+    # Backstop only: the deploy step's own 10-minute timeout (see its
+    # comment) must fire first.
+    timeout-minutes: 15
+    # The only job that can publish: pages: write lets actions/deploy-pages
+    # create and poll the deployment, and id-token: write mints the OIDC
+    # token it authenticates with. It checks nothing out and runs nothing
+    # but the TMPDIR export every Ubuntu job starts with and deploy-pages, so
+    # no repository or third-party code ever holds either.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
         with:
-          artifact_name: github-pages-${{ github.run_attempt }}
+          artifact_name: ${{ needs.build.outputs.artifact_name }}
           # Wait up to 10 minutes (the action's default) for the Pages
           # backend to finish the deployment. A healthy deployment takes
           # seconds (median 8s, p90 28s over the 22 successful deploys up to
@@ -308,7 +345,5 @@ jobs:
           # When this fires the action cancels the Pages deployment and fails
           # the step with "Timeout reached", so keep it inside
           # timeout-minutes and a stall ends as that step failure rather than
-          # a cancelled job: at worst ~10 minutes waiting for the sibling run
-          # above, a few minutes of builds and downloads, then these 10
-          # minutes, all inside the job's 30.
+          # a cancelled job: these 10 minutes sit inside the job's 15.
           timeout: 600000

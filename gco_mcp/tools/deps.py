@@ -7,7 +7,9 @@ from audit import audit_logged
 from server import mcp
 
 
-@mcp.tool(tags={"safe", "observability"})
+# low-risk, not safe: the full scan pip-installs into the server's own
+# environment (see the docstring), so it is not a read-only tool.
+@mcp.tool(tags={"low-risk", "observability"})
 @audit_logged
 async def deps_scan(nodepools_only: bool = False) -> str:
     """Generate the dependency update list the monthly deps-scan produces.
@@ -24,8 +26,10 @@ async def deps_scan(nodepools_only: bool = False) -> str:
     The full scan reaches out to PyPI, npm, container registries, GitHub,
     and (with credentials) AWS, and typically takes several minutes. Its
     Python surface pip-installs the project's extras into the server's
-    active environment, mirroring how the CI scan runs. Requires a GCO
-    checkout (the scanner lives under .github/scripts/).
+    active environment, mirroring how the CI scan runs, so the tool is
+    low-risk rather than read-only: it changes the packages installed
+    where the server runs. ``nodepools_only=True`` installs nothing.
+    Requires a GCO checkout (the scanner lives under .github/scripts/).
 
     Args:
         nodepools_only: Run only the accelerator-catalog / Karpenter

@@ -974,6 +974,19 @@ class TestJobsMetricsCoverage:
         assert resp.json()["summary"]["total_cpu_millicores"] == 2000
         assert resp.json()["summary"]["total_memory_bytes"] == 1024**3
 
+    def test_microcores_and_exponents(self, jobs_mock_processor, jobs_api_client):
+        """Regression: a microcore reading ("u") made the pod's metrics unavailable."""
+        mock_pod = MagicMock()
+        mock_pod.metadata.name = "pod-1"
+        jobs_mock_processor.core_v1.list_namespaced_pod.return_value = MagicMock(items=[mock_pod])
+        jobs_mock_processor.custom_objects.get_namespaced_custom_object.return_value = {
+            "containers": [{"name": "m", "usage": {"cpu": "2507348u", "memory": "129e6"}}]
+        }
+        resp = jobs_api_client.get("/api/v1/jobs/gco-jobs/j/metrics", headers=_AUTH_HEADERS)
+        assert resp.json()["summary"]["total_cpu_millicores"] == 2508
+        assert resp.json()["summary"]["total_memory_bytes"] == 129 * 10**6
+        assert "error" not in resp.json()["pods"][0]
+
 
 class TestJobsBulkDeleteCoverage:
     def test_dry_run(self, jobs_mock_processor, jobs_api_client):

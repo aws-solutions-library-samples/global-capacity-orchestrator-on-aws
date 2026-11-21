@@ -394,25 +394,8 @@ class TestModelUploadGating:
         root = tmp_path / "local-root"
         source = root / "weights"
         source.mkdir(parents=True)
-        if not (
-            os.name == "posix"
-            and hasattr(os, "O_NOFOLLOW")
-            and hasattr(os, "O_DIRECTORY")
-            and Path("/dev/fd").is_dir()
-        ):
-            pytest.skip("secure upload staging requires descriptor-relative /dev/fd support")
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        descriptor = os.open(root, flags)
-        try:
-            try:
-                os.stat(
-                    f"/dev/fd/{descriptor}/{source.name}",
-                    follow_symlinks=False,
-                )
-            except OSError as exc:
-                pytest.skip(f"/dev/fd directory traversal is unavailable: {exc}")
-        finally:
-            os.close(descriptor)
+        if not (os.name == "posix" and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")):
+            pytest.skip("secure upload staging requires descriptor-relative filesystem support")
         with patch.dict(os.environ, {"GCO_STORAGE_LOCAL_ROOT": str(root)}):
             importlib.reload(run_mcp)
             with patch("cli_runner.subprocess.run") as mock:
@@ -421,10 +404,11 @@ class TestModelUploadGating:
                 cmd = mock.call_args.args[0]
                 assert "models" in cmd
                 assert "upload" in cmd
-                # The CLI receives a descriptor-backed private snapshot rather
-                # than a raceable absolute source path.
+                # The CLI receives a private snapshot (through /dev/fd on Linux)
+                # rather than the source path itself.
                 upload_argument = cmd[cmd.index("upload") + 1]
-                assert upload_argument.startswith("/dev/fd/")
+                assert upload_argument.endswith("/weights")
+                assert upload_argument != str(source.resolve())
                 assert mock.call_args.kwargs["pass_fds"]
                 assert cmd[cmd.index("--name") : cmd.index("--name") + 2] == [
                     "--name",

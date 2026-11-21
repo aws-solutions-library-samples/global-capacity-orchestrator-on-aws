@@ -25,7 +25,7 @@
 | `image-lookup/` | Adopts or creates retained `gco/<name>` [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) repositories without same-name deployment failures. |
 | `inference-streaming-proxy/` | Node.js 24 response-streaming proxy used by global and regional `/inference/*` [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) integrations. |
 | `kubectl-applier-simple/` | Applies Kubernetes manifests to [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) clusters during CDK deployment. |
-| `pcs-lookup/` | Regional-stack custom resources for a managed [AWS PCS](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) cluster: `Custom::PcsAmiLookup` resolves the newest PCS sample AMI or PCS-ready DLAMI for a compute node group's architecture and Slurm version; `Custom::PcsControllerLookup` resolves the controller's `SLURMCTLD` endpoint (`ip:6817`) by type for the Prometheus scrape of its Slurm metrics. |
+| `pcs-lookup/` | Regional-stack custom resources for a managed [AWS PCS](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) cluster: `Custom::PcsAmiLookup` resolves the newest PCS sample AMI or PCS-ready DLAMI for a compute node group's architecture and Slurm version; `Custom::PcsControllerLookup` resolves the controller's `SLURMCTLD` endpoint (`ip:6817`) by type for the Prometheus scrape of its Slurm metrics; `Custom::PcsSubnetLookup` narrows a node group's candidate subnets to the Availability Zones that offer every one of its instance types. |
 | `proxy-shared/` | Shared request signing, header sanitization, URL, timeout, and retry utilities for API proxy Lambdas. |
 | `regional-api-proxy/` | [VPC](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html) proxy behind each regional aggregation bridge; verifies the internal ALB and uses HMAC plus private-root TLS. |
 | `secret-rotation/` | Daily overlap-safe rotation of the backend HMAC key in [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html). |
@@ -46,6 +46,22 @@ than `lambda_.Code.from_asset`; `tests/test_asset_permissions.py` enforces
 this. Only the generated `*-build` directories below use `from_asset`
 directly.
 
+A zipped source directory installs nothing: its `requirements.txt` is not
+installed, so its handler can import only its own files, the standard library and
+the SDK the Lambda Python runtime provides (boto3 and the packages it requires).
+The runtime's other modules (pip, and the runtime interface client with its
+dependencies) belong to the runtime, not to handler code. A handler that needs
+anything else must ship it, as `kubectl-applier-simple` does through the build
+step below and the two container images (`helm-installer`,
+`tls-certificate-manager`) do by installing their `requirements.txt` in the
+Dockerfile. `integration:lambda:imports`
+(`.github/scripts/verify_lambda_imports.py`) imports every zipped handler in
+exactly that environment, inside the Lambda Python base image those two
+Dockerfiles build FROM, so a missing package fails CI rather than the first
+invocation in AWS; the image Lambdas' `integration:docker:*` jobs import their
+handlers inside the built images. To run it locally you need Docker or Finch:
+`CDK_DOCKER=finch python3 .github/scripts/verify_lambda_imports.py`.
+
 The `kubectl-applier-simple` Lambda requires a build step to package dependencies.
 `gco stacks deploy` runs it automatically (`StackManager._build_kubectl_lambda`
 in `cli/stacks.py`); this is the equivalent by hand, pinned by the package's
@@ -60,6 +76,20 @@ python3 -m pip install -r lambda/kubectl-applier-simple/requirements.txt \
   -t lambda/kubectl-applier-simple-build/ --upgrade \
   --platform manylinux2014_x86_64 --only-binary=:all:
 ```
+
+Lambda rejects a .zip package whose contents unzip to more than 250 MiB
+(262,144,000 bytes, layers included; this function has none), and only when
+CloudFormation creates or updates the function. The CLI's build therefore
+measures the installed tree before publishing it: it fails, naming the size,
+the quota and the largest directories, when the package is over the quota, and
+prints a warning above 90% of it. `kubernetes` is most of the package, so a
+`kubernetes` bump in `requirements.txt` is the change to watch.
+
+The CLI stops a pip or npm install for these builds after 10 minutes, because
+the install holds the lock that other deploys and synths wait on; set
+`GCO_ASSET_BUILD_TIMEOUT_SECONDS` to allow longer. A failed or stopped install
+reports the end of the installer's error output, where pip and npm print the
+error.
 
 The inference streaming proxy has a separate production npm graph. CI and CDK staging install it from its committed lockfile with lifecycle scripts disabled:
 

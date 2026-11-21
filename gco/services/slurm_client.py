@@ -280,7 +280,14 @@ class SecretTokenProvider:
     def _read_secret(self) -> str:
         from kubernetes import client as kubernetes_client
 
-        secret = kubernetes_client.CoreV1Api().read_namespaced_secret(self.name, self.namespace)
+        from gco.services.k8s_client import BoundedApiClient
+
+        # A bare CoreV1Api() sends the read with no timeout at all, so one
+        # stalled API-server connection would hold the request thread (and
+        # every Slurm call waiting on the token) indefinitely.
+        secret = kubernetes_client.CoreV1Api(BoundedApiClient()).read_namespaced_secret(
+            self.name, self.namespace
+        )
         data = getattr(secret, "data", None) or {}
         encoded = data.get(self.key)
         if not encoded:

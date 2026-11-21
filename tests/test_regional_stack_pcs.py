@@ -561,8 +561,9 @@ class TestManagedModeCluster:
             {"ParameterName": "PurgeJobAfter", "ParameterValue": "90days"}
         ]
         assert "CgroupCustomSettings" not in slurm
+        # ``Project`` is cdk.json ``context.tags.Project``; ``gco:project`` the project name.
         assert props["Tags"] == {
-            "Project": "gco-test",
+            "Project": "gco",
             "gco:project": "gco-test",
             "gco:pcs-cluster": "gco-test-hpc",
         }
@@ -943,6 +944,66 @@ class TestManagedModeNodeGroups:
         assert stack.pcs.lifecycle_log_group is not None
         for group in _of_type(resources, "AWS::PCS::ComputeNodeGroup").values():
             assert log_group_id in group["DependsOn"]
+
+
+def _project_tag_values(node: Any) -> list[Any]:
+    """Every ``Project`` tag value under ``node``: ``{Key, Value}`` entries and tag maps."""
+    values: list[Any] = []
+    if isinstance(node, dict):
+        if node.get("Key") == "Project" and "Value" in node:
+            values.append(node["Value"])
+        tags = node.get("Tags")
+        if isinstance(tags, dict) and "Project" in tags:
+            values.append(tags["Project"])
+        for child in node.values():
+            values.extend(_project_tag_values(child))
+    elif isinstance(node, list):
+        for child in node:
+            values.extend(_project_tag_values(child))
+    return values
+
+
+class TestProjectTag:
+    def test_every_project_tag_is_the_context_tags_value(self, pcs_managed_full) -> None:
+        """Every ``Project`` tag the stack writes is cdk.json ``context.tags.Project``.
+
+        The cost reports filter on that value. app.py's app-wide tags override
+        an L1 resource's own ``Project`` tag, but not the launch templates' tag
+        specifications (all the instances and volumes PCS launches carry) or
+        the tags the construct adds to the lifecycle log group: those carried
+        ``project_name``, so PCS compute spend fell outside the reports.
+        MockConfigLoader's ``Project`` tag (``gco``) differs from its project
+        name (``gco-test``); FSx is on in this synth.
+        """
+        _stack, resources = pcs_managed_full
+        carriers: dict[str, list[Any]] = {}
+        for resource in resources.values():
+            values = _project_tag_values(resource.get("Properties", {}))
+            if values:
+                carriers.setdefault(resource["Type"], []).extend(values)
+        assert set(carriers) == {
+            "AWS::EC2::LaunchTemplate",
+            "AWS::EC2::PlacementGroup",
+            "AWS::FSx::FileSystem",
+            "AWS::Logs::LogGroup",
+            "AWS::PCS::Cluster",
+            "AWS::PCS::ComputeNodeGroup",
+            "AWS::PCS::Queue",
+        }
+        assert {value for values in carriers.values() for value in values} == {"gco"}
+        # Each launch template tags itself, its instances and their volumes.
+        for template in _of_type(resources, "AWS::EC2::LaunchTemplate").values():
+            specs = [
+                *template["Properties"]["TagSpecifications"],
+                *template["Properties"]["LaunchTemplateData"]["TagSpecifications"],
+            ]
+            assert sorted(spec["ResourceType"] for spec in specs) == [
+                "instance",
+                "launch-template",
+                "volume",
+            ]
+            for spec in specs:
+                assert _project_tag_values(spec) == ["gco"], spec["ResourceType"]
 
 
 class TestManagedModeLaunchTemplates:
@@ -1445,6 +1506,7 @@ def _bare_stack(
     efs_sg = ec2.SecurityGroup(stack, "EfsSg", vpc=vpc)
     kwargs: dict[str, Any] = {
         "project_name": "gco-test",
+        "project_tag": "GCO",
         "vpc": vpc,
         "eks_cluster_security_group": ec2.SecurityGroup(stack, "EksSg", vpc=vpc),
         "api_role": iam.Role(stack, "Api", assumed_by=iam.ServicePrincipal("ec2.amazonaws.com")),

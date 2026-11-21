@@ -184,7 +184,7 @@ def is_numeric_value(x: object) -> bool:
     return False
 
 
-def metrics_result(key: str, value: float, **provenance: object) -> dict[str, Any]:
+def metrics_result(key: str, value: float, /, **provenance: object) -> dict[str, Any]:
     """Assemble the canonical success shape: ``{"metrics": {key: value}, ...}``.
 
     The single metric lives under the top-level ``metrics`` object; every
@@ -193,6 +193,9 @@ def metrics_result(key: str, value: float, **provenance: object) -> dict[str, An
     inside it, so the merged view contains only the numeric value. ``value``
     must already be a real, finite number — callers coerce and check before
     reaching this builder.
+
+    ``key`` and ``value`` are positional-only, so a provenance field may
+    itself be named ``key`` or ``value`` without colliding with them.
     """
     assert is_numeric_value(value), "metrics_result requires a finite numeric value"
     # Lay down provenance first, then the metrics object, so the top-level
@@ -203,12 +206,13 @@ def metrics_result(key: str, value: float, **provenance: object) -> dict[str, An
     return result
 
 
-def error_envelope(code: str, **details: object) -> dict[str, Any]:
+def error_envelope(code: str, /, **details: object) -> dict[str, Any]:
     """Assemble the structured failure shape: ``{"code": code, "details": {...}}``.
 
     The returned object never carries a top-level ``metrics`` key, so a
     consumer that merges only ``metrics``-shaped results skips it and leaves
     the corresponding check undecided rather than acting on bad data. Any
-    diagnostic context is nested under ``details``.
+    diagnostic context is nested under ``details``. ``code`` is
+    positional-only, so a details field may itself be named ``code``.
     """
     return {"code": code, "details": dict(details)}

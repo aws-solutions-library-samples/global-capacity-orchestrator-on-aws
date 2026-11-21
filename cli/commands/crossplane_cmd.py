@@ -45,7 +45,7 @@ def crossplane_status(config: Any) -> None:
 
     Examples:
         gco crossplane status
-        gco crossplane status --output json
+        gco -o json crossplane status
     """
     from ..crossplane import crossplane_status as _crossplane_status
 
@@ -94,7 +94,7 @@ def crossplane_open(
     bind_port = local_port or DEFAULT_LOCAL_PORT
     namespace, target, remote_port = PORT_FORWARD_TARGET
     try:
-        update_kubeconfig(cluster, target_region)
+        context = update_kubeconfig(cluster, target_region)
         with open_api_server_tunnel(
             formatter,
             cluster=cluster,
@@ -110,6 +110,7 @@ def crossplane_open(
                 remote_port,
                 server=session.server,
                 tls_server_name=session.tls_server_name,
+                context=context,
             )
             formatter.print_info(
                 f"Starting kubectl port-forward for Crossview on localhost:{bind_port}..."
@@ -178,7 +179,7 @@ def crossplane_screenshot(
     output = output_path or Path.cwd() / DEFAULT_SCREENSHOT_FILENAME
     namespace, target, remote_port = PORT_FORWARD_TARGET
     try:
-        update_kubeconfig(cluster, target_region)
+        context = update_kubeconfig(cluster, target_region)
         with open_api_server_tunnel(
             formatter,
             cluster=cluster,
@@ -194,10 +195,11 @@ def crossplane_screenshot(
                 remote_port,
                 server=session.server,
                 tls_server_name=session.tls_server_name,
+                context=context,
             )
             with cluster_ui.background_port_forward(cmd, bind_port):
                 written = capture_dashboard_screenshot(
-                    f"http://localhost:{bind_port}", output, headless=not headed
+                    f"http://127.0.0.1:{bind_port}", output, headless=not headed
                 )
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))

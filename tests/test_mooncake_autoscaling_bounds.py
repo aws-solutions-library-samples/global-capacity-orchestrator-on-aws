@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from kubernetes.client.rest import ApiException
 
 _SPLIT_MODES = ("disaggregated", "both")
 _ROLES = ("prefill", "decode")
@@ -122,6 +123,10 @@ def test_enabled_autoscaling_creates_bounded_per_role_autoscaler(spec, name):
 
     for role in _ROLES:
         with patch("gco.services.inference_monitor.client.AutoscalingV2Api") as mock_api:
+            # No autoscaler exists yet: the monitor reads before it creates.
+            mock_api.return_value.read_namespaced_horizontal_pod_autoscaler.side_effect = (
+                ApiException(status=404)
+            )
             create = mock_api.return_value.create_namespaced_horizontal_pod_autoscaler
             monitor._create_role_hpa(name, "gco-inference", endpoint_spec, role)
 

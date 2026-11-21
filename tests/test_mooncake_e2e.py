@@ -99,6 +99,11 @@ class _FakeAppsApi:
         self.stateful_sets[name] = stateful_set
         return stateful_set
 
+    def read_namespaced_stateful_set(self, name, namespace, **_kw):
+        if name not in self.stateful_sets:
+            raise ApiException(status=404, reason="Not Found")
+        return self.stateful_sets[name]
+
     def read_namespaced_stateful_set_status(self, name, namespace, **_kw):
         if name not in self.stateful_sets:
             raise ApiException(status=404, reason="Not Found")
@@ -172,6 +177,11 @@ class _FakeNetworkingApi:
         self.ingresses: dict[str, object] = {}
         self.deleted_ingresses: list[str] = []
         self.network_policies: dict[str, object] = {}
+
+    def read_namespaced_network_policy(self, name, namespace, **_kw):
+        if name not in self.network_policies:
+            raise ApiException(status=404, reason="Not Found")
+        return self.network_policies[name]
 
     def create_namespaced_network_policy(self, namespace, policy, **_kw):
         name = _name_of(policy)

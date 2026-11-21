@@ -93,6 +93,13 @@ def _call(
     return result
 
 
+def _job_path(job_id: int) -> str:
+    """``/api/v1/slurm/jobs/{job_id}``, built with the shared path-segment encoder."""
+    from ..aws_client import api_path_segment
+
+    return f"/api/v1/slurm/jobs/{api_path_segment(job_id)}"
+
+
 def _fail(formatter: Any, verb: str, exc: Exception) -> None:
     formatter.print_error(f"Failed to {verb}: {exc}")
     sys.exit(1)
@@ -158,7 +165,7 @@ def slurm_backends(config: Any, region: str | None) -> None:
 
     Examples:
         gco slurm backends -r us-east-1
-        gco -r us-east-1 slurm backends --output json
+        gco -o json -r us-east-1 slurm backends
     """
     from ..slurm import render_backends
 
@@ -184,7 +191,7 @@ def slurm_status(config: Any, region: str | None, backend: str | None) -> None:
     Examples:
         gco slurm status -r us-east-1
         gco slurm status -r us-east-1 --backend pcs
-        gco -r us-east-1 slurm status --output json
+        gco -o json -r us-east-1 slurm status
     """
     from ..slurm import render_status
 
@@ -329,7 +336,7 @@ def slurm_job(config: Any, job_id: int, region: str | None, backend: str | None)
     formatter = get_output_formatter(config)
     target = _slurm_region(config, region)
     try:
-        result = _call(config, "GET", f"/api/v1/slurm/jobs/{job_id}", target, backend=backend)
+        result = _call(config, "GET", _job_path(job_id), target, backend=backend)
     except Exception as exc:
         _fail(formatter, f"read Slurm job {job_id}", exc)
     if config.output_format != "table":
@@ -496,7 +503,7 @@ def slurm_cancel(
         result = _call(
             config,
             "DELETE",
-            f"/api/v1/slurm/jobs/{job_id}",
+            _job_path(job_id),
             target,
             backend=backend,
             params={"signal": signal.upper() if signal else None},
@@ -623,7 +630,7 @@ def _read_pcs_output(
         return pcs_login.read_file(node, reader)
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))
-        sys.exit(1)
+        raise SystemExit(1) from exc
 
 
 @slurm.command("shell")
@@ -683,7 +690,7 @@ def slurm_shell(
         return
     cluster = f"{config.project_name}-{target_region}"
     try:
-        update_kubeconfig(cluster, target_region)
+        context = update_kubeconfig(cluster, target_region)
         with open_api_server_tunnel(
             formatter,
             cluster=cluster,
@@ -697,6 +704,7 @@ def slurm_shell(
                 interactive=True,
                 server=session.server,
                 tls_server_name=session.tls_server_name,
+                context=context,
             )
             formatter.print_info(
                 f"Opening a shell on {LOGIN_NAMESPACE}/{LOGIN_DEPLOYMENT} in {target_region} "
@@ -761,10 +769,7 @@ def slurm_output(
     backend, _entry = _resolve_backend(config, formatter, target_region, backend)
     try:
         job = (
-            _call(
-                config, "GET", f"/api/v1/slurm/jobs/{job_id}", target_region, backend=backend
-            ).get("job")
-            or {}
+            _call(config, "GET", _job_path(job_id), target_region, backend=backend).get("job") or {}
         )
     except Exception as exc:
         _fail(formatter, f"read Slurm job {job_id}", exc)
@@ -806,7 +811,7 @@ def slurm_output(
 
     cluster = f"{config.project_name}-{target_region}"
     try:
-        update_kubeconfig(cluster, target_region)
+        context = update_kubeconfig(cluster, target_region)
         with open_api_server_tunnel(
             formatter,
             cluster=cluster,
@@ -816,7 +821,10 @@ def slurm_output(
             assume_yes=assume_yes,
         ) as session:
             cmd = login_exec_command(
-                reader, server=session.server, tls_server_name=session.tls_server_name
+                reader,
+                server=session.server,
+                tls_server_name=session.tls_server_name,
+                context=context,
             )
             if follow:
                 # Streams until Ctrl-C; the tunnel closes on the way out and

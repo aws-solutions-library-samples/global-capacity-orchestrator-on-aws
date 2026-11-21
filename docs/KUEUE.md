@@ -37,7 +37,7 @@ Kueue is installed via Helm chart in the `kueue-system` namespace:
 |-----------|-------------|
 | kueue-controller-manager | Manages ClusterQueue, LocalQueue, and Workload CRDs, and serves Kueue's admission webhooks (`kueue-webhook-service`) |
 
-The chart's default configuration turns on the plain Pod integration alongside batch Jobs, Deployments, StatefulSets and the Ray, JobSet and Kubeflow kinds, so Kueue can also queue standalone pods that carry a `kueue.x-k8s.io/queue-name` label. This is useful for Ray head pods, inference servers, or any long-running workload that isn't wrapped in a Job. Because of that integration, every Pod create outside `kube-system` and `kueue-system` passes through Kueue's webhook, so GCO annotates the controller pod `karpenter.sh/do-not-disrupt` to keep EKS Auto Mode from evicting it during consolidation.
+The chart's default configuration turns on the plain Pod integration alongside batch Jobs, Deployments, StatefulSets and the Ray, JobSet and Kubeflow kinds, so Kueue can also queue standalone pods that carry a `kueue.x-k8s.io/queue-name` label. This is useful for Ray head pods, inference servers, or any long-running workload that isn't wrapped in a Job. Because of that integration, every Pod create outside `kube-system` and `kueue-system` passes through Kueue's webhook, so GCO annotates the controller pod `karpenter.sh/do-not-disrupt` to keep EKS Auto Mode from evicting it during consolidation, and runs it at the `system-cluster-critical` priority so that no pod the webhook admits, GCO's `gco-platform-critical` services included, can preempt it.
 
 ## Key Concepts
 
@@ -122,7 +122,10 @@ is enabled: ResourceFlavor `gco-default-flavor`, ClusterQueue
 LocalQueue `gco-default` in `gco-jobs` (applied by
 `post-helm-kueue-default-queues.yaml`). Label a Job with
 `kueue.x-k8s.io/queue-name: gco-default` and it queues immediately — no
-hand-applied queue objects required. With [SageMaker HyperPod](HYPERPOD.md)
+hand-applied queue objects required. Kueue manages only labelled workloads:
+the chart GCO installs leaves `manageJobsWithoutQueueName` at its default,
+false, so a Job without the label is not queued and starts at once, limited
+only by the namespace ResourceQuota. With [SageMaker HyperPod](HYPERPOD.md)
 on as well, a second topology is applied next to it: ResourceFlavor
 `gco-hyperpod-flavor` (the HyperPod node label as `nodeLabels`, the HyperPod
 taint as a toleration), ClusterQueue `gco-hyperpod-queue` (quotas from
@@ -137,6 +140,18 @@ pod's RuntimeClass overhead to the workload's requests, and every
 slots, so a ClusterQueue without it never admits a sandboxed Job. A custom
 ClusterQueue that should take sandboxed Jobs needs the same entry under
 `coveredResources`.
+
+Both shipped ClusterQueues cover the Neuron and EFA resources too, for the
+same reason: Kueue never admits a workload that requests a resource its
+ClusterQueue does not cover, so a labelled Trainium, Inferentia or EFA Job
+would stay suspended. `aws.amazon.com/neuron` gets the same nominal quota as
+`nvidia.com/gpu` (`resource_quota.max_gpu`, or `hyperpod.queue.max_gpu` for
+`gco-hyperpod-queue`). `vpc.amazonaws.com/efa` gets the most interfaces those
+accelerators can attach, five per unit of that quota (four per GPU, as on a
+p5.48xlarge, plus one per Neuron device, as on a trn2.48xlarge), so the
+accelerator quotas are always reached first: 160 with the default
+`max_gpu` of 32. A custom ClusterQueue needs the same entries for Neuron or
+EFA Jobs.
 
 Add the `kueue.x-k8s.io/queue-name` label and set resource limits to your Job:
 

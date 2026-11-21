@@ -8,8 +8,8 @@ HMAC key and the root CA private key are never transmitted.
 ``X-GCO-Target-Region`` is intentionally rejected here. This Lambda is not
 attached to regional VPCs and therefore cannot route directly to private ALBs;
 authorized callers that need region pinning must invoke that region's always-
-deployed API bridge directly. Direct caller access is an explicit opt-in even
-though the bridge itself is required for aggregation.
+deployed API bridge directly, which takes their own ``execute-api:Invoke``
+permission on the bridge (its resource policy admits only the aggregator role).
 
 Environment variables:
     GLOBAL_ACCELERATOR_ENDPOINT: Global Accelerator DNS name.
@@ -18,14 +18,16 @@ Environment variables:
     BACKEND_TLS_ROOT_CA_PARAMETER: SSM parameter containing public CA roots.
     BACKEND_TLS_ROOT_CA_REGION: Region containing the public trust parameter.
     PROXY_MAX_RETRIES: Max attempts per request (default: 3). Read-only
-        methods spend them on any retryable answer; mutating methods only on
-        the ALB's own 503 page, served before a target is selected.
+        methods spend them on any retryable answer, each retry signed afresh;
+        mutating methods only on the ALB's own 503 page, served before a
+        target is selected.
     PROXY_RETRY_BACKOFF_BASE: Base retry backoff in seconds (default: 0.3).
     SECRET_CACHE_TTL_SECONDS: Signing-key cache TTL in seconds (default: 300).
 """
 
 import json
 import os
+from functools import partial
 from typing import Any
 
 from proxy_utils import (
@@ -34,12 +36,13 @@ from proxy_utils import (
     caller_identity_headers,
     forward_request,
     get_secret_token,
+    has_dot_segment,
     sanitize_request_headers,
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-08-30T12:00:00Z
-# Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5
+# Generated at (UTC): 2026-11-19T12:23:38Z
+# Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.png``)
@@ -89,6 +92,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     http_method = event["httpMethod"]
     path = event["path"]
+    if has_dot_segment(path):
+        return _error_response(400, "The request path must not have a '.' or '..' segment")
     query_string = (
         event.get("multiValueQueryStringParameters") or event.get("queryStringParameters") or {}
     )
@@ -118,9 +123,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     # Only a short-lived HMAC envelope is transmitted. TLS independently
     # authenticates the ALB certificate and encrypts the complete request.
+    # Its nonce is single-use, so forward_request signs each retry afresh.
+    sign = partial(build_signed_headers, signing_key, http_method, target_url, body)
     headers = sanitize_request_headers(headers)
     headers.update(caller_identity_headers(event))
-    headers.update(build_signed_headers(signing_key, http_method, target_url, body))
+    headers.update(sign())
 
     return forward_request(
         target_url,
@@ -128,4 +135,5 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         headers,
         body,
         timeout=_get_request_timeout_seconds(context),
+        resign_headers=sign,
     )

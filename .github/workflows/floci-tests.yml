@@ -117,7 +117,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install dependencies
-        run: pip install -e ".[dev,mcp]"
+        run: pip install -c requirements-lock.txt -e ".[dev,mcp]"
       - uses: ./.github/actions/build-lambda-package
       - name: Wait for the emulator
         # The service container maps onto localhost; a bounded readiness poll
@@ -226,7 +226,7 @@ jobs:
       - name: Install locked CDK + Python dependencies
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
-          pip install -e ".[dev,mcp]"
+          pip install -c requirements-lock.txt -e ".[dev,mcp]"
       - uses: ./.github/actions/build-lambda-package
       - name: Wait for the emulator
         run: |

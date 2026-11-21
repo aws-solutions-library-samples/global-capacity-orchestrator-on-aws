@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
 from gco.services import tracing
 from gco.services.auth_middleware import AuthenticationMiddleware
 from gco.services.central_queue_worker import CentralQueueWorker
@@ -51,8 +52,8 @@ from gco.services.template_store import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-08-30T12:00:00Z
-# Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5
+# Generated at (UTC): 2026-11-18T16:59:04Z
+# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
 # Flowchart(s) generated from this file:
 #   * ``lifespan`` -> ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.png``)
@@ -337,7 +338,8 @@ async def health_check() -> JSONResponse:
             )
 
         try:
-            manifest_processor.core_v1.list_namespace(limit=1)
+            # In a worker thread so a slow API server cannot stall /healthz too.
+            await asyncio.to_thread(manifest_processor.core_v1.list_namespace, limit=1)
             api_healthy = True
         except Exception as e:
             logger.error(f"Kubernetes API health check failed: {e}")
@@ -373,10 +375,11 @@ async def get_service_status() -> dict[str, Any]:
     templates_count = 0
     webhooks_count = 0
     try:
+        # DynamoDB scans: in worker threads, like every blocking call here.
         if template_store:
-            templates_count = len(template_store.list_templates())
+            templates_count = len(await asyncio.to_thread(template_store.list_templates))
         if webhook_store:
-            webhooks_count = len(webhook_store.list_webhooks())
+            webhooks_count = len(await asyncio.to_thread(webhook_store.list_webhooks))
     except Exception as e:
         logger.warning(f"Failed to get store counts: {e}")
 
@@ -388,9 +391,19 @@ async def get_service_status() -> dict[str, Any]:
         "environment": {
             "cluster_name": os.getenv("CLUSTER_NAME", "unknown"),
             "region": os.getenv("REGION", "unknown"),
-            "max_cpu_per_manifest": os.getenv("MAX_CPU_PER_MANIFEST", "10"),
-            "max_memory_per_manifest": os.getenv("MAX_MEMORY_PER_MANIFEST", "32Gi"),
-            "max_gpu_per_manifest": os.getenv("MAX_GPU_PER_MANIFEST", "4"),
+            # The defaults the processors enforce when the variable is unset.
+            "max_cpu_per_manifest": os.getenv(
+                "MAX_CPU_PER_MANIFEST",
+                str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_cpu_per_manifest"]),
+            ),
+            "max_memory_per_manifest": os.getenv(
+                "MAX_MEMORY_PER_MANIFEST",
+                str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_memory_per_manifest"]),
+            ),
+            "max_gpu_per_manifest": os.getenv(
+                "MAX_GPU_PER_MANIFEST",
+                str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_gpu_per_manifest"]),
+            ),
             "allowed_namespaces": os.getenv("ALLOWED_NAMESPACES", "gco-jobs"),
             "validation_enabled": os.getenv("VALIDATION_ENABLED", "true"),
         },
@@ -460,7 +473,9 @@ async def get_job_validation_policy() -> dict[str, Any]:
         # a config-file read.
         "source": "deployed-cluster-runtime",
         "policy": manifest_processor.effective_job_validation_policy(),
-        "cluster_enforcement": manifest_processor.cluster_resource_governance(),
+        "cluster_enforcement": await asyncio.to_thread(
+            manifest_processor.cluster_resource_governance
+        ),
     }
 
 

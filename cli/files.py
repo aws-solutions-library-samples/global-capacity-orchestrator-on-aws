@@ -8,17 +8,17 @@ attached to GCO regional stacks.
 import json
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
 
-from ._image_uri import aws_partition, aws_url_suffix
+from ._image_uri import aws_url_suffix
 from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
-from .kubectl_helpers import update_kubeconfig
+from .kubectl_helpers import kubectl_context_flags, update_kubeconfig
 
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
 _DNS_SUBDOMAIN_RE = re.compile(
@@ -313,108 +313,6 @@ class FileSystemClient:
                 return fs
         return None
 
-    def create_datasync_download_task(
-        self,
-        file_system_id: str,
-        region: str,
-        source_path: str,
-        destination_bucket: str,
-        destination_prefix: str = "",
-    ) -> str:
-        """
-        Create a DataSync task to download files from EFS/FSx to S3.
-
-        This is useful for downloading large amounts of data from file systems
-        that aren't directly accessible.
-
-        Args:
-            file_system_id: EFS or FSx file system ID
-            region: AWS region
-            source_path: Path within the file system
-            destination_bucket: S3 bucket name
-            destination_prefix: S3 key prefix
-
-        Returns:
-            DataSync task ARN
-        """
-        datasync = self._session.client("datasync", region_name=region)
-        partition = aws_partition(region)
-
-        # Determine file system type
-        fs_info = None
-        for fs in self.get_file_systems(region):
-            if fs.file_system_id == file_system_id:
-                fs_info = fs
-                break
-
-        if not fs_info:
-            raise ValueError(f"File system {file_system_id} not found in region {region}")
-
-        # Create source location
-        if fs_info.file_system_type == "efs":
-            source_location = datasync.create_location_efs(
-                EfsFilesystemArn=f"arn:{partition}:elasticfilesystem:{region}:{self._get_account_id()}:file-system/{file_system_id}",
-                Subdirectory=source_path,
-                Ec2Config={
-                    "SubnetArn": self._get_subnet_arn(region),
-                    "SecurityGroupArns": [self._get_security_group_arn(region)],
-                },
-            )
-            source_arn = source_location["LocationArn"]
-        else:
-            source_location = datasync.create_location_fsx_lustre(
-                FsxFilesystemArn=f"arn:{partition}:fsx:{region}:{self._get_account_id()}:file-system/{file_system_id}",
-                Subdirectory=source_path,
-                SecurityGroupArns=[self._get_security_group_arn(region)],
-            )
-            source_arn = source_location["LocationArn"]
-
-        # Create destination location (S3)
-        dest_location = datasync.create_location_s3(
-            S3BucketArn=f"arn:{partition}:s3:::{destination_bucket}",
-            Subdirectory=destination_prefix,
-            S3Config={"BucketAccessRoleArn": self._get_datasync_role_arn(region)},
-        )
-        dest_arn = dest_location["LocationArn"]
-
-        # Create task
-        task = datasync.create_task(
-            SourceLocationArn=source_arn,
-            DestinationLocationArn=dest_arn,
-            Name=f"gco-download-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}",
-            Options={
-                "VerifyMode": "ONLY_FILES_TRANSFERRED",
-                "OverwriteMode": "ALWAYS",
-                "PreserveDeletedFiles": "REMOVE",
-                "TransferMode": "CHANGED",
-            },
-        )
-
-        return str(task["TaskArn"])
-
-    def _get_account_id(self) -> str:
-        """Get current AWS account ID."""
-        sts = self._session.client("sts")
-        return str(sts.get_caller_identity()["Account"])
-
-    def _get_subnet_arn(self, _region: str) -> str:
-        """Get a subnet ARN for DataSync in the given region."""
-        # This would need to be implemented based on your VPC setup
-        # For now, return a placeholder
-        raise NotImplementedError("Subnet ARN lookup not implemented - configure via stack outputs")
-
-    def _get_security_group_arn(self, _region: str) -> str:
-        """Get a security group ARN for DataSync in the given region."""
-        raise NotImplementedError(
-            "Security group ARN lookup not implemented - configure via stack outputs"
-        )
-
-    def _get_datasync_role_arn(self, region: str) -> str:
-        """Get the DataSync IAM role ARN."""
-        raise NotImplementedError(
-            "DataSync role ARN lookup not implemented - configure via stack outputs"
-        )
-
     def get_access_point_info(self, file_system_id: str, region: str) -> list[dict[str, Any]]:
         """
         Get EFS access points for a file system.
@@ -424,11 +322,20 @@ class FileSystemClient:
             region: AWS region
 
         Returns:
-            List of access point information
+            List of access point information; empty when the file system
+            has none or does not exist (``FileSystemNotFound``)
+
+        Raises:
+            ClientError: Any other failure (access denied, throttling, a
+                malformed ID, a service error): none of them says the file
+                system has no access points.
         """
         try:
             efs = self._session.client("efs", region_name=region)
-            response = efs.describe_access_points(FileSystemId=file_system_id)
+            # DescribeAccessPoints returns 100 per page by default.
+            pages = efs.get_paginator("describe_access_points").paginate(
+                FileSystemId=file_system_id
+            )
 
             return [
                 {
@@ -438,10 +345,13 @@ class FileSystemClient:
                     "posix_user": ap.get("PosixUser", {}),
                     "status": ap["LifeCycleState"],
                 }
-                for ap in response.get("AccessPoints", [])
+                for page in pages
+                for ap in page.get("AccessPoints", [])
             ]
-        except ClientError:
-            return []
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "FileSystemNotFound":
+                return []
+            raise
 
     def download_from_pod(
         self,
@@ -482,12 +392,12 @@ class FileSystemClient:
 
         # Update kubeconfig for the cluster
         cluster_name = f"{self.config.project_name}-{region}"
-        update_kubeconfig(cluster_name, region)
+        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
 
         # Build kubectl cp command
         # Format: kubectl cp <namespace>/<pod>:<remote_path> <local_path>
         source = f"{namespace}/{pod_name}:{remote_path}"
-        cmd = ["kubectl", "cp"]
+        cmd = ["kubectl", *context_flags, "cp"]
 
         if container:
             cmd.extend(["-c", container])
@@ -574,7 +484,7 @@ class FileSystemClient:
 
         # Update kubeconfig for the cluster
         cluster_name = f"{self.config.project_name}-{region}"
-        update_kubeconfig(cluster_name, region)
+        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
 
         # Create helper pod manifest.
         #
@@ -598,7 +508,7 @@ class FileSystemClient:
         try:
             # Create the helper pod
             subprocess.run(
-                ["kubectl", "apply", "-f", "-"],
+                ["kubectl", *context_flags, "apply", "-f", "-"],
                 input=pod_manifest,
                 capture_output=True,
                 text=True,
@@ -612,6 +522,7 @@ class FileSystemClient:
                 status_result = subprocess.run(
                     [
                         "kubectl",
+                        *context_flags,
                         "get",
                         "pod",
                         helper_pod_name,
@@ -636,6 +547,7 @@ class FileSystemClient:
             list_result = subprocess.run(
                 [
                     "kubectl",
+                    *context_flags,
                     "exec",
                     helper_pod_name,
                     "-n",
@@ -702,6 +614,7 @@ class FileSystemClient:
                 subprocess.run(
                     [
                         "kubectl",
+                        *context_flags,
                         "delete",
                         "pod",
                         helper_pod_name,
@@ -767,7 +680,7 @@ class FileSystemClient:
 
         # Update kubeconfig for the cluster
         cluster_name = f"{self.config.project_name}-{region}"
-        update_kubeconfig(cluster_name, region)
+        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
 
         # Create helper pod manifest.
         #
@@ -786,7 +699,7 @@ class FileSystemClient:
         try:
             # Create the helper pod
             subprocess.run(
-                ["kubectl", "apply", "-f", "-"],
+                ["kubectl", *context_flags, "apply", "-f", "-"],
                 input=pod_manifest,
                 capture_output=True,
                 text=True,
@@ -800,6 +713,7 @@ class FileSystemClient:
                 status_result = subprocess.run(
                     [
                         "kubectl",
+                        *context_flags,
                         "get",
                         "pod",
                         helper_pod_name,
@@ -822,7 +736,7 @@ class FileSystemClient:
 
             # Copy files from the helper pod
             source = f"{namespace}/{helper_pod_name}:{full_remote_path}"
-            cmd = ["kubectl", "cp", "--", source, local_path]
+            cmd = ["kubectl", *context_flags, "cp", "--", source, local_path]
 
             subprocess.run(
                 cmd, check=True, capture_output=True, text=True
@@ -867,6 +781,7 @@ class FileSystemClient:
                 subprocess.run(
                     [
                         "kubectl",
+                        *context_flags,
                         "delete",
                         "pod",
                         helper_pod_name,

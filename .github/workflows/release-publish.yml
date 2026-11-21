@@ -8,21 +8,35 @@
 # generated notes. Both actions are idempotent, so a failed run can be
 # re-dispatched (workflow_dispatch) and it finishes whatever is missing.
 #
+# The release commit is the newest commit on main's first-parent history that
+# changed VERSION, located from the run's commit rather than assumed to be it.
+# A dispatch starts at whatever main points to by then, possibly several
+# merges past the release; tagging that commit would release unreleased
+# changes, and once the tag exists every resume would fail the immutability
+# check.
+#
 # Guard rails:
-#   * The version files must agree (VERSION is the source of truth;
-#     gco/_version.py and cli/__init__.py must mirror it) — a drifted merge
-#     fails loudly instead of tagging an inconsistent tree.
-#   * On push events the head commit subject must be `Release vX.Y.Z`
-#     (optionally with the squash-merge `(#N)` suffix). A VERSION edit that
-#     arrives any other way is deliberately NOT auto-tagged; an operator can
-#     still publish it explicitly via workflow_dispatch after review.
+#   * The version files must agree at the release commit (VERSION is the
+#     source of truth; gco/_version.py and cli/__init__.py must mirror it) —
+#     a drifted merge fails loudly instead of tagging an inconsistent tree.
+#   * The release commit's subject must be `Release vX.Y.Z` (optionally with
+#     the squash-merge `(#N)` suffix). A VERSION edit that arrives any other
+#     way is deliberately NOT tagged: a push run skips it with a summary, and
+#     a dispatch fails, since publishing it would release a commit nobody
+#     cut as a release. Ship those changes by cutting the next release.
 #   * A v-tag that already exists pointing at a different commit is an
-#     immutability violation and fails the run; pointing at this commit is
-#     the resume case and skips tag creation.
+#     immutability violation and fails the run; pointing at the release
+#     commit is the resume case and skips tag creation.
 #
 # Concurrency:
-#   Shares the `release` group with stage 1 so a publish never interleaves
-#   with the next release's branch cut.
+#   Its own `release-publish` group, never cancelled. GitHub keeps at most
+#   one pending run per group and a newer queued run cancels it, whatever
+#   cancel-in-progress says, so sharing stage 1's group let a Release
+#   dispatch cancel a publish waiting behind a running stage 1, and that
+#   merged version was never tagged. The two stages need no serializing
+#   against each other: stage 1 reads only main and the tags, and the next
+#   release PR cannot pass CI and merge before this run finishes. Publish
+#   runs serialize among themselves, so two never race the same tag.
 #
 # Permissions model:
 #   `contents: write` on the built-in GITHUB_TOKEN covers the tag push and
@@ -42,11 +56,12 @@ on:
     paths:
       - VERSION
   # Manual re-publish for a merged release whose publish run failed midway.
-  # Every step is idempotent, so re-running completes only the missing half.
+  # Every step is idempotent, so re-running completes only the missing half;
+  # a dispatch publishes the newest release commit on main.
   workflow_dispatch:
 
 concurrency:
-  group: release
+  group: release-publish
   cancel-in-progress: false
 
 permissions:
@@ -73,6 +88,21 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Locate the release commit
+        id: release
+        # First-parent only, so the commit found is one main's own history
+        # records (the squash-merge), never a commit inside a merged branch.
+        # Every later step verifies and tags this commit's tree.
+        run: |
+          set -euo pipefail
+          release_sha=$(git log -1 --first-parent --format=%H -- VERSION)
+          if [ -z "$release_sha" ]; then
+            echo "No commit in the history of ${GITHUB_SHA} changed VERSION; nothing to publish" >&2
+            exit 1
+          fi
+          git checkout --quiet --detach "$release_sha"
+          echo "sha=$release_sha" >> "$GITHUB_OUTPUT"
+          echo "Release commit: $release_sha (run started at $GITHUB_SHA)"
       - name: Resolve and verify the version
         id: version
         run: |
@@ -92,52 +122,55 @@ jobs:
           fi
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
           echo "Publishing v$new_version"
-      - name: Require a release commit subject (push events only)
+      - name: Require a release commit subject
         id: gate
         env:
           EVENT_NAME: ${{ github.event_name }}
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" != "push" ]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "workflow_dispatch: operator explicitly requested publish"
-            exit 0
-          fi
           subject=$(git log -1 --format=%s)
           pattern="^Release v${NEW_VERSION//./\\.}( \(#[0-9]+\))?$"
           if printf '%s\n' "$subject" | grep -qE "$pattern"; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            {
-              echo "## Release publish skipped"
-              echo ""
-              echo "VERSION changed on main, but the commit subject is:"
-              echo ""
-              echo "    ${subject}"
-              echo ""
-              echo "not \`Release v${NEW_VERSION}\`, so this was not a release PR merge."
-              echo "To publish it anyway, re-run this workflow via workflow_dispatch."
-            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
+          # A dispatch asked for a publish that cannot happen; a green run
+          # would read as success.
+          if [ "$EVENT_NAME" != "push" ]; then
+            echo "The newest VERSION change on main is not a release commit: ${subject}" >&2
+            echo "Only \`Release v${NEW_VERSION}\` commits are published; cut a new release instead." >&2
+            exit 1
+          fi
+          echo "publish=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Release publish skipped"
+            echo ""
+            echo "VERSION changed on main, but the commit subject is:"
+            echo ""
+            echo "    ${subject}"
+            echo ""
+            echo "not \`Release v${NEW_VERSION}\`, so this was not a release PR merge."
+            echo "Only release commits are published; ship these changes by cutting the next release."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Create and push the annotated tag (idempotent)
         if: steps.gate.outputs.publish == 'true'
         env:
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
         run: |
           set -euo pipefail
           tag="v${NEW_VERSION}"
           if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
             tagged_commit=$(git rev-parse "${tag}^{commit}")
-            if [ "$tagged_commit" != "$GITHUB_SHA" ]; then
-              echo "Tag ${tag} already exists at ${tagged_commit}, not ${GITHUB_SHA}." >&2
+            if [ "$tagged_commit" != "$RELEASE_SHA" ]; then
+              echo "Tag ${tag} already exists at ${tagged_commit}, not ${RELEASE_SHA}." >&2
               echo "Released tags are immutable; bump the version again instead." >&2
               exit 1
             fi
-            echo "Tag ${tag} already points at ${GITHUB_SHA}; skipping tag creation"
+            echo "Tag ${tag} already points at ${RELEASE_SHA}; skipping tag creation"
           else
-            git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}" "$GITHUB_SHA"
+            git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}" "$RELEASE_SHA"
             git push origin "refs/tags/v${NEW_VERSION}"
           fi
       - name: Create GitHub Release with generated notes (idempotent)

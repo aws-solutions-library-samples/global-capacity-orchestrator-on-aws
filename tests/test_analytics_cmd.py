@@ -888,7 +888,7 @@ def test_toggle_round_trip_property(enabled: bool, hyperpod_enabled: bool) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_enable_then_synth_emits_sagemaker_emr_cognito(tmp_path, monkeypatch):
+def test_enable_then_synth_emits_sagemaker_emr_cognito(tmp_path, monkeypatch, valid_cdk_context):
     """``analytics enable`` then ``cdk synth`` emits the analytics resources.
 
     Rather than shelling out to the real ``cdk`` CLI (which would need
@@ -942,6 +942,7 @@ def test_enable_then_synth_emits_sagemaker_emr_cognito(tmp_path, monkeypatch):
 
     app = cdk.App(
         context={
+            **valid_cdk_context,
             "analytics_environment": {
                 "enabled": True,
                 "hyperpod": {"enabled": False},

@@ -26,7 +26,6 @@ from hypothesis import strategies as st
 from cli.inference import (
     MOONCAKE_BYTE_SIZE_MAX,
     MOONCAKE_OFFLOAD_TIERS,
-    MOONCAKE_PROXY_SCHEDULING,
     MOONCAKE_TRANSFER_PROTOCOLS,
     author_byte_size,
     validate_mooncake_spec,
@@ -178,7 +177,7 @@ def _mooncake_blocks(draw: st.DrawFn) -> dict[str, Any]:
         if draw(st.booleans()):
             proxy["image"] = draw(_names)
         if draw(st.booleans()):
-            proxy["scheduling"] = draw(st.sampled_from(sorted(MOONCAKE_PROXY_SCHEDULING)))
+            proxy["scheduling"] = "round_robin"
         if draw(st.booleans()):
             proxy["admin_api_key_secret"] = draw(_names)
         block["proxy"] = proxy

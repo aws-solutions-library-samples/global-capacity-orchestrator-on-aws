@@ -106,9 +106,9 @@ Each region contains:
 
 - Created in every workload region because the centralized aggregator cannot join arbitrary regional VPCs
 - Regional REST API uses AWS-managed TLS and IAM authentication ([SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html))
-- Its resource policy always admits the exact aggregator role
-- In the commercial `aws` partition, `api_gateway.regional_api_enabled=true` additionally admits IAM-authorized principals from the deployment account for direct region-pinned access
-- In other partitions, same-account direct access is enabled automatically because this bridge is the supported workload ingress when Global Accelerator is absent
+- Its resource policy names only the exact aggregator role, for the routes it fans out to
+- Region-pinned calls by other principals of the deployment account use the bridge directly; each caller needs an identity-based policy that allows `execute-api:Invoke` on it, because no statement admits the account as a whole
+- In other partitions this bridge is also the supported workload ingress, because Global Accelerator is absent
 - The buffered Python VPC Lambda resolves and verifies the internal ALB from `/<project>/alb-hostname-<region>` for `/api/v1/*`
 - A separate Node.js 24 VPC Lambda applies the same HMAC, private-root TLS, and ALB-ownership controls while streaming `/inference/*` responses
 - Neither path requires a VPC Link or Network Load Balancer
@@ -211,12 +211,12 @@ rendered as spec sheets and as the interaction diagram in
 
 **Service Accounts & RBAC**
 
-- `gco-health-monitor-sa`: Read-only cluster health plus narrowly named self-healing resources
+- `gco-health-monitor-sa`: Lists nodes, pods and node metrics, lists and watches Jobs (lifecycle webhooks), plus the named `gco-gateway` Gateway and its two election Leases
 - `gco-manifest-processor-sa`: Job-namespace Kubernetes writes and control-plane table access
-- `gco-inference-monitor-sa`: Inference-namespace reconciliation permissions
+- `gco-inference-monitor-sa`: Inference-namespace reconciliation permissions, and its own IAM role: read, update and delete on the inference endpoints table (no create; the CLI creates endpoints) and the regional bucket's `/name` discovery parameter for the Mooncake cold tier
 - `gco-inference-proxy-sa`: Exact AWS secret/endpoint-read access and no Kubernetes RBAC binding
 - `gco-cost-monitor-sa`: Cost report bucket write access only; no Kubernetes RBAC binding
-- `gco-service-account`: General job and inference workload identity
+- `gco-service-account`: General job and inference workload identity in `gco-jobs` and `gco-inference`. Its role has no access to the jobs or inference endpoints tables, so a submitted pod cannot rewrite queue or endpoint state
 
 ### 5. Lambda Layer
 
@@ -338,7 +338,7 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 **Layers of Defense:**
 
-1. API Gateway IAM authorization, account-scoped resource policy, WAF, and throttling
+1. API Gateway IAM authorization (each caller's identity-based `execute-api:Invoke` permission; no resource-policy statement admits the account as a whole), WAF, and throttling
 2. Request-bound HMAC authentication between trusted proxies and backend services
 3. Internal ALB and private-subnet isolation
 4. Security groups, Kubernetes NetworkPolicies, and RBAC
@@ -347,8 +347,22 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 - Private endpoint enabled
 - Public endpoint disabled by default
-- Cluster security group controls VPC access
+- Cluster security group admits the Kubernetes API (443) only from itself (nodes, the `--via-ssm auto` bastion), from the security groups of the kubectl-applier, Helm installer and GA registration Lambdas, and with HyperPod on from its node security group; no rule admits the VPC CIDR
 - Pod security controls and admission-time workload validation enforced
+
+Every client inside the regional VPC that calls the private Kubernetes API, and the rule that lets it reach 443 on the control plane's network interfaces (they carry the EKS cluster security group):
+
+| Client | Its security group | Rule that admits it |
+|--------|--------------------|---------------------|
+| EKS Auto Mode nodes: the built-in pools and every GCO NodePool (all use the `default` NodeClass), and the NodeClasses `gco nodepools create-odcr` / `create-capacity-block` generate | The cluster security group | The cluster security group's own all-traffic rule from itself, which EKS creates |
+| The `--via-ssm auto` ephemeral bastion (`cli/ephemeral_bastion.py`) | The cluster security group, read from `eks:DescribeCluster` | The same self rule |
+| kubectl-applier Lambda | `KubectlLambdaSG` | 443 from that group |
+| Helm installer Lambda | `HelmInstallerLambdaSG` | 443 from that group |
+| GA registration Lambda | The security group CDK creates for the function | 443 from that group |
+| HyperPod nodes (`hyperpod.enabled`) | `<project>-hyperpod-sg-<region>` | All traffic from that group (`gco/stacks/hyperpod_cluster.py`) |
+| An instance you name with `--via-ssm <instance-id>`, a Client VPN endpoint, a VPC-attached CI runner | Yours | None until you add one: attach the cluster security group (`ClusterSecurityGroupId` stack output) or add your group as a 443 ingress source on it |
+
+The other compute GCO runs in or beside the VPC does not call the Kubernetes API: the GA deregistration and drift-detection Lambdas run outside the VPC and call AWS APIs only; the regional API proxy and inference streaming proxy Lambdas call the internal ALB, whose security groups the AWS Load Balancer Controller manages; the ALB reaches the API pods on 8443 through the controller's backend security group rules; AWS PCS nodes run Slurm (the API pods reach `slurmrestd` instead); SageMaker Studio and EMR Serverless run in the analytics stack's own VPC. No stack creates CodeBuild projects.
 
 **In-cluster network isolation** (`lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`, enforced on EKS Auto Mode by the network policy controller that `06-network-policy-controller.yaml` switches on — `cdk.json` `eks_cluster.network_policy_enforcement`, default `true` — and by Calico in the kind CI job):
 
@@ -356,7 +370,7 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 |-----------|---------|--------|
 | `gco-system` | Default deny. Each platform Deployment is admitted on exactly the TLS port its sidecar serves, while every plaintext application listener binds pod loopback: 8443 (TLS proxy sidecars, targeted by the ALB) for health-monitor, manifest-processor, inference-proxy; 9443 (the metrics TLS sidecar) for inference-monitor; 8443 from the manifest processor only for cost-monitor | DNS, HTTPS (AWS APIs, Kubernetes API), the node's EKS Pod Identity Agent, the inference proxy's path to `gco-inference` model pods (8443), the cost monitor's path to OpenCost's TLS front door (9443) |
 | `gco-jobs` | Default deny from other namespaces; every pod in the namespace may reach every other pod on any port (distributed training, Ray, Volcano, Slurm, Kubeflow choose their own ports). Two operators are admitted from their own namespaces on one port each, because they drive their workloads through an in-pod API rather than the Kubernetes API: KubeRay to Ray head pods on the dashboard port (8265, RayJob status and RayService health) and, with Slurm enabled, Slinky to slurmrestd (6820, NodeSet reconciliation) | DNS, HTTPS to any destination (S3, DynamoDB, ECR, CloudWatch, Bedrock, model hubs, package indexes — GCO's own tables and shared bucket live in the global region, so a VPC-only rule could never carry the platform's traffic), the node's EKS Pod Identity Agent (`169.254.170.23:80`, where a `gco-service-account` pod obtains its AWS credentials), the in-VPC ranges from `vpc_endpoint_cidrs` on any port (Valkey, Aurora, EFS/FSx, VPC endpoints), plus the opt-in MLflow and Slurm client rules |
-| `gco-inference` | Model pods (`gco.io/type: inference`) accept traffic only from the authenticated inference proxy, on their TLS sidecar's 8443, and from each other (Mooncake KV-transfer, PD proxy) | Every pod in the namespace: DNS, HTTPS (model pulls, AWS APIs) and the node's EKS Pod Identity Agent; model pods also reach each other and the Mooncake master ports. Frameworks whose pods talk to each other on their own ports, such as Ray (RayService included), therefore belong in `gco-jobs` |
+| `gco-inference` | Default deny. Model pods (`gco.io/type: inference`) accept traffic only from the authenticated inference proxy, on their TLS sidecar's 8443, and from each other (Mooncake KV-transfer, PD proxy); the shared Mooncake master accepts model pods on its RPC and metadata ports. Any other pod in the namespace, such as a tenant Deployment whose pods do not carry `gco.io/type: inference`, accepts nothing until a NetworkPolicy admits its clients | Every pod in the namespace: DNS, HTTPS (model pulls, AWS APIs) and the node's EKS Pod Identity Agent; model pods also reach each other and the Mooncake master ports. Frameworks whose pods talk to each other on their own ports, such as Ray (RayService included), therefore belong in `gco-jobs` |
 
 Rules on probed ports name the port but no source: the ALB is not a pod and the kubelet probes from the node's host network, which no selector can express. DNS rules likewise allow port 53 to any destination because Auto Mode answers cluster DNS from a per-node service rather than CoreDNS pods. NetworkPolicies are additive, so an operator who needs a path GCO does not ship adds a policy rather than switching enforcement off.
 
@@ -616,7 +630,14 @@ applier and cluster administrators included:
   recreating it unlabelled therefore cannot change what the pods run. Only the
   monitor sets, changes or removes its provenance annotations
   (`gco.io/lifecycle-id`, `gco.io/region-generation`, `gco.io/leader-epoch`), so
-  it cannot be made to adopt an object it never created.
+  it cannot be made to adopt an object it never created, and the
+  `gco.io/endpoint` label on the objects it manages, so none of them can be
+  relabelled for another endpoint, which the monitor would then neither repair
+  nor delete with its own endpoint. The same holds for their `project` label:
+  with `gco.io/type: inference` it is the provenance label the monitor checks
+  before it deletes a stale object of an earlier lifecycle of the endpoint, so
+  stripping it would leave the old object running and keep the new lifecycle
+  from taking over its name.
 - Only cert-manager's controller may create or update
   `gco-inference/gco-inference-tls`. Nobody can plant that Secret, with a
   `ca.crt` every PD proxy would trust, before cert-manager first issues it.

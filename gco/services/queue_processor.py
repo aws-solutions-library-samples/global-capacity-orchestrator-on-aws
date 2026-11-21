@@ -28,13 +28,15 @@ Configuration via environment variables:
     ALLOWED_KINDS:           Comma-separated resource-kind allowlist shared
                              with the REST manifest processor
     MAX_GPU_PER_MANIFEST:    Max GPUs summed across all containers
-                             (regular + init + ephemeral) (default: 4)
-    MAX_CPU_PER_MANIFEST:    Max CPU summed across all containers; accepts
-                             K8s suffixes ("500m" or "10" for cores)
-                             (default: 10000 millicores = 10 cores)
-    MAX_MEMORY_PER_MANIFEST: Max memory summed across all containers;
-                             accepts K8s suffixes ("32Gi", "256Mi") or
-                             a bare byte count (default: 32Gi)
+                             (regular + init + ephemeral)
+    MAX_CPU_PER_MANIFEST:    Max CPU summed across all containers; any
+                             Kubernetes quantity ("500m", "10", "0.5")
+    MAX_MEMORY_PER_MANIFEST: Max memory summed across all containers; any
+                             Kubernetes quantity ("32Gi", "256Mi", a bare
+                             byte count)
+                             The three caps default to
+                             gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS,
+                             the REST processor's defaults.
     TRUSTED_REGISTRIES:      Comma-separated list of registry domains
                              (e.g. "nvcr.io,public.ecr.aws"). Empty/unset
                              uses the REST processor's secure defaults.
@@ -44,6 +46,10 @@ Configuration via environment variables:
                              (e.g. "nvidia,pytorch"). Empty/unset uses the
                              REST processor's secure defaults. Keep in sync
                              with cdk.json::job_validation_policy.trusted_dockerhub_orgs.
+    K8S_API_TIMEOUT:         Seconds each Kubernetes API request attempt may
+                             take (default: 30, gco.services.k8s_client)
+    YAML_MAX_DEPTH:          Maximum manifest nesting depth (default: 50),
+                             the REST processor's variable and default
 
 Security policy toggles (all default to true except ``BLOCK_RUN_AS_ROOT``
 which defaults to false, matching job_validation_policy.manifest_security_policy
@@ -97,11 +103,17 @@ from gco.job_admission import (
     check_sandbox,
     check_sandbox_runtime_class,
     hyperpod_routing,
+    parse_cpu_millicores,
+    parse_memory_bytes,
+    pod_tolerations,
+    resource_totals,
+    within_nesting_depth,
 )
 from gco.job_envelope import DEFAULT_JOB_NAMESPACE
 from gco.manifest_security_policy import parse_boolean_environment
 from gco.models import ResourceStatus
 from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
+from gco.services.k8s_client import BoundedApiClient
 from gco.services.manifest_processor import (
     ADDON_KIND_HINTS,
     DEFAULT_ALLOWED_KINDS,
@@ -115,8 +127,8 @@ from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobStore
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-16T20:28:30Z
-# Generated from Git commit: 3c21b4eec4ebed24c6ca9e80a33302966592d8db
+# Generated at (UTC): 2026-11-19T14:17:34Z
+# Generated from Git commit: d0db0066b3e8f603134a252ab3753efd40d90493
 # Flowchart(s) generated from this file:
 #   * ``validate_manifest`` -> ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.png``)
@@ -131,45 +143,22 @@ logging.basicConfig(
 log = logging.getLogger("queue-processor")
 
 
-def _parse_cpu_string(cpu_str: str) -> int:
-    """Parse a Kubernetes-style CPU string to millicores.
+def _parse_cpu_string(cpu_str: object) -> int:
+    """A CPU quantity in millicores (``"500m"`` -> 500, ``"4"`` -> 4000, ``0.5`` -> 500).
 
-    Accepts:
-      - Millicore suffix: "500m" -> 500
-      - Whole cores: "4" -> 4000
+    Any form the API server accepts, through the parser the REST gate uses
+    (:func:`gco.job_admission.parse_cpu_millicores`); an empty value is 0.
     """
-    if not cpu_str:
-        return 0
-    s = cpu_str.strip()
-    if s.endswith("m"):
-        return int(s[:-1])
-    return int(s) * 1000
+    return parse_cpu_millicores(cpu_str)
 
 
-def _parse_memory_string(memory_str: str) -> int:
-    """Parse a Kubernetes-style memory string to bytes.
+def _parse_memory_string(memory_str: object) -> int:
+    """A memory quantity in bytes (``"1Gi"``, ``"512M"``, ``2147483648``, ``"1e9"``).
 
-    Accepts binary suffixes (Ki, Mi, Gi, Ti), decimal suffixes (k, M, G),
-    or a bare byte count.
+    Any form the API server accepts, through the parser the REST gate uses
+    (:func:`gco.job_admission.parse_memory_bytes`); an empty value is 0.
     """
-    if not memory_str:
-        return 0
-    s = memory_str.strip()
-    if s.endswith("Ki"):
-        return int(float(s[:-2]) * 1024)
-    if s.endswith("Mi"):
-        return int(float(s[:-2]) * 1024**2)
-    if s.endswith("Gi"):
-        return int(float(s[:-2]) * 1024**3)
-    if s.endswith("Ti"):
-        return int(float(s[:-2]) * 1024**4)
-    if s.endswith("k"):
-        return int(float(s[:-1]) * 1000)
-    if s.endswith("M"):
-        return int(float(s[:-1]) * 1000**2)
-    if s.endswith("G"):
-        return int(float(s[:-1]) * 1000**3)
-    return int(float(s))
+    return parse_memory_bytes(memory_str)
 
 
 # --- Configuration from environment ---
@@ -205,9 +194,10 @@ ALLOWED_KINDS = (
 )
 # Whether a Nitro Sandbox RuntimeClass exists here (validate_manifest). The
 # client is built per lookup because the Kubernetes configuration is loaded
-# after import.
+# after import; like every client here it bounds each request
+# (gco.services.k8s_client).
 runtime_class_exists = RuntimeClassPresence(
-    lambda name: client.NodeV1Api().read_runtime_class(name)
+    lambda name: client.NodeV1Api(BoundedApiClient()).read_runtime_class(name)
 )
 # Defaults come from the shared source of truth
 # (gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS - two full
@@ -269,6 +259,10 @@ BLOCK_RUN_AS_ROOT = parse_boolean_environment("BLOCK_RUN_AS_ROOT", False)
 # manifest_processor.require_accelerator_toleration so the SQS path is not a
 # bypass.
 REQUIRE_ACCELERATOR_TOLERATION = parse_boolean_environment("REQUIRE_ACCELERATOR_TOLERATION", True)
+
+# Maximum manifest nesting depth: the variable and default the REST processor
+# reads (create_manifest_processor_from_env), checked the same way.
+YAML_MAX_DEPTH = int(os.environ.get("YAML_MAX_DEPTH", "50"))
 
 
 def _is_registry_domain(entry: str) -> bool:
@@ -483,14 +477,22 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
     A TrainJob has no single pod spec: checks 2-5 run over its decomposition
     (synthetic ``spec.trainer`` view plus every pod spec embedded in
     ``runtimePatches`` — see ``manifest_processor.TrainJobPodSpecs``), with
-    the trainer view's resources counted once per ``numNodes`` for check 5
-    and accelerator tolerations unioned across views for the toleration
-    check.
+    the trainer view's resources counted once per ``numNodes`` for check 5,
+    accelerator requests unioned across views for the toleration check,
+    and the tolerations those its pod templates carry once Trainer merges
+    the patches (``gco.job_admission.pod_tolerations``, shared with the
+    REST path).
+
+    Before any of these, the manifest must nest no deeper than
+    ``YAML_MAX_DEPTH`` levels (``yaml_max_depth``, default 50), checked by
+    the function the REST path uses and reported in its words.
 
     Returns:
         ``(True, "")`` if the manifest is accepted, otherwise
         ``(False, reason)`` where ``reason`` is a human-readable string.
     """
+    if not within_nesting_depth(m, YAML_MAX_DEPTH):
+        return False, f"Manifest exceeds maximum nesting depth of {YAML_MAX_DEPTH} levels"
     kind = m.get("kind")
     if not kind:
         return False, "missing 'kind'"
@@ -550,14 +552,15 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
         # stay Pending forever on tainted accelerator nodes. For a TrainJob the
         # request usually lives in spec.trainer.resourcesPerNode while the
         # toleration can only be expressed through a runtimePatches pod spec,
-        # so requests and tolerations are each unioned across every view
-        # before matching.
+        # so requests are unioned across every view, and the tolerations are
+        # those the pod templates carry once Trainer merges the patches (a
+        # later patch's list replaces an earlier one for the same replicated
+        # job). One definition with the REST path: pod_tolerations.
         if REQUIRE_ACCELERATOR_TOLERATION:
             requested_taints: set[str] = set()
-            tolerations: list[dict[str, Any]] = []
             for pod_spec, _multiplier in weighted_pod_specs:
                 requested_taints.update(_requested_accelerators(pod_spec))
-                tolerations.extend(pod_spec.get("tolerations", []) or [])
+            tolerations = pod_tolerations(m, [spec for spec, _ in weighted_pod_specs])
             # A workload routed to SageMaker HyperPod nodes meets none of the
             # accelerator taints, only gco.aws/hyperpod: the Kueue queue path
             # has the ResourceFlavor inject that toleration, the node-selector
@@ -666,24 +669,11 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
         # our security intent: an operator's configured "max CPU/memory/GPU
         # per manifest" is a hard cap on the total resources a submitter
         # can request regardless of which container kind carries the request.
-        total_gpu = 0
-        total_cpu = 0
-        total_memory = 0
-        for pod_spec, multiplier in weighted_pod_specs:
-            for _container_type, c in _iter_containers(pod_spec):
-                res = c.get("resources", {}) or {}
-                limits = res.get("limits", {}) or {}
-                requests = res.get("requests", {}) or {}
-                gpu = limits.get("nvidia.com/gpu") or requests.get("nvidia.com/gpu", "0")  # nosec B113  # dict.get(), not HTTP requests
-                total_gpu += multiplier * int(gpu)
-                cpu_str = limits.get("cpu") or requests.get("cpu", "0")  # nosec B113  # dict.get(), not HTTP requests
-                if isinstance(cpu_str, str) and cpu_str.endswith("m"):
-                    total_cpu += multiplier * int(cpu_str[:-1])
-                else:
-                    total_cpu += multiplier * int(float(cpu_str) * 1000)
-                mem_str = limits.get("memory") or requests.get("memory", "0")  # nosec B113  # dict.get(), not HTTP requests
-                mem_bytes = _parse_memory_string(str(mem_str))
-                total_memory += multiplier * mem_bytes
+        try:
+            total_cpu, total_memory, total_gpu = resource_totals(weighted_pod_specs)
+        except ValueError as exc:
+            # Same message shape as the REST gate (job_admission.check_resource_caps).
+            return False, f"Resource limit validation error: {exc}"
 
         errors = []
         if total_gpu > MAX_GPU:
@@ -697,7 +687,7 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
             )
         if errors:
             hint = (
-                "To raise limits, update queue_processor in cdk.json "
+                "To raise limits, update job_validation_policy.resource_quotas in cdk.json "
                 "and redeploy (see examples/README.md#troubleshooting)"
             )
             return False, "; ".join(errors) + f". {hint}"
@@ -764,14 +754,13 @@ def _inject_security_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     via SQS get the same SA-token-theft protection as those submitted via
     the REST API.
 
-    For a TrainJob the default is injected into every pod spec embedded in
-    ``runtimePatches`` (live references into the manifest, so setdefault
-    mutates it in place); the base pod template comes from the shipped
-    ClusterTrainingRuntime, which already disables the token.
+    A TrainJob is left as it is: its pod template comes from the runtime, and
+    a runtime patch's pod spec has no ``automountServiceAccountToken`` (Kubeflow
+    Trainer 2.3.0's TrainJob CRD), so the API server would drop an injected
+    one. The shipped ``torch-distributed`` ClusterTrainingRuntime sets it to
+    false (docs/DISTRIBUTED_TRAINING.md, Runtimes).
     """
     if manifest.get("kind") == "TrainJob":
-        for embedded in extract_trainjob_pod_specs(manifest).embedded:
-            embedded.setdefault("automountServiceAccountToken", False)
         return manifest
     pod_spec = _extract_pod_spec(manifest)
     if pod_spec is not None:
@@ -817,7 +806,7 @@ def apply_manifest(m: dict[str, Any]) -> ResourceStatus:
             message=message,
         )
 
-    dyn = dynamic.DynamicClient(client.ApiClient())
+    dyn = dynamic.DynamicClient(BoundedApiClient())
     try:
         resource = dyn.resources.get(api_version=api_version, kind=kind)
     except ResourceNotFoundError:
@@ -905,7 +894,9 @@ def process_one_message() -> bool:
 
     try:
         body = json.loads(msg.get("Body", ""))
-    except (json.JSONDecodeError, TypeError) as e:
+    except (json.JSONDecodeError, TypeError, RecursionError) as e:
+        # RecursionError: one SQS message has room for more nesting than the
+        # parser can follow (it gives up near 120k levels, 240 KB).
         log.error("Malformed SQS message body; retaining for retry/DLQ: %s", e)
         return False
 

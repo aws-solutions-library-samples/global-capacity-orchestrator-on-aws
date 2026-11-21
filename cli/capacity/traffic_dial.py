@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from cli.config import GCOConfig, get_config
 
@@ -195,8 +195,49 @@ class TrafficDialManager:
             )
         return statuses
 
+    def _override_description(self, region: str) -> str:
+        return (
+            f"Manual traffic-dial override for {region}; the scheduled "
+            "controller skips this region until the override is cleared."
+        )
+
+    def _read_override(self, region: str) -> str | None:
+        """The region's current override value, or None when there is none."""
+        ssm = self._ssm_client()
+        try:
+            response = ssm.get_parameter(Name=self._override_parameter_name(region))
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ParameterNotFound":
+                return None
+            raise
+        return str(response["Parameter"]["Value"])
+
+    def _restore_override(self, region: str, previous: str | None) -> str | None:
+        """Put back the override ``set_dial`` replaced; returns an error or None."""
+        ssm = self._ssm_client()
+        try:
+            if previous is None:
+                ssm.delete_parameter(Name=self._override_parameter_name(region))
+            else:
+                ssm.put_parameter(
+                    Name=self._override_parameter_name(region),
+                    Value=previous,
+                    Type="String",
+                    Overwrite=True,
+                    Description=self._override_description(region),
+                )
+        except (ClientError, BotoCoreError) as exc:
+            return str(exc)
+        return None
+
     def set_dial(self, region: str, percentage: int) -> RegionDialStatus:
-        """Apply a manual dial and record the override the controller honors."""
+        """Apply a manual dial and record the override the controller honors.
+
+        The override is written first, so the controller already leaves the
+        region alone when the dial changes. If the dial update then fails, the
+        override is put back as it was (removed, or its previous value), and
+        the error names the state left behind.
+        """
         if not isinstance(percentage, int) or isinstance(percentage, bool):
             raise TrafficDialError(f"Percentage must be an integer, got {percentage!r}")
         if not 0 <= percentage <= 100:
@@ -232,6 +273,30 @@ class TrafficDialManager:
                     "explicit operator intent."
                 )
 
+        try:
+            previous = self._read_override(region)
+        except (ClientError, BotoCoreError) as exc:
+            raise TrafficDialError(
+                f"Failed to read the {region} traffic-dial override; nothing was changed: {exc}"
+            ) from exc
+
+        # Override first: the controller skips the region from this point on,
+        # so it cannot revert (or race) the dial change below.
+        ssm = self._ssm_client()
+        try:
+            ssm.put_parameter(
+                Name=self._override_parameter_name(region),
+                Value=str(percentage),
+                Type="String",
+                Overwrite=True,
+                Description=self._override_description(region),
+            )
+        except (ClientError, BotoCoreError) as exc:
+            raise TrafficDialError(
+                f"Failed to record the {region} traffic-dial override; "
+                f"the dial was not changed: {exc}"
+            ) from exc
+
         ga = self._ga_client()
         try:
             # Only the dial: UpdateEndpointGroup patches omitted fields, and
@@ -240,20 +305,24 @@ class TrafficDialManager:
                 EndpointGroupArn=groups[region],
                 TrafficDialPercentage=float(percentage),
             ).get("EndpointGroup", {})
-        except ClientError as exc:
-            raise TrafficDialError(f"Failed to update the {region} traffic dial: {exc}") from exc
-
-        ssm = self._ssm_client()
-        ssm.put_parameter(
-            Name=self._override_parameter_name(region),
-            Value=str(percentage),
-            Type="String",
-            Overwrite=True,
-            Description=(
-                f"Manual traffic-dial override for {region}; the scheduled "
-                "controller skips this region until the override is cleared."
-            ),
-        )
+        except (ClientError, BotoCoreError) as exc:
+            rollback_error = self._restore_override(region, previous)
+            if rollback_error is None:
+                restored = (
+                    "the override was removed"
+                    if previous is None
+                    else f"the override was restored to {previous}"
+                )
+                raise TrafficDialError(
+                    f"Failed to change the {region} traffic dial; the dial is unchanged "
+                    f"and {restored}: {exc}"
+                ) from exc
+            raise TrafficDialError(
+                f"Failed to change the {region} traffic dial ({exc}), and putting the "
+                f"override back failed ({rollback_error}): the override now reads "
+                f"{percentage} while the dial is unchanged. Run 'gco capacity "
+                f"traffic-dial clear {region}' or set the dial again."
+            ) from exc
 
         return RegionDialStatus(
             region=region,

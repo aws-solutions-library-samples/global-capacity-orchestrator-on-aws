@@ -19,13 +19,24 @@ request a cluster cannot honor fails before anything is provisioned.
 from __future__ import annotations
 
 import json
+import signal
+import threading
+from collections.abc import Iterator
 from typing import Any
 
 import click
 import pytest
 from click.testing import CliRunner
 
-from cli import cluster_tunnel as ct
+# Patch the modules the CLI code holds (ct.ephemeral_bastion, ct.ssm_tunnel,
+# monitoring_cmd.cluster_ui), not dotted paths such as "cli.cluster_ui.x".
+# cli binds them with `from . import x`, and coverage given module names
+# (`--cov=cli.commands.x`) imports the cli packages inside a block that drops
+# them from sys.modules again; afterwards the dotted path and the CLI's own
+# reference can name two copies of one module. `import cli.cluster_tunnel`
+# names the copy the commands import.
+import cli.cluster_tunnel as ct
+from cli.commands import monitoring_cmd
 from cli.main import cli
 
 PRIVATE_ENDPOINT = "https://ABC123.gr7.us-east-1.eks.amazonaws.com"
@@ -49,6 +60,10 @@ def runner() -> CliRunner:
 class _FakeTunnel:
     """Stand-in for the SSM tunnel Popen; records termination and reaping."""
 
+    # No pipes to drain: stop_api_tunnel only waits for the exit.
+    stdout = None
+    stderr = None
+
     def __init__(self) -> None:
         self.terminated = False
         self.reaped = False
@@ -59,9 +74,9 @@ class _FakeTunnel:
     def terminate(self) -> None:
         self.terminated = True
 
-    def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+    def wait(self, timeout: float | None = None) -> int:
         self.reaped = True
-        return b"", b""
+        return -15
 
 
 class _FakeFormatter:
@@ -184,6 +199,92 @@ class TestResolvers:
             default_region = "us-east-2"
 
         assert ct.resolve_region(_Cfg(), None) == "us-east-2"
+
+    def test_the_configured_default_region_wins_over_cdk_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """config.default_region already starts as the first cdk.json regional
+        entry; the global -r, GCO_DEFAULT_REGION or the config file replace it."""
+        monkeypatch.setattr(
+            "cli.config._load_cdk_json", lambda: {"regional": ["us-east-1", "us-west-2"]}
+        )
+
+        class _Cfg:
+            default_region = "us-west-2"
+
+        assert ct.resolve_region(_Cfg(), None) == "us-west-2"
+
+    def test_the_last_fallback_is_us_east_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cli.config._load_cdk_json", dict)
+
+        class _Cfg:
+            default_region = ""
+
+        assert ct.resolve_region(_Cfg(), None) == "us-east-1"
+
+
+class TestClusterAccessRegionSelection:
+    """The global -r, GCO_DEFAULT_REGION and the config file pick the cluster."""
+
+    @pytest.fixture
+    def checkout(self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+        (tmp_path / "cdk.json").write_text(
+            json.dumps(
+                {"context": {"deployment_regions": {"regional": ["us-east-1", "us-west-2"]}}}
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("GCO_DEFAULT_REGION", raising=False)
+        monkeypatch.delenv("GCO_PROJECT_NAME", raising=False)
+        monkeypatch.setattr(
+            "cli.kubectl_helpers.describe_cluster_access",
+            lambda c, r: {"endpoint": PRIVATE_ENDPOINT, "public": False, "private": True},
+        )
+        return tmp_path
+
+    def _plan(self, runner: CliRunner, *args: str) -> dict[str, Any]:
+        result = runner.invoke(cli, [*args])
+        assert result.exit_code == 0, result.output
+        return dict(json.loads(result.output))
+
+    def test_global_region_flag(self, runner: CliRunner, checkout: Any) -> None:
+        plan = self._plan(runner, "-r", "us-west-2", "-o", "json", "cluster", "tunnel", "--print")
+        assert (plan["cluster"], plan["region"]) == ("gco-us-west-2", "us-west-2")
+
+    def test_environment_default_region(
+        self, runner: CliRunner, checkout: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GCO_DEFAULT_REGION", "us-west-2")
+        plan = self._plan(runner, "-o", "json", "cluster", "tunnel", "--print")
+        assert (plan["cluster"], plan["region"]) == ("gco-us-west-2", "us-west-2")
+
+    def test_config_file_default_region(self, runner: CliRunner, checkout: Any) -> None:
+        (checkout / ".gco.yaml").write_text("default_region: us-west-2\n", encoding="utf-8")
+        plan = self._plan(runner, "-o", "json", "cluster", "tunnel", "--print")
+        assert plan["region"] == "us-west-2"
+
+    def test_without_any_the_first_regional_entry(self, runner: CliRunner, checkout: Any) -> None:
+        plan = self._plan(runner, "-o", "json", "cluster", "tunnel", "--print")
+        assert plan["region"] == "us-east-1"
+
+    def test_the_command_region_wins_over_the_global_one(
+        self, runner: CliRunner, checkout: Any
+    ) -> None:
+        plan = self._plan(
+            runner,
+            "-r",
+            "us-west-2",
+            "-o",
+            "json",
+            "cluster",
+            "tunnel",
+            "--print",
+            "--region",
+            "us-east-1",
+        )
+        assert plan["region"] == "us-east-1"
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +567,7 @@ class TestClusterTunnelInteractive:
             lambda c, r: {"endpoint": PRIVATE_ENDPOINT, "public": False, "private": True},
         )
         proc = _FakeTunnel()
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", lambda *a, **k: proc)
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", lambda *a, **k: proc)
         blocked: dict[str, bool] = {}
         monkeypatch.setattr(
             "cli.commands.cluster_cmd._block_until_interrupt",
@@ -480,6 +581,28 @@ class TestClusterTunnelInteractive:
         assert "kubectl --server https://127.0.0.1:8443" in res.output
         assert blocked.get("waited") is True
         assert proc.terminated is True
+
+    def test_kubectl_hint_names_the_clusters_context(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--server replaces only the endpoint: the hint names the cluster's
+        context so another shell's current context cannot supply the wrong
+        credentials and CA."""
+        context = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
+        monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: context)
+        monkeypatch.setattr(
+            "cli.kubectl_helpers.describe_cluster_access",
+            lambda c, r: {"endpoint": PRIVATE_ENDPOINT, "public": False, "private": True},
+        )
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", lambda *a, **k: _FakeTunnel())
+        monkeypatch.setattr("cli.commands.cluster_cmd._block_until_interrupt", lambda: None)
+        monkeypatch.delenv("GCO_DEV_CONTAINER", raising=False)
+        monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
+        res = runner.invoke(
+            cli, ["cluster", "tunnel", "--via-ssm", "i-0123456789abcdef0", "--region", "us-east-1"]
+        )
+        assert res.exit_code == 0, res.output
+        assert f"kubectl --context={context} --server https://127.0.0.1:8443" in res.output
 
     def test_kubectl_hint_names_the_container_inside_gco_dev(
         self, monkeypatch: pytest.MonkeyPatch
@@ -559,7 +682,7 @@ class TestClusterTunnelInteractive:
         def _boom(*a: object, **k: object) -> None:
             raise RuntimeError("tunnel start failed")
 
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", _boom)
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", _boom)
         res = runner.invoke(
             cli, ["cluster", "tunnel", "--via-ssm", "i-0123456789abcdef0", "--region", "us-east-1"]
         )
@@ -584,16 +707,20 @@ class TestMonitoringOpenAutoBastion:
         created: list[str] = []
         destroyed: list[str] = []
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.create_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "create_ephemeral_bastion",
             lambda c, r, **k: created.append("x") or "i-0aaaaaaaaaaaaaaaa",
         )
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.destroy_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "destroy_ephemeral_bastion",
             lambda iid, r, **k: destroyed.append(iid),
         )
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", lambda *a, **k: _FakeTunnel())
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", lambda *a, **k: _FakeTunnel())
         captured: dict[str, Any] = {}
-        monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _ready_forward(captured))
+        monkeypatch.setattr(
+            monitoring_cmd.cluster_ui, "exec_port_forward", _ready_forward(captured)
+        )
         res = runner.invoke(
             cli,
             ["monitoring", "open", "--via-ssm", "auto", "-y", "--region", "us-east-1"],
@@ -1112,7 +1239,7 @@ class TestClusterTunnelRoutes:
 
         monkeypatch.setattr("cli.kubectl_helpers.describe_cluster_access", describe)
         proc = _FakeTunnel()
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", lambda *a, **k: proc)
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", lambda *a, **k: proc)
         blocked: list[str] = []
         monkeypatch.setattr(
             "cli.commands.cluster_cmd._block_until_interrupt", lambda: blocked.append("held")
@@ -1139,11 +1266,13 @@ class TestClusterTunnelRoutes:
         proc, blocked = self._patch(monkeypatch, ACCESS["PUBLIC_AND_PRIVATE"])
         lifecycle: list[str] = []
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.create_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "create_ephemeral_bastion",
             lambda c, r, **k: lifecycle.append("create") or BASTION,
         )
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.destroy_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "destroy_ephemeral_bastion",
             lambda iid, r, **k: lifecycle.append(f"destroy:{iid}"),
         )
         res = runner.invoke(
@@ -1271,11 +1400,13 @@ class TestMonitoringOpenRoutes:
         )
         lifecycle: list[str] = []
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.create_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "create_ephemeral_bastion",
             lambda c, r, **k: lifecycle.append("create") or BASTION,
         )
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.destroy_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "destroy_ephemeral_bastion",
             lambda iid, r, **k: lifecycle.append(f"destroy:{iid}"),
         )
         proc = _FakeTunnel()
@@ -1284,8 +1415,10 @@ class TestMonitoringOpenRoutes:
             lifecycle.append("tunnel")
             return proc
 
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", start)
-        monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _ready_forward(captured, fail=fail))
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", start)
+        monkeypatch.setattr(
+            monitoring_cmd.cluster_ui, "exec_port_forward", _ready_forward(captured, fail=fail)
+        )
         return lifecycle
 
     def test_auto_on_public_and_private_forwards_through_the_bastion(
@@ -1374,3 +1507,247 @@ class TestMonitoringOpenRoutes:
         assert "before localhost:5000 was listening" in res.output
         assert "Forwarding mlflow" not in res.output
         assert lifecycle == ["create", "tunnel", f"destroy:{BASTION}"]
+
+
+def _signal_self(signum: int, events: list[str] | None = None) -> None:
+    """Deliver ``signum`` to this thread, the main one, where Python runs handlers.
+
+    ``signal.pthread_kill`` sends it to the calling thread and runs the pending
+    handler before returning, so a handler that raises does so here and nothing
+    has to wait for it. ``os.kill(os.getpid(), ...)`` lets the kernel give the
+    signal to any thread of the process (the worker has several), and then the
+    handler runs only at the main thread's next check.
+    """
+    if events is not None:
+        events.append("body")
+    signal.pthread_kill(threading.get_ident(), signum)
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
+class TestTerminationSignals:
+    """SIGTERM and SIGHUP end a tunnel session through its cleanup.
+
+    The SSM child runs in its own session, so neither the terminal's SIGHUP nor
+    a signal sent to gco reaches it. With the default actions gco died without
+    its finally blocks: the local port stayed bound and an ``auto`` bastion ran
+    until its TTL. These tests deliver the real signal to this process, and
+    each starts with both signals at their default actions.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _default_actions(self) -> Iterator[None]:
+        """Set SIGTERM and SIGHUP to their default actions for the test, then restore them.
+
+        The tunnel takes over only a signal still at its default action, and a
+        test run inherits its dispositions from whatever started it. Under
+        ``nohup``, or a supervisor that ignores SIGHUP, SIGHUP arrives ignored,
+        the tunnel rightly leaves it ignored, and the SIGHUP case failed with
+        "DID NOT RAISE" on every run started that way.
+        """
+        saved = {
+            signum: signal.signal(signum, signal.SIG_DFL)
+            for signum in (signal.SIGTERM, signal.SIGHUP)
+        }
+        try:
+            yield
+        finally:
+            for signum, handler in saved.items():
+                # None: a handler installed outside Python, which signal.signal
+                # cannot reinstall.
+                signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+
+    @pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+    def test_a_signal_in_the_body_stops_the_tunnel_and_the_bastion(
+        self, monkeypatch: pytest.MonkeyPatch, signame: str
+    ) -> None:
+        signum = getattr(signal, signame)
+        seams = _Seams(monkeypatch, ACCESS["PRIVATE"])
+        before = signal.getsignal(signum)
+        with (
+            pytest.raises(ct.TunnelTerminated) as excinfo,
+            ct.open_api_server_tunnel(
+                _FakeFormatter(),
+                cluster="gco-us-east-1",
+                region="us-east-1",
+                via_ssm=ct.AUTO_BASTION,
+                assume_yes=True,
+            ),
+        ):
+            _signal_self(signum, seams.events)
+        assert excinfo.value.code == 128 + signum
+        assert seams.events == [
+            f"provision:{_TTL}:True",
+            f"start:{BASTION}:8443",
+            "body",
+            "stop",
+            f"teardown:{BASTION}",
+        ]
+        assert seams.tunnel.terminated is True
+        assert signal.getsignal(signum) == before
+
+    def test_a_signal_while_the_bastion_waits_for_ssm_still_terminates_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The signal handler's exit reaches the guard that removes a bastion still being created."""
+        monkeypatch.setattr(
+            ct.kubectl_helpers, "describe_cluster_access", lambda c, r: dict(ACCESS["PRIVATE"])
+        )
+        eb = ct.ephemeral_bastion
+        monkeypatch.setattr(eb, "resolve_bastion_ami", lambda region: "ami-0123456789abcdef0")
+        monkeypatch.setattr(
+            eb,
+            "resolve_bastion_network",
+            lambda c, r: eb.BastionNetwork(
+                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0"
+            ),
+        )
+        monkeypatch.setattr(eb, "ensure_bastion_iam", lambda *a, **k: None)
+        monkeypatch.setattr(eb, "launch_bastion", lambda **k: BASTION)
+        terminated: list[str] = []
+        monkeypatch.setattr(
+            eb, "destroy_ephemeral_bastion", lambda iid, region, **k: terminated.append(iid)
+        )
+
+        def wait_for_ssm(*_a: object, **_k: object) -> None:
+            _signal_self(signal.SIGTERM)
+
+        monkeypatch.setattr(eb, "wait_until_ssm_online", wait_for_ssm)
+        with (
+            pytest.raises(ct.TunnelTerminated),
+            ct.open_api_server_tunnel(
+                _FakeFormatter(),
+                cluster="gco-us-east-1",
+                region="us-east-1",
+                via_ssm=ct.AUTO_BASTION,
+                assume_yes=True,
+            ),
+        ):
+            pytest.fail("body must not run")  # pragma: no cover
+        assert terminated == [BASTION]
+
+    def test_a_second_signal_does_not_interrupt_the_cleanup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seams = _Seams(monkeypatch, ACCESS["PRIVATE"])
+
+        def teardown(fmt: Any, instance_id: str, region: str, project: str) -> None:
+            _signal_self(signal.SIGTERM)  # a supervisor repeating itself
+            seams.events.append(f"teardown:{instance_id}")
+
+        monkeypatch.setattr(ct, "teardown_bastion", teardown)
+        with (
+            pytest.raises(ct.TunnelTerminated),
+            ct.open_api_server_tunnel(
+                _FakeFormatter(),
+                cluster="gco-us-east-1",
+                region="us-east-1",
+                via_ssm=ct.AUTO_BASTION,
+                assume_yes=True,
+            ),
+        ):
+            _signal_self(signal.SIGTERM)
+        assert seams.events[-2:] == ["stop", f"teardown:{BASTION}"]
+
+    def test_cluster_tunnel_exits_143_after_tearing_down_on_sigterm(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seams = _Seams(monkeypatch, ACCESS["PRIVATE"])
+        monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
+
+        def held_open() -> None:
+            _signal_self(signal.SIGTERM)  # kill <pid>, a supervisor, an IDE stop
+
+        monkeypatch.setattr("cli.commands.cluster_cmd._block_until_interrupt", held_open)
+        result = runner.invoke(
+            cli, ["cluster", "tunnel", "--region", "us-east-1", "--via-ssm", "auto", "-y"]
+        )
+        assert result.exit_code == 128 + signal.SIGTERM
+        assert seams.events[-2:] == ["stop", f"teardown:{BASTION}"]
+
+    def test_a_handler_the_caller_installed_is_left_in_place(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A harness with its own SIGTERM policy (or nohup's ignored SIGHUP) keeps it."""
+        _Seams(monkeypatch, ACCESS["PRIVATE"])
+        seen: list[int] = []
+
+        def harness_handler(signum: int, frame: object) -> None:
+            seen.append(signum)
+
+        previous_term = signal.signal(signal.SIGTERM, harness_handler)
+        previous_hup = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        try:
+            with ct.open_api_server_tunnel(
+                _FakeFormatter(),
+                cluster="gco-us-east-1",
+                region="us-east-1",
+                via_ssm="i-0123456789abcdef0",
+            ):
+                assert signal.getsignal(signal.SIGTERM) is harness_handler
+                assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+                _signal_self(signal.SIGTERM)
+            assert seen == [signal.SIGTERM]
+        finally:
+            signal.signal(signal.SIGTERM, previous_term)
+            signal.signal(signal.SIGHUP, previous_hup)
+
+    def test_off_the_main_thread_nothing_is_installed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _Seams(monkeypatch, ACCESS["PRIVATE"])
+        observed: list[object] = []
+
+        def run() -> None:
+            with ct.open_api_server_tunnel(
+                _FakeFormatter(),
+                cluster="gco-us-east-1",
+                region="us-east-1",
+                via_ssm="i-0123456789abcdef0",
+            ):
+                observed.append(signal.getsignal(signal.SIGTERM))
+
+        before = signal.getsignal(signal.SIGTERM)
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(10)
+        assert observed == [before]
+
+
+class TestTeardownWithoutATerminal:
+    def test_the_bastion_is_terminated_when_output_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After SIGHUP every write to the closed terminal raises; the bastion
+        must still be terminated."""
+
+        class _ClosedTerminal:
+            def __getattr__(self, name: str) -> Any:
+                def write(_message: str) -> None:
+                    raise OSError(5, "Input/output error")
+
+                return write
+
+        destroyed: list[str] = []
+        monkeypatch.setattr(
+            ct.ephemeral_bastion,
+            "destroy_ephemeral_bastion",
+            lambda iid, region, **k: destroyed.append(iid),
+        )
+        ct.teardown_bastion(_ClosedTerminal(), BASTION, "us-east-1")
+        assert destroyed == [BASTION]
+
+    def test_a_failed_teardown_with_a_closed_terminal_does_not_raise(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _ClosedTerminal:
+            def __getattr__(self, name: str) -> Any:
+                def write(_message: str) -> None:
+                    raise OSError(5, "Input/output error")
+
+                return write
+
+        def fail(*_a: object, **_k: object) -> None:
+            raise RuntimeError("UnauthorizedOperation")
+
+        monkeypatch.setattr(ct.ephemeral_bastion, "destroy_ephemeral_bastion", fail)
+        ct.teardown_bastion(_ClosedTerminal(), BASTION, "us-east-1")

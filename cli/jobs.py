@@ -4,12 +4,12 @@ Job management for GCO CLI.
 Provides functionality to submit, query, and manage jobs across GCO clusters.
 """
 
-from collections.abc import Callable, Mapping
+import re
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import requests
 import yaml
@@ -18,12 +18,12 @@ from gco.job_admission import apply_sandbox
 from gco.job_envelope import build_job_message
 from gco.services.manifest_processor import TRAINJOB_API_VERSION, safe_load_all_yaml
 
-from .aws_client import get_aws_client
+from .aws_client import APIRequestError, api_path_segment, get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-10T17:41:25Z
-# Generated from Git commit: c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe
+# Generated at (UTC): 2026-11-19T14:17:34Z
+# Generated from Git commit: d0db0066b3e8f603134a252ab3753efd40d90493
 # Flowchart(s) generated from this file:
 #   * ``JobManager.submit_job`` -> ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.html``
 #     (PNG: ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.png``)
@@ -37,6 +37,9 @@ from .config import GCOConfig, get_config
 
 logger = __import__("logging").getLogger(__name__)
 
+#: ``GET /api/v1/jobs`` serves at most this many jobs per page.
+JOBS_PAGE_MAX = 1000
+
 
 def _format_duration(seconds: int) -> str:
     """Format seconds into a human-readable duration string."""
@@ -47,6 +50,84 @@ def _format_duration(seconds: int) -> str:
         return f"{minutes}m{secs:02d}s"
     hours, mins = divmod(minutes, 60)
     return f"{hours}h{mins:02d}m{secs:02d}s"
+
+
+# CloudWatch Logs fallback naming. The CloudWatch Observability add-on's Fluent
+# Bit tails /var/log/containers/*.log with tag ``application.*`` and writes each
+# file to a stream named ``<node-host>-application.var.log.containers.<file>``,
+# where the kubelet names the file ``<pod>_<namespace>_<container>-<id>.log``.
+_CONTAINER_LOG_STREAM_PREFIX = r"application\.var\.log\.containers\."
+#: Job names are DNS-1123 subdomains (dots allowed) of at most 63 characters.
+_K8S_SUBDOMAIN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
+#: Namespaces and container names are DNS-1123 labels.
+_K8S_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
+#: The API server cuts a ``generateName`` prefix to 58 characters before it
+#: appends the 5-character random suffix (63 - 5).
+_GENERATED_NAME_PREFIX_MAX = 58
+_RANDOM_POD_SUFFIX = "[a-z0-9]{5}"
+
+
+def _require_k8s_name(value: str, what: str, pattern: re.Pattern[str]) -> str:
+    """Return *value* if it is a valid Kubernetes name of the given kind.
+
+    The CloudWatch Logs Insights query embeds these names in a regular
+    expression, so validation is what keeps a quote or a slash in user input
+    from changing the query.
+    """
+    if len(value) > 63 or pattern.fullmatch(value) is None:
+        raise ValueError(f"{what} {value!r} is not a valid Kubernetes name")
+    return value
+
+
+def _job_pod_name_regex(job_name: str, index: int | None = None) -> str:
+    """Regex for the names of the pods a batch Job named *job_name* creates.
+
+    The Job controller names pods ``<job>-<random5>`` (NonIndexed) or
+    ``<job>-<index>-<random5>`` (Indexed), and the API server truncates the
+    part before the random suffix to 58 characters. With *index* only that
+    completion index matches. *job_name* must already be validated: dots are
+    the only regex metacharacter a Kubernetes name can contain.
+    """
+
+    def literal(text: str) -> str:
+        return text.replace(".", r"\.")
+
+    if index is not None:
+        return literal(f"{job_name}-{index}-"[:_GENERATED_NAME_PREFIX_MAX]) + _RANDOM_POD_SUFFIX
+    base = f"{job_name}-"
+    room = _GENERATED_NAME_PREFIX_MAX - len(base)
+    if room <= 0:
+        return literal(base[:_GENERATED_NAME_PREFIX_MAX]) + _RANDOM_POD_SUFFIX
+    # An Indexed pod's "<index>-" is cut like the rest of the prefix: it fits
+    # whole, or only its first ``room`` characters (digits) survive.
+    index_part = "[0-9]" if room == 1 else f"(?:[0-9]{{1,{room - 1}}}-|[0-9]{{{room}}})"
+    return f"{literal(base)}(?:{index_part})?{_RANDOM_POD_SUFFIX}"
+
+
+def job_log_stream_regex(
+    job_name: str, namespace: str, container: str | None = None, node: int = 0
+) -> str:
+    """Regex for the Container Insights log streams of one job's pods.
+
+    Matches the batch Job's own pods and, for a Kubeflow TrainJob of that
+    name, the rank-*node* pod of its child Job ``<name>-node-0`` (the same
+    pod ``gco jobs logs --node`` reads from the API). The namespace and,
+    when given, the container must match exactly, so a job named ``train``
+    never picks up ``pretrain-...`` or ``train-v2-...`` streams.
+    """
+    _require_k8s_name(job_name, "job name", _K8S_SUBDOMAIN)
+    _require_k8s_name(namespace, "namespace", _K8S_LABEL)
+    if container is not None:
+        _require_k8s_name(container, "container name", _K8S_LABEL)
+    container_part = container if container is not None else _K8S_LABEL.pattern
+    pods = (
+        f"(?:{_job_pod_name_regex(job_name)}"
+        f"|{_job_pod_name_regex(f'{job_name}-node-0', index=node)})"
+    )
+    return (
+        f"{_CONTAINER_LOG_STREAM_PREFIX}{pods}_{namespace}_{container_part}"
+        r"-[0-9a-f]+\.log$"
+    )
 
 
 def resolve_submission_identity(
@@ -241,6 +322,19 @@ class JobInfo:
         return None
 
 
+class JobsReadError(RuntimeError):
+    """The jobs of one or more Regions could not be read.
+
+    ``errors`` holds one ``{"region", "error"}`` entry per Region that was not
+    read, in the order queried; ``jobs`` holds the jobs of every Region that was.
+    """
+
+    def __init__(self, jobs: list[JobInfo], errors: list[dict[str, str]]) -> None:
+        super().__init__("; ".join(f"{entry['region']}: {entry['error']}" for entry in errors))
+        self.jobs = jobs
+        self.errors = errors
+
+
 class JobManager:
     """
     Manages jobs across GCO clusters.
@@ -410,10 +504,12 @@ class JobManager:
 
         cluster_name = stack.cluster_name
 
-        # Update kubeconfig for the cluster
-        from .kubectl_helpers import update_kubeconfig
+        # Update kubeconfig for the cluster. Every kubectl call below names the
+        # cluster's context: with a tunnel-pinned entry the current context can
+        # belong to another cluster.
+        from .kubectl_helpers import kubectl_context_flags, update_kubeconfig
 
-        update_kubeconfig(cluster_name, region)
+        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
 
         # Handle existing Job resources before applying
         warnings: list[str] = []
@@ -426,7 +522,9 @@ class JobManager:
                 if not job_name:
                     continue
 
-                existing_status = self._get_kubectl_job_status(job_name, job_ns)
+                existing_status = self._get_kubectl_job_status(
+                    job_name, job_ns, context_flags=context_flags
+                )
                 if existing_status is None:
                     # No existing job — nothing to do
                     continue
@@ -434,7 +532,7 @@ class JobManager:
                 if existing_status in ("complete", "failed"):
                     # Finished job — safe to delete and replace
                     subprocess.run(
-                        ["kubectl", "delete", "job", job_name, "-n", job_ns],
+                        ["kubectl", *context_flags, "delete", "job", job_name, "-n", job_ns],
                         capture_output=True,
                         text=True,
                         check=False,
@@ -464,7 +562,7 @@ class JobManager:
 
         try:
             # Build kubectl command
-            kubectl_cmd = ["kubectl", "apply", "-f", temp_path]
+            kubectl_cmd = ["kubectl", *context_flags, "apply", "-f", temp_path]
 
             if dry_run:
                 kubectl_cmd.extend(["--dry-run=client"])
@@ -521,8 +619,13 @@ class JobManager:
 
             os.unlink(temp_path)
 
-    def _get_kubectl_job_status(self, job_name: str, namespace: str) -> str | None:
+    def _get_kubectl_job_status(
+        self, job_name: str, namespace: str, *, context_flags: Sequence[str] = ()
+    ) -> str | None:
         """Check the status of an existing Job via kubectl.
+
+        ``context_flags`` selects the cluster's kubeconfig context
+        (:func:`cli.kubectl_helpers.kubectl_context_flags`).
 
         Returns:
             "complete", "failed", "active", or None if the job doesn't exist.
@@ -533,6 +636,7 @@ class JobManager:
         result = subprocess.run(
             [
                 "kubectl",
+                *context_flags,
                 "get",
                 "job",
                 job_name,
@@ -569,6 +673,7 @@ class JobManager:
         namespace: str | None = None,
         status: str | None = None,
         all_regions: bool = False,
+        limit: int | None = None,
     ) -> list[JobInfo]:
         """
         List jobs across GCO clusters.
@@ -578,40 +683,86 @@ class JobManager:
             namespace: Filter by namespace
             status: Filter by status
             all_regions: Query all discovered regions
+            limit: Maximum jobs to return per region, read across as many
+                API pages as that takes; None reads every page
 
         Returns:
-            List of JobInfo objects
+            List of JobInfo objects (newest first within a region, the
+            API's default order)
+
+        Raises:
+            JobsReadError: With ``all_regions``, once every region has been
+                queried, when any could not be read; it carries the jobs of
+                the regions that were read and names each one that was not.
+            Exception: Whatever the single-region read raised (HTTP error,
+                missing regional API, credentials).
         """
         jobs = []
 
         if all_regions:
             # Query all discovered regional stacks
             stacks = self._aws_client.discover_regional_stacks()
+            errors: list[dict[str, str]] = []
             for stack_region in stacks:
                 try:
-                    region_jobs = self._query_jobs_in_region(stack_region, namespace, status)
+                    region_jobs = self._query_jobs_in_region(stack_region, namespace, status, limit)
                     jobs.extend(region_jobs)
                 except Exception as e:
-                    logger.warning("Failed to query jobs in %s: %s", stack_region, e)
-                    continue
+                    # Returning the others alone would pass the region off as empty.
+                    errors.append({"region": stack_region, "error": str(e)})
+            if errors:
+                raise JobsReadError(jobs, errors)
         elif region:
-            jobs = self._query_jobs_in_region(region, namespace, status)
+            jobs = self._query_jobs_in_region(region, namespace, status, limit)
         else:
             # Use default region
-            jobs = self._query_jobs_in_region(self.config.default_region, namespace, status)
+            jobs = self._query_jobs_in_region(self.config.default_region, namespace, status, limit)
 
         return jobs
 
     def _query_jobs_in_region(
-        self, region: str, namespace: str | None, status: str | None
+        self,
+        region: str,
+        namespace: str | None,
+        status: str | None,
+        limit: int | None = None,
     ) -> list[JobInfo]:
-        """Query jobs in a specific region."""
-        try:
-            response = self._aws_client.get_jobs(region=region, namespace=namespace, status=status)
-            return [self._parse_job_info(job_data, region) for job_data in response.get("jobs", [])]
-        except Exception as exc:
-            logger.warning("Failed to query jobs in %s: %s", region, exc)
-            return []
+        """Query jobs in a specific region, following pages up to *limit*.
+
+        ``GET /api/v1/jobs`` is offset-paginated (at most
+        :data:`JOBS_PAGE_MAX` per page, ``has_more`` while jobs remain).
+        Pages are requested until *limit* jobs are read, the API reports no
+        more, or the offset reaches the reported ``total``; with *limit*
+        None every page is read.
+
+        A failed read raises. Returning an empty list here would tell the
+        caller the region has no jobs when it was never read, and a
+        single-region ``gco jobs list`` would print "No results" and exit 0
+        on a 403. The all-regions fan-out in :meth:`list_jobs` catches the
+        error per region, reads the others, and raises :class:`JobsReadError`.
+        """
+        jobs: list[JobInfo] = []
+        offset = 0
+        while limit is None or len(jobs) < limit:
+            page_size = JOBS_PAGE_MAX if limit is None else min(limit - len(jobs), JOBS_PAGE_MAX)
+            response = self._aws_client.get_jobs(
+                region=region,
+                namespace=namespace,
+                status=status,
+                limit=page_size,
+                offset=offset,
+            )
+            page = response.get("jobs") or []
+            jobs.extend(self._parse_job_info(job_data, region) for job_data in page)
+            offset += len(page)
+            total = response.get("total")
+            if (
+                not page
+                or not response.get("has_more")
+                or (isinstance(total, int) and offset >= total)
+            ):
+                break
+        return jobs if limit is None else jobs[:limit]
 
     def _parse_job_info(self, job_data: dict[str, Any], region: str) -> JobInfo:
         """Parse job data into JobInfo object."""
@@ -678,9 +829,11 @@ class JobManager:
         TrainJobs.
 
         ``None`` means the API confirmed the job does not exist (HTTP 404 on
-        both lookups). Any other failure — an unreachable regional API bridge,
-        an auth error, a 5xx — propagates to the caller so it is never
-        misreported as "not found" (see issue #258).
+        the batch lookup, and 404 on the TrainJob lookup or a 403 saying the
+        deployment admits no TrainJobs). Any other failure — an unreachable
+        regional API bridge, an auth error, a 5xx, on either lookup —
+        propagates to the caller so it is never misreported as "not found"
+        (see issue #258).
 
         Args:
             job_name: Name of the job
@@ -716,18 +869,25 @@ class JobManager:
             raise
 
     def _get_trainjob_info(self, job_name: str, namespace: str, region: str) -> JobInfo | None:
-        """Fetch a TrainJob through the generic manifests endpoint, or None."""
+        """Fetch a TrainJob through the generic manifests endpoint, or None.
+
+        None only when the API answers that there is no TrainJob to see:
+        404 (no such TrainJob) or 403 (the deployment's policy does not admit
+        the TrainJob kind, so none can exist). Any other failure (a 5xx,
+        throttling, an unreachable regional bridge) propagates, so get_job
+        never reports a job it could not read as "not found".
+        """
         try:
             response = self._aws_client.call_api(
                 "GET",
-                f"/api/v1/manifests/{quote(namespace, safe='')}/{quote(job_name, safe='')}",
+                f"/api/v1/manifests/{api_path_segment(namespace)}/{api_path_segment(job_name)}",
                 region=region,
                 params={"api_version": TRAINJOB_API_VERSION, "kind": "TrainJob"},
             )
-        except RuntimeError as e:
-            # 404 (no such TrainJob either) and transport errors both mean
-            # "not resolvable as a TrainJob"; the caller reports not-found.
-            logger.debug("TrainJob fallback lookup failed for %s: %s", job_name, e)
+        except APIRequestError as e:
+            if e.status_code not in (403, 404):
+                raise
+            logger.debug("No TrainJob %s in %s/%s: %s", job_name, region, namespace, e)
             return None
         resource = response.get("resource") or {}
         if not resource.get("exists", False):
@@ -833,6 +993,7 @@ class JobManager:
         follow: bool = False,
         since_hours: int = 24,
         node: int = 0,
+        container: str | None = None,
     ) -> str:
         """
         Get logs from a job.
@@ -853,6 +1014,9 @@ class JobManager:
             follow: Stream logs (not implemented yet)
             since_hours: Hours to look back in CloudWatch (default 24)
             node: Node rank to fetch for a distributed TrainJob (default 0)
+            container: Container to read in a multi-container pod. None
+                reads the pod's first container from the API, and every
+                container of the job's pods from CloudWatch
 
         Returns:
             Log content as string
@@ -868,6 +1032,7 @@ class JobManager:
                 namespace=namespace,
                 region=target_region,
                 tail_lines=tail_lines,
+                container=container,
             )
         except RuntimeError as e:
             error_msg = str(e)
@@ -882,6 +1047,7 @@ class JobManager:
                         region=target_region,
                         node=node,
                         tail_lines=tail_lines,
+                        container=container,
                     )
                 except Exception as tj_err:
                     logger.debug("TrainJob logs fallback failed: %s", tj_err)
@@ -894,9 +1060,12 @@ class JobManager:
                 try:
                     return self._get_cloudwatch_logs(
                         job_name=job_name,
+                        namespace=namespace,
                         region=target_region,
                         tail_lines=tail_lines,
                         since_hours=since_hours,
+                        container=container,
+                        node=node,
                     )
                 except Exception as cw_err:
                     logger.debug("CloudWatch fallback failed: %s", cw_err)
@@ -915,6 +1084,7 @@ class JobManager:
         region: str,
         node: int,
         tail_lines: int,
+        container: str | None = None,
     ) -> str:
         """Fetch logs from the rank-``node`` pod of a TrainJob.
 
@@ -964,15 +1134,19 @@ class JobManager:
             namespace=namespace,
             region=region,
             tail_lines=tail_lines,
+            container=container,
         )
         return str(response.get("logs", ""))
 
     def _get_cloudwatch_logs(
         self,
         job_name: str,
+        namespace: str,
         region: str,
         tail_lines: int = 100,
         since_hours: int = 24,
+        container: str | None = None,
+        node: int = 0,
     ) -> str:
         """
         Fetch job logs from CloudWatch Logs (Container Insights).
@@ -980,15 +1154,23 @@ class JobManager:
         The CloudWatch Observability addon ships container stdout/stderr to:
           /aws/containerinsights/{cluster_name}/application
 
+        Only the streams of this job's pods in *namespace* are read (see
+        :func:`job_log_stream_regex`), and the newest *tail_lines* lines are
+        returned oldest-first, like ``kubectl logs --tail``.
+
         Args:
-            job_name: Name of the job (used to filter log streams)
+            job_name: Name of the job (its pods' log streams are matched)
+            namespace: Namespace of the job
             region: AWS region
-            tail_lines: Number of log lines to return
+            tail_lines: Number of log lines to return (the most recent)
             since_hours: Hours to look back (default 24)
+            container: Read only this container's stream; None reads all
+            node: TrainJob node rank whose child-Job pod is matched
 
         Returns:
             Log content as string
         """
+        stream_regex = job_log_stream_regex(job_name, namespace, container, node)
         cluster_name = f"{self.config.project_name}-{region}"
         log_group = f"/aws/containerinsights/{cluster_name}/application"
 
@@ -999,10 +1181,12 @@ class JobManager:
         now = int(time.time())
         start_time = now - (since_hours * 3600)
 
+        # Sort newest-first so ``limit`` keeps the most recent lines; the
+        # rows are put back in time order below.
         query = (
             f"fields @timestamp, @message "
-            f'| filter @logStream like "{job_name}" '
-            f"| sort @timestamp asc "
+            f"| filter @logStream like /{stream_regex}/ "
+            f"| sort @timestamp desc "
             f"| limit {tail_lines}"
         )
 
@@ -1045,7 +1229,7 @@ class JobManager:
         import json as _json
 
         lines = []
-        for row in result["results"]:
+        for row in reversed(result["results"]):
             for entry in row:
                 if entry["field"] == "@message":
                     raw = entry["value"].rstrip()
@@ -1073,8 +1257,9 @@ class JobManager:
         A name the batch Job endpoint does not know (404) is retried as a
         Kubeflow TrainJob through the generic manifests endpoint. Deleting
         the TrainJob cascades to its JobSet, child Jobs, and pods via owner
-        references. ``expected_uid`` (a batch-Job concurrency guard) is not
-        supported on the TrainJob path.
+        references. With no TrainJob either, the batch 404 is raised; a
+        TrainJob delete that fails raises its own error. ``expected_uid`` (a
+        batch-Job concurrency guard) is not supported on the TrainJob path.
 
         Args:
             job_name: Name of the job
@@ -1100,21 +1285,34 @@ class JobManager:
             raise
 
     def _delete_trainjob(self, job_name: str, namespace: str, region: str) -> dict[str, Any] | None:
-        """Delete a TrainJob via the manifests endpoint, or None if that fails.
+        """Delete a TrainJob via the manifests endpoint, or None if there is none.
 
-        Returning None (rather than raising) lets the caller surface the
-        original batch-Job 404, which is the right error for a typo'd name.
+        None only when the API answers that there is no TrainJob to delete:
+        the route reports a missing one as a 200 whose resource status is
+        ``unchanged`` ("not found"), and a 403 or 404 means the deployment
+        admits no TrainJob there, so none can exist (the rule
+        :meth:`_get_trainjob_info` uses). The caller then surfaces the batch
+        Job's 404, the right error for a typo'd name. Any other failure (a
+        delete the cluster refused, a 5xx) propagates, so a TrainJob that
+        could not be deleted is never reported as "not found".
         """
         try:
-            return self._aws_client.call_api(
+            result: dict[str, Any] = self._aws_client.call_api(
                 "DELETE",
-                f"/api/v1/manifests/{quote(namespace, safe='')}/{quote(job_name, safe='')}",
+                f"/api/v1/manifests/{api_path_segment(namespace)}/{api_path_segment(job_name)}",
                 region=region,
                 params={"api_version": TRAINJOB_API_VERSION, "kind": "TrainJob"},
             )
-        except RuntimeError as e:
-            logger.debug("TrainJob delete fallback failed for %s: %s", job_name, e)
+        except APIRequestError as e:
+            if e.status_code not in (403, 404):
+                raise
+            logger.debug("No TrainJob %s to delete in %s/%s: %s", job_name, region, namespace, e)
             return None
+        resource = result.get("resource") or {}
+        if resource.get("status") == "unchanged":
+            logger.debug("No TrainJob %s to delete in %s/%s", job_name, region, namespace)
+            return None
+        return result
 
     def wait_for_job(
         self,
@@ -1210,10 +1408,11 @@ class JobManager:
             manifests: Path to manifest file/directory or list of manifest dicts
             region: Target region for job submission (required)
             namespace: Fallback namespace for manifests that don't declare
-                their own. When set, each manifest's ``metadata.namespace`` is
-                filled in only if missing — existing values are preserved so
-                users who've declared a target namespace in the manifest can
-                rely on it reaching the queue processor untouched. Server-side
+                their own (default: ``config.default_namespace``). Each
+                manifest's ``metadata.namespace`` is filled in only if
+                missing — existing values are preserved so users who've
+                declared a target namespace in the manifest can rely on it
+                reaching the queue processor untouched. Server-side
                 validation enforces the allowlist.
             labels: Additional labels to add to manifests
             priority: Job priority (higher = more important)
@@ -1228,19 +1427,20 @@ class JobManager:
         # Load manifests if path provided
         manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
 
-        # Apply namespace as a fallback only — preserve any namespace the
-        # manifest declared itself.
-        if namespace:
-            for manifest in manifest_list:
-                if "metadata" not in manifest:
-                    manifest["metadata"] = {}
-                manifest["metadata"].setdefault("namespace", namespace)
+        # Apply the explicit or configured namespace as a fallback only —
+        # preserve any namespace the manifest declared itself. The same rule
+        # as submit_job: without it a manifest that names no namespace ran in
+        # the consumer's hard-coded gco-jobs, ignoring GCO_DEFAULT_NAMESPACE.
+        effective_namespace = namespace or self.config.default_namespace
+        for manifest in manifest_list:
+            if "metadata" not in manifest:
+                manifest["metadata"] = {}
+            manifest["metadata"].setdefault("namespace", effective_namespace)
 
         # Apply additional labels
         if labels:
             for manifest in manifest_list:
-                if "metadata" not in manifest:
-                    manifest["metadata"] = {}
+                # The namespace loop above already gave every manifest metadata.
                 if "labels" not in manifest["metadata"]:
                     manifest["metadata"]["labels"] = {}
                 manifest["metadata"]["labels"].update(labels)
@@ -1266,8 +1466,10 @@ class JobManager:
 
         # Build the envelope through the shared protocol module, which the
         # in-cluster consumer and the CI end-to-end test also import, so the
-        # producer cannot drift from the reader.
-        message = build_job_message(manifest_list, namespace=namespace, priority=priority)
+        # producer cannot drift from the reader. Its informational namespace
+        # is the first manifest's, now always set, so it names where the job
+        # actually runs.
+        message = build_job_message(manifest_list, priority=priority)
 
         # Send to SQS
         sqs = boto3.client("sqs", region_name=region)

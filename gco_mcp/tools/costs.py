@@ -43,6 +43,10 @@ def cost_trend(days: int = 14) -> str:
 def cost_workloads(region: str | None = None) -> str:
     """Estimate accumulated and hourly cost for running workloads.
 
+    Reads each region's cluster API with the server's kubeconfig credentials.
+    A region whose cluster cannot be read makes the call fail and is named in
+    the error; the workloads read from the other regions are in its output.
+
     Args:
         region: Region to inspect, or omit to inspect every deployment region.
     """

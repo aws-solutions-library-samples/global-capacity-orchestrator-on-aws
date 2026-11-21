@@ -25,14 +25,12 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
+from ..inventory._shared import _TERMINAL_VOLUME_STATES
 from ..models import RunContext
 
 _VOLUME_ARN = re.compile(
     r"^arn:[^:]+:ec2:(?P<region>[a-z0-9-]+):(?P<account>\d{12}):volume/(?P<volume_id>vol-[0-9a-f]+)$"
 )
-#: EBS states in which the volume is already being removed and cannot be
-#: residue; anything else (``available``, ``in-use``, ``creating``, ``error``) is.
-_TERMINAL_VOLUME_STATES = frozenset({"deleting", "deleted"})
 _NOT_FOUND_CODES = frozenset({"InvalidVolume.NotFound"})
 
 

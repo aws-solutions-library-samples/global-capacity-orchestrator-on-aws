@@ -426,6 +426,9 @@ def test_jobs_section_surfaces_totals_and_scan_completeness() -> None:
     assert section.data["totals"] == {"total": 4, "queued": 3, "running": 1}
     assert section.data["complete"] is True
     assert section.data["records_evaluated"] == 4
+    # The route aggregates `gco queue submit` records only: the
+    # document says so, so `empty` is never read as "no jobs at all".
+    assert section.data["source"] == "central job queue"
     # A single attempt: a status snapshot reports a failing route honestly
     # rather than retrying past the section timeout.
     client.call_api.assert_called_once_with(
@@ -1020,6 +1023,53 @@ def test_gather_times_out_a_stuck_section_without_holding_the_document() -> None
     # The stuck section never held the rest of the document.
     assert doc.sections[SECTION_STACKS].status == STATUS_OK
     assert doc.sections[SECTION_QUEUE].status == STATUS_OK
+
+
+def test_the_policy_budget_covers_the_per_region_policy_timeout() -> None:
+    """With ``--with-policy`` the sections' budget outlasts the policy fetch's bound."""
+    from cli import status
+    from cli.job_policy import FETCH_TIMEOUT_SECONDS
+
+    assert status.POLICY_SECTION_TIMEOUT_SECONDS > FETCH_TIMEOUT_SECONDS
+    assert status.POLICY_SECTION_TIMEOUT_SECONDS >= status.SECTION_TIMEOUT_SECONDS
+
+
+def test_a_hung_region_costs_the_policy_section_one_region_not_the_section() -> None:
+    """A region whose policy read hangs is reported unreachable; the others still compare.
+
+    The policy section waits up to ``FETCH_TIMEOUT_SECONDS`` (45 s) for every
+    region, but the section budget was a fixed 30 s, so one hung region turned
+    the whole section into a timeout error and dropped the regions that had
+    answered.
+    """
+    from cli.job_policy import FETCH_OK, RegionPolicy
+    from gco.job_admission import JobValidationPolicy
+
+    document = {"allowed_namespaces": ["gco-jobs"], "allowed_kinds": ["Job"]}
+
+    def fetch(_client: Any, region: str) -> RegionPolicy:
+        if region == "us-west-2":
+            time.sleep(5)
+        return RegionPolicy(
+            region=region,
+            status=FETCH_OK,
+            policy=JobValidationPolicy.from_policy_document(document),
+            document=document,
+        )
+
+    with (
+        _fleet_boundaries(_CDK_REGIONS) as boundaries,
+        patch("cli.job_policy.fetch_region_policy", side_effect=fetch),
+        patch("cli.job_policy.FETCH_TIMEOUT_SECONDS", 0.3),
+        patch("cli.status.SECTION_TIMEOUT_SECONDS", 0.1),
+        patch("cli.status.POLICY_SECTION_TIMEOUT_SECONDS", 1.0),
+    ):
+        doc = gather_fleet_status(boundaries.config, with_policy=True)
+
+    section = doc.sections["policy"]
+    assert section.status == STATUS_PARTIAL, section.reason
+    assert section.data["compared"] == ["us-east-1"]
+    assert section.data["unreadable"] == {"us-west-2": "timed out after 0.3s"}
 
 
 # ---------------------------------------------------------------------------

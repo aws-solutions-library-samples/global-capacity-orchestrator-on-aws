@@ -344,6 +344,155 @@ class TestCloudWatchLogsFallback:
         assert "plain text log line" in logs
 
 
+_CONTAINER_ID = "0123456789abcdef" * 4
+
+
+def _stream(pod: str, namespace: str = "gco-jobs", container: str = "main") -> str:
+    """A stream name as the CloudWatch Observability add-on's Fluent Bit writes it."""
+    return (
+        "ip-10-0-1-2.ec2.internal-application.var.log.containers."
+        f"{pod}_{namespace}_{container}-{_CONTAINER_ID}.log"
+    )
+
+
+class TestCloudWatchFallbackStreamsAndOrder:
+    """The fallback reads only this job's streams and keeps the newest lines."""
+
+    @staticmethod
+    def _query(manager, aws_client, *args, **kwargs):
+        aws_client.get_job_logs.side_effect = RuntimeError("Pod not found")
+        logs_client = MagicMock()
+        aws_client._session.client.return_value = logs_client
+        logs_client.start_query.return_value = {"queryId": "q"}
+        logs_client.get_query_results.return_value = {
+            "status": "Complete",
+            # Newest first, as the query's ``sort @timestamp desc`` returns them.
+            "results": [
+                [{"field": "@message", "value": "line 3"}],
+                [{"field": "@message", "value": "line 2"}],
+            ],
+        }
+        with patch("time.sleep"):
+            output = manager.get_job_logs(*args, **kwargs)
+        return output, logs_client.start_query.call_args.kwargs["queryString"]
+
+    def test_newest_lines_are_kept_and_printed_oldest_first(self, job_manager):
+        manager, aws_client = job_manager
+
+        output, query = self._query(manager, aws_client, "train", "gco-jobs", tail_lines=2)
+
+        assert "| sort @timestamp desc | limit 2" in query
+        assert output.endswith("line 2\nline 3")
+
+    def test_stream_filter_matches_only_this_jobs_pods(self, job_manager):
+        import re
+
+        manager, aws_client = job_manager
+
+        _, query = self._query(manager, aws_client, "train", "gco-jobs")
+
+        pattern = re.search(r"filter @logStream like /(.+)/ \|", query).group(1)
+        matches = {
+            pod: bool(re.search(pattern, _stream(pod)))
+            for pod in (
+                "train-x7k2p",
+                "train-3-x7k2p",
+                "train-node-0-0-x7k2p",
+                "pretrain-x7k2p",
+                "train-v2-x7k2p",
+                "training-x7k2p",
+                "train-node-0-1-x7k2p",
+            )
+        }
+        assert matches == {
+            "train-x7k2p": True,
+            "train-3-x7k2p": True,
+            "train-node-0-0-x7k2p": True,
+            "pretrain-x7k2p": False,
+            "train-v2-x7k2p": False,
+            "training-x7k2p": False,
+            "train-node-0-1-x7k2p": False,
+        }
+        assert not re.search(pattern, _stream("train-x7k2p", namespace="other-ns"))
+
+    def test_container_and_node_narrow_the_streams(self, job_manager):
+        import re
+
+        manager, aws_client = job_manager
+
+        _, query = self._query(manager, aws_client, "train", "ml-jobs", container="sidecar", node=1)
+
+        pattern = re.search(r"filter @logStream like /(.+)/ \|", query).group(1)
+        assert re.search(pattern, _stream("train-x7k2p", "ml-jobs", "sidecar"))
+        assert re.search(pattern, _stream("train-node-0-1-x7k2p", "ml-jobs", "sidecar"))
+        assert not re.search(pattern, _stream("train-x7k2p", "ml-jobs", "main"))
+        assert not re.search(pattern, _stream("train-x7k2p", "ml-jobs", "sidecar-2"))
+        assert not re.search(pattern, _stream("train-node-0-0-x7k2p", "ml-jobs", "sidecar"))
+
+    def test_invalid_names_never_reach_the_query(self, job_manager):
+        manager, aws_client = job_manager
+        aws_client.get_job_logs.side_effect = RuntimeError("Pod not found")
+        logs_client = MagicMock()
+        aws_client._session.client.return_value = logs_client
+
+        with pytest.raises(RuntimeError, match="not a valid Kubernetes name"):
+            manager.get_job_logs('x" | display @message', "gco-jobs")
+        logs_client.start_query.assert_not_called()
+
+
+class TestJobLogStreamRegex:
+    """``job_log_stream_regex`` follows the API server's pod-name truncation."""
+
+    def test_long_job_names_match_the_truncated_pod_prefix(self):
+        import re
+
+        from cli.jobs import job_log_stream_regex
+
+        name = "a" * 60
+        pattern = job_log_stream_regex(name, "gco-jobs")
+
+        assert re.search(pattern, _stream(f"{name}-"[:58] + "x7k2p"))
+        assert not re.search(pattern, _stream("a" * 57 + "-x7k2p"))
+
+    def test_indexed_pods_near_the_limit_keep_their_cut_index(self):
+        import re
+
+        from cli.jobs import _job_pod_name_regex, job_log_stream_regex
+
+        name = "b" * 54  # "<name>-" leaves 3 characters before the suffix
+        pattern = job_log_stream_regex(name, "gco-jobs")
+        for index in (5, 12, 123, 4567):
+            assert re.search(pattern, _stream(f"{name}-{index}-"[:58] + "x7k2p")), index
+        # With one character left only the first digit of the index survives.
+        assert _job_pod_name_regex("c" * 56) == "c" * 56 + "-(?:[0-9])?[a-z0-9]{5}"
+
+    def test_dots_in_job_names_are_literal(self):
+        import re
+
+        from cli.jobs import job_log_stream_regex
+
+        pattern = job_log_stream_regex("train.v1", "gco-jobs")
+
+        assert re.search(pattern, _stream("train.v1-x7k2p"))
+        assert not re.search(pattern, _stream("trainxv1-x7k2p"))
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"job_name": "Train"}, "job name"),
+            ({"job_name": "x" * 64}, "job name"),
+            ({"namespace": "a.b"}, "namespace"),
+            ({"container": "side/car"}, "container name"),
+        ],
+    )
+    def test_invalid_names_are_rejected(self, kwargs, message):
+        from cli.jobs import job_log_stream_regex
+
+        arguments = {"job_name": "train", "namespace": "gco-jobs", **kwargs}
+        with pytest.raises(ValueError, match=message):
+            job_log_stream_regex(**arguments)
+
+
 class TestCloudWatchAddonTolerations:
     """Tests that the CloudWatch addon is configured with container logs and tolerations."""
 

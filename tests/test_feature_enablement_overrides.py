@@ -125,7 +125,8 @@ class TestOverrideForcesEnablement:
         loader = _loader({"valkey": {"enabled": True}})
         assert loader.get_valkey_config()["enabled"] is True
 
-    def test_unknown_override_fails_at_config_read(self) -> None:
-        loader = _loader({FEATURE_OVERRIDE_CONTEXT_KEY: "slurm"})
+    def test_unknown_override_fails_validation(self) -> None:
+        # The data-service blocks are validated up front, which resolves the
+        # override, so a typo fails as soon as the configuration is loaded.
         with pytest.raises(ConfigValidationError, match="Unknown feature_enabled_overrides"):
-            loader.get_valkey_config()
+            _loader({FEATURE_OVERRIDE_CONTEXT_KEY: "slurm"})

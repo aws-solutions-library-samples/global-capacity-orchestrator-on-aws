@@ -79,6 +79,10 @@ error_envelope("my_new_code", reason="whatever happened", extra="context")
 `is_numeric_value`), so a `bool`, `NaN`, or `±inf` can never reach a criterion.
 Keep that guarantee intact in anything you add.
 
+Pass the builders' own arguments (`key` and `value`, or `code`) positionally:
+they are positional-only, so a provenance or details field may itself be named
+`key`, `value`, or `code`.
+
 ## Customizing for Your Use Case
 
 ### Add a New Aggregation Mode

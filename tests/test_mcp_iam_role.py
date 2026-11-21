@@ -1,48 +1,76 @@
 """
-CDK assertion tests for the dedicated MCP server IAM role on the regional stack.
+The MCP server role (``McpServerRole``) on the regional stack.
 
-GCORegionalStack provisions an McpServerRole that the MCP server can
-assume at startup via GCO_MCP_ROLE_ARN. These tests synthesize the stack
-(patching DockerImageAsset and the helm-installer builder to avoid a
-Docker daemon dependency) and assert against the resulting CloudFormation
-template that the role exists exactly once, is described as the MCP
-role, and has only the least-privilege actions specified in the design —
-no broader access sneaks in via managed policies or catch-all statements.
+With ``GCO_MCP_ROLE_ARN`` set, the MCP server and every ``gco``/``kubectl``
+process it starts run as this role, so it must grant what the default
+(ungated) tools call and nothing that writes a stack, an image, a model, a
+bucket object or an inference endpoint record, assumes or passes a role. ``gco/stacks/mcp_role_permissions.py``
+holds the statements; these tests pin them on one real synthesis (the Docker
+image assets and the Helm installer builder stood in), check the module's own
+contract (default tools it leaves out, ARNs per Region, the cdk-nag details),
+the EKS access entry and the RBAC it relies on, and that gco_mcp/README.md
+documents the boundary.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import aws_cdk as cdk
+import pytest
+import yaml
 from aws_cdk import assertions
 
-from tests.test_regional_stack import MockConfigLoader, TestRegionalStackSynthesis
+from gco.stacks.mcp_role_permissions import (
+    DEFAULT_TOOLS_OUTSIDE_ROLE,
+    MCP_EKS_ACCESS_POLICY,
+    MCP_KUBERNETES_GROUP,
+    UNSCOPED_READ_ACTIONS,
+    McpRoleScope,
+    mcp_server_role_statements,
+    wildcard_resources,
+)
+
+# Module import, not a name import: pytest would collect an imported Test* class again.
+from tests import test_regional_stack as regional_fixtures
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RBAC_MANIFEST = REPO_ROOT / "lambda" / "kubectl-applier-simple" / "manifests" / "02-rbac.yaml"
+
+# Actions the role may hold that are not reads: requests to the GCO API
+# (which authorizes each one itself), job submission to the GCO job queues,
+# Bedrock prompts for the capacity advisor, and starting a Logs Insights query.
+NON_READ_ACTIONS = {
+    "execute-api:Invoke",
+    "sqs:SendMessage",
+    "bedrock:InvokeModel",
+    "logs:StartQuery",
+}
+READ_VERBS = ("Describe", "List", "Get", "Search", "Query", "Scan")
 
 
 def _synth(app: cdk.App, construct_id: str) -> assertions.Template:
-    """Synthesize the regional stack and return its Template.
-
-    Mirrors the helper in tests/test_drift_detection.py: mocks the Docker
-    image asset and helm-installer Lambda builder so tests do not depend on a
-    running Docker daemon.
-    """
+    """Synthesize the regional stack (MockConfigLoader) and return its Template."""
     from gco.stacks.regional_stack import GCORegionalStack
 
-    config = MockConfigLoader(app)
-
+    config = regional_fixtures.MockConfigLoader(app)
     with (
         patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
         patch.object(
             GCORegionalStack,
             "_create_helm_installer_lambda",
-            TestRegionalStackSynthesis._mock_helm_installer,
+            regional_fixtures.TestRegionalStackSynthesis._mock_helm_installer,
         ),
     ):
         mock_image = MagicMock()
         mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
         mock_docker.return_value = mock_image
-
         stack = GCORegionalStack(
             app,
             construct_id,
@@ -53,285 +81,699 @@ def _synth(app: cdk.App, construct_id: str) -> assertions.Template:
             ),
             env=cdk.Environment(account="123456789012", region="us-east-1"),
         )
-
         return assertions.Template.from_stack(stack)
 
 
-def _find_mcp_role(template: assertions.Template) -> tuple[str, dict]:
-    """Return the (logical_id, resource) for the MCP server IAM role.
+@pytest.fixture(scope="module")
+def template() -> assertions.Template:
+    return _synth(cdk.App(), "test-mcp-role")
 
-    Identified by the role description mentioning "MCP server".
-    """
-    roles = template.find_resources("AWS::IAM::Role")
-    matches = []
-    for logical_id, resource in roles.items():
-        description = resource.get("Properties", {}).get("Description", "")
-        if "MCP server" in description:
-            matches.append((logical_id, resource))
-    assert len(matches) == 1, (
-        f"Expected exactly one IAM role with 'MCP server' in description, found {len(matches)}"
-    )
+
+def _find_mcp_role(template: assertions.Template) -> tuple[str, dict]:
+    """The (logical_id, resource) of the role whose description names the MCP server."""
+    matches = [
+        (logical_id, resource)
+        for logical_id, resource in template.find_resources("AWS::IAM::Role").items()
+        if "MCP server" in resource.get("Properties", {}).get("Description", "")
+    ]
+    assert len(matches) == 1, f"expected one MCP server role, found {len(matches)}"
     return matches[0]
 
 
-def _policies_for_role(template: assertions.Template, role_logical_id: str) -> list[dict]:
-    """Return all AWS::IAM::Policy resources attached to the given role."""
-    policies = template.find_resources("AWS::IAM::Policy")
-    attached = []
-    for policy in policies.values():
-        roles = policy.get("Properties", {}).get("Roles", []) or []
-        for role_ref in roles:
-            if isinstance(role_ref, dict) and role_ref.get("Ref") == role_logical_id:
-                attached.append(policy)
-                break
-    return attached
-
-
 def _all_statements_for_role(template: assertions.Template, role_logical_id: str) -> list[dict]:
-    """Flatten all PolicyDocument statements for every policy attached to role."""
-    statements = []
-    for policy in _policies_for_role(template, role_logical_id):
-        doc = policy.get("Properties", {}).get("PolicyDocument", {})
-        statements.extend(doc.get("Statement", []))
+    statements: list[dict] = []
+    for policy in template.find_resources("AWS::IAM::Policy").values():
+        if {"Ref": role_logical_id} in policy["Properties"].get("Roles", []):
+            statements.extend(policy["Properties"]["PolicyDocument"]["Statement"])
     return statements
 
 
 def _actions_as_set(stmt: dict) -> set[str]:
-    """Normalize an Action property (str or list) into a set."""
     actions = stmt.get("Action", [])
-    if isinstance(actions, str):
-        actions = [actions]
-    return set(actions)
+    return {actions} if isinstance(actions, str) else set(actions)
 
 
-class TestMcpIamRole:
-    """Assertions for the dedicated MCP server IAM role."""
+def _flatten(value: Any) -> str:
+    """Render a template resource (string or Fn::Join) as one string."""
+    if isinstance(value, str):
+        return value
+    if "Fn::Join" in value:
+        return "".join(_flatten(part) for part in value["Fn::Join"][1])
+    if "Ref" in value:
+        return f"<{value['Ref']}>"
+    if "Fn::GetAtt" in value:
+        return "<" + ".".join(value["Fn::GetAtt"]) + ">"
+    raise AssertionError(f"unexpected resource shape: {value!r}")
 
-    def test_mcp_role_exists_with_description(self):
-        """An IAM role with 'MCP server' in description is synthesized."""
-        template = _synth(cdk.App(), "test-mcp-role-exists")
 
+def _resources(stmt: dict) -> list[str]:
+    resources = stmt["Resource"]
+    return [_flatten(r) for r in (resources if isinstance(resources, list) else [resources])]
+
+
+def _role_grants(template: assertions.Template) -> set[tuple[frozenset[str], tuple[str, ...]]]:
+    role_id, _ = _find_mcp_role(template)
+    return {
+        (frozenset(_actions_as_set(s)), tuple(sorted(_resources(s))))
+        for s in _all_statements_for_role(template, role_id)
+    }
+
+
+class TestMcpServerRole:
+    """The role as synthesized from the shipped regional stack."""
+
+    def test_role_holds_exactly_the_default_tool_statements(self, template):
+        """Every statement, actions and resources, as MockConfigLoader's deployment renders it."""
+        partition, account = "<AWS::Partition>", "123456789012"
+
+        def arn(service: str, region: str, resource: str, owner: str = account) -> str:
+            return f"arn:{partition}:{service}:{region}:{owner}:{resource}"
+
+        bucket = "arn:<AWS::Partition>:s3:::<ReadModelBucketName5A20EEB7.Parameter.Value>"
+        table = arn("dynamodb", "us-east-2", "table/gco-test-capacity-history")
+        endpoints = arn("dynamodb", "us-east-2", "table/gco-test-inference-endpoints")
+        log_group = "log-group:/aws/containerinsights/gco-test-*/application"
+        expected = {
+            (
+                frozenset({"execute-api:Invoke"}),
+                tuple(
+                    sorted(
+                        arn("execute-api", region, f"*/prod/*/{path}")
+                        for region in ("us-east-1", "us-east-2")
+                        for path in ("api/v1/*", "inference/*")
+                    )
+                ),
+            ),
+            (
+                frozenset(
+                    {
+                        "cloudformation:DescribeStacks",
+                        "cloudformation:ListStackResources",
+                        "cloudformation:GetTemplate",
+                    }
+                ),
+                (arn("cloudformation", "*", "stack/gco-test-*/*"),),
+            ),
+            (
+                frozenset({"ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"}),
+                tuple(
+                    sorted(
+                        [
+                            arn("ssm", "*", "parameter/gco-test/*"),
+                            arn("ssm", "*", "parameter/aws/service/sagemaker-hyperpod/*", ""),
+                        ]
+                    )
+                ),
+            ),
+            (
+                frozenset(
+                    {"eks:DescribeCluster", "eks:ListCapabilities", "eks:DescribeCapability"}
+                ),
+                tuple(
+                    sorted(
+                        [
+                            arn("eks", "*", "cluster/gco-test-*"),
+                            arn("eks", "*", "capability/gco-test-*/*"),
+                        ]
+                    )
+                ),
+            ),
+            (
+                frozenset({"sqs:SendMessage", "sqs:GetQueueAttributes"}),
+                (arn("sqs", "us-east-1", "gco-test-jobs-us-east-1"),),
+            ),
+            (
+                frozenset({"sqs:GetQueueAttributes"}),
+                (arn("sqs", "us-east-1", "gco-test-jobs-dlq-us-east-1"),),
+            ),
+            (
+                frozenset({"logs:StartQuery"}),
+                tuple(sorted([arn("logs", "*", log_group), arn("logs", "*", f"{log_group}:*")])),
+            ),
+            (frozenset({"s3:ListBucket"}), (bucket,)),
+            (frozenset({"dynamodb:Query"}), tuple(sorted([table, f"{table}/index/*"]))),
+            (frozenset({"dynamodb:GetItem", "dynamodb:Scan"}), (endpoints,)),
+            (
+                frozenset(
+                    {
+                        "ecr:DescribeImages",
+                        "ecr:GetLifecyclePolicy",
+                        "ecr:DescribeImageReplicationStatus",
+                    }
+                ),
+                (arn("ecr", "*", "repository/gco-test/*"),),
+            ),
+            (
+                frozenset(
+                    {
+                        "sagemaker:DescribeCluster",
+                        "sagemaker:ListTags",
+                        "sagemaker:DescribeTrainingPlan",
+                        "pcs:GetCluster",
+                        "pcs:ListComputeNodeGroups",
+                        "pcs:GetComputeNodeGroup",
+                    }
+                ),
+                tuple(
+                    sorted(
+                        [
+                            arn("sagemaker", "*", "cluster/*"),
+                            arn("sagemaker", "*", "training-plan/*"),
+                            arn("pcs", "*", "cluster/*"),
+                        ]
+                    )
+                ),
+            ),
+            (
+                frozenset({"bedrock:InvokeModel"}),
+                tuple(
+                    sorted(
+                        [
+                            arn("bedrock", "*", "foundation-model/*", ""),
+                            arn("bedrock", "*", "inference-profile/*"),
+                        ]
+                    )
+                ),
+            ),
+            (
+                frozenset({"cognito-idp:DescribeUserPool"}),
+                (arn("cognito-idp", "*", "userpool/*"),),
+            ),
+            (frozenset(UNSCOPED_READ_ACTIONS), ("*",)),
+        }
+        assert _role_grants(template) == expected
+
+    def test_role_reads_only_except_the_gco_api_and_job_submission(self, template):
+        """No role assumption or pass, no stack, image, model or object write."""
+        role_id, _ = _find_mcp_role(template)
+        for stmt in _all_statements_for_role(template, role_id):
+            assert stmt["Effect"] == "Allow"
+            assert "NotAction" not in stmt and "NotResource" not in stmt
+            for action in _actions_as_set(stmt):
+                service, _, verb = action.partition(":")
+                assert service not in {"iam", "sts"}, action
+                assert "*" not in action, action
+                assert action in NON_READ_ACTIONS or verb.startswith(READ_VERBS), action
+
+    def test_trust_policy_leaves_assumption_to_identity_policies(self, template):
+        """The account principal, sts:AssumeRole only: callers need their own permission."""
         _, role = _find_mcp_role(template)
         props = role["Properties"]
-        assert "MCP server" in props.get("Description", ""), (
-            f"Expected 'MCP server' in role description, got {props.get('Description')!r}"
+        [statement] = props["AssumeRolePolicyDocument"]["Statement"]
+        assert statement["Action"] == "sts:AssumeRole"
+        assert (
+            _flatten(statement["Principal"]["AWS"]) == "arn:<AWS::Partition>:iam::123456789012:root"
         )
+        assert "Condition" not in statement
+        assert "ManagedPolicyArns" not in props and "Policies" not in props
+        assert props["MaxSessionDuration"] == 12 * 3600
 
-    def test_mcp_role_has_describe_cluster_scoped_to_cluster_arn(self):
-        """eks:DescribeCluster is present and scoped to the cluster ARN (not '*')."""
-        template = _synth(cdk.App(), "test-mcp-role-eks")
+    def test_access_entry_is_read_only_kubernetes_access(self, template):
+        """The view access policy cluster-wide, plus the group 02-rbac.yaml binds."""
+        role_id, _ = _find_mcp_role(template)
+        entries = [
+            e["Properties"]
+            for e in template.find_resources("AWS::EKS::AccessEntry").values()
+            if e["Properties"]["PrincipalArn"] == {"Fn::GetAtt": [role_id, "Arn"]}
+        ]
+        assert entries == [
+            {
+                "AccessPolicies": [
+                    {
+                        "AccessScope": {"Type": "cluster"},
+                        "PolicyArn": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    "arn:",
+                                    {"Ref": "AWS::Partition"},
+                                    f":eks::aws:cluster-access-policy/{MCP_EKS_ACCESS_POLICY}",
+                                ],
+                            ]
+                        },
+                    }
+                ],
+                "ClusterName": {"Ref": "GCOEksCluster841A896A"},
+                "KubernetesGroups": [MCP_KUBERNETES_GROUP],
+                "PrincipalArn": {"Fn::GetAtt": [role_id, "Arn"]},
+                "Type": "STANDARD",
+            }
+        ]
+        assert MCP_EKS_ACCESS_POLICY == "AmazonEKSViewPolicy"
 
-        role_logical_id, _ = _find_mcp_role(template)
-        statements = _all_statements_for_role(template, role_logical_id)
-
-        eks_stmts = [s for s in statements if "eks:DescribeCluster" in _actions_as_set(s)]
-        assert eks_stmts, "No statement granting eks:DescribeCluster found"
-
-        for stmt in eks_stmts:
-            assert stmt.get("Effect") == "Allow"
-            resources = stmt.get("Resource")
-            if isinstance(resources, str):
-                resources = [resources]
-            assert resources != ["*"], (
-                "eks:DescribeCluster must be scoped to the cluster ARN, not wildcard"
-            )
-            # Resource should be a Fn::GetAtt or a Ref to the cluster, not a
-            # bare wildcard string.
-            for r in resources:
-                assert r != "*", f"Unexpected wildcard resource on eks:DescribeCluster: {r!r}"
-
-    def test_mcp_role_has_s3_get_and_list_scoped_to_project_prefix(self):
-        """s3:GetObject and s3:ListBucket are scoped to the `{project}-*` prefix."""
-        template = _synth(cdk.App(), "test-mcp-role-s3")
-
-        role_logical_id, _ = _find_mcp_role(template)
-        statements = _all_statements_for_role(template, role_logical_id)
-
-        s3_stmts = [s for s in statements if _actions_as_set(s) & {"s3:GetObject", "s3:ListBucket"}]
-        assert s3_stmts, "No statement granting s3:GetObject / s3:ListBucket found"
-
-        # Gather all S3 actions granted on this role.
-        granted_s3_actions: set[str] = set()
-        s3_resources: list = []
-        for stmt in s3_stmts:
-            assert stmt.get("Effect") == "Allow"
-            granted_s3_actions.update(a for a in _actions_as_set(stmt) if a.startswith("s3:"))
-            resources = stmt.get("Resource")
-            if isinstance(resources, str):
-                resources = [resources]
-            s3_resources.extend(resources)
-
-        assert "s3:GetObject" in granted_s3_actions
-        assert "s3:ListBucket" in granted_s3_actions
-
-        # Resources must reference the `{project_name}-*` pattern, never the
-        # bare "*" wildcard. MockConfigLoader.get_project_name() returns "gco"
-        # so we expect arn:aws:s3:::gco-* style resources.
-        assert s3_resources, "No S3 resources on statement"
-        for r in s3_resources:
-            assert r != "*", "S3 actions must not be granted on '*'"
-            if isinstance(r, str):
-                assert "arn:aws:s3:::" in r, f"Expected S3 ARN with project prefix, got {r!r}"
-                # Must contain a '-*' prefix pattern (e.g. "gco-*").
-                assert "-*" in r, f"Expected S3 resource to use '{{project}}-*' pattern, got {r!r}"
-
-    def test_mcp_role_has_cloudwatch_metrics_readonly(self):
-        """CloudWatch metrics read APIs are present (wildcard resource is acceptable)."""
-        template = _synth(cdk.App(), "test-mcp-role-cw")
-
-        role_logical_id, _ = _find_mcp_role(template)
-        statements = _all_statements_for_role(template, role_logical_id)
-
-        required = {
-            "cloudwatch:GetMetricData",
-            "cloudwatch:GetMetricStatistics",
-            "cloudwatch:ListMetrics",
-        }
-        found: set[str] = set()
-        for stmt in statements:
-            if stmt.get("Effect") != "Allow":
-                continue
-            found.update(_actions_as_set(stmt) & required)
-
-        missing = required - found
-        assert not missing, f"MCP role is missing CloudWatch actions: {missing!r}"
-
-    def test_mcp_role_has_sqs_scoped_to_job_queue_arn(self):
-        """SQS send/describe actions are scoped to the job queue ARN, not wildcard."""
-        template = _synth(cdk.App(), "test-mcp-role-sqs")
-
-        role_logical_id, _ = _find_mcp_role(template)
-        statements = _all_statements_for_role(template, role_logical_id)
-
-        required = {"sqs:SendMessage", "sqs:GetQueueUrl", "sqs:GetQueueAttributes"}
-        sqs_stmts = [s for s in statements if _actions_as_set(s) & required]
-        assert sqs_stmts, "No statement granting SQS actions found"
-
-        granted: set[str] = set()
-        for stmt in sqs_stmts:
-            assert stmt.get("Effect") == "Allow"
-            granted.update(a for a in _actions_as_set(stmt) if a.startswith("sqs:"))
-            resources = stmt.get("Resource")
-            if isinstance(resources, str):
-                resources = [resources]
-            # SQS actions must NOT be on wildcard - they must reference the
-            # job queue ARN (via Fn::GetAtt or similar).
-            for r in resources:
-                assert r != "*", "SQS actions must be scoped to the job queue ARN, not wildcard"
-
-        missing = required - granted
-        assert not missing, f"MCP role is missing SQS actions: {missing!r}"
-
-    def test_mcp_role_has_no_broader_permissions(self):
-        """Role must NOT grant iam:*, s3:DeleteObject, s3:PutObject, or *:*."""
-        template = _synth(cdk.App(), "test-mcp-role-no-broad")
-
-        role_logical_id, _ = _find_mcp_role(template)
-        statements = _all_statements_for_role(template, role_logical_id)
-
-        # Actions that must never appear on the MCP role.
-        forbidden_exact = {
-            "iam:*",
-            "*",
-            "*:*",
-            "s3:*",
-            "s3:DeleteObject",
-            "s3:PutObject",
-            "s3:DeleteBucket",
-            "ec2:*",
-            "sts:*",
-        }
-
-        # Also disallow any iam:Create/Delete/Put/Attach/Update actions.
-        forbidden_iam_prefixes = (
-            "iam:Create",
-            "iam:Delete",
-            "iam:Put",
-            "iam:Attach",
-            "iam:Update",
-            "iam:AddUser",
-            "iam:Pass",
-        )
-
-        for stmt in statements:
-            if stmt.get("Effect") != "Allow":
-                continue
-            actions = _actions_as_set(stmt)
-
-            for action in actions:
-                assert action not in forbidden_exact, (
-                    f"MCP role must not grant forbidden action {action!r}; statement: {stmt!r}"
-                )
-                assert not action.startswith("iam:"), (
-                    f"MCP role must not grant any iam:* action, got {action!r}"
-                )
-                for prefix in forbidden_iam_prefixes:
-                    assert not action.startswith(prefix), (
-                        f"MCP role must not grant {prefix}*, got {action!r}"
-                    )
-
-    def test_mcp_role_cfn_output_present(self):
-        """A CfnOutput named McpServerRoleArn must be exported."""
-        template = _synth(cdk.App(), "test-mcp-role-output")
-
+    def test_mcp_role_cfn_output_present(self, template):
         outputs = template.find_outputs("McpServerRoleArn")
-        assert outputs, "Expected a CfnOutput named 'McpServerRoleArn'"
-        # There should be exactly one such output.
-        assert len(outputs) == 1, (
-            f"Expected exactly one McpServerRoleArn output, found {len(outputs)}"
-        )
+        assert len(outputs) == 1
 
     def test_mcp_role_disabled_via_context(self):
-        """Setting mcp_server.enabled=false skips role creation entirely."""
-        app = cdk.App(context={"mcp_server": {"enabled": False}})
-        template = _synth(app, "test-mcp-role-disabled")
-
-        roles = template.find_resources("AWS::IAM::Role")
-        mcp_roles = [
+        """mcp_server.enabled=false creates no role, access entry or output."""
+        template = _synth(cdk.App(context={"mcp_server": {"enabled": False}}), "test-mcp-off")
+        roles = [
             r
-            for r in roles.values()
+            for r in template.find_resources("AWS::IAM::Role").values()
             if "MCP server" in r.get("Properties", {}).get("Description", "")
         ]
-        assert mcp_roles == [], (
-            f"MCP role should not be created when mcp_server.enabled=false; found {len(mcp_roles)}"
+        assert roles == []
+        groups = [
+            e["Properties"].get("KubernetesGroups")
+            for e in template.find_resources("AWS::EKS::AccessEntry").values()
+        ]
+        assert [MCP_KUBERNETES_GROUP] not in groups
+        assert not template.find_outputs("McpServerRoleArn")
+
+
+class TestMcpRolePermissionsModule:
+    """``gco/stacks/mcp_role_permissions.py`` on its own."""
+
+    SCOPE = McpRoleScope(
+        partition="aws",
+        account="123456789012",
+        project_name="acme",
+        global_region="us-east-2",
+        api_regions=("eu-west-1", "us-east-1", "us-east-2"),
+        workload_regions=("us-east-1", "eu-west-1"),
+        model_bucket_arn="arn:aws:s3:::acme-global-modelbucket-example",
+    )
+
+    def test_one_api_pair_per_region_and_one_queue_per_workload_region(self):
+        statements = mcp_server_role_statements(self.SCOPE)
+        by_actions = {tuple(sorted(s.actions)): s.resources for s in statements}
+        assert by_actions[("execute-api:Invoke",)] == [
+            f"arn:aws:execute-api:{region}:123456789012:*/prod/*/{path}"
+            for region in ("eu-west-1", "us-east-1", "us-east-2")
+            for path in ("api/v1/*", "inference/*")
+        ]
+        assert by_actions[("sqs:GetQueueAttributes", "sqs:SendMessage")] == [
+            "arn:aws:sqs:us-east-1:123456789012:acme-jobs-us-east-1",
+            "arn:aws:sqs:eu-west-1:123456789012:acme-jobs-eu-west-1",
+        ]
+        assert by_actions[("sqs:GetQueueAttributes",)] == [
+            "arn:aws:sqs:us-east-1:123456789012:acme-jobs-dlq-us-east-1",
+            "arn:aws:sqs:eu-west-1:123456789012:acme-jobs-dlq-eu-west-1",
+        ]
+        assert by_actions[("s3:ListBucket",)] == ["arn:aws:s3:::acme-global-modelbucket-example"]
+
+    def test_wildcard_resources_are_deduplicated_details(self):
+        statements = mcp_server_role_statements(self.SCOPE)
+        details = wildcard_resources(statements + statements)
+        assert len(details) == len(set(details))
+        assert "Resource::*" in details
+        assert "Resource::arn:aws:cloudformation:*:123456789012:stack/acme-*/*" in details
+        assert "Resource::arn:aws:s3:::acme-global-modelbucket-example" not in details
+
+    def test_unscoped_reads_are_reads(self):
+        assert len(set(UNSCOPED_READ_ACTIONS)) == len(UNSCOPED_READ_ACTIONS)
+        for action in UNSCOPED_READ_ACTIONS:
+            assert action.partition(":")[2].startswith(READ_VERBS), action
+
+    def test_hyperpod_preflight_quota_listings_are_granted(self):
+        """Every Service Quotas listing ``hyperpod_preflight`` pages through is granted.
+
+        The instance-type check lists the applied quotas, then AWS's defaults for
+        an instance type with none applied. Without the second action, a session
+        on the role turned that type's check into a "could not check" warning.
+        """
+        import boto3
+
+        from cli import hyperpod_preflight
+        from cli.pcs_preflight import _Checker
+
+        model = boto3.client("service-quotas", region_name="us-east-1")
+        operations: list[str] = []
+
+        class _RecordingQuotas:
+            def get_paginator(self, method: str) -> Any:
+                operations.append(model.meta.method_to_api_mapping[method])
+                return MagicMock(paginate=MagicMock(return_value=[{"Quotas": []}]))
+
+        quotas = _RecordingQuotas()
+        checker = _Checker("us-east-1", lambda service, **_: quotas)
+        hyperpod_preflight._check_instance_types(
+            checker, {"instance_groups": [{"instance_type": "ml.g5.8xlarge", "instance_count": 1}]}
         )
 
-        # The CfnOutput should also be absent.
-        outputs = template.find_outputs("McpServerRoleArn")
-        assert not outputs, "McpServerRoleArn output should not exist when MCP role is disabled"
+        assert operations == ["ListServiceQuotas", "ListAWSDefaultServiceQuotas"]
+        for operation in operations:
+            assert f"servicequotas:{operation}" in UNSCOPED_READ_ACTIONS, operation
+
+    def test_images_orphans_endpoint_reads_are_granted(self, monkeypatch):
+        """Every DynamoDB call ``images_orphans`` makes for the endpoint records is granted.
+
+        The orphan listing collects the images every inference endpoint names
+        and fails when it cannot read them, so on a role without ``dynamodb:Scan``
+        on the endpoints table every ``images_orphans`` call failed.
+        """
+        import boto3
+        from botocore.stub import Stubber
+
+        import gco.services.inference_store as inference_store
+        from cli.config import GCOConfig
+        from cli.images import ImageManager
+
+        config = GCOConfig()
+        resource = boto3.resource("dynamodb", region_name=config.global_region)
+        client = resource.meta.client
+        calls: list[tuple[str, str, str]] = []
+        client.meta.events.register(
+            "before-parameter-build.dynamodb",
+            lambda params, model, **_: calls.append(
+                (model.name, client.meta.region_name, params["TableName"])
+            ),
+        )
+        stubber = Stubber(client)
+        stubber.add_response("scan", {"Items": []})
+        monkeypatch.setattr(inference_store.boto3, "resource", lambda *a, **k: resource)
+        with stubber:
+            assert ImageManager(config, region="us-east-1")._collect_inference_image_refs() == set()
+        stubber.assert_no_pending_responses()
+
+        scope = McpRoleScope(
+            partition="aws",
+            account="123456789012",
+            project_name=config.project_name,
+            global_region=config.global_region,
+            api_regions=(config.global_region,),
+            workload_regions=("us-east-1",),
+            model_bucket_arn="arn:aws:s3:::gco-global-modelbucket-example",
+        )
+        statements = mcp_server_role_statements(scope)
+        assert calls == [("Scan", "us-east-2", "gco-inference-endpoints")]
+        for operation, region, table in calls:
+            arn = f"arn:aws:dynamodb:{region}:123456789012:table/{table}"
+            assert any(
+                f"dynamodb:{operation}" in statement.actions and arn in statement.resources
+                for statement in statements
+            ), (operation, arn)
+
+
+_ACME_CDK = {
+    "app": "python3 app.py",
+    "context": {
+        "project_name": "acme",
+        "deployment_regions": {
+            "global": "us-east-2",
+            "api_gateway": "us-east-2",
+            "monitoring": "us-east-2",
+            "regional": ["us-east-1", "us-west-2"],
+        },
+    },
+}
+_ACME_ENDPOINTS = "acme-inference-endpoints"
+_IMAGE = "vllm/vllm-openai:v0.32.0"
+_NEW_IMAGE = "vllm/vllm-openai:v0.33.0"
+_INFERENCE_RESOURCE = "gco://inference/{endpoint_name}"
+
+# Every default tool in gco_mcp/tools/inference.py, and the inference resource,
+# with arguments that take its happy path on an endpoint the fixture seeds.
+_INFERENCE_TOOL_CALLS: dict[str, dict[str, Any]] = {
+    "list_inference_endpoints": {},
+    "inference_status": {"name": "ep"},
+    "mooncake_topology_status": {"name": "mc-topology"},
+    "invoke_inference": {"name": "ep", "prompt": "hello"},
+    "chat_inference": {"name": "ep", "messages": [{"role": "user", "content": "hello"}]},
+    "inference_health": {"name": "ep"},
+    "list_endpoint_models": {"name": "ep"},
+    _INFERENCE_RESOURCE: {"endpoint_name": "ep"},
+    "deploy_inference": {"name": "new-ep", "image": _IMAGE, "region": "us-east-1"},
+    "deploy_disaggregated_inference": {"name": "new-pd", "image": _IMAGE, "region": "us-east-1"},
+    "scale_inference": {"name": "scale-ep", "replicas": 2},
+    "update_inference_image": {"name": "image-ep", "image": _NEW_IMAGE},
+    "stop_inference": {"name": "stop-ep"},
+    "start_inference": {"name": "start-ep"},
+    "add_inference_region": {"name": "add-ep", "region": "us-west-2"},
+    "remove_inference_region": {"name": "remove-ep", "region": "us-west-2"},
+    "set_mooncake_topology": {"name": "mc-topology", "prefill": 2, "decode": 2},
+    "configure_mooncake_store": {"endpoint_name": "mc-store", "offload": "cpu"},
+    "canary_deploy": {"name": "canary-ep", "image": _NEW_IMAGE},
+    "promote_canary": {"name": "promote-ep"},
+    "rollback_canary": {"name": "rollback-ep"},
+}
+
+
+def _seed_inference_endpoints() -> None:
+    """Create acme's endpoints table and the endpoints the tool calls act on."""
+    import boto3
+
+    from gco.services.inference_store import InferenceEndpointStore
+
+    boto3.client("dynamodb", region_name="us-east-2").create_table(
+        TableName=_ACME_ENDPOINTS,
+        KeySchema=[{"AttributeName": "endpoint_name", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "endpoint_name", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    store = InferenceEndpointStore(table_name=_ACME_ENDPOINTS, region="us-east-2")
+    classic = {"image": _IMAGE, "framework": "vllm", "replicas": 1, "port": 8000}
+    canary = {**classic, "canary": {"image": _NEW_IMAGE, "weight": 10, "replicas": 1}}
+    seeds: dict[str, tuple[dict[str, Any], list[str]]] = {
+        "ep": (classic, ["us-east-1"]),
+        "scale-ep": (classic, ["us-east-1"]),
+        "image-ep": (classic, ["us-east-1"]),
+        "stop-ep": (classic, ["us-east-1"]),
+        "start-ep": (classic, ["us-east-1"]),
+        "add-ep": (classic, ["us-east-1"]),
+        "remove-ep": (classic, ["us-east-1", "us-west-2"]),
+        "canary-ep": (classic, ["us-east-1"]),
+        "promote-ep": (canary, ["us-east-1"]),
+        "rollback-ep": (canary, ["us-east-1"]),
+        "mc-topology": (
+            {
+                **classic,
+                "mooncake": {"mode": "disaggregated", "topology": {"prefill": 1, "decode": 1}},
+            },
+            ["us-east-1"],
+        ),
+        "mc-store": (
+            {**classic, "mooncake": {"mode": "store", "store": {"enabled": True}}},
+            ["us-east-1"],
+        ),
+    }
+    for name, (spec, regions) in seeds.items():
+        store.create_endpoint(name, spec, regions)
+    stopped = store.get_endpoint("start-ep", consistent_read=True)
+    assert stopped is not None
+    store.update_desired_state("start-ep", "stopped", expected_lifecycle_id=stopped["lifecycle_id"])
+
+
+class TestInferenceToolsUnderTheRole:
+    """The DynamoDB calls each default inference tool makes, against the role.
+
+    The inference tools call DynamoDB on ``<project>-inference-endpoints``
+    themselves, through the CLI's ``InferenceEndpointStore``, not through the
+    GCO API. Each tool runs its real ``gco`` command in-process on moto (an
+    ``acme`` deployment, global Region us-east-2), with every DynamoDB call
+    recorded the way the store's client makes it. A tool the role covers must
+    make only calls the role grants; a tool listed in
+    ``DEFAULT_TOOLS_OUTSIDE_ROLE`` must make one it does not, so the list
+    stays exact. ``inference_status``, ``invoke_inference`` and the
+    ``gco://inference/{endpoint_name}`` resource used to fail with
+    AccessDenied under the role (GetItem was not granted).
+    """
+
+    SCOPE = McpRoleScope(
+        partition="aws",
+        account="123456789012",
+        project_name="acme",
+        global_region="us-east-2",
+        api_regions=("us-east-2", "us-east-1", "us-west-2"),
+        workload_regions=("us-east-1", "us-west-2"),
+        model_bucket_arn="arn:aws:s3:::acme-global-modelbucket-example",
+    )
+
+    @pytest.fixture
+    def run_tool(self, tmp_path, monkeypatch):
+        import boto3
+        import requests
+        from click.testing import CliRunner
+        from moto import mock_aws
+
+        import cli.config
+        import gco.services.inference_store as inference_store
+        from cli.aws_client import GCOAWSClient
+        from cli.main import cli as gco_cli
+
+        sys.path.insert(0, str(REPO_ROOT / "gco_mcp"))
+        import cli_runner
+        import run_mcp
+        from resources import inference as inference_resource
+
+        (tmp_path / "cdk.json").write_text(json.dumps(_ACME_CDK), encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))  # no ~/.gco/config.yaml of the host
+        monkeypatch.setattr(cli.config, "_project_root", None)
+        for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+            monkeypatch.setenv(name, "testing")
+        for name in (
+            "GCO_PROJECT_NAME",
+            "GCO_GLOBAL_REGION",
+            "INFERENCE_ENDPOINTS_TABLE_NAME",
+            "DYNAMODB_REGION",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        calls: list[tuple[str, str, str]] = []
+        exit_codes: list[int] = []
+        real_resource = boto3.resource
+
+        def recording_resource(*args: Any, **kwargs: Any) -> Any:
+            resource = real_resource(*args, **kwargs)
+            client = resource.meta.client
+            client.meta.events.register(
+                "before-parameter-build.dynamodb",
+                lambda params, model, **_: calls.append(
+                    (model.name, client.meta.region_name, params.get("TableName", ""))
+                ),
+            )
+            return resource
+
+        def run_in_process(*argv: str, **_options: Any) -> str:
+            result = CliRunner().invoke(gco_cli, ["--output", "json", *argv])
+            exit_codes.append(result.exit_code)
+            return result.output
+
+        def api_response(*_args: Any, **_kwargs: Any) -> requests.Response:
+            response = requests.Response()
+            response.status_code = 200
+            response.headers["content-type"] = "application/json"
+            response._content = b'{"choices": [{"text": "hi"}], "data": []}'
+            return response
+
+        monkeypatch.setattr(cli_runner, "_run_cli", run_in_process)
+        monkeypatch.setattr(
+            GCOAWSClient,
+            "discover_regional_stacks",
+            lambda self, force_refresh=False: {"us-east-1": MagicMock(), "us-west-2": MagicMock()},
+        )
+        monkeypatch.setattr(GCOAWSClient, "make_authenticated_request", api_response)
+
+        def run(tool: str) -> tuple[list[tuple[str, str, str]], list[int], str]:
+            arguments = _INFERENCE_TOOL_CALLS[tool]
+            with mock_aws():
+                _seed_inference_endpoints()
+                monkeypatch.setattr(inference_store.boto3, "resource", recording_resource)
+                if tool == _INFERENCE_RESOURCE:
+                    output = inference_resource._inference_resource(**arguments)
+                else:
+                    output = getattr(run_mcp, tool)(**arguments)
+                monkeypatch.setattr(inference_store.boto3, "resource", real_resource)
+            return calls, exit_codes, output
+
+        try:
+            yield run
+        finally:
+            sys.path.remove(str(REPO_ROOT / "gco_mcp"))
+
+    def _granted(self, call: tuple[str, str, str]) -> bool:
+        operation, region, table = call
+        arn = f"arn:aws:dynamodb:{region}:123456789012:table/{table}"
+        return any(
+            f"dynamodb:{operation}" in statement.actions and arn in statement.resources
+            for statement in mcp_server_role_statements(self.SCOPE)
+        )
+
+    @pytest.mark.parametrize("tool", sorted(_INFERENCE_TOOL_CALLS))
+    def test_each_call_is_granted_unless_the_tool_is_outside_the_role(self, run_tool, tool):
+        calls, exit_codes, output = run_tool(tool)
+
+        # The command ran to the end, so every DynamoDB call of its happy path was made.
+        assert exit_codes in ([], [0]), output
+        assert '"error"' not in output, output
+        assert calls, f"{tool} made no DynamoDB call"
+        assert {(region, table) for _, region, table in calls} == {("us-east-2", _ACME_ENDPOINTS)}
+        refused = sorted({call[0] for call in calls if not self._granted(call)})
+        if tool in DEFAULT_TOOLS_OUTSIDE_ROLE:
+            assert refused, f"{tool} is listed outside the role but makes only granted calls"
+            assert set(refused) <= {"PutItem", "UpdateItem"}, refused
+        else:
+            assert refused == [], f"{tool} calls {refused}, which the role does not grant"
+
+    def test_every_default_inference_tool_is_driven(self, default_tool_names):
+        import ast
+
+        tree = ast.parse((REPO_ROOT / "gco_mcp" / "tools" / "inference.py").read_text())
+        # Module-level definitions only: the gated tools sit under ``if is_enabled(...)``.
+        defined = {
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.decorator_list
+        }
+        assert set(_INFERENCE_TOOL_CALLS) - {_INFERENCE_RESOURCE} == defined & default_tool_names
+
+
+_DEFAULT_TOOLS = (
+    "import asyncio, json, sys; sys.path.insert(0, 'gco_mcp'); import run_mcp; "
+    "print(json.dumps(sorted(t.name for t in asyncio.run(run_mcp.mcp._list_tools()))))"
+)
+
+
+@pytest.fixture(scope="module")
+def default_tool_names() -> set[str]:
+    """The tools the server registers with every GCO_ENABLE_* flag unset."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GCO_ENABLE_")}
+    proc = subprocess.run(
+        [sys.executable, "-c", _DEFAULT_TOOLS],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return set(json.loads(proc.stdout.strip().splitlines()[-1]))
+
+
+class TestBoundaryIsDocumented:
+    """The default tools the role leaves out exist and are documented."""
+
+    def test_tools_outside_the_role_are_default_tools(self, default_tool_names):
+        assert len(default_tool_names) > 100
+        assert set(DEFAULT_TOOLS_OUTSIDE_ROLE) <= default_tool_names
+
+    def test_readme_names_each_tool_outside_the_role(self):
+        readme = (REPO_ROOT / "gco_mcp" / "README.md").read_text(encoding="utf-8")
+        section = readme.split("### IAM role (`GCO_MCP_ROLE_ARN`)", 1)[1].split("\n## ", 1)[0]
+        for tool in DEFAULT_TOOLS_OUTSIDE_ROLE:
+            assert f"`{tool}`" in section, tool
+
+    def test_rbac_binds_the_group_to_read_only_rules(self):
+        documents = [d for d in yaml.safe_load_all(RBAC_MANIFEST.read_text()) if d]
+        [binding] = [
+            d
+            for d in documents
+            if d["kind"] == "ClusterRoleBinding"
+            and any(s.get("name") == MCP_KUBERNETES_GROUP for s in d.get("subjects", []))
+        ]
+        assert binding["subjects"] == [
+            {"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": MCP_KUBERNETES_GROUP}
+        ]
+        [role] = [
+            d
+            for d in documents
+            if d["kind"] == "ClusterRole" and d["metadata"]["name"] == binding["roleRef"]["name"]
+        ]
+        assert role["rules"] == [
+            {"apiGroups": [""], "resources": ["nodes"], "verbs": ["get", "list", "watch"]},
+            {
+                "apiGroups": ["karpenter.sh"],
+                "resources": ["nodepools"],
+                "verbs": ["get", "list", "watch"],
+            },
+        ]
 
 
 class TestNoDangerousPermissionsInStack:
     """Guardrail: no IAM policy in the stack should grant full-admin-style access."""
 
-    def test_no_iam_policy_grants_full_admin(self):
+    def test_no_iam_policy_grants_full_admin(self, template):
         """No IAM policy or managed policy grants '*:*', 'iam:*', or NotAction='*'."""
-        template = _synth(cdk.App(), "test-stack-no-admin")
-
-        # Check inline policies (AWS::IAM::Policy) and managed policies
-        # (AWS::IAM::ManagedPolicy).
-        policy_types = ["AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"]
-
         forbidden_actions = {"*", "*:*", "iam:*"}
-
-        for policy_type in policy_types:
+        for policy_type in ("AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"):
             for logical_id, resource in template.find_resources(policy_type).items():
                 doc = resource.get("Properties", {}).get("PolicyDocument", {})
                 for stmt in doc.get("Statement", []):
                     if stmt.get("Effect") != "Allow":
                         continue
-
-                    # Detect NotAction (effectively inverse wildcard).
-                    not_action = stmt.get("NotAction")
-                    if not_action is not None:
-                        raise AssertionError(
-                            f"Policy {logical_id} ({policy_type}) uses NotAction, "
-                            f"which is dangerous: {stmt!r}"
-                        )
-
-                    actions = _actions_as_set(stmt)
-                    bad = actions & forbidden_actions
-                    assert not bad, (
-                        f"Policy {logical_id} ({policy_type}) grants dangerous "
-                        f"action(s) {bad!r}; statement: {stmt!r}"
+                    assert stmt.get("NotAction") is None, (
+                        f"Policy {logical_id} ({policy_type}) uses NotAction: {stmt!r}"
                     )
+                    bad = _actions_as_set(stmt) & forbidden_actions
+                    assert not bad, f"Policy {logical_id} grants {bad!r}: {stmt!r}"

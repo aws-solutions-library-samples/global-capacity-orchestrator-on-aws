@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -4597,16 +4598,16 @@ class TestCheckpointPersistence:
         assert loaded.identity == {"run_id": "run-123"}
         assert loaded.state == {"nested": {"value": 1}}
 
-    def test_checkpoint_without_state_keeps_compatible_empty_default(self, tmp_path: Path) -> None:
+    def test_a_checkpoint_without_state_is_corrupt(self, tmp_path: Path) -> None:
         from scripts.live_release_validation import models
 
         path = tmp_path / "report" / "checkpoint.json"
-        models.atomic_write_json(
-            path,
-            {"schema_version": models.SCHEMA_VERSION, "identity": {}},
-        )
+        payload = models.RunCheckpoint(identity={}).to_dict()
+        del payload["state"]
+        models.atomic_write_json(path, payload)
 
-        assert models.RunCheckpoint.from_path(path).state == {}
+        with pytest.raises(ValueError, match="is corrupt: missing state"):
+            models.RunCheckpoint.from_path(path)
 
     @pytest.mark.parametrize(
         "state",
@@ -4623,11 +4624,7 @@ class TestCheckpointPersistence:
         path = tmp_path / "report" / "checkpoint.json"
         models.atomic_write_json(
             path,
-            {
-                "schema_version": models.SCHEMA_VERSION,
-                "identity": {},
-                "state": state,
-            },
+            {**models.RunCheckpoint(identity={}).to_dict(), "state": state},
         )
 
         with pytest.raises(ValueError, match="state must be an object"):
@@ -5542,6 +5539,29 @@ class TestSchedulerValidation:
         enablement = checks_schedulers.effective_scheduler_enablement(self._ctx(helm=None))
         assert all(state["enabled"] for state in enablement.values())
 
+    @pytest.mark.parametrize(
+        ("value", "expected"), [(True, True), (False, False), ("true", True), ("TRUE", True)]
+    )
+    def test_a_toggle_reads_the_way_the_stacks_read_it(self, value: object, expected: bool) -> None:
+        from scripts.live_release_validation.checks import schedulers as checks_schedulers
+
+        ctx = self._ctx(helm={"volcano": {"enabled": value}})
+        enablement = checks_schedulers.effective_scheduler_enablement(ctx)
+        assert enablement["volcano"] == {"enabled": expected, "source": "cdk.json helm.volcano"}
+
+    @pytest.mark.parametrize("value", ["false", "no", "", 0, 1, None])
+    def test_a_toggle_the_stacks_reject_is_an_error_not_a_probe(self, value: object) -> None:
+        # bool("false") is True: the harness used to probe a scheduler the
+        # stacks now refuse to read as on.
+        from gco.config.config_loader import ConfigValidationError
+        from scripts.live_release_validation.checks import schedulers as checks_schedulers
+
+        ctx = self._ctx(helm={"kueue": {"enabled": value}})
+        with pytest.raises(
+            ConfigValidationError, match=r"helm\.kueue\.enabled must be true or false"
+        ):
+            checks_schedulers.effective_scheduler_enablement(ctx)
+
     def test_run_overrides_force_optional_schedulers_on(self) -> None:
         from scripts.live_release_validation.checks import schedulers as checks_schedulers
 
@@ -5892,6 +5912,121 @@ class TestManifestPathResolution:
         assert referenced, "no _load_manifest call sites found; update the scanner regex"
         for filename in sorted(referenced):
             assert (package / "manifests" / filename).is_file(), filename
+
+
+class _ApiResponse:
+    """The parts of a ``requests.Response`` the WAF retry reads."""
+
+    def __init__(self, status_code: int, body: object = None) -> None:
+        self.status_code = status_code
+        self._body = body
+        self.closed = False
+
+    def json(self) -> object:
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestWafPatientApiClient:
+    """The harness's API client waits out the per-IP WAF rate rule."""
+
+    @staticmethod
+    def _client(monkeypatch: pytest.MonkeyPatch, responses: list[_ApiResponse]) -> tuple[Any, list]:
+        from cli.aws_client import GCOAWSClient
+        from scripts.live_release_validation import aws_session
+
+        calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        queue = list(responses)
+
+        def parent(self: Any, *args: Any, **kwargs: Any) -> _ApiResponse:
+            calls.append((args, kwargs))
+            return queue.pop(0)
+
+        monkeypatch.setattr(GCOAWSClient, "make_authenticated_request", parent)
+        client = object.__new__(aws_session.WafPatientApiClient)
+        return client, calls
+
+    @pytest.mark.parametrize(
+        ("response", "blocked"),
+        [
+            (_ApiResponse(403, {"message": "Forbidden"}), True),
+            # An IAM refusal names the caller; it is not a WAF block.
+            (_ApiResponse(403, {"Message": "User: anonymous is not authorized"}), False),
+            (_ApiResponse(403, {"message": "Missing Authentication Token"}), False),
+            (_ApiResponse(403, ValueError("not JSON")), False),
+            (_ApiResponse(429, {"message": "Forbidden"}), False),
+            (_ApiResponse(200, {"message": "Forbidden"}), False),
+        ],
+    )
+    def test_only_the_waf_block_shape_counts(self, response: _ApiResponse, blocked: bool) -> None:
+        from scripts.live_release_validation.aws_session import is_waf_block
+
+        assert is_waf_block(response) is blocked
+
+    def test_a_block_is_waited_out_and_the_request_sent_again(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live run's PCS status read was blocked once the run crossed the limit."""
+        from scripts.live_release_validation import aws_session
+
+        blocked = _ApiResponse(403, {"message": "Forbidden"})
+        answered = _ApiResponse(200, {"jobs": []})
+        client, calls = self._client(monkeypatch, [blocked, blocked, answered])
+        sleeps: list[float] = []
+        monkeypatch.setattr(aws_session.time, "sleep", sleeps.append)
+        monkeypatch.setattr(aws_session.time, "monotonic", lambda: 0.0)
+        result = client.make_authenticated_request(
+            method="POST", path="/api/v1/jobs", body={"a": 1}, target_region="us-east-1"
+        )
+        assert result is answered
+        assert sleeps == [30.0, 30.0]
+        assert blocked.closed is True
+        # Every attempt is the caller's request, unchanged; a WAF block never
+        # reached GCO, so a mutating request is safe to send again.
+        assert (
+            calls
+            == [
+                (
+                    (),
+                    {
+                        "method": "POST",
+                        "path": "/api/v1/jobs",
+                        "body": {"a": 1},
+                        "target_region": "us-east-1",
+                    },
+                )
+            ]
+            * 3
+        )
+
+    def test_a_block_that_outlasts_the_deadline_is_returned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.live_release_validation import aws_session
+
+        responses = [_ApiResponse(403, {"message": "Forbidden"}) for _ in range(20)]
+        client, calls = self._client(monkeypatch, responses)
+        clock = iter([0.0, 100.0, 300.0, 419.0, 420.0])
+        monkeypatch.setattr(aws_session.time, "monotonic", lambda: next(clock))
+        sleeps: list[float] = []
+        monkeypatch.setattr(aws_session.time, "sleep", sleeps.append)
+        result = client.make_authenticated_request(method="GET", path="/api/v1/health")
+        assert result is responses[3]
+        assert result.closed is False
+        assert len(calls) == 4 and sleeps == [30.0, 30.0, 30.0]
+
+    def test_any_other_answer_is_returned_at_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts.live_release_validation import aws_session
+
+        denied = _ApiResponse(403, {"Message": "User: x is not authorized"})
+        client, calls = self._client(monkeypatch, [denied])
+        monkeypatch.setattr(aws_session.time, "sleep", pytest.fail)
+        assert client.make_authenticated_request(method="GET", path="/x") is denied
+        assert len(calls) == 1
 
 
 class TestThrottleResilientSession:

@@ -9,6 +9,7 @@ pattern (inference_monitor).
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard
@@ -25,8 +26,8 @@ from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-25T13:00:05Z
-# Generated from Git commit: de508a874e7ac267180e26a4c6fc56c1cd0878c2
+# Generated at (UTC): 2026-11-19T14:17:34Z
+# Generated from Git commit: d0db0066b3e8f603134a252ab3753efd40d90493
 # Flowchart(s) generated from this file:
 #   * ``InferenceManager.deploy`` -> ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.html``
 #     (PNG: ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.png``)
@@ -72,8 +73,6 @@ MOONCAKE_TRANSFER_PROTOCOLS: frozenset[str] = frozenset({"rdma", "tcp"})
 #: KV-store offload tiers for spilling cache beyond GPU memory.
 MOONCAKE_OFFLOAD_TIERS: frozenset[str] = frozenset({"cpu", "disk", "none"})
 
-#: PD proxy request-scheduling strategies supported today.
-MOONCAKE_PROXY_SCHEDULING: frozenset[str] = frozenset({"round_robin"})
 
 #: Inclusive bounds for per-role replica counts in an XpYd topology.
 MOONCAKE_TOPOLOGY_MIN: int = 1
@@ -132,7 +131,8 @@ class MooncakeTransferConfig(TypedDict, total=False):
 class MooncakeProxyConfig(TypedDict, total=False):
     """PD proxy configuration. ``admin_api_key_secret`` names the Kubernetes
     Secret holding the proxy admin key; the key value is never carried on the
-    endpoint spec."""
+    endpoint spec. ``scheduling`` is accepted from specs earlier releases wrote
+    and has no effect: the role Services spread requests across Ready pods."""
 
     image: str
     scheduling: Literal["round_robin"]
@@ -384,12 +384,23 @@ class InferenceManager:
         self._aws_client = get_aws_client(config)
 
     def _get_store(self, region: str | None = None) -> InferenceEndpointStore:
-        """Get an InferenceEndpointStore for the global region."""
+        """Get the InferenceEndpointStore of the configured deployment.
+
+        The global stack creates ``<project_name>-inference-endpoints`` in the
+        global Region, so the name and Region come from the CLI configuration
+        (cdk.json, the config file, ``GCO_PROJECT_NAME`` / ``GCO_GLOBAL_REGION``).
+        ``INFERENCE_ENDPOINTS_TABLE_NAME``, the variable the in-cluster
+        services are given, still names the table when it is set.
+        """
         from gco.services.inference_store import InferenceEndpointStore
 
-        # Use the global region for DynamoDB (same as job store)
-        store_region = region or self.config.global_region
-        return InferenceEndpointStore(region=store_region)
+        table_name = (
+            os.environ.get("INFERENCE_ENDPOINTS_TABLE_NAME")
+            or f"{self.config.project_name}-inference-endpoints"
+        )
+        return InferenceEndpointStore(
+            table_name=table_name, region=region or self.config.global_region
+        )
 
     def _build_mooncake_block(
         self,
@@ -563,7 +574,20 @@ class InferenceManager:
 
         Returns:
             Created endpoint record
+
+        Raises:
+            ValueError: For an invalid spec, for a name that is not a DNS-1035
+                label of at most 55 characters, or for a name whose derived
+                Kubernetes object names (``<name>-canary``, ``<name>-proxy``
+                and the others) would be shared with an existing endpoint, in
+                either direction.
         """
+        from gco.services.inference_store import (
+            check_endpoint_name_collisions,
+            validate_endpoint_name,
+        )
+
+        validate_endpoint_name(endpoint_name)
         if framework not in (None, "vllm", "sglang"):
             raise ValueError("framework must be 'vllm' or 'sglang'")
         if mooncake_mode is not None and framework == "sglang":
@@ -692,6 +716,14 @@ class InferenceManager:
             spec["mooncake"] = mooncake_block
 
         store = self._get_store()
+        check_endpoint_name_collisions(
+            endpoint_name,
+            (
+                existing["endpoint_name"]
+                for existing in store.list_endpoints()
+                if isinstance(existing.get("endpoint_name"), str)
+            ),
+        )
         result: dict[str, Any] = store.create_endpoint(
             endpoint_name=endpoint_name,
             spec=spec,
@@ -793,7 +825,8 @@ class InferenceManager:
 
         Updates ``spec.mooncake.topology`` to the new XpYd counts and
         re-triggers reconciliation (via :meth:`InferenceEndpointStore.update_spec`,
-        which flips ``desired_state`` to ``deploying``) so the per-region
+        which moves a live endpoint to ``deploying``; a stopped one stays
+        stopped until started) so the per-region
         monitor adjusts the prefill and decode role replica counts.
 
         Both counts must be integers in the inclusive range
@@ -865,7 +898,8 @@ class InferenceManager:
 
         Merges ``store_config`` into ``spec.mooncake.store`` and re-triggers
         reconciliation (via :meth:`InferenceEndpointStore.update_spec`, which
-        flips ``desired_state`` to ``deploying``) so the per-region monitor
+        moves a live endpoint to ``deploying``; a stopped one stays stopped
+        until started) so the per-region monitor
         picks up the new store settings.
 
         Store byte-size fields are authored as base-10 integer decimal strings
@@ -1042,18 +1076,15 @@ class InferenceManager:
         # Region appeared earlier in cleanup history. This invalidates a prior
         # terminal removal acknowledgement before resources can be recreated.
         region_generations[region] = secrets.token_hex(32)
-        try:
-            result = store.update_target_regions(
-                endpoint_name,
-                regions,
-                cleanup_regions,
-                region_generations,
-                expected_lifecycle_id=lifecycle_id,
-                expected_updated_at=updated_at,
-            )
-        except Exception as e:
-            logger.error("Failed to add region: %s", e)
-            return None
+        # A failed write propagates: None means only that the endpoint was not found.
+        result = store.update_target_regions(
+            endpoint_name,
+            regions,
+            cleanup_regions,
+            region_generations,
+            expected_lifecycle_id=lifecycle_id,
+            expected_updated_at=updated_at,
+        )
         if result is None:
             self._raise_write_conflict(endpoint_name, "added to a Region")
         return result
@@ -1088,18 +1119,15 @@ class InferenceManager:
         # The cleanup pass must acknowledge this removal, not any earlier
         # remove/re-add cycle for the same Region.
         region_generations[region] = secrets.token_hex(32)
-        try:
-            result = store.update_target_regions(
-                endpoint_name,
-                regions,
-                cleanup_regions,
-                region_generations,
-                expected_lifecycle_id=lifecycle_id,
-                expected_updated_at=updated_at,
-            )
-        except Exception as e:
-            logger.error("Failed to remove region: %s", e)
-            return None
+        # A failed write propagates: None means only that the endpoint was not found.
+        result = store.update_target_regions(
+            endpoint_name,
+            regions,
+            cleanup_regions,
+            region_generations,
+            expected_lifecycle_id=lifecycle_id,
+            expected_updated_at=updated_at,
+        )
         if result is None:
             self._raise_write_conflict(endpoint_name, "removed from a Region")
         return result

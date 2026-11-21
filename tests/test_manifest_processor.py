@@ -11,6 +11,7 @@ and Job manifests so each test starts from a known-good baseline.
 """
 
 import re
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -252,6 +253,58 @@ class TestResourceLimitValidation:
         is_valid, error = processor.validate_manifest(valid_deployment)
         assert is_valid is False
         assert "cdk.json" in error
+
+    @staticmethod
+    def _pod(kind: str = "Pod", *, gpu: int, cpu: str, memory: str) -> dict:
+        """A tolerating, trusted-image workload whose only problem can be its size."""
+        pod_spec = {
+            "restartPolicy": "Never",
+            "tolerations": [
+                {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+            ],
+            "containers": [
+                {
+                    "name": "main",
+                    "image": "nvcr.io/nvidia/pytorch:24.01-py3",
+                    "resources": {"limits": {"nvidia.com/gpu": gpu, "cpu": cpu, "memory": memory}},
+                }
+            ],
+        }
+        spec = pod_spec if kind == "Pod" else {"template": {"spec": pod_spec}}
+        return {
+            "apiVersion": "v1" if kind == "Pod" else "apps/v1",
+            "kind": kind,
+            "metadata": {"name": "big", "namespace": "gco-jobs"},
+            "spec": spec,
+        }
+
+    def test_bare_pod_over_the_caps_is_rejected(self, processor):
+        """A bare Pod is held to the per-manifest caps a Job's template is.
+
+        The cap check used to run only for a fixed list of workload kinds that
+        left out Pod, an allowed kind, so one Pod could ask for 8 GPUs where
+        the cap is 4 (the SQS consumer already rejected the same manifest).
+        """
+        is_valid, error = processor.validate_manifest(self._pod(gpu=8, cpu="64", memory="512Gi"))
+        assert is_valid is False
+        assert "CPU 64000m exceeds max 10000m" in error
+        assert "Memory 512Gi exceeds max 32Gi" in error
+        assert "GPU 8 exceeds max 4" in error
+
+    def test_bare_pod_within_the_caps_is_admitted(self, processor):
+        assert processor.validate_manifest(self._pod(gpu=1, cpu="2", memory="4Gi")) == (
+            True,
+            None,
+        )
+
+    def test_caps_do_not_depend_on_a_kind_list(self, processor):
+        """An operator-allowed pod-template kind is capped without being named in code."""
+        processor.allowed_kinds = {*processor.allowed_kinds, "ReplicaSet"}
+        is_valid, error = processor.validate_manifest(
+            self._pod("ReplicaSet", gpu=8, cpu="1", memory="1Gi")
+        )
+        assert is_valid is False
+        assert "GPU 8 exceeds max 4" in error
 
 
 class TestSecurityContextValidation:
@@ -1517,6 +1570,79 @@ class TestKubernetesConfigLoading:
                 )
 
 
+class TestBoundedKubernetesClient:
+    """Every Kubernetes request the processor makes carries a timeout.
+
+    kubernetes-client 37 reads no timeout from its Configuration, so the old
+    ``configuration.request_timeout`` assignment bounded nothing, and the typed
+    APIs each built their own default client. They now share one
+    ``BoundedApiClient`` (tests/test_k8s_client.py covers the client itself).
+    """
+
+    @staticmethod
+    def _processor() -> ManifestProcessor:
+        with patch("gco.services.manifest_processor.config"):
+            return ManifestProcessor("test-cluster", "us-east-1", {})
+
+    def test_every_api_shares_one_bounded_client(self, monkeypatch):
+        from gco.services.k8s_client import BoundedApiClient
+
+        monkeypatch.setenv("K8S_API_TIMEOUT", "7")
+        processor = self._processor()
+
+        assert isinstance(processor.api_client, BoundedApiClient)
+        assert processor.api_client.default_request_timeout == processor._k8s_timeout == 7
+        for api in (
+            processor.core_v1,
+            processor.apps_v1,
+            processor.batch_v1,
+            processor.networking_v1,
+            processor.custom_objects,
+            processor.node_v1,
+        ):
+            assert api.api_client is processor.api_client
+        # The removed no-op: Configuration has no such setting and nothing read it.
+        assert not hasattr(processor.api_client.configuration, "request_timeout")
+
+    def test_an_invalid_timeout_fails_construction(self, monkeypatch):
+        monkeypatch.setenv("K8S_API_TIMEOUT", "0")
+        with pytest.raises(ValueError, match="K8S_API_TIMEOUT"):
+            self._processor()
+
+    def test_the_dynamic_client_is_built_on_the_bounded_client(self):
+        processor = self._processor()
+        with patch("gco.services.manifest_processor.dynamic.DynamicClient") as dynamic_client:
+            assert processor.dynamic_client is dynamic_client.return_value
+        dynamic_client.assert_called_once_with(processor.api_client)
+
+    def test_concurrent_first_requests_build_one_dynamic_client(self):
+        """Requests resolve resources from worker threads; discovery must run once."""
+        import threading
+        import time
+
+        processor = self._processor()
+
+        def slow_discovery(_api_client):
+            time.sleep(0.2)
+            return object()
+
+        with patch(
+            "gco.services.manifest_processor.dynamic.DynamicClient", side_effect=slow_discovery
+        ) as dynamic_client:
+            seen: list[object] = []
+            workers = [
+                threading.Thread(target=lambda: seen.append(processor.dynamic_client))
+                for _ in range(4)
+            ]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(5)
+
+        assert dynamic_client.call_count == 1
+        assert len(seen) == 4 and len({id(client) for client in seen}) == 1
+
+
 class TestListJobs:
     """Tests for list_jobs method."""
 
@@ -1652,6 +1778,45 @@ class TestListJobs:
 
         assert len(jobs) == 1
         assert jobs[0]["metadata"]["name"] == "job-completed"
+
+    @pytest.mark.asyncio
+    async def test_list_jobs_status_filter_succeeded_is_completed(self, processor_with_mocks):
+        """``succeeded`` filters like ``completed``.
+
+        The job responses call a finished Job ``succeeded`` (and so do older
+        CLIs and direct API callers, and the bulk-delete ``status`` enum
+        accepts it), while the filter compared against ``completed`` only, so
+        ``?status=succeeded`` listed nothing and a bulk delete with
+        ``"status": "succeeded"`` matched nothing.
+        """
+        from kubernetes.client import V1Job, V1JobList
+
+        def job(name: str, status: dict[str, Any]) -> V1Job:
+            return V1Job.from_dict(
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {"name": name, "namespace": "default", "uid": f"uid-{name}"},
+                    "spec": {"template": {"spec": {"containers": []}}},
+                    "status": status,
+                }
+            )
+
+        done = {
+            "succeeded": 1,
+            "conditions": [{"type": "Complete", "status": "True"}],
+        }
+        processor_with_mocks.batch_v1.list_namespaced_job = MagicMock(
+            return_value=V1JobList(
+                items=[job("job-running", {"active": 1}), job("job-done", done)], metadata={}
+            )
+        )
+
+        for status_filter in ("succeeded", "completed"):
+            jobs = await processor_with_mocks.list_jobs(
+                namespace="default", status_filter=status_filter
+            )
+            assert [j["metadata"]["name"] for j in jobs] == ["job-done"], status_filter
 
     @pytest.mark.asyncio
     async def test_list_jobs_with_status_filter_failed(self, processor_with_mocks):

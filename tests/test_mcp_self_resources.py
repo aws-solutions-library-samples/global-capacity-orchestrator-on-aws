@@ -164,7 +164,11 @@ class TestFeatureFlags:
         }
         expected = {
             "GCO_ENABLE_CAPACITY_PURCHASE": {"reserve_capacity", "create_reservation"},
-            "GCO_ENABLE_MODEL_UPLOAD": {"models_upload", "upload_to_regional_bucket"},
+            "GCO_ENABLE_MODEL_UPLOAD": {
+                "models_upload",
+                "upload_to_regional_bucket",
+                "populate_kv_cache",
+            },
             "GCO_ENABLE_IMAGE_PUBLISH": {"images_build", "images_push", "images_mirror"},
             "GCO_ENABLE_INFRASTRUCTURE_DEPLOY": {
                 "deploy_stack",

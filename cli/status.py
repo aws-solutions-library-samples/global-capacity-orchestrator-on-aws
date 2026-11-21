@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from botocore.exceptions import ClientError
 
 from cli.config import GCOConfig, _load_cdk_json
+from cli.job_policy import FETCH_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from cli.capacity.multi_region import RegionCapacity
@@ -97,6 +98,12 @@ _DEGRADED_STATUSES = frozenset({STATUS_PARTIAL, STATUS_UNAVAILABLE, STATUS_ERROR
 REGION_SOURCE_CDK_JSON = "cdk.json"
 REGION_SOURCE_FLAG = "--region flag"
 
+# Source marker for the ``jobs`` section. The queue-statistics route counts
+# the central job queue's records, which only ``gco queue submit`` and
+# ``gco jobs submit-queue`` create; jobs sent with ``gco jobs submit``,
+# ``submit-sqs`` or ``submit-direct`` never appear there.
+JOBS_SOURCE_CENTRAL_QUEUE = "central job queue"
+
 # Stack health classification. Anything ending ``_IN_PROGRESS`` is a deploy
 # in flight; ``UPDATE_ROLLBACK_COMPLETE`` and friends mean the last deploy
 # did not take, which is unhealthy even though CloudFormation is at rest.
@@ -117,6 +124,13 @@ HEALTH_UNHEALTHY = "unhealthy"
 #: Wall-clock budget for one section's gather; a section that exceeds it
 #: reports ``error`` instead of holding the whole document.
 SECTION_TIMEOUT_SECONDS = 30
+
+#: The budget with ``--with-policy``. The policy section waits up to
+#: :data:`cli.job_policy.FETCH_TIMEOUT_SECONDS` for the slowest region's
+#: policy read and then reports that region unreachable; the budget covers
+#: that wait plus the section's own work, so a hung region costs one region
+#: instead of the whole section.
+POLICY_SECTION_TIMEOUT_SECONDS = max(SECTION_TIMEOUT_SECONDS, FETCH_TIMEOUT_SECONDS + 5)
 
 #: Cost Explorer window for the opt-in ``costs`` section.
 COST_WINDOW_DAYS = 30
@@ -251,12 +265,15 @@ def _run_section(name: str, gather: Callable[[], Section]) -> Section:
         )
 
 
-def _run_sections_concurrently(gatherers: dict[str, Callable[[], Section]]) -> dict[str, Section]:
+def _run_sections_concurrently(
+    gatherers: dict[str, Callable[[], Section]], timeout_seconds: float
+) -> dict[str, Section]:
     """Run section gatherers in parallel under the shared wall-clock budget.
 
-    Every gatherer gets the full :data:`SECTION_TIMEOUT_SECONDS` of wall
-    clock because they run concurrently. A section that has not finished by
-    the deadline reports ``error`` naming the timeout. Sections run on
+    Every gatherer gets the full *timeout_seconds* of wall clock
+    (:data:`SECTION_TIMEOUT_SECONDS`, or :data:`POLICY_SECTION_TIMEOUT_SECONDS`
+    with ``--with-policy``) because they run concurrently. A section that has
+    not finished by the deadline reports ``error`` naming the timeout. Sections run on
     daemon threads so an abandoned straggler — a hung subprocess probe or
     an unresponsive endpoint — can neither hold the document nor block
     process exit afterwards.
@@ -275,7 +292,7 @@ def _run_sections_concurrently(gatherers: dict[str, Callable[[], Section]]) -> d
     }
     for thread in threads.values():
         thread.start()
-    deadline = time.monotonic() + SECTION_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout_seconds
     for thread in threads.values():
         thread.join(max(0.0, deadline - time.monotonic()))
 
@@ -285,7 +302,7 @@ def _run_sections_concurrently(gatherers: dict[str, Callable[[], Section]]) -> d
             sections[name] = results.get(name) or Section(
                 name=name,
                 status=STATUS_ERROR,
-                reason=f"the gather exceeded the {SECTION_TIMEOUT_SECONDS}s section timeout",
+                reason=f"the gather exceeded the {timeout_seconds:g}s section timeout",
             )
     return sections
 
@@ -521,7 +538,12 @@ def _gather_queue(
 
 
 def _gather_jobs(config: GCOConfig, region: str | None) -> Section:
-    """Read fleet-wide job counts from the queue-statistics API route."""
+    """Read the central job queue's record counts from the queue-statistics route.
+
+    The route aggregates the job-queue table, so the section counts what
+    ``gco queue submit`` / ``gco jobs submit-queue`` queued and nothing else;
+    ``data["source"]`` says so, so ``empty`` is never read as "no jobs".
+    """
     from cli.aws_client import get_aws_client
 
     aws_client = get_aws_client(config)
@@ -552,6 +574,7 @@ def _gather_jobs(config: GCOConfig, region: str | None) -> Section:
         "running": int(summary.get("total_running", 0)),
     }
     data: dict[str, Any] = {
+        "source": JOBS_SOURCE_CENTRAL_QUEUE,
         "totals": totals,
         "by_region": by_region,
         "complete": bool(summary.get("complete", True)),
@@ -1047,7 +1070,7 @@ def derive_findings(sections: dict[str, Section]) -> list[Finding]:
                 severity=SEVERITY_WARN,
                 section=SECTION_JOBS,
                 message=(
-                    f"the job-count scan was truncated after {evaluated} records; "
+                    f"the central job-queue scan was truncated after {evaluated} records; "
                     "totals are a floor, not a count"
                 ),
             )
@@ -1172,7 +1195,8 @@ def gather_fleet_status(
     if not workload:
         for name in sorted(_PER_REGION_SECTIONS):
             sections[name] = _regions_unavailable_section(name)
-    sections.update(_run_sections_concurrently(gatherers))
+    budget = POLICY_SECTION_TIMEOUT_SECONDS if with_policy else SECTION_TIMEOUT_SECONDS
+    sections.update(_run_sections_concurrently(gatherers, budget))
 
     findings = derive_findings(sections)
     overall, degraded = _derive_overall(sections, findings)

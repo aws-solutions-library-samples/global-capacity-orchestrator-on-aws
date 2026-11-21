@@ -144,6 +144,15 @@ case "$url" in
         repo="${url#*api.github.com/repos/}"; repo="${repo%/releases/latest}"
         reply 200 "{\"tag_name\": \"$(answer github-release "$repo" v1.0.0)\"}"
         ;;
+    *api.github.com/repos/*/commits/*)
+        # A branch head. Under drift the branch has moved on: every hex digit
+        # rotates, so the reply is a different commit of the same shape.
+        github_gate || exit 0
+        repo="${url#*api.github.com/repos/}"; repo="${repo%%/commits/*}"
+        sha="$(catalog_get github-commit "$repo")"
+        [ "${FAKE_DRIFT:-0}" = "1" ] && sha="$(printf '%s' "$sha" | tr '0-9a-f' '1-9a-f0')"
+        reply 200 "{\"sha\": \"${sha}\"}"
+        ;;
     *api.github.com/repos/*/tags*)
         github_gate || exit 0
         repo="${url#*api.github.com/repos/}"; repo="${repo%%/tags*}"
@@ -718,6 +727,7 @@ for spec in specs:
 PY
             echo "github-release|aquasecurity/trivy|$(extract_install_trivy_pin .github/actions/install-trivy/action.yml)"
             echo "github-release|rhysd/actionlint|$(extract_workflow_env_pin ACTIONLINT_VERSION | head -1)"
+            echo "github-release|pypa/pip-audit|v$(extract_workflow_env_pin PIP_AUDIT_VERSION | head -1)"
             echo "github-release|helm/helm|$(extract_helm_installer_pins lambda/helm-installer/Dockerfile | awk -F'|' '$1=="HELM_VERSION"{print $2}')"
             installer_kubectl="$(extract_helm_installer_pins lambda/helm-installer/Dockerfile | awk -F'|' '$1=="KUBECTL_VERSION"{print $2}')"
             [ -n "$installer_kubectl" ] && echo "k8s-stable|$(printf '%s' "${installer_kubectl#v}" | cut -d. -f1-2)|$installer_kubectl"
@@ -726,6 +736,7 @@ PY
             echo "github-release|projectcalico/calico|$(extract_workflow_env_pin CALICO_VERSION | head -1)"
             echo "github-release|crossplane-contrib/function-go-templating|$(extract_crossplane_function_pin lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating | head -1)"
             echo "github-release|kubernetes-sigs/kind|$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}' | head -1)"
+            echo "github-commit|datreeio/CRDs-catalog|$(extract_python_string_constant CRD_CATALOG_COMMIT .github/scripts/validate_k8s_manifests.py)"
             kind_node="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}' | head -1)"
             # Tag and digest: the tag half is a registry tag like any other image's;
             # the digest half is recorded below with the other committed digests.
@@ -751,6 +762,8 @@ PY
                 extract_python_string_constant AWS_CLI_IMAGE gco/services/inference_monitor.py | sed 's/@sha256:.*//'
                 grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}" scripts/live_release_validation/manifests/ 2>/dev/null \
                     | sed 's/^image: //; s/@sha256:.*//'
+                grep -rhoE "[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}" .github/workflows 2>/dev/null \
+                    | grep -v '^kindest/node:' | sed 's/@sha256:.*//'
             } | sort -u | while IFS= read -r img; do
                 [ -n "$img" ] || continue
                 parsed="$(parse_image_registry "${img%%:*}")"
@@ -761,6 +774,7 @@ PY
                 grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}" scripts/live_release_validation/manifests/ 2>/dev/null | sed 's/^image: //'
                 extract_crossplane_function_packages lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating
                 extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}'
+                grep -rhoE "[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}" .github/workflows 2>/dev/null
             } | sort -u | while IFS= read -r ref; do
                 case "$ref" in *@sha256:*) echo "digest|${ref%@sha256:*}|${ref##*@sha256:}" ;; esac
             done
@@ -814,7 +828,7 @@ make_consistent_checkout() {
     # clock: ``date -u`` is a day ahead of a US-timezone workstation every
     # evening and would make a "0 days" expiry read as 1.
     today="$(date +%Y-%m-%d)"
-    mkdir -p "$root"/{.github/workflows,.github/actions/install-trivy,.github/config,gco/stacks,gco/services,cli,lambda/helm-installer,lambda/kubectl-applier-simple/manifests,lambda/pcs-lookup,examples,scripts/live_release_validation/manifests,dockerfiles}
+    mkdir -p "$root"/{.github/workflows,.github/actions/install-trivy,.github/config,.github/scripts,gco/stacks,gco/services,cli,lambda/helm-installer,lambda/kubectl-applier-simple/manifests,lambda/pcs-lookup,examples,scripts/live_release_validation/manifests,dockerfiles}
     cat > "$root/pyproject.toml" <<'TOML'
 [build-system]
 requires = ["setuptools==84.0.0"]
@@ -847,6 +861,7 @@ YAML
 name: Lint
 env:
   ACTIONLINT_VERSION: "1.7.12"
+  PIP_AUDIT_VERSION: "2.10.1"
 jobs:
   ruff:
     runs-on: ubuntu-latest
@@ -857,6 +872,12 @@ jobs:
       - uses: astral-sh/ruff-action@0000000000000000000000000000000000000000
         with:
           version: "0.16.5"
+  hadolint:
+    runs-on: ubuntu-latest
+    env:
+      HADOLINT_IMAGE: "hadolint/hadolint:v2.14.0-debian@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    steps:
+      - run: docker run --rm "$HADOLINT_IMAGE" --version
 YAML
     cat > "$root/.github/workflows/integration-tests.yml" <<'YAML'
 name: Integration Tests
@@ -886,6 +907,7 @@ inputs:
     default: "v0.74.0"
 YAML
     printf 'CVE-2026-0001 exp:2999-01-01 justification\n' > "$root/.github/config/.trivyignore"
+    printf 'CRD_CATALOG_COMMIT = "0123456789abcdef0123456789abcdef01234567"\n' > "$root/.github/scripts/validate_k8s_manifests.py"
     printf '# none\n' > "$root/.github/config/.pip-audit-ignore"
     printf 'GHSA-0000-0000-0000 exp:2999-06-30 justification\n' > "$root/.github/config/.npm-audit-ignore"
     cat > "$root/cdk.json" <<'JSON'
@@ -1178,6 +1200,14 @@ findings_path() {
     # patch drift is the CI tooling check's own list-tags call, and it stays
     # out of the generic image sweep (which would list the tag a second time).
     grep -q '^skopeo inspect --retry-times 3 --raw docker://kindest/node:v1.37.0' "$CALLS"
+    # A digest-pinned workflow image: its digest is bound to its tag, and its
+    # tag rides the sweep (the free-form workflow scan never matched
+    # <namespace>/<repo>:<tag> names).
+    grep -q '^skopeo inspect --retry-times 3 --raw docker://hadolint/hadolint:v2.14.0-debian' "$CALLS"
+    # The CRD catalog commit the manifest validator reads is compared with
+    # the catalog's main head.
+    grep -q '^curl https://api.github.com/repos/datreeio/CRDs-catalog/commits/main' "$CALLS"
+    grep -q '^skopeo list-tags --retry-times 3 docker://docker.io/hadolint/hadolint' "$CALLS"
     [ "$(grep -c '^skopeo list-tags --retry-times 3 docker://docker.io/kindest/node' "$CALLS")" = "1" ]
     grep -q '^helm repo add keda https://kedacore.github.io/charts --force-update' "$CALLS"
     grep -q '^helm show chart oci://registry.k8s.io/kueue/charts/kueue' "$CALLS"
@@ -1221,6 +1251,11 @@ findings_path() {
     [[ "$output" == *"  - public.ecr.aws/aws-cli/aws-cli:2.36.41: committed digest does not match the tag"* ]]
     [[ "$output" == *"  - xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5: committed digest does not match the tag (lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml)"* ]]
     [[ "$output" == *"  - kindest/node:v1.37.0: committed digest does not match the tag (.github/workflows/integration-tests.yml KIND_NODE_IMAGE)"* ]]
+    [[ "$output" == *"  - hadolint/hadolint:v2.14.0-debian: committed digest does not match the tag (.github/workflows)"* ]]
+    # ...and its tag is compared like any other image's.
+    [[ "$output" == *"  - hadolint/hadolint:v2.14.0-debian -> v3.14.0-debian"* ]]
+    [[ "$output" == *"  - datreeio/CRDs-catalog (CRD_CATALOG_COMMIT): 0123456789ab -> 123456789abc"* ]]
+    [[ "$output" == *"  - pip-audit (PIP_AUDIT_VERSION): 2.10.1 -> v3.10.1"* ]]
     [[ "$output" == *"  - keda (keda): 2.20.2 -> 3.20.2"* ]]
     [[ "$output" == *"  - kueue (kueue): 0.19.2 -> 1.19.2"* ]]
     [[ "$output" == *"  - metrics-server: v0.9.0-eksbuild.7 -> v1.9.0-eksbuild.7"* ]]
@@ -1384,6 +1419,29 @@ findings_path() {
     grep -q '^curl https://docs.aws.amazon.com/pcs/latest/userguide/slurm-versions.html$' "$CALLS"
 }
 
+@test "the CDK enum check reads the interpreter CDK_ENUM_PYTHON names, not python3" {
+    local root="$BATS_TEST_TMPDIR/checkout"
+    make_consistent_checkout "$root"
+    build_catalog "$root"
+    # The scan's own python3 has no aws_cdk here and the named interpreter
+    # does, so a completed enum check can only have read the latter.
+    write_stub "$FAKE_BIN" cdk-latest-python <<'STUB'
+#!/usr/bin/env bash
+FAKE_AWS_CDK=present exec python3 "$@"
+STUB
+    run_scan "$root" FAKE_AWS_CDK=absent CDK_ENUM_PYTHON="$FAKE_BIN/cdk-latest-python"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CDK enum constants:       0"* ]]
+    [[ "$output" != *"aws-cdk-lib not importable"* ]]
+    grep -qx 'scan_complete=true' "$GITHUB_OUTPUT"
+    # A named interpreter that cannot import aws_cdk (its install failed) is
+    # a skipped check, never a silent fallback to the scan's pinned copy.
+    run_scan "$root" FAKE_AWS_CDK=present CDK_ENUM_PYTHON="$BATS_TEST_TMPDIR/absent/python"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CDK enum constants:       (skipped)"* ]]
+    grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+}
+
 @test "with drift and skipped sections the report carries the incomplete warning and the collapsed skip list" {
     local root="$BATS_TEST_TMPDIR/checkout"
     make_consistent_checkout "$root"
@@ -1471,12 +1529,15 @@ findings_path() {
 
     [ "$status" -eq 0 ]
     local why=" (GitHub API: rate limit exceeded on the anonymous 60 req/h bucket, set GITHUB_TOKEN)."
-    # The eight CI-tooling releases, the two GitHub-hosted pre-commit hooks and
-    # the five GitHub-backed Dockerfile.dev pins all read api.github.com, so all
-    # fifteen go incomplete together and every line says the same thing.
+    # The nine CI-tooling releases, the CRD catalog's main head, the two
+    # GitHub-hosted pre-commit hooks and the five GitHub-backed Dockerfile.dev
+    # pins all read api.github.com, so all seventeen go incomplete together
+    # and every line says the same thing.
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Trivy (install-trivy action default) (aquasecurity/trivy)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for kind (kubernetes-sigs/kind)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Crossplane function-go-templating (post-helm-crossplane.yaml) (crossplane-contrib/function-go-templating)${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: GitHub commit lookup failed for datreeio/CRDs-catalog main${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for pip-audit (PIP_AUDIT_VERSION) (pypa/pip-audit)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/astral-sh/ruff-pre-commit${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/DavidAnson/markdownlint-cli2${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin AWSCLI_VERSION${why}"* ]]
@@ -1487,7 +1548,7 @@ findings_path() {
     # Surfaces on other hosts are untouched: the npm-backed CDK pin still
     # resolves, and nothing else went incomplete.
     [[ "$output" != *"Dockerfile.dev pin CDK_VERSION"* ]]
-    [[ "$output" == *"Incomplete lookups:       15"* ]]
+    [[ "$output" == *"Incomplete lookups:       17"* ]]
     grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
     # No token was offered, so no request carried one.
     ! grep -q '\[bearer\]' "$CALLS"
@@ -1762,6 +1823,8 @@ YAML
     [[ "$output" == *"INCOMPLETE: Could not parse the committed version pin for Trivy (install-trivy action default)."* ]]
     [[ "$output" == *"INCOMPLETE: Could not parse the kubectl pin from lambda/helm-installer/Dockerfile."* ]]
     [[ "$output" == *"INCOMPLETE: Could not parse the kind node-image pin from integration-tests.yml."* ]]
+    [[ "$output" == *"INCOMPLETE: Could not parse CRD_CATALOG_COMMIT from .github/scripts/validate_k8s_manifests.py."* ]]
+    [[ "$output" == *"INCOMPLETE: Could not parse the committed version pin for pip-audit (PIP_AUDIT_VERSION)."* ]]
     [[ "$output" == *"  - pyproject.toml [build-system] requires is missing or unparseable"* ]]
     [[ "$output" == *"  - Lambda runtime pin: pyproject.toml: missing or unparseable, cannot verify Lambda pins"* ]]
     [[ "$output" == *"INCOMPLETE: Lockfile freshness validation failed; inspect its error above."* ]]

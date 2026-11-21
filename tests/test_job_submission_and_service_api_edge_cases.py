@@ -1246,6 +1246,86 @@ async def test_jobs_route_500_details_never_echo_exception_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_route_500_details_never_echo_exception_text() -> None:
+    """The queue, template and webhook routes answer a store failure with the generic 500.
+
+    A DynamoDB error names the table, the account and the caller's role, and
+    these twelve handlers used to return its text as the detail. They now go
+    through internal_server_error like the jobs routes above: the client gets
+    the constant detail and a request id, the log keeps the cause.
+    """
+    import gco.services.api_routes.queue as queue_routes
+    import gco.services.api_routes.templates as template_routes
+    import gco.services.api_routes.webhooks as webhook_routes
+    from gco.services import api_shared
+    from gco.services.api_shared import JobTemplateRequest, WebhookEvent, WebhookRequest
+
+    marker = "arn:aws:sts::123456789012:assumed-role/secret-internal-role"
+    failure = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": f"{marker} is not authorized"}},
+        "Scan",
+    )
+    store = MagicMock()
+    for method in (
+        "list_jobs_page",
+        "get_job",
+        "cancel_job",
+        "get_job_count_summary",
+        "list_templates",
+        "create_template",
+        "get_template",
+        "delete_template",
+        "list_webhooks",
+        "create_webhook",
+        "delete_webhook",
+    ):
+        getattr(store, method).side_effect = failure
+
+    route_calls = [
+        lambda: queue_routes.list_queued_jobs(None, None, None, 100, None),
+        lambda: queue_routes.get_queued_job("job-1\nforged"),
+        lambda: queue_routes.cancel_queued_job("job-1", None),
+        lambda: queue_routes.get_queue_stats(),
+        lambda: queue_routes.poll_and_process_jobs(5),
+        lambda: template_routes.list_templates(),
+        lambda: template_routes.create_template(
+            JobTemplateRequest(name="tpl", manifest=_base_job())
+        ),
+        lambda: template_routes.get_template("tpl"),
+        lambda: template_routes.delete_template("tpl"),
+        lambda: webhook_routes.list_webhooks(None),
+        lambda: webhook_routes.create_webhook(
+            WebhookRequest(url="https://hooks.example.com/x", events=[WebhookEvent.JOB_COMPLETED])
+        ),
+        lambda: webhook_routes.delete_webhook("hook-1"),
+    ]
+    with (
+        patch.object(queue_routes, "_get_job_store", return_value=store),
+        patch.object(queue_routes, "_check_processor", return_value=_api_processor()),
+        patch.object(queue_routes, "process_queued_jobs_once", AsyncMock(side_effect=failure)),
+        patch.object(template_routes, "_get_template_store", return_value=store),
+        patch.object(webhook_routes, "_get_webhook_store", return_value=store),
+        # Registration validates the URL first; that check is not under test.
+        patch.object(webhook_routes, "validate_webhook_url", return_value=(True, None)),
+        patch.object(api_shared, "logger") as api_logger,
+    ):
+        for route_call in route_calls:
+            with pytest.raises(HTTPException) as error:
+                await route_call()
+            assert error.value.status_code == 500
+            detail = str(error.value.detail)
+            assert re.fullmatch(r"Internal server error \(request-id: [0-9a-f]{32}\)", detail)
+            assert marker not in detail
+
+    logged = [call.args for call in api_logger.error.call_args_list]
+    assert len(logged) == len(route_calls)
+    assert all(args[-1] is failure for args in logged)
+    # A queue job id is the caller's input, so it reaches the log sanitized.
+    assert logged[1][1] == "getting queued job job-1\\nforged"
+    assert logged[2][1] == "cancelling queued job job-1"
+
+
+@pytest.mark.asyncio
 async def test_jobs_bulk_delete_missing_timestamp_and_per_job_failure() -> None:
     import gco.services.api_routes.jobs as routes
     from gco.services.api_shared import BulkDeleteRequest
@@ -1572,8 +1652,13 @@ async def test_manifest_api_readiness_health_status_and_policy_edges(
     assert error.value.status_code == 503
 
 
+#: Monotonic clock for the ALB-sync elector of ``_new_health_monitor``.
+_LEASE_CLOCK = [0.0]
+
+
 def _new_health_monitor() -> Any:
     from gco.services.health_monitor import HealthMonitor
+    from gco.services.leader_lease import LeaseElector, LeaseIdentity
 
     monitor = object.__new__(HealthMonitor)
     monitor.cluster_id = "cluster"
@@ -1583,11 +1668,20 @@ def _new_health_monitor() -> Any:
     monitor._alb_sync_lease_namespace = "gco-system"
     monitor._alb_sync_lease_duration = 90
     monitor._alb_sync_holder = "pod-a"
+    monitor._alb_sync_elector = LeaseElector(
+        LeaseIdentity("lease", "gco-system", "pod-a", 90),
+        label="ALB-sync",
+        clock=lambda: _LEASE_CLOCK[0],
+    )
     monitor._alb_sync_interval = 300
     monitor._last_alb_sync = None
     monitor.core_v1 = MagicMock()
     monitor.coordination_v1 = MagicMock()
     monitor.metrics_v1beta1 = MagicMock()
+    monitor.job_namespaces = frozenset({"gco-jobs", "default"})
+    monitor._clock = lambda: _LEASE_CLOCK[0]
+    monitor._last_good_reading = None
+    monitor._refresh = None
     return monitor
 
 
@@ -1627,7 +1721,7 @@ async def test_health_monitor_loops_multiple_pending_pods_and_containers() -> No
     monitor.core_v1.list_pod_for_all_namespaces.return_value = SimpleNamespace(
         items=[first, second]
     )
-    result = await monitor._calculate_pending_requested_resources()
+    result = monitor._calculate_pending_requested_resources([first, second])
     assert result.cpu_vcpus == pytest.approx(0.6)
     assert result.memory_gb == pytest.approx(6 * 1024 / 1024**3)
 
@@ -1678,6 +1772,11 @@ def test_health_monitor_lease_acquires_unowned_missing_or_naive_expired(
         lease_transitions=0,
     )
     monitor.coordination_v1.read_namespaced_lease.return_value = SimpleNamespace(spec=spec)
+    if renew_time is not None:
+        # A renewing holder expires only after a full lease of unchanged
+        # observations on this replica's clock.
+        assert monitor._try_acquire_alb_sync_lease() is False
+        _LEASE_CLOCK[0] += 90
     assert monitor._try_acquire_alb_sync_lease() is True
     assert spec.holder_identity == "pod-a"
 
@@ -1811,6 +1910,53 @@ async def test_health_api_background_monitor_wait_publish_failure_and_cancel_pat
 
 
 @pytest.mark.asyncio
+async def test_health_api_publishes_cloudwatch_metrics_off_the_event_loop() -> None:
+    """put_metric_data is a blocking HTTPS call; the probes share this loop."""
+    import gco.services.health_api as api
+
+    status = MagicMock()
+    status.status = "healthy"
+    status.get_threshold_violations.return_value = []
+    monitor = MagicMock()
+    monitor.get_health_status = AsyncMock(return_value=status)
+    monitor.sync_alb_registration = AsyncMock()
+    metrics = MagicMock()
+    metrics.publish_resource_utilization.side_effect = lambda **_kwargs: time.sleep(0.4)
+    metrics.publish_health_status.side_effect = lambda **_kwargs: time.sleep(0.4)
+    api.health_monitor = monitor
+    api.health_metrics = metrics
+    gaps: list[float] = []
+    published = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def heartbeat() -> None:
+        last = time.monotonic()
+        while not published.is_set():
+            await real_sleep(0.02)
+            now = time.monotonic()
+            gaps.append(now - last)
+            last = now
+
+    async def end_after_one_pass(_seconds: float) -> None:
+        published.set()
+        raise asyncio.CancelledError
+
+    try:
+        beating = asyncio.create_task(heartbeat())
+        await real_sleep(0.05)
+        with patch.object(api.asyncio, "sleep", side_effect=end_after_one_pass):
+            await api.background_health_monitor()
+        await beating
+    finally:
+        api.health_monitor = None
+        api.health_metrics = None
+
+    metrics.publish_resource_utilization.assert_called_once()
+    metrics.publish_health_status.assert_called_once()
+    assert max(gaps) < 0.3
+
+
+@pytest.mark.asyncio
 async def test_health_api_uncached_health_and_dispatcher_status_metrics() -> None:
     import gco.services.health_api as api
     from gco.models import HealthStatus, RequestedResources, ResourceThresholds, ResourceUtilization
@@ -1927,8 +2073,12 @@ def _bare_dispatcher() -> Any:
     # logs it and sleeps, and ``_watch_jobs`` spins forever — the tests below
     # only terminate because the loop reaches ``_process_job_event``.
     dispatcher._leader_lease = None
+    dispatcher._leader_elector = None
     dispatcher._standby_poll_seconds = 0
     dispatcher._is_leader = False
+    # As after a successful Job list: the watch resumes from this version.
+    dispatcher._resource_version = "1"
+    dispatcher._cache_seeded = True
     return dispatcher
 
 
@@ -1998,7 +2148,10 @@ async def test_webhook_nonstring_url_cancel_and_dispatch_cancellation() -> None:
         pinned_url=lambda attempt: "https://8.8.8.8:443/hook",
     )
     http_client = MagicMock()
-    http_client.post = AsyncMock(side_effect=asyncio.CancelledError)
+    stream = MagicMock()
+    stream.__aenter__ = AsyncMock(side_effect=asyncio.CancelledError)
+    stream.__aexit__ = AsyncMock(return_value=False)
+    http_client.stream.return_value = stream
     context = MagicMock()
     context.__aenter__ = AsyncMock(return_value=http_client)
     context.__aexit__ = AsyncMock(return_value=False)
@@ -2157,8 +2310,8 @@ def test_api_shared_condition_and_container_state_fallthroughs() -> None:
     pod.status.container_statuses = states
     parsed = _parse_pod_to_dict(pod)
     assert parsed["status"]["containerStatuses"] == [
-        {"name": "none", "ready": False, "restartCount": 0, "image": "x"},
-        {"name": "empty", "ready": False, "restartCount": 0, "image": "x"},
+        {"name": "none", "ready": False, "restartCount": 0, "image": "x", "lastState": None},
+        {"name": "empty", "ready": False, "restartCount": 0, "image": "x", "lastState": None},
     ]
 
 
@@ -2461,14 +2614,16 @@ def test_cli_direct_submission_handles_nonjobs_multiple_output_and_no_job() -> N
 
 
 def test_cli_list_parse_trainjob_logs_cloudwatch_and_wait_paths(capsys: Any) -> None:
-    from cli.jobs import JobInfo
+    from cli.jobs import JobInfo, JobsReadError
 
     manager = _manager()
     manager._aws_client.discover_regional_stacks.return_value = ["bad", "good"]
     manager._query_jobs_in_region = MagicMock(
         side_effect=[RuntimeError("region unavailable"), [MagicMock(name="job")]]
     )
-    assert len(manager.list_jobs(all_regions=True)) == 1
+    with pytest.raises(JobsReadError, match=r"^bad: region unavailable$") as excinfo:
+        manager.list_jobs(all_regions=True)
+    assert len(excinfo.value.jobs) == 1
 
     parsed = manager._parse_job_info(
         {
@@ -2508,19 +2663,20 @@ def test_cli_list_parse_trainjob_logs_cloudwatch_and_wait_paths(capsys: Any) -> 
 
     logs = MagicMock()
     logs.start_query.return_value = {"queryId": "q"}
+    # Insights answers newest-first (the query sorts by @timestamp desc).
     logs.get_query_results.return_value = {
         "status": "Complete",
         "results": [
+            [{"field": "@message", "value": "second"}],
             [
                 {"field": "other", "value": "ignored"},
                 {"field": "@message", "value": '{"log":"first"}'},
             ],
-            [{"field": "@message", "value": "second"}],
         ],
     }
     manager._aws_client._session.client.return_value = logs
     with patch("time.sleep"):
-        output = manager._get_cloudwatch_logs("j", "us-east-1")
+        output = manager._get_cloudwatch_logs("j", "gco-jobs", "us-east-1")
     assert output.endswith("first\nsecond")
 
     pending = JobInfo(
@@ -2953,6 +3109,38 @@ def test_queue_route_accepts_a_configured_target_region() -> None:
 
 
 @pytest.mark.asyncio
+async def test_template_route_answers_400_for_a_manifest_the_request_model_refuses() -> None:
+    """Templates are stored unvalidated, so their manifest is the caller's input.
+
+    The request model's ValueError used to fall into the generic handler and
+    answer "Internal server error"; POST /api/v1/manifests answers the same
+    error with 400 and its message, and so does this route now.
+    """
+    import gco.services.api_routes.templates as routes
+    from gco.services.api_shared import JobFromTemplateRequest
+
+    store = MagicMock()
+    store.get_template.return_value = {"manifest": {"apiVersion": "batch/v1", "kind": "Job"}}
+    processor = _api_processor()
+    processor.process_manifest_submission = AsyncMock()
+    with (
+        patch.object(routes, "_get_template_store", return_value=store),
+        patch.object(routes, "_check_processor", return_value=processor),
+        patch.object(routes, "_check_namespace"),
+        pytest.raises(HTTPException) as error,
+    ):
+        await routes.create_job_from_template(
+            "t", JobFromTemplateRequest(name="run", namespace="gco-jobs")
+        )
+
+    assert error.value.status_code == 400
+    assert error.value.detail == (
+        "Invalid manifest at index 0: Either spec or data must be provided for most resource types"
+    )
+    processor.process_manifest_submission.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_template_route_preserves_processor_http_error() -> None:
     import gco.services.api_routes.templates as routes
     from gco.services.api_shared import JobFromTemplateRequest
@@ -2984,19 +3172,19 @@ def test_cli_cloudwatch_logs_preserve_non_object_and_non_string_envelopes() -> N
     logs.get_query_results.return_value = {
         "status": "Complete",
         "results": [
-            [{"field": "@message", "value": "42"}],
-            [{"field": "@message", "value": '["list"]'}],
-            [{"field": "@message", "value": '{"log":42}'}],
             [{"field": "@message", "value": '{"log":"clean"}'}],
+            [{"field": "@message", "value": '{"log":42}'}],
+            [{"field": "@message", "value": '["list"]'}],
+            [{"field": "@message", "value": "42"}],
         ],
     }
     manager._aws_client._session.client.return_value = logs
     with patch("time.sleep"):
-        output = manager._get_cloudwatch_logs("trainer", "us-east-1")
+        output = manager._get_cloudwatch_logs("trainer", "gco-jobs", "us-east-1")
     assert output.endswith('42\n["list"]\n{"log":42}\nclean')
 
 
-def test_cli_sqs_labels_create_metadata_without_namespace_override() -> None:
+def test_cli_sqs_labels_and_the_default_namespace_fill_missing_metadata() -> None:
     manager = _manager()
     manager._aws_client.get_regional_stack.return_value = SimpleNamespace(stack_name="stack")
     cloudformation = MagicMock()
@@ -3013,7 +3201,7 @@ def test_cli_sqs_labels_create_metadata_without_namespace_override() -> None:
     manifests = [{"apiVersion": "v1", "kind": "ConfigMap", "data": {"key": "value"}}]
     with patch("boto3.client", side_effect=client):
         result = manager.submit_job_sqs(manifests, "us-east-1", labels={"team": "training"})
-    assert manifests[0]["metadata"] == {"labels": {"team": "training"}}
+    assert manifests[0]["metadata"] == {"namespace": "gco-jobs", "labels": {"team": "training"}}
     assert result["namespace"] == "gco-jobs"
     envelope = json.loads(sqs.send_message.call_args.kwargs["MessageBody"])
     assert envelope["namespace"] == "gco-jobs"
@@ -3142,7 +3330,7 @@ def test_cli_cloudwatch_logs_ignore_rows_without_a_message_field() -> None:
     }
     manager._aws_client._session.client.return_value = logs
     with patch("time.sleep"):
-        output = manager._get_cloudwatch_logs("trainer", "us-east-1")
+        output = manager._get_cloudwatch_logs("trainer", "gco-jobs", "us-east-1")
     assert output.endswith("\nvisible")
     assert "metadata" not in output
 
@@ -3195,14 +3383,17 @@ async def test_health_monitor_counts_multiple_pods_and_skips_unrequested_sidecar
 
     pods = [
         SimpleNamespace(
-            metadata=SimpleNamespace(namespace="gco-jobs"),
+            metadata=SimpleNamespace(namespace="gco-jobs", owner_references=None),
             status=SimpleNamespace(phase="Pending"),
             spec=SimpleNamespace(
                 containers=[container("100m", "1Ki"), SimpleNamespace(resources=None)]
             ),
         ),
         SimpleNamespace(
-            metadata=SimpleNamespace(namespace="default"),
+            metadata=SimpleNamespace(
+                namespace="default",
+                owner_references=[SimpleNamespace(kind="Job", uid="uid-job")],
+            ),
             status=SimpleNamespace(phase="Running"),
             spec=SimpleNamespace(containers=[container("200m", "2Ki")]),
         ),
@@ -3212,9 +3403,8 @@ async def test_health_monitor_counts_multiple_pods_and_skips_unrequested_sidecar
             spec=None,
         ),
     ]
-    monitor.core_v1.list_pod_for_all_namespaces.return_value = SimpleNamespace(items=pods)
-    assert await monitor._get_pod_counts() == (1, 1)
-    requested = await monitor._calculate_pending_requested_resources()
+    assert monitor._get_pod_counts(pods) == (1, 1)
+    requested = monitor._calculate_pending_requested_resources(pods)
     assert requested.cpu_vcpus == pytest.approx(0.1)
     assert requested.memory_gb == pytest.approx(1024 / 1024**3)
 

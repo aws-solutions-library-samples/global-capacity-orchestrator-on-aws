@@ -6,6 +6,7 @@ import errno
 import os
 import re
 import stat
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
@@ -39,28 +40,6 @@ def _directory_fd(path: Path) -> Iterator[int]:
         yield descriptor
     finally:
         os.close(descriptor)
-
-
-def _require_dev_fd_directory_access(root: Path) -> None:
-    """Skip only when this POSIX host cannot traverse an open directory via /dev/fd."""
-    if not Path("/dev/fd").is_dir():
-        pytest.skip("secure upload staging requires /dev/fd")
-
-    probe = root / ".dev-fd-probe"
-    probe.write_bytes(b"probe")
-    try:
-        with _directory_fd(root) as descriptor:
-            try:
-                metadata = os.stat(
-                    f"/dev/fd/{descriptor}/{probe.name}",
-                    follow_symlinks=False,
-                )
-            except OSError as exc:
-                pytest.skip(f"/dev/fd directory traversal is unavailable: {exc}")
-            if not stat.S_ISREG(metadata.st_mode):
-                pytest.skip("/dev/fd directory traversal did not reach the probe file")
-    finally:
-        probe.unlink(missing_ok=True)
 
 
 def _stage_directories(root: Path) -> list[Path]:
@@ -431,7 +410,7 @@ def test_create_stage_directory_retries_a_name_collision(
     local_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    collision = local_root / f"{local_data._UPLOAD_STAGE_PREFIX}collision"
+    collision = local_root / f"{local_data._UPLOAD_STAGE_PREFIX}{os.getpid()}-collision"
     collision.mkdir()
     tokens = iter(("collision", "fresh"))
     monkeypatch.setattr(local_data.secrets, "token_hex", lambda _size: next(tokens))
@@ -442,7 +421,9 @@ def test_create_stage_directory_retries_a_name_collision(
         try:
             stage_name, stage_fd = local_data._create_stage_directory(root_fd)
             stage_path = local_root / stage_name
-            assert stage_name == f"{local_data._UPLOAD_STAGE_PREFIX}fresh"
+            # The owning process ID is part of the name so a later upload can
+            # tell a snapshot left by a killed server from one in use.
+            assert stage_name == f"{local_data._UPLOAD_STAGE_PREFIX}{os.getpid()}-fresh"
             assert stat.S_ISDIR(os.fstat(stage_fd).st_mode)
             assert stat.S_IMODE(stage_path.stat().st_mode) == 0o700
         finally:
@@ -458,7 +439,7 @@ def test_create_stage_directory_exhausts_colliding_names(
     local_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    collision = local_root / f"{local_data._UPLOAD_STAGE_PREFIX}taken"
+    collision = local_root / f"{local_data._UPLOAD_STAGE_PREFIX}{os.getpid()}-taken"
     collision.mkdir()
     attempts = 0
 
@@ -475,27 +456,25 @@ def test_create_stage_directory_exhausts_colliding_names(
     assert _stage_directories(local_root) == [collision]
 
 
-def test_stage_upload_path_rejects_missing_dev_fd_support(
+def test_stage_upload_path_hands_over_a_path_without_dev_fd_traversal(
     local_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Hosts that cannot walk /dev/fd/<n> (macOS) get the snapshot's own path.
+
+    Staging used to hand every host ``/dev/fd/<n>/<name>``, which macOS cannot
+    resolve, so every upload tool failed there with ENOENT.
+    """
     source = local_root / "payload.bin"
     source.write_bytes(b"payload")
     contract = local_data.resolve_local_path("payload.bin", require_exists=True)
-    real_is_dir = Path.is_dir
+    monkeypatch.setattr(local_data, "_descriptor_argument", lambda *_args: None)
 
-    def unavailable_dev_fd(path: Path) -> bool:
-        if path == Path("/dev/fd"):
-            return False
-        return real_is_dir(path)
-
-    with monkeypatch.context() as scoped:
-        scoped.setattr(Path, "is_dir", unavailable_dev_fd)
-        with (
-            pytest.raises(ValueError, match="requires /dev/fd support"),
-            local_data.stage_upload_path(contract),
-        ):
-            pytest.fail("staging must not yield without /dev/fd support")
+    with local_data.stage_upload_path(contract) as staged:
+        (stage,) = _stage_directories(local_root)
+        assert staged.argument == str(stage / "payload.bin")
+        assert Path(staged.argument).read_bytes() == b"payload"
+        assert os.stat(staged.argument).st_ino == os.stat(source).st_ino
 
     _assert_no_stage_directories(local_root)
     assert os.stat(source, follow_symlinks=False).st_nlink == 1
@@ -504,7 +483,6 @@ def test_stage_upload_path_rejects_missing_dev_fd_support(
 def test_stage_upload_path_regular_file_keeps_descriptor_valid_and_cleans_up(
     local_root: Path,
 ) -> None:
-    _require_dev_fd_directory_access(local_root)
     source = local_root / "payload.bin"
     source.write_bytes(b"immutable payload")
     source_before = os.stat(source, follow_symlinks=False)
@@ -547,7 +525,6 @@ def test_stage_upload_path_regular_file_keeps_descriptor_valid_and_cleans_up(
 
 
 def test_stage_upload_path_recursively_snapshots_directory(local_root: Path) -> None:
-    _require_dev_fd_directory_access(local_root)
     source = local_root / "dataset"
     nested = source / "nested"
     empty = nested / "empty"
@@ -595,7 +572,6 @@ def test_stage_upload_path_recursively_snapshots_directory(local_root: Path) -> 
 
 
 def test_staging_root_skips_only_top_level_internal_stage_names(local_root: Path) -> None:
-    _require_dev_fd_directory_access(local_root)
     preexisting_stage = local_root / f"{local_data._UPLOAD_STAGE_PREFIX}preexisting"
     preexisting_stage.mkdir()
     (preexisting_stage / "secret.txt").write_text("do not copy", encoding="utf-8")
@@ -631,7 +607,6 @@ def test_staging_root_skips_only_top_level_internal_stage_names(local_root: Path
 def test_stage_upload_path_rejects_source_replacement_and_leaves_no_stage(
     local_root: Path,
 ) -> None:
-    _require_dev_fd_directory_access(local_root)
     source = local_root / "payload.bin"
     source.write_bytes(b"validated")
     contract = local_data.resolve_local_path("payload.bin", require_exists=True)
@@ -654,7 +629,6 @@ def test_stage_upload_path_rejects_source_replacement_and_leaves_no_stage(
 
 
 def test_stage_upload_path_rejects_hard_linked_source(local_root: Path) -> None:
-    _require_dev_fd_directory_access(local_root)
     source = local_root / "payload.bin"
     source.write_bytes(b"payload")
     contract = local_data.resolve_local_path("payload.bin", require_exists=True)
@@ -673,7 +647,6 @@ def test_stage_upload_path_rejects_hard_linked_source(local_root: Path) -> None:
 
 
 def test_stage_upload_path_cleans_up_when_context_body_raises(local_root: Path) -> None:
-    _require_dev_fd_directory_access(local_root)
     source = local_root / "payload.bin"
     source.write_bytes(b"payload")
     contract = local_data.resolve_local_path("payload.bin", require_exists=True)
@@ -703,7 +676,6 @@ def test_stage_upload_path_cleans_up_when_context_body_raises(local_root: Path) 
 def test_stage_directory_rejects_symlink_entry_and_cleans_partial_stage(
     local_root: Path,
 ) -> None:
-    _require_dev_fd_directory_access(local_root)
     target = local_root / "target.bin"
     target.write_bytes(b"target")
     source = local_root / "dataset"
@@ -727,7 +699,6 @@ def test_stage_directory_rejects_symlink_entry_and_cleans_partial_stage(
 def test_stage_directory_rejects_special_entry_and_cleans_partial_stage(
     local_root: Path,
 ) -> None:
-    _require_dev_fd_directory_access(local_root)
     source = local_root / "dataset"
     source.mkdir()
     fifo = source / "input.pipe"
@@ -747,7 +718,6 @@ def test_stage_directory_rejects_special_entry_and_cleans_partial_stage(
 def test_stage_directory_rejects_hard_linked_entry_and_cleans_partial_stage(
     local_root: Path,
 ) -> None:
-    _require_dev_fd_directory_access(local_root)
     source = local_root / "dataset"
     source.mkdir()
     first = source / "first.bin"
@@ -934,29 +904,25 @@ def test_stage_upload_path_rejects_invalid_staged_result_and_cleans_up(
     local_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _require_dev_fd_directory_access(local_root)
     source = local_root / "payload.bin"
     source.write_bytes(b"payload")
     contract = local_data.resolve_local_path("payload.bin", require_exists=True)
-    real_stat = local_data.os.stat
 
-    def invalid_result_stat(path: object, *args: object, **kwargs: object) -> object:
-        metadata = real_stat(path, *args, **kwargs)
-        if (
-            isinstance(path, str)
-            and path.startswith("/dev/fd/")
-            and kwargs.get("follow_symlinks") is False
-        ):
-            return _clone_stat(metadata, st_mode=stat.S_IFIFO | 0o600)
-        return metadata
+    def staged_fifo(
+        _source_dir_fd: int,
+        _source_name: str,
+        _source_stat: os.stat_result,
+        destination_dir_fd: int,
+        destination_name: str,
+    ) -> None:
+        os.mkfifo(destination_name, dir_fd=destination_dir_fd)
 
-    with monkeypatch.context() as scoped:
-        scoped.setattr(local_data.os, "stat", invalid_result_stat)
-        with (
-            pytest.raises(ValueError, match="produced an invalid source"),
-            local_data.stage_upload_path(contract),
-        ):
-            pytest.fail("an invalid staged artifact must never be yielded")
+    monkeypatch.setattr(local_data, "_link_verified_regular", staged_fifo)
+    with (
+        pytest.raises(ValueError, match="produced an invalid source"),
+        local_data.stage_upload_path(contract),
+    ):
+        pytest.fail("an invalid staged artifact must never be yielded")
 
     _assert_no_stage_directories(local_root)
     assert source.read_bytes() == b"payload"
@@ -1040,37 +1006,235 @@ class TestResidualResolutionFailures:
         assert _stage_directories(local_root) == []
 
 
-@pytest.mark.parametrize("valid", [True, False])
-def test_stage_upload_path_validates_descriptor_argument_type_without_host_traversal(
+@pytest.mark.parametrize("same_entry", [True, False])
+def test_stage_upload_path_uses_dev_fd_only_when_it_reaches_the_snapshot(
     local_root: Path,
     monkeypatch: pytest.MonkeyPatch,
-    valid: bool,
+    same_entry: bool,
 ) -> None:
-    """Final descriptor-path validation accepts files and rejects special artifacts."""
-    if not Path("/dev/fd").is_dir():
-        pytest.skip("secure upload staging requires /dev/fd")
+    """Where /dev/fd/<n>/<name> resolves (Linux) the CLI gets that argument.
 
+    The stat of the ``/dev/fd`` path is simulated so the check runs on hosts
+    without that traversal too. A ``/dev/fd`` path that reaches anything other
+    than the staged entry fails closed.
+    """
     source = local_root / "payload.bin"
     source.write_bytes(b"payload")
     contract = local_data.resolve_local_path("payload.bin", require_exists=True)
     real_stat = os.stat
 
-    def selective_stat(path: object, *args: object, **kwargs: object):
+    def dev_fd_stat(path: object, *args: object, **kwargs: object) -> object:
         if isinstance(path, str) and path.startswith("/dev/fd/"):
-            mode = stat.S_IFREG | 0o600 if valid else stat.S_IFIFO | 0o600
-            return SimpleNamespace(st_mode=mode)
+            descriptor, name = path.removeprefix("/dev/fd/").split("/", 1)
+            metadata = real_stat(name, dir_fd=int(descriptor), follow_symlinks=False)
+            return metadata if same_entry else _clone_stat(metadata, st_ino=metadata.st_ino + 1)
         return real_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(local_data.os, "stat", selective_stat)
-    if valid:
+    monkeypatch.setattr(local_data.os, "stat", dev_fd_stat)
+    if same_entry:
         with local_data.stage_upload_path(contract) as staged:
-            assert staged.argument.endswith("/payload.bin")
-            assert staged.directory_fd >= 0
+            assert staged.argument == f"/dev/fd/{staged.directory_fd}/payload.bin"
     else:
         with (
             pytest.raises(ValueError, match="produced an invalid source"),
             local_data.stage_upload_path(contract),
         ):
-            raise AssertionError("an invalid staged artifact must never be yielded")
+            raise AssertionError("a /dev/fd path to another entry must never be yielded")
 
     assert _stage_directories(local_root) == []
+
+
+def test_path_argument_rejects_a_snapshot_path_that_reaches_another_directory(
+    local_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = local_root / "payload.bin"
+    source.write_bytes(b"payload")
+    contract = local_data.resolve_local_path("payload.bin", require_exists=True)
+    monkeypatch.setattr(local_data, "_descriptor_argument", lambda *_args: None)
+    real_stat = os.stat
+
+    def swapped_stage(path: object, *args: object, **kwargs: object) -> object:
+        metadata = real_stat(path, *args, **kwargs)
+        if isinstance(path, Path) and path.name.startswith(local_data._UPLOAD_STAGE_PREFIX):
+            return _clone_stat(metadata, st_ino=metadata.st_ino + 1)
+        return metadata
+
+    monkeypatch.setattr(local_data.os, "stat", swapped_stage)
+    with (
+        pytest.raises(ValueError, match="changed while staging"),
+        local_data.stage_upload_path(contract),
+    ):
+        raise AssertionError("a swapped snapshot path must never be yielded")
+
+    assert _stage_directories(local_root) == []
+
+
+class TestPathHandoffNeedsDirectoriesOthersCannotModify:
+    """A path argument is only safe when no other user can rename entries on it."""
+
+    def _stage(self, local_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        (local_root / "payload.bin").write_bytes(b"payload")
+        contract = local_data.resolve_local_path("payload.bin", require_exists=True)
+        monkeypatch.setattr(local_data, "_descriptor_argument", lambda *_args: None)
+        with local_data.stage_upload_path(contract) as staged:
+            assert Path(staged.argument).read_bytes() == b"payload"
+
+    def test_group_writable_root_is_refused(
+        self, local_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        local_root.chmod(0o775)
+        with pytest.raises(ValueError, match=re.escape(f"modify {local_root.resolve()} ")):
+            self._stage(local_root, monkeypatch)
+        assert _stage_directories(local_root) == []
+
+    def test_sticky_world_writable_root_is_accepted(
+        self, local_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        local_root.chmod(0o1777)
+        self._stage(local_root, monkeypatch)
+
+    def test_ancestor_owned_by_another_user_is_refused(
+        self, local_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        parent = local_root.resolve().parent
+        real_stat = os.stat
+
+        def foreign_parent(path: object, *args: object, **kwargs: object) -> object:
+            metadata = real_stat(path, *args, **kwargs)
+            if path == parent:
+                values = {name: getattr(metadata, name) for name in ("st_dev", "st_ino", "st_mode")}
+                return SimpleNamespace(**values, st_uid=os.geteuid() + 1)
+            return metadata
+
+        monkeypatch.setattr(local_data.os, "stat", foreign_parent)
+        with pytest.raises(ValueError, match=re.escape(f"modify {parent} ")):
+            self._stage(local_root, monkeypatch)
+
+
+class TestStaleSnapshots:
+    """Snapshots left by a killed server are removed before the next upload."""
+
+    _HEX = "0123456789abcdef0123456789abcdef"
+
+    def _snapshot(self, local_root: Path, name: str, source: Path) -> Path:
+        stage = local_root / name
+        stage.mkdir(mode=0o700)
+        os.link(source, stage / source.name)
+        return stage
+
+    def test_snapshot_of_a_dead_process_no_longer_blocks_an_upload(
+        self, local_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        source = local_root / "weights.bin"
+        source.write_bytes(b"weights")
+        stale = self._snapshot(
+            local_root, f"{local_data._UPLOAD_STAGE_PREFIX}4242-{self._HEX}", source
+        )
+        assert os.stat(source).st_nlink == 2
+        monkeypatch.setattr(local_data, "_process_exists", lambda pid: pid != 4242)
+        contract = local_data.resolve_local_path("weights.bin", require_exists=True)
+
+        with local_data.stage_upload_path(contract) as staged:
+            assert Path(staged.argument).read_bytes() == b"weights"
+            assert not stale.exists()
+
+        assert os.stat(source).st_nlink == 1
+
+    def test_live_own_young_and_foreign_snapshots_are_kept(
+        self, local_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        payload = local_root / "payload.bin"
+        payload.write_bytes(b"payload")
+        prefix = local_data._UPLOAD_STAGE_PREFIX
+        kept = [
+            local_root / f"{prefix}4243-{self._HEX}",  # its process is alive
+            local_root / f"{prefix}{os.getpid()}-{self._HEX}",  # this process
+            local_root / f"{prefix}{self._HEX}",  # legacy name, young
+            local_root / f"{prefix}foreign-{self._HEX}",  # not the name format
+            local_root / f"{prefix}0-{self._HEX}",  # not a process ID
+        ]
+        for stage in kept:
+            stage.mkdir()
+        legacy_old = local_root / f"{prefix}{'f' * 32}"
+        legacy_old.mkdir()
+        old = time.time() - local_data._LEGACY_STAGE_MAX_AGE_SECONDS - 60
+        os.utime(legacy_old, (old, old))
+        not_a_directory = local_root / f"{prefix}4244-{self._HEX}"
+        not_a_directory.write_bytes(b"")
+        monkeypatch.setattr(local_data, "_process_exists", lambda pid: pid == 4243)
+
+        with _directory_fd(local_root) as root_fd:
+            local_data._remove_stale_stages(root_fd)
+
+        assert all(stage.is_dir() for stage in kept)
+        assert not legacy_old.exists()
+        assert not_a_directory.is_file()
+
+    def test_snapshots_of_another_user_or_already_gone_are_skipped(
+        self, local_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        prefix = local_data._UPLOAD_STAGE_PREFIX
+        foreign = local_root / f"{prefix}4245-{self._HEX}"
+        foreign.mkdir()
+        vanished = f"{prefix}4246-{self._HEX}"
+        (local_root / vanished).mkdir()
+        real_stat = os.stat
+
+        def stat_with_races(path: object, *args: object, **kwargs: object) -> object:
+            if path == vanished:
+                raise FileNotFoundError(errno.ENOENT, "removed by another server")
+            metadata = real_stat(path, *args, **kwargs)
+            if path == foreign.name:
+                return SimpleNamespace(
+                    st_mode=metadata.st_mode, st_uid=os.geteuid() + 1, st_mtime=0.0
+                )
+            return metadata
+
+        monkeypatch.setattr(local_data.os, "stat", stat_with_races)
+        monkeypatch.setattr(local_data, "_process_exists", lambda _pid: False)
+        with _directory_fd(local_root) as root_fd:
+            local_data._remove_stale_stages(root_fd)
+
+        assert foreign.is_dir()
+
+    @pytest.mark.parametrize(
+        ("outcome", "exists"),
+        [
+            (None, True),
+            (ProcessLookupError(), False),
+            (OverflowError(), False),
+            (PermissionError(), True),
+        ],
+    )
+    def test_process_exists(
+        self, monkeypatch: pytest.MonkeyPatch, outcome: BaseException | None, exists: bool
+    ) -> None:
+        def kill(pid: int, signal: int) -> None:
+            assert (pid, signal) == (4247, 0)
+            if outcome is not None:
+                raise outcome
+
+        monkeypatch.setattr(local_data.os, "kill", kill)
+        assert local_data._process_exists(4247) is exists
+
+    def test_new_snapshot_names_match_the_sweep_format(self, local_root: Path) -> None:
+        with _directory_fd(local_root) as root_fd:
+            name, stage_fd = local_data._create_stage_directory(root_fd)
+            os.close(stage_fd)
+        match = local_data._STAGE_NAME_RE.fullmatch(name)
+        assert match is not None
+        assert match.group("pid") == str(os.getpid())
+
+
+def test_descriptor_argument_is_none_when_the_descriptor_path_does_not_resolve(
+    tmp_path: Path,
+) -> None:
+    """Where ``/dev/fd/<n>/<name>`` does not reach the entry (macOS), the caller passes a path."""
+    entry = tmp_path / "staged"
+    entry.write_text("x", encoding="utf-8")
+    stage_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        assert local_data._descriptor_argument(stage_fd, "missing", entry.stat()) is None
+    finally:
+        os.close(stage_fd)

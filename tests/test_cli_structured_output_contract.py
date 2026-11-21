@@ -40,6 +40,11 @@ def _contract_cli() -> click.Group:
     def empty() -> None:
         return None
 
+    @root.command("empty-list")
+    @click.pass_obj
+    def empty_list(config: GCOConfig) -> None:
+        OutputFormatter(config).print([])
+
     @root.command()
     @click.pass_obj
     def scalar(config: GCOConfig) -> None:
@@ -130,6 +135,23 @@ def test_existing_document_keeps_its_schema_and_requested_format(output_format: 
     assert _load_one(result.stdout, output_format) == {"value": 1}
     if output_format == "yaml":
         assert not result.stdout.lstrip().startswith("{")
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_an_empty_result_printed_through_the_formatter_keeps_its_list_schema(
+    output_format: str,
+) -> None:
+    """``{"status": "ok"}`` comes only from commands that print nothing.
+
+    A command that emits its (empty) result keeps the result's shape, so a
+    command whose JSON turns into ``{"status": "ok"}`` when the result is
+    empty is skipping the emission (printing only a table-mode message), and
+    the fix belongs in that command, not in the formatter.
+    """
+    result = CliRunner().invoke(_contract_cli(), ["--output", output_format, "empty-list"])
+
+    assert result.exit_code == 0, result.output
+    assert _load_one(result.stdout, output_format) == []
 
 
 @pytest.mark.parametrize("output_format", ["json", "yaml"])

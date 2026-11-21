@@ -431,6 +431,9 @@ class PcsLookup(Construct):
 class PcsCluster(Construct):
     """Everything a region deploys for the ``pcs`` block.
 
+    ``project_tag`` is the value of the ``Project`` tag (cdk.json
+    ``context.tags.Project``, which the cost reports filter on); the
+    launch templates stamp it on the instances and volumes PCS launches.
     ``api_role`` is the manifest-processor's role: it receives the two reads
     the API pod needs and nothing else. ``custom_resource_role`` is the
     stack's shared ``AwsCustomResource`` execution role. The storage
@@ -445,6 +448,7 @@ class PcsCluster(Construct):
         *,
         config: Mapping[str, Any],
         project_name: str,
+        project_tag: str,
         vpc: ec2.IVpc,
         eks_cluster_security_group: ec2.ISecurityGroup,
         api_role: iam.IRole,
@@ -458,6 +462,7 @@ class PcsCluster(Construct):
         super().__init__(scope, construct_id)
         self.config = dict(config)
         self.project_name = project_name
+        self.project_tag = project_tag
         self.vpc = vpc
         self.eks_cluster_security_group = eks_cluster_security_group
         self.api_role = api_role
@@ -805,7 +810,7 @@ class PcsCluster(Construct):
         """
         assert self.cluster_name is not None
         return {
-            "Project": self.project_name,
+            "Project": self.project_tag,
             "gco:project": self.project_name,
             "gco:pcs-cluster": self.cluster_name,
             **extra,

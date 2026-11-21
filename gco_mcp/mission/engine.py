@@ -79,8 +79,8 @@ from .types import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-11-18T16:59:04Z
+# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
 # Flowchart(s) generated from this file:
 #   * ``MissionEngine.run_iteration`` -> ``diagrams/code_diagrams/gco_mcp/mission/engine.MissionEngine_run_iteration.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/engine.MissionEngine_run_iteration.png``)
@@ -164,8 +164,13 @@ SamplingCallable = Callable[..., Awaitable[Any]]
 #: ``_apply_observation_augmenters`` checks the shape at runtime and ignores
 #: a non-dict contribution, which the type must leave room for.
 ObservationAugmenter = Callable[[SessionState], object]
+#: ``(script, ctx, tool_dispatcher, session) -> (observation, script_call_log)``.
+#: ``session`` is the session as it stands while the iteration runs (its
+#: ``iterations`` list does not yet hold the in-progress one), so the runner
+#: can build a fresh per-iteration sandbox whose audit rows carry the right
+#: ``iteration_index``.
 SandboxRunner = Callable[
-    [str, Any, ToolDispatcher],
+    [str, Any, ToolDispatcher, SessionState],
     Awaitable[tuple[dict[str, Any], list[ToolCallRecord]]],
 ]
 
@@ -189,7 +194,8 @@ class MissionEngine:
       engine to the deterministic fallback strategy.
     * ``sandbox_runner`` — optional async callable that runs a scripted
       Strategy in the Mission sandbox. Signature ``(script, ctx,
-      tool_dispatcher) -> (observation_dict, script_call_log)``. ``None``
+      tool_dispatcher, session) -> (observation_dict, script_call_log)``,
+      where ``session`` is the session as the iteration sees it. ``None``
       means the engine refuses any scripted strategy with a clear
       error instead of silently executing operator-supplied code.
     * ``now`` — injectable clock. Defaults to a UTC clock; tests pin it
@@ -315,7 +321,7 @@ class MissionEngine:
                 # the original phase exception — the operator's first
                 # need is to see what actually went wrong, not what
                 # went wrong while reporting what went wrong.
-                self.backend.save_session(session)
+                self._save_iteration(session, record)
             raise
 
         # Stamp the verdict on the iteration record before append; the
@@ -328,11 +334,11 @@ class MissionEngine:
         session["iterations"].append(record)
 
         self._update_session_post_iteration(session, record)
-        self.backend.save_session(session)
+        saved = self._save_iteration(session, record)
 
-        if verdict in TERMINAL_VERDICTS:
+        if verdict in TERMINAL_VERDICTS and saved is session:
             await self._finalise_terminal_session(session, record, verdict, reason)
-            self.backend.save_session(session)
+            self._save_iteration(session, record)
 
         # One verdict event per iteration regardless of terminal vs
         # in-progress, so audit consumers see a uniform stream.
@@ -345,6 +351,31 @@ class MissionEngine:
         )
 
         return record
+
+    def _save_iteration(self, session: SessionState, record: IterationRecord) -> SessionState:
+        """Save the session this iteration ran on, unless it was stopped meanwhile.
+
+        ``mission_abort``, ``mission_complete`` and ``swarm_abort`` write the
+        session while an iteration may be running. Saving this iteration's
+        copy, loaded before its tool calls, used to undo them: the session
+        went back to ``running`` and the next ``mission_iterate`` carried on.
+        When the stored session has meanwhile turned terminal or paused, it
+        is kept as stored (status, verdict, end time) and only this
+        iteration's record, and the no-progress counter it advanced, are
+        added to it. Returns the session that was saved.
+        """
+        stored: SessionState | None = self.backend.load_session(session["session_id"])
+        if stored is None or (
+            stored["status"] not in TERMINAL_STATES and stored["status"] != "paused"
+        ):
+            self.backend.save_session(session)
+            return session
+        index = record["iteration_index"]
+        if all(item.get("iteration_index") != index for item in stored["iterations"]):
+            stored["iterations"].append(record)
+        stored["no_progress_counter"] = session.get("no_progress_counter", 0)
+        self.backend.save_session(stored)
+        return stored
 
     # ------------------------------------------------------------------ #
     # Iteration record bootstrap
@@ -772,9 +803,10 @@ class MissionEngine:
           runs, the failure lands as one entry, and Observe_Phase
           surfaces it under ``errors``.
         * **script** — hand the script to :attr:`sandbox_runner` along
-          with ``ctx`` and the engine's own ``tool_dispatcher`` so the
+          with ``ctx``, the engine's own ``tool_dispatcher`` (so the
           sandbox can safely invoke allowlisted tools as native
-          callables. The runner returns ``(observation_dict,
+          callables) and the current session (so the sandbox's audit rows
+          carry this iteration's index). The runner returns ``(observation_dict,
           script_call_log)``. The observation is stashed on the record
           for Observe_Phase to use directly; the script_call_log is
           stored on ``record["script_call_log"]``.
@@ -899,17 +931,18 @@ class MissionEngine:
         * :class:`ScriptRejected` from inside the runner — the runner
           re-validated the script just before execution and the AST
           gate fired. Re-raise as ``script_rejected``.
-        * :class:`SandboxTerminated` from inside the runner — Monty
-          killed the script for exceeding a duration / memory cap.
-          The cap is a true budget cap, not a code-quality failure,
-          so the engine *swallows* the exception, builds a partial
-          Observation from whatever the script collected before being
-          killed, stashes the partial ``script_call_log`` and a
-          ``sandbox_terminated_reason`` sentinel on the iteration
-          record, and returns a list of partial calls. The Decide_Phase
-          reads the sentinel and emits ``("terminate",
-          "max_wall_clock")`` so the verdict surfaces on the
-          budget-cap path rather than via a phase failure.
+        * :class:`SandboxTerminated` from inside the runner — the
+          sandbox stopped the script: its wall-clock or memory cap
+          fired, or the script raised an error. The engine *swallows*
+          the exception, builds a partial Observation from whatever the
+          script collected before it stopped, stashes the partial
+          ``script_call_log``, the ``sandbox_terminated_reason``
+          sentinel (``script_time_limit``, ``script_memory_limit`` or
+          ``script_error``) and the ``sandbox_terminated_detail`` error
+          text on the iteration record, and returns a list of partial
+          calls. The Decide_Phase reads the sentinel and emits
+          ``("terminate", <reason>)`` so the verdict names what stopped
+          the script rather than surfacing as a phase failure.
 
         The sandbox module is imported lazily inside this method so
         the engine module stays importable on hosts where the
@@ -921,13 +954,12 @@ class MissionEngine:
         failed Execute_Phase, which is the right behaviour even
         without per-class translation.
         """
-        del session  # accepted for symmetry with the execute path; unused
         if self.sandbox_runner is None:
             raise MissionEngineError("script_rejected")
         script = strategy["script"]
         try:
             observation_dict, script_call_log = await self.sandbox_runner(
-                script, ctx, self.tool_dispatcher
+                script, ctx, self.tool_dispatcher, session
             )
         except Exception as exc:
             # Late-resolved class lookup: importing the sandbox
@@ -948,16 +980,15 @@ class MissionEngine:
             if isinstance(exc, ScriptRejected):
                 raise MissionEngineError("script_rejected") from exc
             if isinstance(exc, SandboxTerminated):
-                # The sandbox cap is a budget cap, not a phase
-                # failure: the script ran out of wall clock (or
-                # memory, or hit a runtime / typing / syntax error
-                # mid-run) under operator-supplied limits. Capture
-                # whatever it collected before being killed and
-                # route the verdict through the budget-cap path.
+                # A sandbox stop is not a phase failure: the script ran
+                # out of wall clock or memory, or raised an error, under
+                # operator-supplied limits. Capture whatever it collected
+                # before it stopped and end the session with the reason
+                # the sandbox reported.
                 #
                 # The sentinel on the iteration record is what the
                 # cascade in ``decide_verdict`` reads to short-
-                # circuit to ``("terminate", "max_wall_clock")``
+                # circuit to ``("terminate", exc.reason)``
                 # before any other branch is consulted; without it
                 # the cascade would fall through to the default
                 # ``("continue", "in_progress")`` because no other
@@ -985,7 +1016,8 @@ class MissionEngine:
                         if isinstance(entry, dict) and "key" in entry
                     }
                 record["observation"] = cast(Observation, partial_observation)
-                record["sandbox_terminated_reason"] = "max_wall_clock"
+                record["sandbox_terminated_reason"] = exc.reason
+                record["sandbox_terminated_detail"] = exc.detail
                 return cast("list[ToolCallRecord]", list(exc.partial_script_call_log))
             raise
         # The sandbox already produced a normalized Observation dict,

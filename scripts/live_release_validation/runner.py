@@ -5,21 +5,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
+import sys
 import tempfile
 import time
 import traceback
 from pathlib import Path
 from typing import Any, Literal
 
-from cli.aws_client import GCOAWSClient
 from cli.config import GCOConfig
 from cli.jobs import JobManager
 from cli.stacks import StackManager
 
 from .actions import action_final_inventory, destroy_deployment
-from .aws_session import ThrottleResilientSession
+from .aws_session import ThrottleResilientSession, WafPatientApiClient
 from .models import (
     ActionFailure,
     ActionResult,
@@ -64,6 +65,88 @@ def require_local_execution() -> None:
     verify_emulator_endpoint(endpoint)
 
 
+def _startup_failure_cleanup(settings: RunSettings, *, module: str) -> dict[str, Any]:
+    """The ``cleanup`` record of a run whose runner could not be constructed.
+
+    Empty unless the checkpoint records a deployment. Then infrastructure may
+    be standing that no cleanup ran for: the record says so and, when the
+    checkpoint is this invocation's, names the exact command that resumes into
+    the guaranteed cleanup.
+    """
+    if not settings.checkpoint_path.is_file():
+        return {}
+    try:
+        checkpoint = RunCheckpoint.from_path(settings.checkpoint_path)
+    except OSError, ValueError:
+        return {}
+    if not checkpoint.deployment_attempted:
+        return {}
+    if checkpoint.identity != settings.identity():
+        return {
+            "needed": True,
+            "completed": False,
+            "blocked": (
+                "A deployed checkpoint exists, but its identity does not match "
+                "this invocation. No cleanup authority was established; resume "
+                "with the original exact command and checkpoint identity."
+            ),
+        }
+    recovery_argv = [sys.executable, "-m", module, *sys.argv[1:]]
+    if "--resume" not in recovery_argv:
+        recovery_argv.append("--resume")
+    return {
+        "needed": True,
+        "completed": False,
+        "blocked": (
+            "Runner construction failed after an identity-verified deployed "
+            "checkpoint was loaded; safe automatic destruction could not be "
+            "initialized."
+        ),
+        "recovery_command": shlex.join(recovery_argv),
+    }
+
+
+def write_startup_failure_report(
+    settings: RunSettings,
+    error: BaseException,
+    *,
+    module: str,
+    title: str | None = None,
+    report_stem: str | None = None,
+) -> None:
+    """Write the failed report of a run whose runner could not be constructed.
+
+    Every harness entry point (``module`` is the one to resume with) writes
+    the same report, including the blocked-cleanup record when a deployment
+    may be standing, into the validated private report directory.
+    """
+    report = ValidationReport(
+        run_id=settings.run_id,
+        identity=settings.identity(),
+        selected_actions=list(settings.requested_actions),
+        started_at=utc_now(),
+        ended_at=utc_now(),
+        status="failed",
+        fatal_error="".join(traceback.format_exception(type(error), error, error.__traceback__)),
+        cleanup=_startup_failure_cleanup(settings, module=module),
+    )
+    if title is not None:
+        report.title = title
+    if report_stem is not None:
+        report.report_stem = report_stem
+    try:
+        ensure_private_run_directory(settings.report_dir, settings.checkpoint_path)
+        json_path, markdown_path = report.write(settings.report_dir)
+    except (OSError, ValueError) as report_exc:
+        print(
+            f"Failure report was not written because the output directory is unsafe: {report_exc}",
+            file=sys.stderr,
+        )
+    else:
+        print(f"JSON report: {json_path}", file=sys.stderr)
+        print(f"Markdown report: {markdown_path}", file=sys.stderr)
+
+
 class LiveValidationRunner:
     """Run selected live actions and always report and clean up."""
 
@@ -100,7 +183,9 @@ class LiveValidationRunner:
             # every enabled Region, and a Regional TPS squeeze must surface
             # as a bounded wait, not a failed action. See aws_session.py.
             self.session = ThrottleResilientSession()
-            self.aws_client = GCOAWSClient(self.config)
+            # The API's per-IP WAF rate rule can block a busy run; see
+            # WafPatientApiClient.
+            self.aws_client = WafPatientApiClient(self.config)
             self.aws_client._session = self.session
             self.job_manager = JobManager(self.config)
             self.job_manager._aws_client = self.aws_client
@@ -472,7 +557,10 @@ class LiveValidationRunner:
           is recorded under ``cleanup.final_inventory_recheck`` and its details
           become the report's final inventory, being the most recent scan.
         * A failed re-check is authoritative either way: the account is not
-          clean, so it replaces any passed result and drops the completion.
+          clean, so it replaces any passed result and drops the completion,
+          and is recorded under ``cleanup.final_inventory_recheck`` with its
+          error. When the scan itself failed, the report's final inventory
+          (an earlier scan) is dropped rather than shown as current.
 
         Before this method existed the re-check overwrote the action's row with a
         zero-duration result, so every report claimed its 10-minute inventory took
@@ -481,6 +569,7 @@ class LiveValidationRunner:
         definition = self.registry["final-inventory"]
         started_at = utc_now()
         started = time.monotonic()
+        earlier_inventory = self.report.final_inventory
         try:
             details = action_final_inventory(self.context)
         except _LiveValidationSignal, KeyboardInterrupt:
@@ -490,7 +579,7 @@ class LiveValidationRunner:
         # helpers under the scan. Recording it here keeps it a failed inventory
         # instead of run()'s outer handler marking a finished teardown incomplete.
         except BaseException as exc:
-            self.checkpoint.action_results["final-inventory"] = ActionResult.failed(
+            failed = ActionResult.failed(
                 name="final-inventory",
                 description=definition.description,
                 started_at=started_at,
@@ -498,8 +587,21 @@ class LiveValidationRunner:
                 ended_monotonic=time.monotonic(),
                 error=exc,
             )
+            self.checkpoint.action_results["final-inventory"] = failed
             if "final-inventory" in self.checkpoint.completed_actions:
                 self.checkpoint.completed_actions.remove("final-inventory")
+            if self.report.final_inventory is earlier_inventory:
+                # The scan itself failed, so the report still holds an earlier
+                # look at the account that this failure supersedes.
+                self.report.final_inventory = None
+            self.report.cleanup["final_inventory_recheck"] = {
+                "status": failed.status,
+                "started_at": failed.started_at,
+                "ended_at": failed.ended_at,
+                "duration_seconds": failed.duration_seconds,
+                "error": failed.error,
+                "recorded_as_action_result": True,
+            }
             self._persist_checkpoint(self.checkpoint)
             return
 

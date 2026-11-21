@@ -118,7 +118,7 @@ def create_mock_regional_stack(
     Both default to disabled so existing tests stay unchanged.
 
     No ALB mock is needed — the monitoring stack's ALB widgets use a
-    CloudWatch SEARCH expression with a ``LoadBalancer="app/k8s-gco-"``
+    CloudWatch SEARCH expression with a ``LoadBalancer=app/k8s-gcosyste-gcogatew-``
     prefix filter, so there's no per-stack resource reference involved.
     """
     mock_regional_stack = MagicMock()
@@ -151,6 +151,18 @@ def create_mock_regional_stack(
         mock_regional_stack.aurora_cluster = aurora_mock
 
     return mock_regional_stack
+
+
+def _alarm_namespaces(alarm: dict) -> set[str]:
+    """Metric namespaces an alarm reads, for single-metric and metric-math alarms."""
+    properties = alarm["Properties"]
+    if "Namespace" in properties:
+        return {properties["Namespace"]}
+    return {
+        query["MetricStat"]["Metric"]["Namespace"]
+        for query in properties.get("Metrics", [])
+        if "MetricStat" in query
+    }
 
 
 class TestMonitoringStackImports:
@@ -208,12 +220,16 @@ class TestMonitoringStackSynthesis:
         template = assertions.Template.from_stack(monitoring_stack)
         template.resource_count_is("AWS::CloudWatch::Dashboard", 1)
 
-    def test_monitoring_stack_creates_log_groups(self, monitoring_stack):
-        """Test that monitoring stack creates log groups for each region."""
+    def test_monitoring_stack_creates_no_log_groups(self, monitoring_stack):
+        """The monitoring stack creates no log group.
+
+        It used to create a health-monitor and a manifest-processor log group
+        per Region with CloudFormation-generated names that no service, role
+        or manifest referenced, so nothing ever wrote to them; the services
+        log to stdout, which Container Insights collects in their own Region.
+        """
         template = assertions.Template.from_stack(monitoring_stack)
-        # Should create log groups for health monitor and manifest processor per region
-        # 2 regions * 2 services = 4 log groups
-        template.resource_count_is("AWS::Logs::LogGroup", 4)
+        template.resource_count_is("AWS::Logs::LogGroup", 0)
 
     def test_monitoring_stack_creates_alarms(self, monitoring_stack):
         """Test that monitoring stack creates CloudWatch alarms."""
@@ -293,41 +309,19 @@ class TestMonitoringStackAlarms:
             },
         )
 
-    def test_sqs_old_message_alarm_exists(self, monitoring_stack):
-        """Test that SQS old message alarm is created for each region."""
-        template = assertions.Template.from_stack(monitoring_stack)
-        # CDK generates alarm names, so we just check for the metric properties
-        template.has_resource_properties(
-            "AWS::CloudWatch::Alarm",
-            {
-                "MetricName": "ApproximateAgeOfOldestMessage",
-                "Namespace": "AWS/SQS",
-            },
-        )
+    def test_workload_region_alarms_are_not_in_the_monitoring_stack(self, monitoring_stack):
+        """SQS, EKS and manifest alarms live in each regional stack.
 
-    def test_sqs_dlq_alarm_exists(self, monitoring_stack):
-        """Test that SQS DLQ alarm is created for each region."""
+        CloudWatch evaluates an alarm only against metrics in its own Region,
+        so ``gco/stacks/regional_alarms.py`` creates them there
+        (tests/test_regional_alarms.py).
+        """
         template = assertions.Template.from_stack(monitoring_stack)
-        # CDK generates alarm names, so we just check for the metric properties
-        template.has_resource_properties(
-            "AWS::CloudWatch::Alarm",
-            {
-                "MetricName": "ApproximateNumberOfMessagesVisible",
-                "Namespace": "AWS/SQS",
-            },
-        )
-
-    def test_eks_high_cpu_alarm_exists(self, monitoring_stack):
-        """Test that EKS high CPU alarm is created for each region."""
-        template = assertions.Template.from_stack(monitoring_stack)
-        # CDK generates alarm names, so we just check for the metric properties
-        template.has_resource_properties(
-            "AWS::CloudWatch::Alarm",
-            {
-                "MetricName": "node_cpu_utilization",
-                "Namespace": "ContainerInsights",
-            },
-        )
+        alarms = template.find_resources("AWS::CloudWatch::Alarm")
+        namespaces = {
+            namespace for props in alarms.values() for namespace in _alarm_namespaces(props)
+        }
+        assert namespaces == {"AWS/ApiGateway", "AWS/Lambda", "AWS/DynamoDB"}
 
     def test_alb_unhealthy_hosts_alarm_skipped(self, monitoring_stack):
         """Test that ALB unhealthy hosts alarm is NOT created (ALB names unknown at synth time)."""
@@ -644,50 +638,67 @@ class TestMonitoringStackOptionalDataServices:
 
     # ── ALB widgets ──────────────────────────────────────────────────────
 
-    def test_alb_widgets_filter_to_platform_alb_name_prefix(self):
-        """ALB widgets use a SEARCH composite-token match on ``app/k8s-gco-``.
+    def test_alb_widgets_filter_to_the_gateway_alb_name_prefix(self):
+        """ALB widgets match the load balancer of the ``gco-system/gco-gateway`` Gateway.
 
-        The AWS Load Balancer Controller names the platform ALB
-        ``k8s-gco-<hash>`` (the namespace is shortened because the
-        controller enforces a 32-char total name limit). CloudWatch's
-        ``LoadBalancer`` dimension is the ARN suffix ``app/<name>/<hash>``.
-
-        We use an UNQUOTED filter in the SEARCH expression
-        (``LoadBalancer=app/k8s-gco-``) so CloudWatch performs a
-        composite-token match rather than exact string match. Quoting
-        the value (``LoadBalancer="app/k8s-gco-"``) would force exact
-        match and return nothing — no ALB's dimension value is literally
-        ``app/k8s-gco-``. Matches every GCO platform ALB; inference ALBs
-        have a different prefix so they don't match.
+        The AWS Load Balancer Controller names a Gateway's load balancer
+        ``k8s-<namespace>-<name>-<hash>`` with namespace and name cut to 8
+        alphanumerics: ``k8s-gcosyste-gcogatew-<hash>``. The old filter
+        ``app/k8s-gco-`` matched the name of the retired Ingress ALB, so every
+        ALB graph was empty. CloudWatch's ``LoadBalancer`` dimension is
+        ``app/<name>/<id>``; the filter stays UNQUOTED, which makes it a
+        composite-token prefix match (a quoted value must match exactly).
         """
+        from gco.stacks.monitoring_stack import PLATFORM_ALB_SEARCH_FILTER
+
+        assert PLATFORM_ALB_SEARCH_FILTER == "LoadBalancer=app/k8s-gcosyste-gcogatew-"
         stack = self._build_stack(MockConfigLoader())
         body = self._dashboard_body(stack)
-        # Unquoted composite-token filter (JSON-escaped body form)
-        assert "LoadBalancer=app/k8s-gco-" in body
+        for metric, stat in (
+            ("RequestCount", "Sum"),
+            ("TargetResponseTime", "Average"),
+            ("TargetResponseTime", "p99"),
+            ("HTTPCode_Target_4XX_Count", "Sum"),
+            ("HTTPCode_Target_5XX_Count", "Sum"),
+            ("ActiveConnectionCount", "Sum"),
+        ):
+            expression = (
+                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
+                f'MetricName=\\"{metric}\\" LoadBalancer=app/k8s-gcosyste-gcogatew-\', '
+                f"'{stat}', 300)"
+            )
+            assert expression in body, (metric, stat)
+        assert "k8s-gco-'" not in body and "k8s-gco-\\'" not in body
 
     def test_alb_widgets_do_not_match_all_albs(self):
         """Regression gate: the ALB SEARCH must be scoped by LoadBalancer name.
 
-        The original dashboard used ``Namespace="AWS/ApplicationELB"`` with
-        no name-prefix filter, so every ALB in the account appeared. We
-        now include ``LoadBalancer=app/k8s-gco-`` to scope the search.
-        This test fails if someone drops the filter.
-
-        The metric-schema form ``{AWS/ApplicationELB,LoadBalancer}`` is
-        still allowed — that's the SEARCH syntax that constrains which
-        dimension tuples CloudWatch considers, not a namespace-only
-        wildcard.
+        A namespace-only search would graph every ALB in the account, and a
+        double-quoted LoadBalancer value is an exact match that finds nothing.
         """
         stack = self._build_stack(MockConfigLoader())
         body = self._dashboard_body(stack)
-        # The double-quoted namespace-only form must NOT be present
         assert 'Namespace=\\"AWS/ApplicationELB\\"' not in body
         assert 'Namespace="AWS/ApplicationELB"' not in body
-        # And the exact-match quoted filter must not be used either —
-        # that was my initial attempt and it returned zero data because
-        # no ALB has LoadBalancer literally equal to "app/k8s-gco-".
-        assert 'LoadBalancer=\\"app/k8s-gco-\\"' not in body
-        assert 'LoadBalancer="app/k8s-gco-"' not in body
+        assert 'LoadBalancer=\\"app/' not in body
+        assert 'LoadBalancer="app/' not in body
+
+    # ── EKS widgets ──────────────────────────────────────────────────────
+
+    def test_eks_api_server_widget_uses_a_published_metric(self):
+        """The widget reads EKS's vended ``apiserver_request_total_5XX`` per cluster.
+
+        ``cluster_failed_request_count`` with a ``cluster_name`` dimension does
+        not exist in ``AWS/EKS``, so the old "Failed Requests" widget was
+        always empty.
+        """
+        stack = self._build_stack(MockConfigLoader())
+        body = self._dashboard_body(stack)
+        assert "cluster_failed_request_count" not in body
+        for region in ("us-east-1", "us-west-2"):
+            metric = f'["AWS/EKS","apiserver_request_total_5XX","ClusterName","gco-test-{region}"'
+            assert metric in body, region
+        assert "EKS API Server - 5XX Responses" in body
 
     # ── Cross-cutting ────────────────────────────────────────────────────
 
@@ -762,3 +773,83 @@ class TestMonitoringStackOptionalDataServices:
         # region refs present, synth raises).
         template = assertions.Template.from_stack(stack)
         template.resource_count_is("AWS::CloudWatch::Dashboard", 1)
+
+
+class TestDynamoDbMetricsCoverEveryOperation:
+    """DynamoDB publishes ThrottledRequests and SystemErrors per TableName and Operation.
+
+    A metric with the TableName dimension alone never has data, so the jobs
+    table alarms (and the dashboard lines) must sum over operations.
+    """
+
+    @pytest.fixture
+    def template(self):
+        from gco.stacks.monitoring_stack import GCOMonitoringStack
+
+        stack = GCOMonitoringStack(
+            cdk.App(),
+            "TestMonitoringDynamoDb",
+            config=MockConfigLoader(cost_monitoring_enabled=False),
+            global_stack=create_mock_global_stack(),
+            regional_stacks=[create_mock_regional_stack("us-east-1")],
+            api_gateway_stack=create_mock_api_gateway_stack(),
+            env=cdk.Environment(account="123456789012", region="us-east-2"),
+        )
+        return assertions.Template.from_stack(stack)
+
+    @pytest.mark.parametrize(
+        ("alarm_prefix", "metric_name"),
+        [
+            ("DynamoDBJobsThrottleAlarm", "ThrottledRequests"),
+            ("DynamoDBJobsErrorsAlarm", "SystemErrors"),
+        ],
+    )
+    def test_jobs_table_alarm_sums_every_operation(self, template, alarm_prefix, metric_name):
+        from gco.stacks.control_plane_alarms import DYNAMODB_ALARM_OPERATIONS
+
+        (alarm,) = [
+            resource["Properties"]
+            for logical_id, resource in template.find_resources("AWS::CloudWatch::Alarm").items()
+            if logical_id.startswith(alarm_prefix)
+        ]
+        assert "MetricName" not in alarm and "Dimensions" not in alarm
+        queries = alarm["Metrics"]
+        (expression,) = [query for query in queries if "Expression" in query]
+        assert expression["Expression"] == "SUM(FILL(METRICS(), 0))"
+        assert expression["ReturnData"] is True
+        stats = [query["MetricStat"] for query in queries if "MetricStat" in query]
+        # An alarm's metric math may reference at most 10 metrics.
+        assert len(stats) == len(DYNAMODB_ALARM_OPERATIONS) <= 10
+        operations = []
+        for stat in stats:
+            metric = stat["Metric"]
+            assert metric["Namespace"] == "AWS/DynamoDB"
+            assert metric["MetricName"] == metric_name
+            assert stat["Stat"] == "Sum" and stat["Period"] == 300
+            dimensions = {d["Name"]: d["Value"] for d in metric["Dimensions"]}
+            assert set(dimensions) == {"TableName", "Operation"}
+            assert dimensions["TableName"] == "gco-test-jobs"
+            operations.append(dimensions["Operation"])
+        assert operations == list(DYNAMODB_ALARM_OPERATIONS)
+        assert {"GetItem", "PutItem", "UpdateItem", "DeleteItem", "Query", "Scan"} <= set(
+            operations
+        )
+
+    def test_dashboard_lines_search_every_operation(self, template):
+        import json
+
+        (dashboard,) = template.find_resources("AWS::CloudWatch::Dashboard").values()
+        body = json.dumps(dashboard["Properties"]["DashboardBody"])
+        for metric_name, tables in (
+            ("ThrottledRequests", ("gco-test-jobs", "gco-test-templates", "gco-test-webhooks")),
+            ("SystemErrors", ("gco-test-jobs", "gco-test-templates")),
+        ):
+            for table in tables:
+                expression = (
+                    "SUM(SEARCH('{AWS/DynamoDB,Operation,TableName} "
+                    f'MetricName=\\\\\\"{metric_name}\\\\\\" TableName=\\\\\\"{table}\\\\\\"\', '
+                    "'Sum', 300))"
+                )
+                assert expression in body, (metric_name, table)
+            # No line may ask for the metric by TableName alone.
+            assert f'\\"{metric_name}\\",\\"TableName\\"' not in body

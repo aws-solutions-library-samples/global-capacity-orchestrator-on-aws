@@ -20,9 +20,12 @@
 #   satisfy the pull request's required status checks.
 #
 # Concurrency:
-#   Release runs are serialized repository-wide (shared group with stage 2).
-#   A half-run release is worse than a slow one, so queued runs wait and
-#   in-progress runs are never canceled.
+#   Stage-1 runs are serialized repository-wide, and an in-progress run is
+#   never canceled: a half-run release is worse than a slow one. GitHub
+#   keeps at most one pending run per group, so a second dispatch waits and
+#   a third replaces (cancels) the waiting second. Stage 2 has a group of its
+#   own (see release-publish.yml) so a dispatch here can never cancel a
+#   publish that is waiting to tag a merged release.
 #
 # Permissions model:
 #   The built-in GITHUB_TOKEN needs `contents: write` (push the release
@@ -47,9 +50,9 @@ on:
           - minor
           - major
 
-# Serialize every release, sharing one group with release-publish.yml. A
-# second dispatch waits for the active release instead of racing its
-# version branch and PR.
+# Serialize stage-1 runs. A second dispatch waits for the active one
+# instead of racing its version branch and PR; release-publish.yml uses its
+# own group so it is never the pending run a later dispatch replaces.
 concurrency:
   group: release
   cancel-in-progress: false

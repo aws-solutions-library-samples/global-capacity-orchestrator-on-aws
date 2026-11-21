@@ -19,7 +19,9 @@ authenticated GCO API alone (no Slurm credential, no kubectl):
    this run's marker; the job reaches ``COMPLETED`` within the run's job
    timeout, which means PCS launched a compute node from zero, it joined the
    controller, mounted the shared EFS home and ran the job as the fixed
-   identity;
+   identity. The submission is journaled in the checkpoint
+   (:data:`PCS_PROBE_STATE_KEY`), so a resumed run waits for the job an
+   interrupted attempt submitted instead of submitting another;
 3. the slurmdbd accounting record carries the job as ``COMPLETED`` with the
    caller attribution the API stamped into its comment; and
 4. ``gco slurm output --backend pcs`` reads the job's output file from the
@@ -84,6 +86,10 @@ _OUTPUT_READ_RETRY_SECONDS = 30
 _BACKENDS_PATH = "/api/v1/slurm/backends"
 _JOBS_PATH = "/api/v1/slurm/jobs"
 _ACCOUNTING_PATH = "/api/v1/slurm/accounting/jobs"
+#: Checkpoint state of the probe's submission: ``{"name", "region"}`` from just
+#: before the POST, plus ``"job"`` (what :func:`_submit_job` returned) once
+#: the API answered.
+PCS_PROBE_STATE_KEY = "pcs_probe"
 
 
 class PcsValidationError(RuntimeError):
@@ -230,6 +236,61 @@ def _submit_job(ctx: RunContext, region: str, *, name: str, marker: str) -> dict
             f"{region}: the submission was answered by backend {payload.get('backend')!r}"
         )
     return {"job_id": job_id, "name": name, "submitted_at": time.time()}
+
+
+def _jobs_named(ctx: RunContext, region: str, name: str) -> list[int]:
+    """The IDs of the jobs called ``name``: slurmctld's queue, then slurmdbd's history."""
+    queue = _request(ctx, region, "GET", f"{_JOBS_PATH}?backend=pcs&name={name}")
+    history = _request(
+        ctx,
+        region,
+        "GET",
+        f"{_ACCOUNTING_PATH}?backend=pcs&start=now-6hours&job_name={name}&limit=200",
+    )
+    return sorted(
+        {
+            job["job_id"]
+            for job in [*(queue.get("jobs") or []), *(history.get("jobs") or [])]
+            if isinstance(job, dict)
+            and job.get("name") == name
+            and isinstance(job.get("job_id"), int)
+            and job["job_id"] > 0
+        }
+    )
+
+
+def _journaled_submission(
+    ctx: RunContext, region: str, *, name: str, marker: str
+) -> dict[str, Any]:
+    """The probe's job: the one an earlier attempt of this run submitted, else a new one.
+
+    The job is journaled in the checkpoint before the POST and again with the
+    API's answer. A resumed run that finds the answer waits for that job. One
+    that finds only the first record (interrupted while the POST was in
+    flight) looks the job up by its run-scoped name, in the queue and in
+    accounting, and submits again only when no such job exists.
+    """
+    with ctx.state_lock:
+        journal = ctx.checkpoint.state.get(PCS_PROBE_STATE_KEY)
+    if isinstance(journal, dict) and journal.get("name") == name:
+        recorded = journal.get("job")
+        if isinstance(recorded, dict):
+            return {**recorded, "resumed": "journaled job id"}
+        earlier = _jobs_named(ctx, region, name)
+        if earlier:
+            job = {"job_id": earlier[-1], "name": name, "submitted_at": None}
+            with ctx.state_lock:
+                ctx.checkpoint.state[PCS_PROBE_STATE_KEY] = {**journal, "job": job}
+                ctx.persist()
+            return {**job, "resumed": f"found by name (job ids {earlier})"}
+    with ctx.state_lock:
+        ctx.checkpoint.state[PCS_PROBE_STATE_KEY] = {"name": name, "region": region}
+        ctx.persist()
+    job = _submit_job(ctx, region, name=name, marker=marker)
+    with ctx.state_lock:
+        ctx.checkpoint.state[PCS_PROBE_STATE_KEY] = {"name": name, "region": region, "job": job}
+        ctx.persist()
+    return job
 
 
 def _wait_for_completion(ctx: RunContext, region: str, job_id: int) -> dict[str, Any]:
@@ -380,7 +441,7 @@ def probe_pcs(ctx: RunContext) -> dict[str, Any]:
         "marker": marker,
         "backend": _check_backends(ctx, region, config),
     }
-    submission = _submit_job(ctx, region, name=name, marker=marker)
+    submission = _journaled_submission(ctx, region, name=name, marker=marker)
     evidence["job"] = submission
     evidence["completion"] = _wait_for_completion(ctx, region, submission["job_id"])
     evidence["accounting"] = _wait_for_accounting(

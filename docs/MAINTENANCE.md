@@ -265,7 +265,10 @@ shipping a skew.
    - `lambda/helm-installer/Dockerfile` — the `dl.k8s.io/release/...` URL and
      the `sha256sum -c` line under it (the checksum for each release binary is
      published alongside it as `<url>.sha256`)
-   - `Dockerfile.dev` (`ARG KUBECTL_VERSION`)
+   - `Dockerfile.dev` — `ARG KUBECTL_VERSION` and the two per-architecture
+     SHA-256s in that `RUN`'s `TARGETARCH` case (amd64 and arm64, each
+     published as `https://dl.k8s.io/release/<version>/bin/linux/<arch>/kubectl.sha256`);
+     the build fails closed until all three move together
 
    No workflow edits are needed: every workflow that installs kubectl derives
    the version and checksum from the installer Dockerfile at runtime
@@ -354,7 +357,7 @@ constant still says `v1beta1`, as the reminder.
   `tests/test_integration.py::test_kubectl_versions_follow_eks_skew_policy`.
 - **kubernetes Python client**: its major must equal the cluster minor
   (`kubernetes==37.x` ↔ EKS `1.37`) or trail it by exactly one
-  (`kubernetes==36.x` on EKS `1.37`). kubernetes-client/python documents that
+  (`kubernetes==37.x` on EKS `1.38`). kubernetes-client/python documents that
   a client one version behind the server works for every API the two have in
   common, and GCO uses only GA core APIs, so the one-minor lag is safe while
   upstream has no stable release for the new minor. A client ahead of the
@@ -470,7 +473,13 @@ To act on the report:
 
 1. Follow the report's **Ref** links to review changelogs for breaking changes.
 2. Update the exact version in `pyproject.toml`, the relevant `package.json`, a
-   manifest, `charts.yaml`, or the pinned `*_VERSION` env/ARG value.
+   manifest, `charts.yaml`, or the pinned `*_VERSION` env/ARG value. An image
+   pinned by tag and digest (the scanner and linter `*_IMAGE` values in
+   `security.yml` and `lint.yml`, the semgrep job container, the Floci
+   emulator) moves both halves: the new tag and that tag's manifest-list
+   digest (`skopeo inspect --raw docker://<image>:<tag> | sha256sum`). A
+   **committed digest does not match the tag** row means upstream re-pushed
+   the tag; find out what changed before refreshing the digest.
 3. Regenerate the lock that belongs to the changed graph:
    - Python: regenerate `requirements-lock.txt` with the supported container
      workflow documented below.
@@ -1013,16 +1022,35 @@ monitoring region resolved in `app.py`) creates the observability surface:
 - **Dashboard** — one CloudWatch dashboard with per-region widgets for Global
   Accelerator, API Gateway, Lambda, SQS, DynamoDB, EKS, ALBs, the optional
   FSx/[Valkey](https://valkey.io/)/Aurora services, and custom application metrics.
-- **Alarms** — metric and composite alarms for EKS CPU/memory, ALB unhealthy
-  hosts, response time, manifest-processing failures, Lambda errors/throttles,
-  SQS message age (stuck jobs), DynamoDB throttling, API Gateway 5XX, and
-  secret-rotation failure.
-- **Alert delivery** — a single SNS topic (`alert_topic`) fed by the composite
-  alarms. **Subscribe your on-call channel to it** — an alarm with no
-  subscriber is silent (see the secret-rotation runbook).
+- **Alarms** — CloudWatch evaluates an alarm only against metrics in its own
+  Region, so the alarms live where their metrics are
+  (`gco/stacks/control_plane_alarms.py`, `gco/stacks/regional_alarms.py`):
+  - API Gateway 5XX and p99 latency, proxy Lambda errors/throttles,
+    secret-rotation failure, and a composite of API Gateway and proxy errors:
+    in the monitoring stack while `deployment_regions.api_gateway` is the
+    monitoring Region (the default), otherwise in the API Gateway stack;
+  - DynamoDB jobs-table throttling and system errors: in the monitoring stack
+    while `deployment_regions.global` is the monitoring Region (the default),
+    otherwise in the global stack;
+  - each regional stack: SQS message age (stuck jobs) and dead-letter
+    messages, EKS node CPU/memory, manifest-processing failures, and a
+    composite of CPU and memory above 90%.
+- **Alert delivery** — every alarm above notifies an SNS topic of its own
+  stack: the monitoring stack's `AlertTopicArn` output, each regional stack's
+  `RegionalAlertTopicArn` output, and, only when they hold alarms (their Region
+  is not the monitoring Region), the global stack's `GlobalAlertTopicArn` and
+  the API Gateway stack's `ApiGatewayAlertTopicArn` outputs. **Subscribe your
+  on-call channel to every one of them** — an alarm with no subscriber is
+  silent (see the secret-rotation runbook). The API Gateway stack's
+  `BackendTls*` alarms on the internal certificate manager notify no topic;
+  attach an action to them yourself
+  ([RUNBOOKS.md → Backend Certificate Rotation Fails](RUNBOOKS.md#backend-certificate-rotation-fails)).
 
-Shape is guarded by `tests/test_monitoring_stack.py` and
-`tests/test_regional_stack.py`.
+Shape is guarded by `tests/test_monitoring_stack.py`,
+`tests/test_control_plane_alarms.py`, `tests/test_regional_alarms.py` and
+`tests/test_regional_stack.py`; `tests/test_cdk_synthesis_matrix.py` checks
+that every alarm of every matrix configuration reads metrics of, and notifies
+a topic in, its own Region.
 
 ### Custom metrics and health checks
 
@@ -1048,7 +1076,6 @@ Services emit structured JSON (`gco/services/structured_logging.py`, tunable via
 request each line also carries `trace_id`, `span_id`, and `trace_sampled`.
 Retention is bounded, not open-ended:
 
-- Monitoring log groups use `RetentionDays.ONE_MONTH` (`monitoring_stack.py`).
 - S3 access logs expire per `s3_access_logs.retention_days` in `cdk.json`
   (default 90 days).
 - Capacity-history rows carry a DynamoDB TTL (default 90 days).
@@ -1061,7 +1088,7 @@ Retention is bounded, not open-ended:
 
 `docs/RUNBOOKS.md` holds eleven step-by-step incident procedures (region
 unhealthy, DLQ filling, secret-rotation failure, cost spike, and more), and the
-alarms above page through the SNS alert topic. Keep one runbook per alarm so a
+alarms above page through the SNS alert topics. Keep one runbook per alarm so a
 page maps to an action.
 
 ## Code health
@@ -1072,7 +1099,7 @@ Ruff owns both formatting and linting (`pyproject.toml` `[tool.ruff]`: line
 length 100, target `py314`, rules `E,W,F,I,B,C4,UP,ARG,SIM`). mypy runs in a
 `--strict`-equivalent mode (`[tool.mypy]`). Both run three ways so nothing slips:
 
-- **Pre-commit** (`.pre-commit-config.yaml`): `ruff-format`, `ruff --fix`,
+- **Pre-commit** (`.pre-commit-config.yaml`): `ruff-format`, `ruff-check --fix`,
   `mypy` (on `gco/config|models|services` + `cli/`), `yamllint`,
   `markdownlint-cli2`. Install once with `pre-commit install`.
 - **CI** (`lint.yml`): `ruff`, `mypy` (`strict` / `stacks` / `lambda`), plus

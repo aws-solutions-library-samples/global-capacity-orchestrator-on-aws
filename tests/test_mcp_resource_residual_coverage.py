@@ -343,7 +343,7 @@ def test_iam_policy_index_without_readme_and_successful_policy_read(
     ],
 )
 def test_image_resources_render_manager_failures(method: str, call: object, expected: str) -> None:
-    manager = MagicMock()
+    manager = MagicMock(_repo_prefix="gco")
     getattr(manager, method).side_effect = RuntimeError("boom")
     with patch.object(images, "_get_manager", return_value=manager):
         result = call()  # type: ignore[operator]
@@ -351,7 +351,7 @@ def test_image_resources_render_manager_failures(method: str, call: object, expe
 
 
 def test_image_describe_failure_is_structured_json() -> None:
-    manager = MagicMock()
+    manager = MagicMock(_repo_prefix="gco")
     manager.describe.side_effect = RuntimeError("denied")
     with patch.object(images, "_get_manager", return_value=manager):
         payload = json.loads(images.images_describe_resource("trainer", "v1"))
@@ -359,7 +359,7 @@ def test_image_describe_failure_is_structured_json() -> None:
 
 
 def test_image_indexes_skip_non_gco_and_unaddressable_duplicate_tags() -> None:
-    manager = MagicMock()
+    manager = MagicMock(_repo_prefix="gco")
     manager.list_repos.return_value = [
         {"name": "other/repo"},
         {"name": "gco/trainer"},
@@ -588,3 +588,40 @@ def test_test_resource_rejects_existing_unsupported_file(
     (tmp_path / "secret.txt").write_text("secret", encoding="utf-8")
     monkeypatch.setattr(test_resources, "TESTS_DIR", tmp_path)
     assert test_resources.test_file_resource("secret.txt") == "File type '.txt' not served."
+
+
+def test_image_resources_use_the_project_prefix_not_a_literal_gco() -> None:
+    """A deployment named ``acme`` keeps its repositories under ``acme/``.
+
+    The index filtered on a hard-coded ``gco/``, so it listed no per-repo
+    resources for such a deployment.
+    """
+    manager = MagicMock(_repo_prefix="acme")
+    manager.list_repos.return_value = [{"name": "acme/trainer"}, {"name": "gco/other"}]
+    manager.list_tags.return_value = [{"tag": "v1", "digest": "sha:one"}]
+    manager.describe.return_value = None
+    with patch.object(images, "_get_manager", return_value=manager):
+        index = images.images_index()
+        tags = images.images_tags_resource("trainer")
+        missing = json.loads(images.images_describe_resource("trainer", "v9"))
+
+    assert "`acme/*` repositories" in index
+    assert "images://gco/trainer/tags" in index
+    assert "list every tag on `acme/trainer`" in index
+    assert "other" not in index.split("## Per-repo resources")[1]
+    assert "# Tags for `acme/trainer`" in tags
+    assert "full describe for `acme/trainer:v1`" in tags
+    assert missing == {"error": "tag not found", "name": "acme/trainer", "tag": "v9"}
+
+    manager.list_repos.return_value = []
+    with patch.object(images, "_get_manager", return_value=manager):
+        assert "No repositories found under the `acme/` prefix." in images.images_index()
+
+
+def test_image_resources_name_the_bare_repository_when_the_manager_fails() -> None:
+    with patch.object(images, "_get_manager", side_effect=ValueError("bad config")):
+        tags = images.images_tags_resource("trainer")
+        described = json.loads(images.images_describe_resource("trainer", "v1"))
+    assert tags.startswith("# Tags for `trainer`")
+    assert "Failed to list tags: bad config" in tags
+    assert described == {"error": "bad config", "name": "trainer", "tag": "v1"}

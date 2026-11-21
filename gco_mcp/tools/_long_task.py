@@ -24,12 +24,13 @@ from typing import Any
 import cli_runner
 from audit import _try_get_task_id
 from fastmcp.exceptions import ToolError
+from iam import child_environment
 
 from tools._task_status import TaskStatusWriter, is_valid_task_id, make_task_id
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-11-19T00:26:15Z
+# Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03
 # Flowchart(s) generated from this file:
 #   * ``_run_long_task`` -> ``diagrams/code_diagrams/gco_mcp/tools/_long_task._run_long_task.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/tools/_long_task._run_long_task.png``)
@@ -40,7 +41,12 @@ from tools._task_status import TaskStatusWriter, is_valid_task_id, make_task_id
 _CFN_FAILED_RE = re.compile(r"(CREATE|UPDATE|DELETE)_FAILED")
 _CDK_STACK_LINE_RE = re.compile(r"\b(gco-[a-z0-9-]+)\b")
 _CDK_STACK_DONE_RE = re.compile(r"[✅✨]\s+(gco-[a-z0-9-]+)\b")
-_CANCEL_GRACE_SECONDS = 10
+#: Seconds a cancelled ``gco`` gets between SIGTERM and SIGKILL. CDK runs in its
+#: own session, so killing ``gco`` first orphans it; on SIGTERM ``gco`` gives
+#: every CDK process group ``CDK_TERMINATE_GRACE_SECONDS`` (30, in
+#: ``cli/stacks.py``) to exit and then exits with status 143. This window covers
+#: that plus 15 seconds for ``gco`` to unwind (tests pin the relation).
+_CANCEL_GRACE_SECONDS = 45
 _HEARTBEAT_INTERVAL_SECONDS = 30
 _STDERR_TAIL_LINES = 80
 _FAILED_EVENT_LINES = 10
@@ -52,16 +58,6 @@ _TRUNCATED_TEXT = "...[truncated]"
 _PARTIAL_STATE_DISCLAIMER = (
     "Partial CloudFormation state may remain — inspect via stack_status or the AWS console."
 )
-
-
-def _argv_has_traversal(argv: Sequence[str]) -> tuple[int, str] | None:
-    """Return the first non-flag argv element containing a ``..`` segment."""
-    for index, value in enumerate(argv):
-        if value.startswith("-"):
-            continue
-        if ".." in value.split("/") or ".." in value.split("\\"):
-            return index, value[:100]
-    return None
 
 
 def _bounded_text(value: str, max_bytes: int) -> str:
@@ -175,6 +171,21 @@ async def _terminate_and_reap(
             await process.wait()
 
 
+async def _cancel_heartbeat_task(task: asyncio.Task[None]) -> None:
+    """Cancel the heartbeat task and wait until it has finished.
+
+    The heartbeat's own cancellation and any error it raised are absorbed
+    (and retrieved, so asyncio does not log them). A cancellation of the task
+    that is waiting here propagates: suppressing ``CancelledError`` around
+    ``await task`` also swallowed that one, so a deploy whose caller was
+    cancelled at this point carried on as if nothing had happened.
+    """
+    task.cancel()
+    await asyncio.wait({task})
+    if not task.cancelled():
+        task.exception()
+
+
 async def _run_long_task(
     argv: Sequence[str],
     *,
@@ -190,12 +201,12 @@ async def _run_long_task(
     drains are coordinated concurrently, so a drain error is surfaced promptly
     instead of allowing an unread pipe to deadlock the child. Every exception
     after spawn terminates/reaps the process and stamps terminal disk status.
+    Callers check their own path arguments before calling this (see
+    ``cli_runner.reject_paths_outside_project_root`` and
+    ``cli_runner.reject_traversal_segments``); argv is otherwise passed
+    through unchanged.
     """
     logical_argv = list(argv)
-    hit = _argv_has_traversal(logical_argv)
-    if hit is not None:
-        index, value = hit
-        return json.dumps({"error": "path_traversal_detected", "argv_index": index, "value": value})
 
     protocol_task_id = _try_get_task_id(ctx)
     if len(logical_argv) >= 3 and logical_argv[0] == "gco":
@@ -317,21 +328,17 @@ async def _run_long_task(
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await coordination
 
-    async def _cancel_heartbeat_task(task: asyncio.Task[None]) -> None:
-        """Cancel one heartbeat task and await its cancellation."""
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
-
     try:
         if total_units is not None and total_units > 0:
             await _best_effort_client_call(progress, "set_total", int(total_units))
 
         process = await asyncio.create_subprocess_exec(
             *spawn_argv,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cli_runner.PROJECT_ROOT),
+            env=child_environment(),
         )
         status_writer.set_pid(process.pid)
 
@@ -350,21 +357,31 @@ async def _run_long_task(
         # nothing between its creation above and this line can raise.
         await _cancel_heartbeat_task(heartbeat)
     except asyncio.CancelledError:
-        if heartbeat is not None:
-            await _cancel_heartbeat_task(heartbeat)
-        with contextlib.suppress(Exception):
-            await _clean_process_tasks()
-        status_writer.finish(
-            state="cancelled",
-            exit_code=process.returncode if process is not None else None,
-            error=_PARTIAL_STATE_DISCLAIMER if is_stack_op else "cancelled",
-        )
+        try:
+            # Stop the child before waiting for the heartbeat: a second
+            # cancellation may interrupt either wait, and the child matters.
+            if heartbeat is not None:
+                heartbeat.cancel()
+            with contextlib.suppress(Exception):
+                await _clean_process_tasks()
+            if heartbeat is not None:
+                await _cancel_heartbeat_task(heartbeat)
+        finally:
+            # Stamp the record even when a second cancellation interrupts the
+            # grace wait, so a cancelled task never reads as still running.
+            # The exit code is gco's own (143 once it has stopped CDK), or
+            # None when gco had not exited yet.
+            status_writer.finish(
+                state="cancelled",
+                exit_code=process.returncode if process is not None else None,
+                error=_PARTIAL_STATE_DISCLAIMER if is_stack_op else "cancelled",
+            )
         if is_stack_op:
             raise asyncio.CancelledError(_PARTIAL_STATE_DISCLAIMER) from None
         raise
     except Exception as exc:
         if heartbeat is not None:
-            await _cancel_heartbeat_task(heartbeat)
+            heartbeat.cancel()
         with contextlib.suppress(Exception):
             await _clean_process_tasks()
         status_writer.finish(
@@ -375,6 +392,8 @@ async def _run_long_task(
                 _DIAGNOSTIC_LINE_MAX_BYTES,
             ),
         )
+        if heartbeat is not None:
+            await _cancel_heartbeat_task(heartbeat)
         raise
 
     duration = int(time.monotonic() - started)

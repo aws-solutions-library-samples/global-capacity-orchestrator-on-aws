@@ -251,14 +251,7 @@ def _global_template(*, accelerator: bool = True, analytics: bool = True) -> dic
         resources.update(_resource("Studio", None, "studio"))
         resources.update(_resource("StudioLogin", "Studio", "login"))
         resources.update(_resource("StudioCallback", "Studio", "callback"))
-        resources.update(
-            _function(
-                "StandIn000",
-                "AnalyticsPresignedUrlStandIn",
-                runtime="python3.13",
-                handler="index.handler",
-            )
-        )
+        resources.update(_function("StandIn000", "AnalyticsPresignedUrlStandIn"))
         resources["Authorizer"] = {
             "Type": "AWS::ApiGateway::Authorizer",
             "Properties": {
@@ -303,7 +296,7 @@ def _global_template(*, accelerator: bool = True, analytics: bool = True) -> dic
     return {"Resources": resources}
 
 
-def _regional_template(*, direct: bool = False) -> dict[str, Any]:
+def _regional_template() -> dict[str, Any]:
     resources: dict[str, Any] = {}
     resources.update(_rest_api(edge=False, policy=False, name="gco-regional-api-us-east-1"))
     statements: list[Any] = [
@@ -314,15 +307,6 @@ def _regional_template(*, direct: bool = False) -> dict[str, Any]:
             "Resource": ["execute-api:/*/GET/api/v1/jobs"],
         }
     ]
-    if direct:
-        statements.append(
-            {
-                "Action": "execute-api:Invoke",
-                "Effect": "Allow",
-                "Principal": {"AWS": "*"},
-                "Resource": "execute-api:/*",
-            }
-        )
     resources[API]["Properties"]["Policy"] = {"Version": "2012-10-17", "Statement": statements}
     resources.update(_stage())
     resources.update(_resource("Api", None, "api"))
@@ -340,7 +324,6 @@ def _templates() -> dict[str, dict[str, Any]]:
         "without-analytics": _global_template(analytics=False),
         "minimal": _global_template(accelerator=False, analytics=False),
         "regional": _regional_template(),
-        "regional-direct-access": _regional_template(direct=True),
         "_config": {
             "project": "gco",
             "regions": {
@@ -678,7 +661,6 @@ def test_describe_builds_both_documents_from_the_variants(gen: ModuleType) -> No
             "analyticsEnvironmentEnabled": True,
         },
     }
-    assert "x-gco-resource-policy-direct-access" not in global_doc
 
     regional = documents["api-gateway-regional"]
     assert regional["x-gco-endpoint-type"] == "REGIONAL"
@@ -692,20 +674,13 @@ def test_describe_builds_both_documents_from_the_variants(gen: ModuleType) -> No
     assert regional["x-gco-resource-policy"][0]["Principal"] == {
         "AWS": "arn:aws:iam::${AWS::AccountId}:role/gco-cross-region-aggregator"
     }
-    assert regional["x-gco-resource-policy-direct-access"] == [
-        {
-            "Action": "execute-api:Invoke",
-            "Effect": "Allow",
-            "Principal": {"AWS": "*"},
-            "Resource": "execute-api:/*",
-        }
-    ]
+    assert len(regional["x-gco-resource-policy"]) == 1
+    assert "x-gco-resource-policy-direct-access" not in regional
     assert regional["x-gco-source"]["stackName"] == "gco-regional-api-us-east-1"
     assert regional["servers"][0]["variables"]["region"]["default"] == "us-east-1"
 
 
-def test_build_document_refuses_undocumented_routes_and_route_set_drift(gen: ModuleType) -> None:
-    templates = _templates()
+def test_build_document_refuses_undocumented_routes(gen: ModuleType) -> None:
     api = gen.ApiDescription(
         kind="regional",
         name="api-gateway-regional",
@@ -726,13 +701,6 @@ def test_build_document_refuses_undocumented_routes_and_route_set_drift(gen: Mod
         gen.ApiGatewayDocumentError, match="no ROUTE_DOCS entry for GET /api/v1/extra"
     ):
         gen.build_document(undocumented, api)
-
-    drifted = _regional_template(direct=True)
-    del drifted["Resources"]["ProxyOPTIONS"]
-    with pytest.raises(
-        gen.ApiGatewayDocumentError, match="regional_api_enabled changed the route set"
-    ):
-        gen.build_document(templates["regional"], api, direct_access_template=drifted)
 
 
 def test_route_docs_and_backends_cover_exactly_the_documented_surface(gen: ModuleType) -> None:

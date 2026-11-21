@@ -300,8 +300,9 @@ def test_main_fails_if_a_deleted_transitive_marker_is_accepted_as_fresh(
 
     def lenient_after_first_repair(source_dir: Path, build_dir: Path) -> bool:
         calls["n"] += 1
-        # Call order in main(): initial (True), handler damage (False), post-synth
-        # (True), marker damage -> pretend True here to trip the assertion.
+        # Call order in main(): initial (True), handler damage (False), at the
+        # synth CDK run (True), marker damage -> pretend True here to trip the
+        # assertion.
         return True if calls["n"] == 4 else real(source_dir, build_dir)
 
     monkeypatch.setattr(
@@ -327,6 +328,83 @@ def test_main_fails_if_diff_does_not_route_through_the_real_cdk_call(
         freshness.main()
 
 
+def _cdk_argv(method: str, stack_name: str | None) -> list[str]:
+    if method == "synth":
+        return ["synth", str(stack_name), "--quiet"]
+    return ["diff", "--no-color", str(stack_name)]
+
+
+@pytest.mark.parametrize("prepare_assets", [False, True])
+def test_main_accepts_either_prepare_assets_value(
+    project, monkeypatch: pytest.MonkeyPatch, prepare_assets: bool
+) -> None:
+    """The check is for the repair before CDK starts, not for the keyword.
+
+    The production synth and diff pass ``prepare_assets=False`` (the full
+    sequence above runs them); a command that let ``_run_cdk`` prepare again
+    is just as fresh when CDK starts.
+    """
+
+    def synth(self: StackManager, stack_name=None, quiet=True) -> str:
+        self._ensure_lambda_build()
+        result = self._run_cdk(
+            _cdk_argv("synth", stack_name), capture_output=True, prepare_assets=prepare_assets
+        )
+        return str(result.stdout)
+
+    monkeypatch.setattr(StackManager, "synth", synth)
+    freshness.main()
+
+
+@pytest.mark.parametrize("method", ["synth", "diff"])
+def test_main_fails_if_cdk_would_start_before_the_bundle_is_repaired(
+    project, monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    """A repair after the CDK run returned is too late; the mock checks at call time."""
+
+    def cdk_first(self: StackManager, stack_name=None, **_kwargs) -> str:
+        result = self._run_cdk(
+            _cdk_argv(method, stack_name), capture_output=True, prepare_assets=False
+        )
+        self._ensure_lambda_build()
+        return str(result.stdout or result.stderr)
+
+    monkeypatch.setattr(StackManager, method, cdk_first)
+    with pytest.raises(AssertionError, match="not source-current"):
+        freshness.main()
+
+
+@pytest.mark.parametrize(
+    ("argv", "kwargs"),
+    [
+        (["synth", "--quiet"], {"capture_output": True}),
+        (["synth", "gco-api-gateway", "--quiet"], {"prepare_assets": False}),
+    ],
+    ids=["without-the-stack", "without-captured-output"],
+)
+def test_main_fails_if_synth_runs_cdk_another_way(
+    project, monkeypatch: pytest.MonkeyPatch, argv: list[str], kwargs: dict[str, bool]
+) -> None:
+    def other_synth(self: StackManager, stack_name=None, quiet=True) -> str:
+        self._ensure_lambda_build()
+        return str(self._run_cdk(argv, **kwargs).stdout)
+
+    monkeypatch.setattr(StackManager, "synth", other_synth)
+    with pytest.raises(AssertionError, match="Unexpected CDK run"):
+        freshness.main()
+
+
+def test_main_fails_if_synth_runs_cdk_twice(project, monkeypatch: pytest.MonkeyPatch) -> None:
+    def synth_twice(self: StackManager, stack_name=None, quiet=True) -> str:
+        self._ensure_lambda_build()
+        self._run_cdk(_cdk_argv("synth", stack_name), capture_output=True)
+        return str(self._run_cdk(_cdk_argv("synth", stack_name), capture_output=True).stdout)
+
+    monkeypatch.setattr(StackManager, "synth", synth_twice)
+    with pytest.raises(AssertionError, match="called once"):
+        freshness.main()
+
+
 def test_main_fails_if_the_transitive_marker_is_not_restored(
     project, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -340,7 +418,8 @@ def test_main_fails_if_the_transitive_marker_is_not_restored(
         seen["n"] += 1
         real_assert(manager, source_dir, build_dir)
         if seen["n"] == 3:
-            # After the diff repair, remove the marker again before main()'s own
+            # Calls: initial, at the synth CDK run, at the diff CDK run. After
+            # the diff repair, remove the marker again before main()'s own
             # final is_file() check runs.
             (build / "node_modules" / "tslib" / "package.json").unlink()
 

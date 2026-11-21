@@ -299,4 +299,5 @@ def test_report_artifact_keeps_the_layout_pages_publishes(workflow: dict[str, An
     upload = _step(aggregate, "Upload shell coverage report")
     assert upload["with"]["name"] == "bash-coverage-report"
     assert upload["with"]["path"] == "coverage/"
-    assert upload["if"] == "always()"
+    # Runs whenever the tree was checked out; a failed shard check skips checkout.
+    assert upload["if"] == "${{ always() && steps.checkout.outcome == 'success' }}"

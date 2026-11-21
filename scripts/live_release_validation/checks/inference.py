@@ -73,6 +73,11 @@ _STATE_KEY = "inference_validation"
 _MAX_PRIVATE_OUTPUT = 64 * 1024
 
 
+def _step_verified(evidence: Any) -> bool:
+    """Whether a leg step's checkpointed evidence says it was proven."""
+    return isinstance(evidence, dict) and evidence.get("phase") == "verified"
+
+
 def initialize_run_state(
     ctx: RunContext,
     settings: RunSettings,
@@ -835,25 +840,18 @@ class ManagedInferenceLifecycle(
         if record.get("validation_complete") is True:
             self.prove_absence(record)
             return False
-        invocation_finished = (
-            record.get("phase") == "invoked"
-            and isinstance(record.get("invoke_evidence"), dict)
-            and record["invoke_evidence"].get("generated_text_non_empty") is True
-        )
-        if record.get("validation_steps_complete") is True or invocation_finished:
-            # A crash after invoke or cleanup must never recreate or reinvoke;
-            # the caller's finally only needs to finish/prove cleanup.
-            record["validation_steps_complete"] = True
+        if record.get("validation_steps_complete") is True:
+            # A crash after the last step or during cleanup must never recreate
+            # or reinvoke; the caller's finally only needs to finish/prove cleanup.
             record["phase"] = "validation-complete-resume"
             self._persist()
             return False
-        journal = record.get("invoke_journal")
-        if isinstance(journal, dict) and not isinstance(record.get("invoke_evidence"), dict):
-            # Invocation intent is one-way: recover durable success without a request;
-            # any other persisted state fails closed for cleanup.
-            self.invoke(plan, record)
-            record["validation_steps_complete"] = True
-            self._persist()
+        if record.get("invoke_journal") is not None or isinstance(
+            record.get("invoke_evidence"), dict
+        ):
+            # Invocation intent is one-way: an invoked leg is never recreated or
+            # reinvoked, and it still owes the steps after its invocation.
+            self._resume_after_invoke(plan, record)
             return False
         self._prepare_incarnation_for_resume(plan, record)
         record["absence_proven"] = False
@@ -865,18 +863,65 @@ class ManagedInferenceLifecycle(
             self.verify_hpa_stability(plan, record)
         self.verify_backend_probes(plan, record)
         self.invoke(plan, record)
+        self._verify_after_invoke(plan, record)
+        return True
+
+    def _verify_after_invoke(self, plan: EndpointPlan, record: dict[str, Any]) -> None:
+        """The leg's steps after its invocation; a resume skips the ones already proven."""
         # The vLLM baseline then asks /v1/systemone through the same path.
-        self.verify_structured_decision(plan, record)
+        if not _step_verified(record.get("structured_decision")):
+            self.verify_structured_decision(plan, record)
         # The store scenario then changes its configuration and must roll
         # onto it; the rolled pods are what the restart audit below sees.
-        self.verify_store_reconfigure(plan, record)
+        if not _step_verified(record.get("store_reconfigure")):
+            self.verify_store_reconfigure(plan, record)
         # Last, so it covers the whole leg: a container that crashed or was
         # killed by a probe anywhere between creation and invocation fails
         # the leg even though every wait above was satisfied in between.
         self.verify_no_container_restarts(plan, record)
         record["validation_steps_complete"] = True
         self._persist()
-        return True
+
+    def _resume_after_invoke(self, plan: EndpointPlan, record: dict[str, Any]) -> None:
+        """Finish a resumed invoked leg on the endpoint that served it, or fail it closed.
+
+        The structured decision, the store reconfiguration and the restart
+        audit are part of the leg's contract, so a resume must still run the
+        ones not yet proven. It can only while the endpoint that served the
+        invocation stands: not after cleanup started, not after a step after
+        the invocation failed, and not once the store reconfiguration (the
+        one mutating step) stopped part-way, since its rollout proof needs
+        the digest from before the change.
+        """
+        if record.get("failed_after_invoke") is True:
+            raise ManagedInferenceValidationError(
+                "managed inference leg failed a step after its invocation; a resumed run "
+                "cannot validate it"
+            )
+        if not isinstance(record.get("invoke_evidence"), dict):
+            # Recover a durable success without a request; any other persisted
+            # outcome fails closed for cleanup.
+            self.invoke(plan, record)
+        if record.get("cleanup_phase") != "not-started":
+            raise ManagedInferenceValidationError(
+                "managed inference leg was cleaned up before the steps after its invocation "
+                "finished; a resumed run cannot validate it"
+            )
+        reconfigure = record.get("store_reconfigure")
+        if reconfigure is not None and not _step_verified(reconfigure):
+            raise ManagedInferenceValidationError(
+                "managed store reconfiguration stopped part-way; a resumed run cannot validate it"
+            )
+        item = self._strong_get(record)
+        if item is None or not self._is_owned(item):
+            raise ManagedInferenceValidationError(
+                "managed inference endpoint that served the invocation is gone; a resumed "
+                "run cannot validate it"
+            )
+        self._verify_item_contract(plan, item, record)
+        self.wait_for_ddb_running(plan, record)
+        self.wait_for_kubernetes_ready(plan, record)
+        self._verify_after_invoke(plan, record)
 
     def cleanup_endpoint(self, plan: EndpointPlan, record: dict[str, Any]) -> dict[str, Any]:
         """Delete only a matching marker, then prove strong DDB and full K8s absence."""
@@ -967,6 +1012,9 @@ class ManagedInferenceLifecycle(
                     ran = self.run_endpoint(plan, record)
                 except (Exception, KeyboardInterrupt) as exc:
                     endpoint_error = exc
+                    if isinstance(record.get("invoke_evidence"), dict):
+                        # Invocation is one-way, so this leg can never pass now.
+                        record["failed_after_invoke"] = True
                     self._record_failure(record, str(record.get("phase", "endpoint")), exc)
                 finally:
                     try:
@@ -1007,8 +1055,6 @@ class ManagedInferenceLifecycle(
                 f"cleanup failures: {len(cleanup_errors)}; inspect the private checkpoint"
             ) from None
 
-        self.state["phase"] = "complete"
-        self._persist()
         completed = sum(1 for record in self.records if record.get("validation_complete") is True)
         frameworks: dict[str, dict[str, Any]] = {}
         model_registry = {"uploaded": 0, "removed": 0}
@@ -1042,7 +1088,7 @@ class ManagedInferenceLifecycle(
                     isinstance(reconfigure, dict) and reconfigure.get("phase") == "verified"
                 )
         shared_proxy = self.state.get("shared_proxy_autoscaling")
-        return {
+        summary = {
             "endpoint_count": len(self.plans),
             "validated_or_resumed": completed,
             "newly_validated": validated,
@@ -1063,6 +1109,15 @@ class ManagedInferenceLifecycle(
                     1 for record in self.records if isinstance(record.get("invoke_evidence"), dict)
                 ),
             },
+            "restart_audits": {
+                "required": len(self.plans),
+                "clean": sum(
+                    1
+                    for record in self.records
+                    if isinstance(record.get("restart_audit"), dict)
+                    and record["restart_audit"].get("restarted") == []
+                ),
+            },
             "hpa": {
                 "target_kind": "Deployment",
                 "min_replicas": self.settings.hpa_min_replicas,
@@ -1070,3 +1125,52 @@ class ManagedInferenceLifecycle(
                 "stable_monitor_intervals": self.settings.hpa_stability_intervals,
             },
         }
+        # Every step raises on its own failure, so a counter short of the
+        # matrix means a step never ran: a resume that skipped it, or a
+        # checkpoint that lost its evidence. Either way the matrix is unproven.
+        shortfalls = self._contract_shortfalls(summary)
+        if shortfalls:
+            self.state["phase"] = "failed"
+            self.state["contract_shortfalls"] = shortfalls
+            self._persist()
+            raise ManagedInferenceValidationError(
+                "managed inference validation did not prove its whole contract: "
+                + "; ".join(shortfalls)
+            )
+        self.state["phase"] = "complete"
+        self._persist()
+        return summary
+
+    def _contract_shortfalls(self, summary: dict[str, Any]) -> list[str]:
+        """Each counter in ``summary`` that does not cover the whole matrix."""
+        shortfalls: list[str] = []
+
+        def require(label: str, observed: Any, expected: Any) -> None:
+            if observed != expected:
+                shortfalls.append(f"{label}: {observed} of {expected}")
+
+        endpoints = len(self.plans)
+        require("validated endpoints", summary["validated_or_resumed"], endpoints)
+        require("invocations", summary["invocations"]["completed"], endpoints)
+        require("clean restart audits", summary["restart_audits"]["clean"], endpoints)
+        for framework, counts in summary["frameworks"].items():
+            plans = [plan for plan in self.plans if plan.runtime.framework == framework]
+            unvalidated = [plan.role for plan in plans if counts[plan.role] is not True]
+            if unvalidated:
+                shortfalls.append(f"{framework} roles not validated: {', '.join(unvalidated)}")
+            require(f"{framework} invocations", counts["invocations"], len(plans))
+            require(f"{framework} model-info probes", counts["model_info"], len(plans))
+        registry = sum(1 for plan in self.plans if plan.runtime.uses_model_registry)
+        require("model registry uploads", summary["model_registry"]["uploaded"], registry)
+        require("model registry removals", summary["model_registry"]["removed"], registry)
+        stores = sum(1 for plan in self.plans if plan.mooncake_store)
+        store = summary["mooncake_store"]
+        require("store cold tiers", store["cold_tier_verified"], stores)
+        require("store reconfigurations", store["reconfigure_rolled"], stores)
+        decisions = summary["structured_decisions"]
+        require("structured decisions", decisions["verified"], decisions["required"])
+        if summary["shared_proxy_autoscaling_verified"] is not True:
+            shortfalls.append("shared inference-proxy autoscaling was not verified")
+        if summary["all_endpoints_absent"] is not True:
+            shortfalls.append("not every endpoint was proven absent")
+        return shortfalls

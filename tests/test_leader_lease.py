@@ -2,27 +2,34 @@
 
 ``gco.services.leader_lease`` is the one implementation behind the ALB→SSM
 sync and the webhook deliverer election, so its rules are pinned here once:
-optimistic replace, expired or timestamp-less holders may be replaced, a
-racing writer (HTTP 409) loses the cycle, and every failure fails closed.
+optimistic replace, a foreign holder expires only after this replica has seen
+its record unchanged for the lease duration on its own monotonic clock (never
+by comparing ``renewTime`` with the local wall clock), a timestamp-less holder
+may be replaced at once, a racing writer (HTTP 409) loses the cycle, every
+failure fails closed, and each attempt reports whether it acquired or renewed.
 The second half covers how the webhook dispatcher consumes it — standbys
-never deliver, a new leader re-seeds its cache before delivering, and a
-dispatcher built without a Lease keeps the single-replica behaviour.
+never deliver, a new leader re-seeds its cache before delivering (including
+after a loss it never observed), and a dispatcher built without a Lease keeps
+the single-replica behaviour.
 """
 
 from __future__ import annotations
 
+import copy
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from kubernetes.client.models import V1Lease, V1LeaseSpec, V1ObjectMeta
 from kubernetes.client.rest import ApiException
 
 from gco.services.leader_lease import (
     LEASE_MIN_DURATION_SECONDS,
     LEASE_REQUEST_TIMEOUT,
+    LeaseElector,
     LeaseIdentity,
+    LeaseOutcome,
     lease_duration_from_env,
-    try_acquire_lease,
 )
 
 IDENTITY = LeaseIdentity(
@@ -39,6 +46,7 @@ def _lease(holder: str | None, renew_time: datetime | None, duration: int | None
     lease.spec.renew_time = renew_time
     lease.spec.lease_duration_seconds = duration
     lease.spec.lease_transitions = 2
+    lease.spec.acquire_time = None
     return lease
 
 
@@ -48,12 +56,57 @@ def _api(lease: MagicMock) -> MagicMock:
     return api
 
 
-class TestTryAcquireLease:
+class FakeClock:
+    """A monotonic clock the test moves by hand."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _elector(label: str = "webhook", clock: FakeClock | None = None) -> LeaseElector:
+    return LeaseElector(IDENTITY, label=label, clock=clock or FakeClock())
+
+
+class FakeCoordination:
+    """A Lease endpoint with optimistic concurrency on resourceVersion."""
+
+    def __init__(self) -> None:
+        self.lease = V1Lease(
+            metadata=V1ObjectMeta(
+                name=IDENTITY.name, namespace=IDENTITY.namespace, resource_version="1"
+            ),
+            spec=V1LeaseSpec(),
+        )
+
+    def read_namespaced_lease(self, name, namespace, _request_timeout=None):
+        return copy.deepcopy(self.lease)
+
+    def replace_namespaced_lease(self, name, namespace, body, _request_timeout=None):
+        if body.metadata.resource_version != self.lease.metadata.resource_version:
+            raise ApiException(status=409)
+        body.metadata.resource_version = str(int(self.lease.metadata.resource_version) + 1)
+        self.lease = copy.deepcopy(body)
+        return body
+
+    def write_as(self, holder: str | None) -> None:
+        """Another replica rewrites the Lease (an acquisition, renewal, or release)."""
+        spec = self.lease.spec
+        if spec.holder_identity != holder:
+            spec.lease_transitions = (spec.lease_transitions or 0) + 1
+        spec.holder_identity = holder
+        spec.renew_time = datetime.now(UTC)
+        self.lease.metadata.resource_version = str(int(self.lease.metadata.resource_version) + 1)
+
+
+class TestLeaseElector:
     def test_unheld_lease_is_acquired_with_a_transition(self):
         lease = _lease(None, None)
         api = _api(lease)
 
-        assert try_acquire_lease(api, IDENTITY, label="webhook") is True
+        assert _elector().try_acquire(api) is LeaseOutcome.ACQUIRED
 
         assert lease.spec.holder_identity == IDENTITY.holder
         assert lease.spec.lease_transitions == 3
@@ -72,53 +125,95 @@ class TestTryAcquireLease:
         lease.spec.acquire_time = acquired_at
         api = _api(lease)
 
-        assert try_acquire_lease(api, IDENTITY, label="webhook") is True
+        assert _elector().try_acquire(api) is LeaseOutcome.RENEWED
 
         assert lease.spec.lease_transitions == 2
         assert lease.spec.acquire_time == acquired_at
         assert lease.spec.renew_time > acquired_at
 
+    def test_outcomes_say_whether_the_lease_is_held(self):
+        assert LeaseOutcome.ACQUIRED.held is True
+        assert LeaseOutcome.RENEWED.held is True
+        assert LeaseOutcome.NOT_HELD.held is False
+
     def test_live_foreign_holder_blocks_without_writing(self):
         api = _api(_lease("other-replica", datetime.now(UTC)))
 
-        assert try_acquire_lease(api, IDENTITY, label="webhook") is False
+        assert _elector().try_acquire(api) is LeaseOutcome.NOT_HELD
 
         api.replace_namespaced_lease.assert_not_called()
 
-    def test_expired_foreign_holder_is_replaced(self):
-        lease = _lease("dead-replica", datetime.now(UTC) - timedelta(minutes=5))
+    def test_a_foreign_holder_is_judged_by_our_clock_not_its_renew_time(self):
+        """A renewTime far behind our wall clock is not proof the holder is gone."""
+        clock = FakeClock()
+        elector = _elector(clock=clock)
+        # Our wall clock runs ten minutes ahead of the holder's.
+        lease = _lease("other-replica", datetime.now(UTC) - timedelta(minutes=10))
         api = _api(lease)
 
-        assert try_acquire_lease(api, IDENTITY, label="webhook") is True
+        assert elector.try_acquire(api) is LeaseOutcome.NOT_HELD
+        clock.now += 89
+        assert elector.try_acquire(api) is LeaseOutcome.NOT_HELD
+        api.replace_namespaced_lease.assert_not_called()
+
+        clock.now += 1  # unchanged for a full lease duration on our clock
+        assert elector.try_acquire(api) is LeaseOutcome.ACQUIRED
         assert lease.spec.holder_identity == IDENTITY.holder
         assert lease.spec.lease_transitions == 3
 
-    def test_naive_renew_time_is_read_as_utc(self):
-        lease = _lease("other-replica", datetime.now(UTC).replace(tzinfo=None))
-        api = _api(lease)
+    def test_a_holder_that_keeps_renewing_is_never_replaced(self):
+        clock = FakeClock()
+        elector = _elector(clock=clock)
+        api = MagicMock()
+        for step in range(5):
+            # A stale-looking renewTime that still changes every read.
+            renewed = datetime.now(UTC) - timedelta(hours=1) + timedelta(seconds=step)
+            api.read_namespaced_lease.return_value = _lease("other-replica", renewed)
+            assert elector.try_acquire(api) is LeaseOutcome.NOT_HELD
+            clock.now += 200
 
-        assert try_acquire_lease(api, IDENTITY, label="webhook") is False
+        api.replace_namespaced_lease.assert_not_called()
 
     def test_holder_without_renew_time_is_treated_as_expired(self):
         lease = _lease("wedged-replica", None)
         api = _api(lease)
 
-        assert try_acquire_lease(api, IDENTITY, label="webhook") is True
+        assert _elector().try_acquire(api) is LeaseOutcome.ACQUIRED
         assert lease.spec.holder_identity == IDENTITY.holder
 
     def test_missing_lease_duration_falls_back_to_the_identity(self):
-        # 89 seconds ago with a 90 second lease: still live under the fallback.
-        lease = _lease("other-replica", datetime.now(UTC) - timedelta(seconds=89), duration=None)
+        clock = FakeClock()
+        elector = _elector(clock=clock)
+        lease = _lease("other-replica", datetime.now(UTC), duration=None)
         api = _api(lease)
 
-        assert try_acquire_lease(api, IDENTITY, label="webhook") is False
+        assert elector.try_acquire(api) is LeaseOutcome.NOT_HELD
+        clock.now += IDENTITY.duration_seconds - 1
+        assert elector.try_acquire(api) is LeaseOutcome.NOT_HELD
+        clock.now += 1
+        assert elector.try_acquire(api) is LeaseOutcome.ACQUIRED
 
-    def test_lost_race_returns_false(self, caplog):
+    def test_regaining_after_another_holder_reports_an_acquisition(self):
+        """A hold this replica never saw end is reported as a new acquisition."""
+        coordination = FakeCoordination()
+        clock = FakeClock()
+        elector = _elector(clock=clock)
+
+        assert elector.try_acquire(coordination) is LeaseOutcome.ACQUIRED
+        assert elector.try_acquire(coordination) is LeaseOutcome.RENEWED
+        # While this replica stalls, another one takes the Lease and releases it.
+        coordination.write_as("replica-b")
+        coordination.write_as("")
+
+        assert elector.try_acquire(coordination) is LeaseOutcome.ACQUIRED
+        assert coordination.lease.spec.holder_identity == IDENTITY.holder
+
+    def test_lost_race_returns_not_held(self, caplog):
         api = _api(_lease(None, None))
         api.replace_namespaced_lease.side_effect = ApiException(status=409)
 
         with caplog.at_level("DEBUG", logger="gco.services.leader_lease"):
-            assert try_acquire_lease(api, IDENTITY, label="webhook") is False
+            assert _elector().try_acquire(api) is LeaseOutcome.NOT_HELD
         assert "Lost webhook Lease race" in caplog.text
 
     def test_replace_failure_other_than_conflict_fails_closed(self, caplog):
@@ -126,7 +221,7 @@ class TestTryAcquireLease:
         api.replace_namespaced_lease.side_effect = ApiException(status=500)
 
         with caplog.at_level("WARNING"):
-            assert try_acquire_lease(api, IDENTITY, label="webhook") is False
+            assert _elector().try_acquire(api) is LeaseOutcome.NOT_HELD
         assert "webhook Lease check failed" in caplog.text
 
     def test_missing_precreated_lease_disables_the_duty(self, caplog):
@@ -134,7 +229,7 @@ class TestTryAcquireLease:
         api.read_namespaced_lease.side_effect = ApiException(status=404)
 
         with caplog.at_level("WARNING"):
-            assert try_acquire_lease(api, IDENTITY, label="webhook") is False
+            assert _elector().try_acquire(api) is LeaseOutcome.NOT_HELD
 
         assert "gco-system/gco-health-monitor-webhooks is missing" in caplog.text
         api.create_namespaced_lease.assert_not_called()
@@ -144,8 +239,73 @@ class TestTryAcquireLease:
         api.read_namespaced_lease.side_effect = RuntimeError("socket closed")
 
         with caplog.at_level("WARNING"):
-            assert try_acquire_lease(api, IDENTITY, label="ALB-sync") is False
+            assert _elector(label="ALB-sync").try_acquire(api) is LeaseOutcome.NOT_HELD
         assert "ALB-sync Lease check failed (non-fatal): socket closed" in caplog.text
+
+
+class TestLeaseRelease:
+    def test_the_holder_releases_and_a_standby_takes_over_at_once(self):
+        coordination = FakeCoordination()
+        clock = FakeClock()
+        leader = _elector(clock=clock)
+        standby = LeaseElector(
+            LeaseIdentity(IDENTITY.name, IDENTITY.namespace, "health-monitor-xyz", 90),
+            label="webhook",
+            clock=clock,
+        )
+        assert leader.try_acquire(coordination) is LeaseOutcome.ACQUIRED
+        assert standby.try_acquire(coordination) is LeaseOutcome.NOT_HELD
+
+        assert leader.release(coordination) is True
+
+        assert coordination.lease.spec.holder_identity is None
+        # No lease duration to wait out: the standby wins on its next attempt.
+        assert standby.try_acquire(coordination) is LeaseOutcome.ACQUIRED
+
+    def test_another_replicas_hold_is_never_released(self):
+        lease = _lease("other-replica", datetime.now(UTC))
+        api = _api(lease)
+
+        assert _elector().release(api) is False
+
+        api.replace_namespaced_lease.assert_not_called()
+        assert lease.spec.holder_identity == "other-replica"
+
+    @pytest.mark.parametrize("failing_call", ["read_namespaced_lease", "replace_namespaced_lease"])
+    def test_a_failed_release_is_non_fatal(self, failing_call, caplog):
+        api = _api(_lease(IDENTITY.holder, datetime.now(UTC)))
+        getattr(api, failing_call).side_effect = ApiException(status=409)
+
+        with caplog.at_level("WARNING"):
+            assert _elector().release(api) is False
+        assert "Could not release the webhook Lease" in caplog.text
+
+
+class TestDispatcherReleasesOnStop:
+    @pytest.mark.asyncio
+    async def test_a_deliverer_releases_the_lease_when_it_stops(self):
+        dispatcher = _dispatcher(IDENTITY)
+        coordination = FakeCoordination()
+        dispatcher.coordination_v1 = coordination
+        dispatcher._watch_jobs = AsyncMock()
+        assert await dispatcher._acquire_leadership() is True
+
+        await dispatcher.start()
+        await dispatcher.stop()
+
+        assert coordination.lease.spec.holder_identity is None
+        assert dispatcher.get_metrics()["leader"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_standby_or_lease_free_dispatcher_releases_nothing(self):
+        for leader_lease in (IDENTITY, None):
+            dispatcher = _dispatcher(leader_lease)
+            dispatcher._initialize_job_cache = AsyncMock(return_value=True)
+            dispatcher._watch_jobs = AsyncMock()
+            await dispatcher.start()
+            with patch.object(LeaseElector, "release") as release:
+                await dispatcher.stop()
+            release.assert_not_called()
 
 
 class TestLeaseDurationFromEnv:
@@ -208,41 +368,77 @@ class TestDispatcherElection:
             assert dispatcher._initialize_job_cache.await_count == seeded, leader_lease
 
     @pytest.mark.asyncio
-    async def test_winning_the_lease_reseeds_the_cache_once(self):
+    async def test_winning_the_lease_discards_the_cache_once(self):
         dispatcher = _dispatcher(IDENTITY)
-        dispatcher._initialize_job_cache = AsyncMock()
+        dispatcher._resource_version = "5"
+        dispatcher._cache_seeded = True
 
-        with patch(
-            "gco.services.webhook_dispatcher.try_acquire_lease", return_value=True
+        with patch.object(
+            dispatcher._leader_elector,
+            "try_acquire",
+            side_effect=[LeaseOutcome.ACQUIRED, LeaseOutcome.RENEWED],
         ) as acquire:
             assert await dispatcher._acquire_leadership() is True
+            # Won: the watcher must list (silently) before it delivers.
+            assert dispatcher._resource_version is None
+            assert dispatcher._cache_seeded is False
+            dispatcher._resource_version = "6"  # the watcher's seed
+            dispatcher._cache_seeded = True
             assert await dispatcher._acquire_leadership() is True
 
-        acquire.assert_called_with(dispatcher.coordination_v1, IDENTITY, label="webhook")
-        # Seeded on acquisition, not on every renewal.
-        dispatcher._initialize_job_cache.assert_awaited_once()
+        acquire.assert_called_with(dispatcher.coordination_v1)
+        # A renewal keeps the cache and the resume point.
+        assert dispatcher._resource_version == "6"
+        assert dispatcher._cache_seeded is True
         assert dispatcher.get_metrics()["leader"] is True
 
     @pytest.mark.asyncio
     async def test_losing_the_lease_stands_by_and_reseeds_on_the_next_win(self, caplog):
         dispatcher = _dispatcher(IDENTITY)
-        dispatcher._initialize_job_cache = AsyncMock()
 
         with (
-            patch(
-                "gco.services.webhook_dispatcher.try_acquire_lease",
-                side_effect=[True, False, False, True],
+            patch.object(
+                dispatcher._leader_elector,
+                "try_acquire",
+                side_effect=[
+                    LeaseOutcome.ACQUIRED,
+                    LeaseOutcome.NOT_HELD,
+                    LeaseOutcome.NOT_HELD,
+                    LeaseOutcome.ACQUIRED,
+                ],
             ),
             caplog.at_level("INFO"),
         ):
             assert await dispatcher._acquire_leadership() is True
+            dispatcher._resource_version = "6"  # the watcher's seed
+            dispatcher._cache_seeded = True
             assert await dispatcher._acquire_leadership() is False
             assert dispatcher.get_metrics()["leader"] is False
             assert await dispatcher._acquire_leadership() is False
             assert await dispatcher._acquire_leadership() is True
 
         assert "lost the deliverer Lease" in caplog.text
-        assert dispatcher._initialize_job_cache.await_count == 2
+        assert dispatcher._resource_version is None
+        assert dispatcher._cache_seeded is False
+
+    @pytest.mark.asyncio
+    async def test_a_lease_lost_and_regained_unseen_reseeds_the_cache(self):
+        """Another replica held (and delivered) in between: never a renewal."""
+        dispatcher = _dispatcher(IDENTITY)
+        coordination = FakeCoordination()
+        dispatcher.coordination_v1 = coordination
+
+        assert await dispatcher._acquire_leadership() is True
+        dispatcher._resource_version = "6"  # the watcher's seed
+        dispatcher._cache_seeded = True
+        # This replica stalls past the lease; another takes over, delivers,
+        # and releases the Lease on shutdown.
+        coordination.write_as("replica-b")
+        coordination.write_as("")
+
+        assert await dispatcher._acquire_leadership() is True
+        assert dispatcher._resource_version is None
+        assert dispatcher._cache_seeded is False
 
     @pytest.mark.asyncio
     async def test_standby_never_watches_or_delivers(self):
@@ -258,7 +454,9 @@ class TestDispatcherElection:
                 dispatcher._running = False
 
         with (
-            patch("gco.services.webhook_dispatcher.try_acquire_lease", return_value=False),
+            patch.object(
+                dispatcher._leader_elector, "try_acquire", return_value=LeaseOutcome.NOT_HELD
+            ),
             patch(
                 "gco.services.webhook_dispatcher.asyncio.sleep", side_effect=stop_after_two_polls
             ),
@@ -282,7 +480,9 @@ class TestDispatcherElection:
 
         dispatcher._process_job_event.side_effect = process_and_stop
 
-        with patch("gco.services.webhook_dispatcher.try_acquire_lease", return_value=True):
+        with patch.object(
+            dispatcher._leader_elector, "try_acquire", return_value=LeaseOutcome.ACQUIRED
+        ):
             dispatcher._running = True
             await dispatcher._watch_jobs()
 
@@ -357,20 +557,25 @@ def test_health_monitor_alb_sync_uses_the_shared_election():
     with (
         patch("gco.services.health_monitor.config.load_incluster_config"),
         patch("gco.services.health_monitor.client"),
-        patch("gco.services.health_monitor.try_acquire_lease", return_value=True) as acquire,
     ):
         monitor = HealthMonitor(
             cluster_id="c", region="us-east-1", thresholds=ResourceThresholds(80, 80, -1)
         )
-        assert monitor._try_acquire_alb_sync_lease() is True
 
-    acquire.assert_called_once()
-    args, kwargs = acquire.call_args
-    assert args[0] is monitor.coordination_v1
-    assert args[1] == LeaseIdentity(
+    elector = monitor._alb_sync_elector
+    assert elector.identity == LeaseIdentity(
         name="gco-health-monitor-alb-sync",
         namespace="gco-system",
         holder=monitor._alb_sync_holder,
         duration_seconds=90,
     )
-    assert kwargs == {"label": "ALB-sync", "request_timeout": LEASE_REQUEST_TIMEOUT}
+    assert elector.label == "ALB-sync"
+    assert elector.request_timeout == LEASE_REQUEST_TIMEOUT
+    for outcome, held in (
+        (LeaseOutcome.ACQUIRED, True),
+        (LeaseOutcome.RENEWED, True),
+        (LeaseOutcome.NOT_HELD, False),
+    ):
+        with patch.object(elector, "try_acquire", return_value=outcome) as acquire:
+            assert monitor._try_acquire_alb_sync_lease() is held
+        acquire.assert_called_once_with(monitor.coordination_v1)

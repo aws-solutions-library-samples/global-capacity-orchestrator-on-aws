@@ -202,9 +202,11 @@ deployed, the following resources appear in the API-gateway region
 - **Cognito user pool** with a strong password policy (12+ chars,
   digits/symbols/uppercase required), SRP auth flow, and a hosted
   `UserPoolDomain` at prefix `gco-studio-<account>`.
-- **Analytics VPC** — private-isolated subnets only, plus interface
-  endpoints for the SageMaker, STS, CloudWatch Logs, ECR, and EFS
-  services; gateway endpoint for S3.
+- **Analytics VPC** — private subnets for Studio, EMR Serverless and the
+  endpoints, and public subnets that hold only the NAT gateway notebooks
+  reach the internet through (pip, git); interface endpoints for the
+  SageMaker, STS, CloudWatch Logs, ECR, and EFS services and a gateway
+  endpoint for S3. It has no VPC flow log (the regional VPCs do).
 - **Studio_EFS** — encrypted EFS file system for per-user home
   folders, one access point per Studio user profile.
 - **Studio_Only_Bucket** — KMS-encrypted S3 bucket scoped to the
@@ -455,9 +457,12 @@ SRP flow explained:
 4. CLI sends the `IdToken` in the `Authorization` header to
    `/studio/login`. API Gateway's Cognito authorizer validates the
    JWT against the user-pool ARN.
-5. Presigned-URL Lambda looks up the Studio domain, creates the user
-   profile if it doesn't exist, and calls
-   `CreatePresignedDomainUrl` with a 300-second expiry.
+5. Presigned-URL Lambda reads the Studio domain id from its
+   environment and creates the user profile if it doesn't exist
+   (replacing a `Failed` one). While the profile provisions it answers
+   `202` and the CLI polls; a profile it cannot recover is a `409`. Once
+   the profile is `InService` it calls `CreatePresignedDomainUrl` with a
+   300-second expiry.
 6. Lambda returns `{url, expires_in}`; API Gateway returns it to
    the CLI; the CLI prints `url` on its own line.
 
@@ -916,9 +921,9 @@ import boto3
 import pandas
 
 # The Studio execution role has RW on Cluster_Shared_Bucket whenever
-# analytics is enabled, plus ssm:GetParameter on the
-# /gco/cluster-shared-bucket/* tree in the global region (default us-east-2),
-# so the bucket name can be resolved at runtime with zero setup.
+# analytics is enabled, plus ssm:GetParameter on the three
+# /gco/cluster-shared-bucket/{name,arn,region} parameters in the global region
+# (default us-east-2), so the bucket can be resolved at runtime with zero setup.
 
 ssm = boto3.client("ssm", region_name="us-east-2")
 bucket = ssm.get_parameter(Name="/gco/cluster-shared-bucket/name")["Parameter"]["Value"]
@@ -1095,10 +1100,18 @@ aws efs delete-access-point --access-point-id fsap-xxxxxxxx --region us-east-2
 aws efs delete-file-system --file-system-id fs-xxxxxxxx --region us-east-2
 ```
 
-`gco analytics doctor` flags retained orphans on next
-`analytics enable` and prints these remediation commands inline so
-you don't need to hunt them down — but they are reproduced above so
-you can script the cleanup yourself if you prefer.
+`gco analytics doctor` flags retained orphans and prints these
+remediation commands inline, with the real access point, mount target
+and file system ids, so you don't need to hunt them down — but they are
+reproduced above so you can script the cleanup yourself if you prefer.
+It finds them from the deleted `gco-analytics` stack's resource list
+(CloudFormation keeps it for 90 days after the delete), from the
+`gco:analytics:managed=true` and `gco:project=<project>` tags the stack
+gives the file system and the user pool, and, for the file system, from
+its `Name` tag (`gco-analytics/StudioEfs` for the default project name).
+The tags are what find a user pool retained more than 90 days ago; a
+deployment made before the stack added them gets them, in place, on its
+next `gco stacks deploy`.
 
 Cognito pools support the same retain opt-in via
 `analytics_environment.cognito.removal_policy = "retain"` with

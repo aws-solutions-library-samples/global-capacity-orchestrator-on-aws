@@ -294,7 +294,7 @@ finalizer, so deleting the Application deletes what it synced.
 
 ```bash
 gco gitops status                     # every regional deployment region
-gco gitops status -r us-west-2 --output json
+gco -o json gitops status -r us-west-2
 ```
 
 The command reads `cdk.json` and `charts.yaml` only: the toggle, the chart
@@ -307,14 +307,19 @@ same document. Sync and health state are in the UI.
 ### Disabling
 
 Set `enabled: false` and deploy. Before it uninstalls the chart, the helm
-installer deletes every `argoproj.io` object: Argo CD processes each
-Application's resources finalizer while its controller is still running, so an
-Application that carries one deletes what it synced, and the root Application,
-which carries none, leaves its workloads in place. The AppProjects go in a
-later pass, once the Applications are gone, because the controller does not
-finalize an Application whose project no longer exists. The chart is then
-uninstalled (the CRDs stay), and the applier prunes the RBAC, the project and
-the root Application. A stack delete runs the same cleanup.
+installer deletes every `argoproj.io` object in the `argocd` namespace: Argo
+CD processes each Application's resources finalizer while its controller is
+still running, so an Application that carries one deletes what it synced, and
+the root Application, which carries none, leaves its workloads in place. The
+AppProjects go in a later pass, once the Applications are gone, because the
+controller does not finalize an Application whose project no longer exists.
+The chart is then uninstalled (the CRDs stay), and the applier prunes the
+RBAC, the project and the root Application. A stack delete runs the same
+cleanup. Objects in other namespaces and cluster-scoped ones are left alone:
+GCO's Argo CD only reconciles its own namespace, and `argoproj.io` is also the
+group of Argo Workflows, Rollouts and Events. The cleanup runs only while
+GCO's `argocd` release exists, so a deploy with the chart off never touches
+an Argo CD that GCO did not install.
 
 ## Verification
 

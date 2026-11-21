@@ -5,10 +5,11 @@ CDK asset image prune the deploy action runs after publishing.
 Every runtime command is a recorded fake: the tests pin which image references
 count as CDK assets (the ``cdkasset-<hash>`` tag in either registry form and the
 ``cdk-<qualifier>-container-assets-<account>-<region>`` ECR repository), that
-everything else in the local store is left alone, that shared image ids are
-removed once, that dangling layers are pruned, and that no failure — a missing
-runtime, a failing command, or an unexpected exception — ever escapes into the
-deploy verdict.
+only those references are removed (never an image ID, which would take the
+operator's own tags of the same image with it), that everything else in the
+local store is left alone, that dangling layers are pruned, and that no
+failure — a missing runtime, a failing command, or an unexpected exception —
+ever escapes into the deploy verdict.
 """
 
 from __future__ import annotations
@@ -30,6 +31,10 @@ _LISTING = "\n".join(
         "public.ecr.aws/lambda/python:3.14 sha-C",
         "docker.io/library/python:3.14.9-slim sha-D",
         "localhost/my-app:cdkasset-lookalike sha-E",
+        # The operator's own tag of a CDK asset image: it shares the image ID.
+        "localhost/my-service:release sha-A",
+        # No tag to name, so nothing to untag; a dangling image goes with the prune.
+        "cdkasset-ccc333:<none> sha-G",
         "<none>:<none> sha-F",
         "malformed line with too many fields here",
     ]
@@ -93,7 +98,7 @@ class TestAssetRepositoryDetection:
 
 
 class TestPruneCdkAssetImages:
-    def test_removes_exactly_the_asset_images_once_per_id_and_prunes_dangling(self) -> None:
+    def test_removes_exactly_the_asset_references_and_prunes_dangling(self) -> None:
         run = _Recorder({"images": _ok(_LISTING), "rmi": _ok(), "image": _ok()})
         evidence = local_images.prune_cdk_asset_images(runtime="podman", run=run)
         assert evidence == {
@@ -109,8 +114,9 @@ class TestPruneCdkAssetImages:
         }
         assert run.calls == [
             ["podman", "images", "--format", "{{.Repository}}:{{.Tag}} {{.ID}}"],
-            # One force-remove for both ids; the shared tags fall with them.
-            ["podman", "rmi", "-f", "sha-A", "sha-B"],
+            # By reference and without -f: localhost/my-service:release keeps
+            # sha-A alive, and podman's -f would also remove its containers.
+            ["podman", "rmi", *evidence["removed_images"]],
             ["podman", "image", "prune", "-f"],
         ]
 

@@ -402,10 +402,14 @@ class TestServiceWiring:
 
     def test_the_sqs_processor_builds_its_client_per_lookup(self) -> None:
         from gco.services import queue_processor
+        from gco.services.k8s_client import BoundedApiClient
 
         with patch("gco.services.queue_processor.client.NodeV1Api") as node_v1:
             queue_processor.runtime_class_exists._read("isolated-sandbox")
         node_v1.return_value.read_runtime_class.assert_called_once_with("isolated-sandbox")
+        # The read names no timeout of its own; the client it is built on supplies one.
+        (api_client,) = node_v1.call_args.args
+        assert isinstance(api_client, BoundedApiClient)
 
 
 class TestKueueCoverage:

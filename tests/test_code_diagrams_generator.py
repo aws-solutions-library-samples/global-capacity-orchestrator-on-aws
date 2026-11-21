@@ -45,9 +45,11 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -1284,6 +1286,40 @@ class TestPruneRetiredMarkers:
         assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 0
         assert outside.read_bytes() == before
 
+    def test_only_the_marker_roots_are_walked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pruning never descends into .venv, node_modules or .worktrees.
+
+        It used to rglob the whole project and filter afterwards: 122,328
+        files instead of 2,938 on a developer checkout, about half a minute.
+        """
+        retired = self._write(tmp_path, "gco/retired.py", self._MARKED)
+        self._write(tmp_path, ".venv/lib/site.py", self._MARKED)
+        self._write(tmp_path, ".worktrees/other/cli/retired.py", self._MARKED)
+        walked: list[Path] = []
+        original_rglob = Path.rglob
+
+        def recording_rglob(self: Path, pattern: str, **kwargs: Any) -> Iterator[Path]:
+            walked.append(self)
+            return original_rglob(self, pattern, **kwargs)
+
+        monkeypatch.setattr(Path, "rglob", recording_rglob)
+        assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 1
+        assert source_marker_mod.SENTINEL not in retired.read_text(encoding="utf-8")
+        allowed = {tmp_path / root for root in source_marker_mod.MARKER_SOURCE_ROOTS}
+        assert walked and set(walked) <= allowed
+
+    def test_a_directory_named_like_a_source_is_skipped(self, tmp_path: Path) -> None:
+        (tmp_path / "gco" / "odd.py").mkdir(parents=True)
+        assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 0
+
+    def test_a_checkout_under_a_build_directory_is_still_pruned(self, tmp_path: Path) -> None:
+        root = tmp_path / "workspace" / "gco-build"
+        retired = self._write(root, "cli/retired.py", self._MARKED)
+        assert generate_mod.prune_retired_markers(root, charted=set()) == 1
+        assert source_marker_mod.SENTINEL not in retired.read_text(encoding="utf-8")
+
     def test_unmarked_sources_are_never_rewritten(self, tmp_path: Path) -> None:
         plain = self._write(tmp_path, "cli/plain.py", "def f():\n    return True\n")
         before = plain.read_bytes()
@@ -1361,6 +1397,29 @@ class TestReadmeMixedVintage:
             assert "2026-09-02T12:00:00Z" in header
             assert "b" * 40 in header
             assert "2026-09-01T12:00:00Z" not in header
+
+    def test_readme_and_contract_break_a_timestamp_tie_the_same_way(self) -> None:
+        """Two sources stamped in one second must not leave the index unverifiable.
+
+        The writer iterates in ``TARGETS`` order and the contract iterates the
+        manifest in path order; with ``generated_at`` alone as the key, each
+        kept the first of the tied stamps it met, so the README recorded one
+        commit and ``--check`` expected the other.
+        """
+        tied = "2026-09-01T12:00:00Z"
+        results = [self._result("beta", tied, "a" * 40), self._result("alpha", tied, "b" * 40)]
+        manifest = {
+            "cli/alpha.py": {"digest": "0", "generated_at": tied, "source_commit": "b" * 40},
+            "cli/beta.py": {"digest": "0", "generated_at": tied, "source_commit": "a" * 40},
+        }
+        header = render_readme(results, output_dir=Path("/tmp/out")).split("###")[0]
+        assert generate_mod.newest_provenance_stamp(manifest) == (tied, "b" * 40)
+        assert "b" * 40 in header
+        assert "a" * 40 not in header
+
+    def test_an_empty_manifest_has_no_newest_stamp(self) -> None:
+        with pytest.raises(ValueError, match="records no sources"):
+            generate_mod.newest_provenance_stamp({})
 
 
 class TestProvenanceSchemaVersions:
@@ -1531,6 +1590,24 @@ class TestSourceMarkerEdgeCases:
 
         assert "mod.func" in marked
         assert "(PNG:" not in marked
+
+    def test_strip_all_markers_walks_a_checkout_whose_path_names_a_bundle(
+        self, tmp_path: Path
+    ) -> None:
+        """The bundle skip applies inside the project, never to the checkout's own path."""
+        root = tmp_path / "helm-installer-build" / "checkout"
+        marked = root / "gco" / "jobs.py"
+        marked.parent.mkdir(parents=True)
+        marked.write_text(
+            f"import os\n\n# <{SENTINEL}> BEGIN - auto-inserted, do not edit\n# <{SENTINEL}> END\n",
+            encoding="utf-8",
+        )
+        bundled = root / "lambda" / "helm-installer-build" / "copy.py"
+        bundled.parent.mkdir(parents=True)
+        bundled.write_text(marked.read_text(encoding="utf-8"), encoding="utf-8")
+        assert strip_all_markers(root) == 1
+        assert SENTINEL not in marked.read_text(encoding="utf-8")
+        assert SENTINEL in bundled.read_text(encoding="utf-8")
 
     def test_strip_all_markers_ignores_unmarked_and_missing_files(self, tmp_path: Path) -> None:
         """Only files actually carrying a marker may be rewritten."""

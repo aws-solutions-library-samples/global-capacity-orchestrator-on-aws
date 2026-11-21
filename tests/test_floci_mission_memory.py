@@ -58,6 +58,17 @@ _DIMENSIONS = 3
 _VECTOR = [0.5, -0.25, 1e-08]
 
 
+@pytest.fixture(autouse=True)
+def _global_region_is_the_session_region(monkeypatch):
+    """Mission looks for its tables in the global stack's Region.
+
+    That is ``GCO_GLOBAL_REGION``, else cdk.json's ``deployment_regions.global``;
+    this module provisions its tables in the emulator session's Region
+    (tests/_floci.py), so name it.
+    """
+    monkeypatch.setenv("GCO_GLOBAL_REGION", "us-east-1")
+
+
 @pytest.fixture(scope="module")
 def dynamodb(verified_floci_endpoint: str):
     return boto3.client("dynamodb")

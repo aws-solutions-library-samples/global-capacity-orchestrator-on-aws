@@ -66,7 +66,7 @@ Instead, the mirror picks a manifest-list-preserving strategy at runtime based o
 
 1. **Docker Buildx** — `docker buildx imagetools create` (a registry-to-registry copy, no local pull).
 2. **[Finch](https://runfinch.com/) / nerdctl** — `pull --all-platforms` then `push --all-platforms` (containerd preserves the manifest list).
-3. **[skopeo](https://github.com/podman-container-tools/skopeo)** — `skopeo copy --all` (daemon-less).
+3. **[skopeo](https://github.com/podman-container-tools/skopeo)** — `skopeo copy --all` (daemon-less). The ECR login goes in a registry auth file readable only by you (`--dest-authfile`), never on skopeo's command line, and the file is deleted when the copies finish.
 
 If none is available the mirror fails fast with guidance rather than producing a single-arch image. No new binary dependency is introduced — the mirror reuses whichever of these the environment already provides. The strategy selection lives in `resolve_copy_strategy()` in [`cli/_image_mirror.py`](../cli/_image_mirror.py).
 
@@ -74,14 +74,13 @@ If none is available the mirror fails fast with guidance rather than producing a
 
 The mirror is **on by default**, so a fresh `gco stacks deploy` auto-mirrors the images into ECR with no extra step — the `cdk.json` block below is the shipped default. To turn it off, set `enabled` to `false`.
 
-**1. Default `cdk.json` config** (already on; the default `ecr_namespace` of `gco/dockerhub` is fine for most setups):
+**1. Default `cdk.json` config** (already on). `ecr_namespace` defaults to `<project_name>/dockerhub`, `gco/dockerhub` for the stock project, which is fine for most setups:
 
 ```json
 {
   "context": {
     "volcano_image_mirror": {
-      "enabled": true,
-      "ecr_namespace": "gco/dockerhub"
+      "enabled": true
     }
   }
 }
@@ -100,7 +99,7 @@ gco stacks addons install -r us-east-1
 gco stacks addons status -r us-east-1
 ```
 
-`ecr_namespace` must start with `gco/` so the mirrored repos inherit the project's `gco/*` node-pull access, ECR replication, and trusted-registry allow-list. The toggle is validated at synth time — an `ecr_namespace` outside `gco/`, or an invalid ECR path, fails the synth fast.
+`ecr_namespace` must start with `<project_name>/` (`gco/` for the stock project) so the mirrored repos inherit the project's `<project_name>/*` node-pull access, ECR replication, and trusted-registry allow-list. The toggle is validated at synth time — an `ecr_namespace` outside that prefix, or an invalid ECR path, fails the synth fast.
 
 ## Mirror Manually
 
@@ -151,7 +150,7 @@ The copy step needs no change — it mirrors whatever `collect_source_refs()` re
 ## Operational Notes
 
 - **Fail-fast on deploy.** If an enabled mirror can't complete during `gco stacks deploy` (no container runtime, no network, missing credentials), the deploy aborts **before** CloudFormation runs — rather than bringing up a cluster whose Volcano images aren't in ECR yet.
-- **Static, version-pinned mirror.** When you bump Volcano's chart `version` / `image_tag_version` in `charts.yaml`, the next `gco stacks deploy` mirrors the new tag automatically (or run `gco images mirror` to do it out of band). Old tags are left in place.
+- **Static, version-pinned mirror.** When you bump Volcano's chart `version` / `image_tag_version` in `charts.yaml`, the next `gco stacks deploy` mirrors the new tag automatically (or run `gco images mirror` to do it out of band). Old tags are left in place. The two move together: `image_tag_version` is `v<chart version>`, and [`.github/scripts/validate_helm_charts.py`](../.github/scripts/validate_helm_charts.py) fails CI when they differ, because the chart's templates are written for its own release's components.
 - **Pull-path only.** The mirror changes only *where* images are pulled from. Volcano's behavior, versions, and configuration are unchanged.
 - **Per-region.** ECR is regional, so the mirror runs once per target region. `deploy-all` mirrors each region in `cdk.json`'s `regional` block; a single-region deploy mirrors just that region.
 - **Idempotent and cheap to repeat.** Already-mirrored tags are skipped (`skip_existing`), so a steady-state deploy adds only a couple of ECR lookups.
@@ -172,7 +171,7 @@ Via MCP, `images_mirror_status` returns the same presence check (`all_mirrored` 
 
 **Deploy aborted with a mirror error before CloudFormation.** That is the fail-fast guard. Check that the machine running the deploy has a container runtime (Docker Buildx, Finch, or skopeo) and valid AWS credentials, then re-run the deploy.
 
-**A node can't pull a mirrored image.** Confirm `ecr_namespace` starts with `gco/` (only `gco/*` repos inherit the node-pull access and trusted-registry allow-list) and that the image is present with `images_mirror_status` or `aws ecr describe-images`.
+**A node can't pull a mirrored image.** Confirm `ecr_namespace` starts with `<project_name>/` (only `<project_name>/*` repos inherit the node-pull access and trusted-registry allow-list) and that the image is present with `images_mirror_status` or `aws ecr describe-images`.
 
 ## Reference
 
@@ -180,8 +179,8 @@ Via MCP, `images_mirror_status` returns the same presence check (`all_mirrored` 
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `enabled` | `true` | Turns the mirror (and the Volcano `image_registry` override + deploy auto-mirror) on. **On by default**; set to `false` to disable. |
-| `ecr_namespace` | `gco/dockerhub` | Destination namespace under the account's ECR registry. Must start with `gco/`. |
+| `enabled` | `true` in the shipped `cdk.json`, `false` when omitted | Turns the mirror (and the Volcano `image_registry` override + deploy auto-mirror) on. **On in the shipped `cdk.json`**; set to `false` to disable. A [JSON boolean](CUSTOMIZATION.md#boolean-flags): a quoted `"false"` fails validation, because earlier releases read it as on. |
+| `ecr_namespace` | `<project_name>/dockerhub` (`gco/dockerhub` for the stock project) | Destination namespace under the account's ECR registry. Must start with `<project_name>/`. |
 
 **Source map:**
 

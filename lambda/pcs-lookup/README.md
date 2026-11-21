@@ -34,6 +34,19 @@ Resolves the cluster controller's address for the Prometheus scrape of its Slurm
 
 Create and Update return `Data.PrivateIpAddress`, `Data.Port` (6817) and `Data.Address` (`ip:port`, the `{{PCS_CONTROLLER_ADDRESS}}` the kubectl-applier writes into the `ScrapeConfig`); Delete is a no-op. A cluster without a `SLURMCTLD` endpoint raises, which CloudFormation reports with the cluster's status.
 
+## `Custom::PcsSubnetLookup`
+
+Narrows a node group's candidate subnets to the Availability Zones that offer every one of its instance types. PCS refuses a node group whose instance types are not offered in each zone of its subnets (`The following instance type isn't offered in 1 or more of the cluster's Availability Zones`), and the regional VPC spans every zone in the Region, some of which (`us-east-1e` for one) lack most current types. `describe-subnets` gives each candidate's zone and `describe-instance-type-offerings` (`availability-zone` location type) the zones each type is offered in.
+
+| `ResourceProperties` | Meaning |
+|---|---|
+| `SubnetIds` | The candidate subnets, in order |
+| `InstanceTypes` | The node group's instance types |
+| `Region` | Where to look |
+| `NodeGroup` | For the physical id, the log line and the error |
+
+Create and Update return `Data.SubnetIds` (the kept subnets, in the caller's order), `Data.AvailabilityZones` and `Data.DroppedZones` (a readable summary, or `none`); Delete is a no-op. No zone left raises, naming what each zone lacks.
+
 ## Permissions
 
-`ec2:DescribeImages` (no resource-level scoping), `ssm:GetParameter` on `arn:<partition>:ssm:<region>::parameter/aws/service/pcs/*` (the public parameters have no account id), and `pcs:GetCluster` on the managed cluster's ARN.
+`ec2:DescribeImages`, `ec2:DescribeSubnets` and `ec2:DescribeInstanceTypeOfferings` (no resource-level scoping), `ssm:GetParameter` on `arn:<partition>:ssm:<region>::parameter/aws/service/pcs/*` (the public parameters have no account id), and `pcs:GetCluster` on the managed cluster's ARN.

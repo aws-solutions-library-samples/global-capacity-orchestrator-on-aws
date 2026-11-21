@@ -982,7 +982,7 @@ def test_hyperpod_ranking_penalises_a_missing_queue_signal_and_an_unreadable_clu
     ]
     assert result["reason"] == (
         "HyperPod cluster InService (2 of 2 nodes, 2 GPUs), cannot fit the 4 GPUs requested "
-        "(2 on HyperPod nodes), job queue telemetry unavailable"
+        "(2 on HyperPod nodes), job queue telemetry unavailable, no running jobs"
     )
     assert result["telemetry_errors"] == ["queue telemetry failed"]
 
@@ -1244,9 +1244,15 @@ def test_pcs_ranking_refuses_when_no_region_qualifies() -> None:
 
 def test_queue_reasons_cover_every_band() -> None:
     checker = _checker()
-    assert checker._queue_reasons(_region("r", unavailable=["queue"])) == [
+    assert checker._queue_reasons(_region("r", unavailable=["queue", "jobs"])) == [
         "job queue telemetry unavailable"
     ]
+    # The running-job count is its own signal (the health monitor's ActiveJobs).
+    assert checker._queue_reasons(_region("r", unavailable=["queue"])) == [
+        "job queue telemetry unavailable",
+        "no running jobs",
+    ]
+    assert checker._queue_reasons(_region("r", unavailable=["jobs"])) == ["empty queue"]
     assert checker._queue_reasons(_region("r")) == ["empty queue", "no running jobs"]
     assert checker._queue_reasons(_region("r", queue_depth=4, running_jobs=4)) == [
         "low queue depth (4)",

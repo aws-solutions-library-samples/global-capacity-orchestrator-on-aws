@@ -866,9 +866,10 @@ def _mutable_endpoint(spec: Any = None, **updates: Any) -> dict[str, Any]:
     return endpoint
 
 
-def test_manager_get_store_uses_explicit_or_global_region() -> None:
+def test_manager_get_store_uses_explicit_or_global_region(monkeypatch) -> None:
+    monkeypatch.delenv("INFERENCE_ENDPOINTS_TABLE_NAME", raising=False)
     manager = InferenceManager.__new__(InferenceManager)
-    manager.config = SimpleNamespace(global_region="us-west-2")
+    manager.config = SimpleNamespace(project_name="acme", global_region="us-west-2")
     manager._aws_client = MagicMock()
 
     with patch("gco.services.inference_store.InferenceEndpointStore") as store_class:
@@ -876,8 +877,8 @@ def test_manager_get_store_uses_explicit_or_global_region() -> None:
         assert manager._get_store() is store_class.return_value
 
     assert store_class.call_args_list == [
-        call(region="eu-central-1"),
-        call(region="us-west-2"),
+        call(table_name="acme-inference-endpoints", region="eu-central-1"),
+        call(table_name="acme-inference-endpoints", region="us-west-2"),
     ]
 
 
@@ -1148,12 +1149,8 @@ def test_cli_deploy_parses_multiple_values_and_warns_for_omitted_regions() -> No
             "B=two=parts",
             "-l",
             "team=ml",
-            "-l",
-            "invalid-label",
             "--node-selector",
             "zone=a",
-            "--node-selector",
-            "invalid-selector",
             "--autoscale-metric",
             "cpu:65",
             "--autoscale-metric",
@@ -1270,8 +1267,8 @@ def test_cli_canary_mutation_can_be_cancelled(command: str) -> None:
 
     result = _invoke_cli(["inference", command, "ep"], manager=manager, input_text="n\n")
 
-    assert result.exit_code == 0, result.output
-    assert "Cancelled" in result.output
+    assert result.exit_code == 1, result.output
+    assert "Aborted" in result.output
     getattr(manager, f"{command}_canary").assert_not_called()
 
 
@@ -1335,6 +1332,7 @@ def _isolated_inference_tool() -> Iterator[tuple[types.ModuleType, Mock, Mock]]:
         "feature_flags": _stub_module(
             "feature_flags",
             FLAG_DESTRUCTIVE_OPERATIONS="destructive",
+            FLAG_MODEL_UPLOAD="model-upload",
             is_enabled=lambda _flag: False,
         ),
         "fastmcp": _stub_module("fastmcp"),
@@ -1545,7 +1543,8 @@ def test_cli_deploy_json_output_prints_result() -> None:
     assert '"endpoint_name": "ep"' in result.output
 
 
-def test_cli_deploy_invalid_env_value_does_not_block_following_entries() -> None:
+def test_cli_deploy_refuses_an_env_value_that_is_not_key_value() -> None:
+    """A malformed -e is a usage error, not silently dropped."""
     manager = MagicMock()
     manager.deploy.return_value = {
         "endpoint_name": "ep",
@@ -1568,8 +1567,9 @@ def test_cli_deploy_invalid_env_value_does_not_block_following_entries() -> None
         manager=manager,
     )
 
-    assert result.exit_code == 0, result.output
-    assert manager.deploy.call_args.kwargs["env"] == {"VALID": "value"}
+    assert result.exit_code == 2, result.output
+    assert "'invalid' is not KEY=VALUE" in result.output
+    manager.deploy.assert_not_called()
 
 
 @pytest.mark.parametrize(

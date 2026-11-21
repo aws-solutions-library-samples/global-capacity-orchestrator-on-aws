@@ -331,8 +331,14 @@ class TestMlflowChartEntry:
 
 
 class TestConfigLoaderMlflowToggle:
+    @pytest.fixture(autouse=True)
+    def _base_context(self, valid_cdk_context):
+        # Validation always runs, so the toggles are read on top of a context
+        # that carries every required field (and no cluster_observability).
+        self.base_context = valid_cdk_context
+
     def _loader(self, observability: dict[str, Any] | None) -> ConfigLoader:
-        context: dict[str, Any] = {}
+        context: dict[str, Any] = dict(self.base_context)
         if observability is not None:
             context["cluster_observability"] = observability
         return ConfigLoader(_MockApp(context))

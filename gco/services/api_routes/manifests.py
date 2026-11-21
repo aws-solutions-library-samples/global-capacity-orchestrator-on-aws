@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -107,7 +108,10 @@ async def validate_manifests(request: ManifestSubmissionAPIRequest) -> Response:
         overall_valid = True
 
         for i, manifest in enumerate(request.manifests):
-            is_valid, error_msg = processor.validate_manifest(manifest, request.namespace)
+            # Off the event loop: the sandbox check can read a RuntimeClass.
+            is_valid, error_msg = await asyncio.to_thread(
+                processor.validate_manifest, manifest, request.namespace
+            )
 
             result: dict[str, Any] = {
                 "manifest_index": i,

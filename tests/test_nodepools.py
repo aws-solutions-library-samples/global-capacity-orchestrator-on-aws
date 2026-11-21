@@ -15,7 +15,9 @@ rendered manifests match spec.
 import base64
 import json
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlsplit
 
+import boto3
 import pytest
 import yaml
 from botocore.exceptions import NoCredentialsError
@@ -646,31 +648,55 @@ class TestAcceleratorTaintsFollowTheInstanceTypes:
 class TestGetEksToken:
     """Tests for get_eks_token function."""
 
-    @patch("cli.nodepools.boto3.Session")
-    @patch("botocore.signers.RequestSigner")
-    def test_get_eks_token(self, mock_signer_class, mock_session_class):
-        """Test generating EKS authentication token."""
-        mock_session = MagicMock()
-        mock_session_class.return_value = mock_session
-
-        mock_sts = MagicMock()
-        mock_sts.meta.service_model.service_id = "STS"
-        mock_session.client.return_value = mock_sts
-
-        mock_credentials = MagicMock()
-        mock_session.get_credentials.return_value = mock_credentials
-        mock_session.events = MagicMock()
-
-        mock_signer = MagicMock()
-        mock_signer.generate_presigned_url.return_value = (
-            "https://sts.us-east-1.amazonaws.com/?signed=true"
+    def test_signs_get_caller_identity_on_the_sts_clients_own_endpoint(self) -> None:
+        """The token is k8s-aws-v1. + unpadded urlsafe base64 of the URL the STS
+        client's own signer presigned for its resolved endpoint."""
+        presigned = (
+            "https://sts.us-east-1.amazonaws.com/?Action=GetCallerIdentity&X-Amz-Signature=beef"
         )
-        mock_signer_class.return_value = mock_signer
+        sts_client = MagicMock()
+        sts_client.meta.endpoint_url = "https://sts.us-east-1.amazonaws.com/"
+        sts_client._request_signer.generate_presigned_url.return_value = presigned
+        session = MagicMock()
+        session.client.return_value = sts_client
+        with patch("cli.nodepools.boto3.Session", return_value=session):
+            token = get_eks_token("test-cluster", "us-east-1")
+        prefix, _, encoded = token.partition(".")
+        assert prefix == "k8s-aws-v1"
+        assert "=" not in encoded
+        assert base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode() == presigned
+        session.client.assert_called_once_with("sts", region_name="us-east-1")
+        sts_client._request_signer.generate_presigned_url.assert_called_once_with(
+            request_dict={
+                "method": "GET",
+                "url": "https://sts.us-east-1.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15",
+                "body": {},
+                "headers": {"x-k8s-aws-id": "test-cluster"},
+                "context": {},
+            },
+            operation_name="GetCallerIdentity",
+            expires_in=60,
+        )
 
-        token = get_eks_token("test-cluster", "us-east-1")
-
-        assert token.startswith("k8s-aws-v1.")
-        mock_signer.generate_presigned_url.assert_called_once()
+    def test_aws_cn_token_is_signed_for_the_china_sts_host(self) -> None:
+        """Real botocore, offline: the host was hard-coded to
+        sts.<region>.amazonaws.com, which does not exist in aws-cn, so EKS
+        there rejected every token `gco nodepools` built."""
+        session = boto3.Session(
+            aws_access_key_id="AKIDEXAMPLE",
+            aws_secret_access_key="example-secret",  # nosec B106 - fake credentials, nothing is sent
+            region_name="cn-north-1",
+        )
+        with patch("cli.nodepools.boto3.Session", return_value=session):
+            token = get_eks_token("gco-cn-north-1", "cn-north-1")
+        encoded = token.removeprefix("k8s-aws-v1.")
+        url = urlsplit(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode())
+        query = parse_qs(url.query)
+        assert url.netloc == "sts.cn-north-1.amazonaws.com.cn"
+        assert query["Action"] == ["GetCallerIdentity"]
+        assert query["X-Amz-Credential"][0].endswith("/cn-north-1/sts/aws4_request")
+        assert query["X-Amz-SignedHeaders"] == ["host;x-k8s-aws-id"]
+        assert query["X-Amz-Expires"] == ["60"]
 
 
 class TestGetK8sClient:

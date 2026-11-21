@@ -1,6 +1,7 @@
 name: "Build Image (with retry)"
 description: |
-  Wraps `docker/build-push-action@v7.3.0` with retry-on-failure.
+  Wraps `docker/build-push-action` (the release pinned below) with
+  retry-on-failure.
 
   Every build starts by resolving base-image metadata against Docker Hub,
   whose registry and token endpoints intermittently time out on GitHub
@@ -20,7 +21,7 @@ description: |
   every attempt; layers completed by a failed attempt are reused by the next
   one. Genuine build failures (bad Dockerfile, failing RUN step) are not
   masked — they are deterministic, so the final attempt fails with the real
-  error. Behaviour matches `docker/build-push-action@v7.3.0` on every
+  error. Behaviour matches the pinned `docker/build-push-action` on every
   successful path; the only observable difference is on transient failures.
 
   Three attempts with a 15 s / 45 s backoff, matching

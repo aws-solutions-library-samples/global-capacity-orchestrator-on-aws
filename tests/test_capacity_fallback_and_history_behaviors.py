@@ -56,7 +56,9 @@ def test_advisor_records_each_isolated_market_lookup_failure() -> None:
     advisor = _advisor()
     capacity = advisor._capacity_checker
     capacity.get_spot_placement_score.return_value = {}
-    capacity.get_spot_price_history.side_effect = RuntimeError("spot history unavailable")
+    capacity.get_spot_price_history_and_series.side_effect = RuntimeError(
+        "spot history unavailable"
+    )
     capacity.get_on_demand_price.side_effect = RuntimeError("pricing unavailable")
     capacity.check_instance_available_in_region.side_effect = _client_error(
         "RequestLimitExceeded", "DescribeInstanceTypeOfferings"
@@ -66,9 +68,6 @@ def test_advisor_records_each_isolated_market_lookup_failure() -> None:
     capacity.get_capacity_block_trend.return_value = 0.0
     advisor._multi_region_checker.get_region_capacity.side_effect = RuntimeError("no cluster")
     advisor._multi_region_checker.recommend_region_for_job.return_value = {}
-    advisor._session.client.return_value.describe_spot_price_history.return_value = {
-        "SpotPriceHistory": []
-    }
 
     data = advisor.gather_capacity_data(["g5.xlarge"], ["us-east-1"])
 
@@ -234,8 +233,8 @@ def test_instance_info_cache_and_missing_pricing_fields_are_defensive() -> None:
     checker = _checker()
     info = InstanceTypeInfo("p5.48xlarge", 192, 2048, 8, "H100", 640)
     with patch.object(checker, "get_instance_info", return_value=info) as get_info:
-        assert checker._gpus_per_instance("p5.48xlarge", "us-east-1") == 8
-        assert checker._gpus_per_instance("p5.48xlarge", "us-east-1") == 8
+        assert checker.gpus_per_instance("p5.48xlarge", "us-east-1") == 8
+        assert checker.gpus_per_instance("p5.48xlarge", "us-east-1") == 8
     get_info.assert_called_once()
 
     reservation = {"total_instances": 1}
@@ -299,6 +298,27 @@ def test_search_summaries_cover_insufficient_capacity_and_longest_only() -> None
     )
     assert "Fewer than the 2 requested" in reservation_summary
     assert "Most available" not in reservation_summary
+
+    # One free instance in each of two Regions does not meet a count of 2.
+    split = [
+        {**reservation, "available_instances": 1},
+        {
+            **reservation,
+            "region": "us-west-2",
+            "availability_zone": "us-west-2a",
+            "available_instances": 1,
+        },
+    ]
+    split_summary = CapacityChecker._summarize_reservation_search(
+        "p5.48xlarge", ["us-east-1", "us-west-2"], split, split[0], 2, None
+    )
+    assert "2 instance(s) available" in split_summary
+    assert "Fewer than the 2 requested are free in any one region" in split_summary
+    together = [{**reservation, "available_instances": 2}]
+    together_summary = CapacityChecker._summarize_reservation_search(
+        "p5.48xlarge", ["us-east-1"], together, together[0], 2, None
+    )
+    assert "Fewer than" not in together_summary
 
     longest = {
         "region": "us-west-2",
@@ -479,9 +499,11 @@ def test_region_capacity_retains_queue_data_when_cloudwatch_client_creation_fail
         capacity = checker.get_region_capacity("us-east-1")
 
     assert capacity.queue_depth == 4
-    assert capacity.running_jobs == 2
+    # The running-job count is a CloudWatch metric too, never the SQS
+    # in-flight count, so it is unknown here.
+    assert capacity.running_jobs == 0
     assert capacity.telemetry_status == "partial"
-    assert capacity.unavailable_signals == ["gpu", "cpu"]
+    assert capacity.unavailable_signals == ["gpu", "cpu", "jobs"]
     assert any("client construction failed" in error for error in capacity.telemetry_errors)
 
 
@@ -510,8 +532,8 @@ def test_all_unavailable_recommendation_prefers_the_configured_default() -> None
 @pytest.mark.parametrize(
     ("status", "unavailable", "expected_reason"),
     [
-        ("unavailable", ["queue", "gpu", "cpu"], "capacity telemetry unavailable"),
-        ("partial", ["queue", "gpu"], "capacity telemetry is partial"),
+        ("unavailable", ["queue", "gpu", "cpu", "jobs"], "capacity telemetry unavailable"),
+        ("partial", ["queue", "gpu", "jobs"], "capacity telemetry is partial"),
     ],
 )
 def test_simple_recommend_uses_provenance_and_skips_unavailable_signals(
@@ -539,8 +561,8 @@ def test_simple_recommend_uses_provenance_and_skips_unavailable_signals(
 @pytest.mark.parametrize(
     ("status", "unavailable", "expected_reason"),
     [
-        ("unavailable", ["queue", "gpu", "cpu"], "cluster telemetry unavailable"),
-        ("partial", ["queue", "gpu"], "cluster telemetry is partial"),
+        ("unavailable", ["queue", "gpu", "cpu", "jobs"], "cluster telemetry unavailable"),
+        ("partial", ["queue", "gpu", "jobs"], "cluster telemetry is partial"),
     ],
 )
 def test_weighted_recommend_uses_provenance_and_skips_unavailable_signals(

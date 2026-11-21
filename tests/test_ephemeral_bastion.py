@@ -599,6 +599,35 @@ class TestCreateDestroyLifecycle:
         # The instance we launched was cleaned up rather than leaked.
         assert destroyed == ["i-0123456789abcdef0"]
 
+    @pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), SystemExit(143)])
+    def test_interrupted_online_wait_terminates_the_instance(
+        self, monkeypatch: pytest.MonkeyPatch, interrupt: BaseException
+    ) -> None:
+        """Ctrl-C (and a SIGTERM/SIGHUP handler's SystemExit) during the SSM
+        wait still terminates the launched instance, then propagates."""
+        monkeypatch.setattr(eb, "resolve_bastion_ami", lambda region: "ami-0123456789abcdef0")
+        monkeypatch.setattr(
+            eb,
+            "resolve_bastion_network",
+            lambda c, r: eb.BastionNetwork(
+                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0"
+            ),
+        )
+        monkeypatch.setattr(eb, "ensure_bastion_iam", lambda *a, **k: None)
+        monkeypatch.setattr(eb, "launch_bastion", lambda **k: "i-0123456789abcdef0")
+
+        def _interrupted(*a: object, **k: object) -> None:
+            raise interrupt
+
+        destroyed: list[str] = []
+        monkeypatch.setattr(eb, "wait_until_ssm_online", _interrupted)
+        monkeypatch.setattr(
+            eb, "destroy_ephemeral_bastion", lambda iid, region, **k: destroyed.append(iid)
+        )
+        with pytest.raises(type(interrupt)):
+            eb.create_ephemeral_bastion("gco-us-east-1", "us-east-1")
+        assert destroyed == ["i-0123456789abcdef0"]
+
     def test_create_skips_wait_when_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(eb, "resolve_bastion_ami", lambda region: "ami-0123456789abcdef0")
         monkeypatch.setattr(
@@ -620,29 +649,29 @@ class TestCreateDestroyLifecycle:
             == "i-0123456789abcdef0"
         )
 
-    def test_destroy_terminates_and_cleans_iam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("project", [eb.DEFAULT_PROJECT_NAME, "acme"])
+    def test_destroy_terminates_only_the_instance(
+        self, monkeypatch: pytest.MonkeyPatch, project: str
+    ) -> None:
+        """The role and instance profile are shared by every bastion of the
+        project in every Region (IAM is global): deleting them when one
+        tunnel closes revoked the credentials of a bastion another session
+        was still using, and failed a launch in progress. Teardown terminates
+        only this run's instance; ``gco stacks destroy-all`` retires the pair."""
         calls: list[list[str]] = []
         monkeypatch.setattr(eb, "_run_aws", lambda cmd, **k: calls.append(cmd) or "")
-        eb.destroy_ephemeral_bastion("i-0123456789abcdef0", "us-east-1")
-        verbs = [c[2] for c in calls]
-        assert verbs[0] == "terminate-instances"
-        assert "delete-role" in verbs
+        eb.destroy_ephemeral_bastion("i-0123456789abcdef0", "us-east-1", project_name=project)
+        assert calls == [eb.build_terminate_instances_command("i-0123456789abcdef0", "us-east-1")]
 
-    def test_destroy_skips_iam_when_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        calls: list[list[str]] = []
-        monkeypatch.setattr(eb, "_run_aws", lambda cmd, **k: calls.append(cmd) or "")
-        eb.destroy_ephemeral_bastion("i-0123456789abcdef0", "us-east-1", delete_iam=False)
-        assert [c[2] for c in calls] == ["terminate-instances"]
+    def test_destroy_propagates_a_termination_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _fail(cmd: list[str], **k: object) -> str:
+            raise RuntimeError("UnauthorizedOperation")
 
-    def test_destroy_iam_failure_is_best_effort(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _fake(cmd: list[str], **k: object) -> str:
-            if cmd[2] == "terminate-instances":
-                return "shutting-down"
-            raise RuntimeError("iam boom")
-
-        # Must not raise even though every IAM step fails.
-        monkeypatch.setattr(eb, "_run_aws", _fake)
-        eb.destroy_ephemeral_bastion("i-0123456789abcdef0", "us-east-1")
+        monkeypatch.setattr(eb, "_run_aws", _fail)
+        with pytest.raises(RuntimeError, match="UnauthorizedOperation"):
+            eb.destroy_ephemeral_bastion("i-0123456789abcdef0", "us-east-1")
 
     def test_context_manager_tears_down(self, monkeypatch: pytest.MonkeyPatch) -> None:
         destroyed: list[str] = []
@@ -700,13 +729,6 @@ class TestProjectScopedNaming:
         tagspec = cmd[cmd.index("--tag-specifications") + 1]
         assert "Key=Name,Value=acme-ephemeral-ssm-bastion" in tagspec
         assert f"Key={eb.TAG_PROJECT_KEY},Value=acme" in tagspec
-
-    def test_destroy_deletes_project_scoped_role(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        calls: list[list[str]] = []
-        monkeypatch.setattr(eb, "_run_aws", lambda cmd, **k: calls.append(cmd) or "")
-        eb.destroy_ephemeral_bastion("i-0123456789abcdef0", "us-east-1", project_name="acme")
-        delete_role = next(c for c in calls if c[2] == "delete-role")
-        assert delete_role[delete_role.index("--role-name") + 1] == "acme-ephemeral-bastion-role"
 
     def test_create_threads_project_to_iam_and_launch(
         self, monkeypatch: pytest.MonkeyPatch

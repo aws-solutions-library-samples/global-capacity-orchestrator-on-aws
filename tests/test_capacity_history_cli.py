@@ -257,6 +257,22 @@ class TestPredict:
         assert result.exit_code == 0
         assert "optional add-on" in result.output
 
+    @patch("cli.capacity.get_bedrock_capacity_advisor")
+    def test_the_table_missing_hint_names_the_projects_global_stack(
+        self, mock_get_advisor, monkeypatch
+    ):
+        """The deploy hint named gco-global whatever the project was called."""
+        monkeypatch.setenv("GCO_PROJECT_NAME", "acme")
+        advisor = _default_advisor_mock()
+        advisor.predict_capacity_window.side_effect = _rnf("GetStatistics")
+        mock_get_advisor.return_value = advisor
+        result = CliRunner().invoke(
+            cli, ["capacity", "predict", "-i", "g5.xlarge", "-r", "us-east-1"]
+        )
+        assert result.exit_code == 0
+        assert "'gco stacks deploy acme-global'" in result.output
+        assert "gco-global" not in result.output
+
 
 class TestHistoryFriendlyErrors:
     @patch("cli.capacity.history.get_capacity_history_store")

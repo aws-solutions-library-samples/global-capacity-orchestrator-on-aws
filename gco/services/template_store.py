@@ -41,8 +41,8 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-05T22:58:10Z
-# Generated from Git commit: 745b3fa3a9af9380bfe2797a5d9716fe8ce3a557
+# Generated at (UTC): 2026-11-18T16:59:04Z
+# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
 # Flowchart(s) generated from this file:
 #   * ``JobStore.claim_job`` -> ``diagrams/code_diagrams/gco/services/template_store.JobStore_claim_job.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/template_store.JobStore_claim_job.png``)
@@ -65,16 +65,36 @@ _LEGACY_REGION_STATUS_INDEX = "region-status-index"
 # DynamoDB permits one GSI create/delete per table update.
 _REGION_STATUS_WORK_INDEX = "region-status-work-index"
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+# Every store's DynamoDB calls run inside an API request or a queue worker
+# pass, where botocore's defaults (60 s connect and read timeouts, legacy
+# retries) would hold the caller for minutes on an unreachable endpoint.
+_DYNAMODB_CONFIG = Config(
+    connect_timeout=3,
+    read_timeout=10,
+    retries={"max_attempts": 3, "mode": "standard"},
+)
+
+
+def _iso_utc(moment: datetime) -> str:
+    """``moment`` as ``YYYY-MM-DDTHH:MM:SS.ffffffZ``, always with six fractional digits.
+
+    Store timestamps are compared as strings: in DynamoDB conditions
+    (``lease_expires_at > :now``) and as the ``work_sort`` / ``priority_sort``
+    GSI range keys. ``isoformat()`` drops the fraction when it is zero, and
+    ``...:10Z`` sorts after ``...:10.5Z``, so only a fixed width keeps string
+    order equal to time order.
+    """
+    return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _utc_now_iso() -> str:
-    """Return current UTC time in ISO format with Z suffix."""
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    """Return the current UTC time in the store's fixed-width ISO format."""
+    return _iso_utc(datetime.now(UTC))
 
 
 def _claim_lease_expiry_iso(lease_seconds: int) -> str:
     """Return a bounded lease expiry for crash-safe regional claims."""
-    return (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat().replace("+00:00", "Z")
+    return _iso_utc(datetime.now(UTC) + timedelta(seconds=lease_seconds))
 
 
 class JobSubmissionConflict(RuntimeError):
@@ -127,7 +147,9 @@ class TemplateStore:
             or os.getenv("GLOBAL_REGION")
             or os.getenv("AWS_REGION", "us-east-1")
         )
-        self._dynamodb = boto3.resource("dynamodb", region_name=self.region)
+        self._dynamodb = boto3.resource(
+            "dynamodb", region_name=self.region, config=_DYNAMODB_CONFIG
+        )
         self._table = self._dynamodb.Table(self.table_name)
 
     def list_templates(self) -> list[dict[str, Any]]:
@@ -311,7 +333,9 @@ class WebhookStore:
             or os.getenv("GLOBAL_REGION")
             or os.getenv("AWS_REGION", "us-east-1")
         )
-        self._dynamodb = boto3.resource("dynamodb", region_name=self.region)
+        self._dynamodb = boto3.resource(
+            "dynamodb", region_name=self.region, config=_DYNAMODB_CONFIG
+        )
         self._table = self._dynamodb.Table(self.table_name)
 
     def list_webhooks(
@@ -328,12 +352,20 @@ class WebhookStore:
         """
         try:
             if namespace:
-                response = self._table.query(
-                    IndexName="namespace-index",
-                    KeyConditionExpression="namespace = :ns",
-                    ExpressionAttributeValues={":ns": namespace},
-                )
+                query: dict[str, Any] = {
+                    "IndexName": "namespace-index",
+                    "KeyConditionExpression": "namespace = :ns",
+                    "ExpressionAttributeValues": {":ns": namespace},
+                }
+                response = self._table.query(**query)
                 items = response.get("Items", [])
+                # A Query page stops at 1 MB; delivery lookups and the list
+                # API must see every webhook in the namespace.
+                while "LastEvaluatedKey" in response:
+                    response = self._table.query(
+                        **query, ExclusiveStartKey=response["LastEvaluatedKey"]
+                    )
+                    items.extend(response.get("Items", []))
             else:
                 response = self._table.scan()
                 items = response.get("Items", [])
@@ -475,13 +507,7 @@ class JobStore:
             _MAX_CLAIM_LEASE_SECONDS,
         )
         self._dynamodb = boto3.resource(
-            "dynamodb",
-            region_name=self.region,
-            config=Config(
-                connect_timeout=3,
-                read_timeout=10,
-                retries={"max_attempts": 3, "mode": "standard"},
-            ),
+            "dynamodb", region_name=self.region, config=_DYNAMODB_CONFIG
         )
         self._table = self._dynamodb.Table(self.table_name)
         self._legacy_migration_cursors: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1435,7 +1461,13 @@ class JobStore:
         limit: int = 100,
         cursor: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
-        """Return one bounded scan page plus an opaque continuation cursor."""
+        """Return one bounded scan page plus an opaque continuation cursor.
+
+        Jobs come in DynamoDB scan order, which follows neither submission
+        time nor priority, and the cursor resumes that order. Sorting each
+        page would suggest an order across pages that they do not have, so a
+        caller that needs one sorts the jobs it has collected.
+        """
         limit = min(max(int(limit), 1), 1_000)
         filters = self._list_filter_identity(target_region, status, namespace)
         filter_parts: list[str] = []
@@ -1504,7 +1536,6 @@ class JobStore:
                 _MAX_LIST_EVALUATED_ITEMS,
             )
         parsed = [self._parse_job_item(item) for item in items]
-        parsed.sort(key=lambda job: job.get("submitted_at") or "", reverse=True)
         next_cursor = self._encode_list_cursor(next_key, filters) if next_key else None
         return parsed, next_cursor, partial
 

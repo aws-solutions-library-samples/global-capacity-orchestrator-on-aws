@@ -12,14 +12,21 @@ tunnel to work.
 
 from __future__ import annotations
 
+import io
 import json
 import re
+import socket
 from typing import Any
 
 import pytest
 from click.testing import CliRunner
 
+# The monitoring open tests patch the modules the CLI code holds
+# (monitoring_cmd.cluster_ui, cluster_tunnel.ssm_tunnel) rather than dotted
+# paths: see the note in tests/test_cluster_tunnel.py.
+import cli.cluster_tunnel as cluster_tunnel
 from cli import ssm_tunnel
+from cli.commands import monitoring_cmd
 from cli.kubectl_helpers import build_port_forward_command, describe_cluster_access
 from cli.main import cli
 
@@ -221,7 +228,9 @@ class TestToggleCommands:
 class TestOpenCommand:
     def _patch_common(self, monkeypatch: pytest.MonkeyPatch, captured: dict[str, object]) -> None:
         monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
-        monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _recording_forward(captured))
+        monkeypatch.setattr(
+            monitoring_cmd.cluster_ui, "exec_port_forward", _recording_forward(captured)
+        )
 
     def test_open_public_endpoint_direct_forward(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
@@ -237,6 +246,22 @@ class TestOpenCommand:
         # Direct forward: no --server override.
         assert "--server" not in captured["cmd"]
         assert "svc/kube-prometheus-stack-grafana" in captured["cmd"]
+        assert not any(str(arg).startswith("--context") for arg in captured["cmd"])
+
+    def test_open_forwards_through_the_clusters_context(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        context = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
+        captured: dict[str, object] = {}
+        self._patch_common(monkeypatch, captured)
+        monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: context)
+        monkeypatch.setattr(
+            "cli.kubectl_helpers.describe_cluster_access",
+            lambda c, r: {"public": True, "endpoint": "https://x.eks.amazonaws.com"},
+        )
+        result = runner.invoke(cli, ["monitoring", "open", "--region", "us-east-1"])
+        assert result.exit_code == 0, result.output
+        assert captured["cmd"][-1] == f"--context={context}"
 
     def test_open_private_without_ssm_warns_but_tries(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
@@ -267,6 +292,9 @@ class TestOpenCommand:
         )
 
         class _FakeProc:
+            stdout = None
+            stderr = None
+
             def __init__(self) -> None:
                 self.terminated = False
 
@@ -277,9 +305,9 @@ class TestOpenCommand:
                 self.terminated = True
                 captured["terminated"] = True
 
-            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            def wait(self, timeout: float | None = None) -> int:
                 captured["reaped"] = True
-                return b"", b""
+                return -15
 
         started: dict[str, object] = {}
 
@@ -289,7 +317,7 @@ class TestOpenCommand:
             started["local_port"] = local_port
             return _FakeProc()
 
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", _fake_start)
+        monkeypatch.setattr(cluster_tunnel.ssm_tunnel, "start_api_tunnel", _fake_start)
 
         result = runner.invoke(
             cli,
@@ -353,64 +381,105 @@ def test_describe_cluster_access_missing_aws_cli(monkeypatch: pytest.MonkeyPatch
         describe_cluster_access("gco-us-east-1", "us-east-1")
 
 
+class _TunnelProc:
+    """A Popen stand-in: real byte streams to drain, a scripted exit."""
+
+    def __init__(
+        self,
+        *,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        polls: list[int | None] | None = None,
+        exit_code: int = -15,
+        pid: int | None = None,
+    ) -> None:
+        self.stdout = io.BytesIO(stdout)
+        self.stderr = io.BytesIO(stderr)
+        self._polls = list(polls or [])
+        self._exit_code = exit_code
+        self.returncode: int | None = None
+        self.events: list[str] = []
+        if pid is not None:
+            self.pid = pid
+
+    def poll(self) -> int | None:
+        if self.returncode is not None:
+            return self.returncode
+        return self._polls.pop(0) if self._polls else None
+
+    def terminate(self) -> None:
+        self.events.append("terminate")
+        self.returncode = self._exit_code
+
+    def kill(self) -> None:
+        self.events.append("kill")
+        self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.events.append("wait")
+        if self.returncode is None:
+            self.returncode = self._exit_code
+        return self.returncode
+
+
+def _opened(port: int = 8443) -> bytes:
+    return f"Starting session with SessionId: s-1\nPort {port} opened for sessionId s-1.\n".encode()
+
+
 class TestStartApiTunnel:
-    class _Socket:
-        def __init__(self) -> None:
-            self.closed = False
+    @staticmethod
+    def _accepts(monkeypatch: pytest.MonkeyPatch, answers: list[bool]) -> list[int]:
+        """Script ``_local_port_accepts``: the first answer is the pre-launch check."""
+        asked: list[int] = []
 
-        def close(self) -> None:
-            self.closed = True
+        def accepts(port: int, timeout: float) -> bool:
+            asked.append(port)
+            return answers.pop(0) if answers else True
 
-    def test_returns_proc_only_after_listener_accepts(
+        monkeypatch.setattr(ssm_tunnel, "_local_port_accepts", accepts)
+        return asked
+
+    def test_returns_proc_once_its_listener_is_reported_and_accepts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        class _Proc:
-            def poll(self) -> None:
-                return None
-
-        connection = self._Socket()
+        proc = _TunnelProc(stdout=_opened())
         popen_call: dict[str, object] = {}
 
-        def popen(*args: object, **kwargs: object) -> _Proc:
+        def popen(*args: object, **kwargs: object) -> _TunnelProc:
             popen_call["args"] = args
             popen_call["kwargs"] = kwargs
-            return _Proc()
+            return proc
 
+        asked = self._accepts(monkeypatch, [False, True])
         monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", popen)
-        monkeypatch.setattr(
-            ssm_tunnel.socket,
-            "create_connection",
-            lambda *a, **k: connection,
+        assert (
+            ssm_tunnel.start_api_tunnel(
+                "i-0123456789abcdef0",
+                "https://ABC.gr7.us-east-1.eks.amazonaws.com",
+                8443,
+                "us-east-1",
+                ready_poll_seconds=0.01,
+            )
+            is proc
         )
-        proc = ssm_tunnel.start_api_tunnel(
-            "i-0123456789abcdef0",
-            "https://ABC.gr7.us-east-1.eks.amazonaws.com",
-            8443,
-            "us-east-1",
-            ready_wait_seconds=0,
-        )
-        assert isinstance(proc, _Proc)
-        assert connection.closed is True
+        assert asked == [8443, 8443]
         kwargs = popen_call["kwargs"]
         assert isinstance(kwargs, dict)
+        assert kwargs["stdout"] is kwargs["stderr"] is ssm_tunnel.subprocess.PIPE
         assert kwargs["start_new_session"] is (ssm_tunnel.os.name == "posix")
-        if ssm_tunnel.os.name == "nt":
+        if ssm_tunnel.os.name == "nt":  # pragma: no cover - POSIX CI
             assert kwargs["creationflags"] == getattr(
                 ssm_tunnel.subprocess, "CREATE_NEW_PROCESS_GROUP", 0
             )
 
     def test_windows_launch_uses_new_process_group(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        class _Proc:
-            @staticmethod
-            def poll() -> None:
-                return None
-
         captured: dict[str, object] = {}
 
-        def popen(*args: object, **kwargs: object) -> _Proc:
+        def popen(*args: object, **kwargs: object) -> _TunnelProc:
             captured.update(kwargs)
-            return _Proc()
+            return _TunnelProc(stdout=_opened())
 
+        self._accepts(monkeypatch, [False, True])
         monkeypatch.setattr(ssm_tunnel.os, "name", "nt")
         monkeypatch.setattr(
             ssm_tunnel.subprocess,
@@ -419,42 +488,51 @@ class TestStartApiTunnel:
             raising=False,
         )
         monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", popen)
-        monkeypatch.setattr(
-            ssm_tunnel.socket,
-            "create_connection",
-            lambda *a, **k: self._Socket(),
-        )
-
         ssm_tunnel.start_api_tunnel(
             "i-0123456789abcdef0",
             "https://ABC.gr7.us-east-1.eks.amazonaws.com",
             8443,
             "us-east-1",
-            ready_wait_seconds=0,
+            ready_poll_seconds=0.01,
         )
-
         assert captured["start_new_session"] is False
         assert captured["creationflags"] == 512
 
-    def test_waits_for_delayed_listener(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        class _Proc:
-            def poll(self) -> None:
-                return None
+    def test_a_port_already_in_use_is_refused_before_launch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def popen(*args: object, **kwargs: object) -> None:
+            raise AssertionError("nothing may start on a port another process holds")
 
-        attempts = 0
+        self._accepts(monkeypatch, [True])
+        monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", popen)
+        with pytest.raises(RuntimeError, match=r"already listens on 127\.0\.0\.1:8443"):
+            ssm_tunnel.start_api_tunnel("i-0123456789abcdef0", "h.example.com", 8443, "us-east-1")
+
+    def test_a_listener_reported_for_another_port_does_not_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        proc = _TunnelProc(stdout=_opened(9999))
+        clock = iter([0.0, 0.0, 99.0])
+        self._accepts(monkeypatch, [False])
+        monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", lambda *a, **k: proc)
+        monkeypatch.setattr(ssm_tunnel.time, "monotonic", lambda: next(clock, 99.0))
+        monkeypatch.setattr(ssm_tunnel.time, "sleep", lambda _seconds: None)
+        with pytest.raises(RuntimeError, match="has not reported its listener yet"):
+            ssm_tunnel.start_api_tunnel(
+                "i-0123456789abcdef0", "h.example.com", 8443, "us-east-1", ready_wait_seconds=1
+            )
+        assert "terminate" in proc.events
+
+    def test_waits_until_the_reported_listener_accepts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         sleeps: list[float] = []
-
-        def connect(*args: object, **kwargs: object) -> TestStartApiTunnel._Socket:
-            nonlocal attempts
-            attempts += 1
-            if attempts < 3:
-                raise ConnectionRefusedError(61, "Connection refused")
-            return self._Socket()
-
-        monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", lambda *a, **k: _Proc())
-        monkeypatch.setattr(ssm_tunnel.socket, "create_connection", connect)
+        asked = self._accepts(monkeypatch, [False, False, False, True])
+        monkeypatch.setattr(
+            ssm_tunnel.subprocess, "Popen", lambda *a, **k: _TunnelProc(stdout=_opened())
+        )
         monkeypatch.setattr(ssm_tunnel.time, "sleep", sleeps.append)
-
         ssm_tunnel.start_api_tunnel(
             "i-0123456789abcdef0",
             "https://ABC.gr7.us-east-1.eks.amazonaws.com",
@@ -463,29 +541,14 @@ class TestStartApiTunnel:
             ready_wait_seconds=5,
             ready_poll_seconds=0.1,
         )
-
-        assert attempts == 3
-        assert sleeps == [0.1, 0.1]
+        assert len(asked) == 4
+        assert sleeps and all(pause == pytest.approx(0.1) for pause in sleeps[-2:])
 
     def test_reports_session_exit_while_waiting(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        class _Proc:
-            def __init__(self) -> None:
-                self.polls = 0
-
-            def poll(self) -> int | None:
-                self.polls += 1
-                return None if self.polls == 1 else 23
-
-            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
-                return b"", b"Session Manager channel failed"
-
-        def refused(*args: object, **kwargs: object) -> None:
-            raise ConnectionRefusedError(61, "Connection refused")
-
-        monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", lambda *a, **k: _Proc())
-        monkeypatch.setattr(ssm_tunnel.socket, "create_connection", refused)
+        proc = _TunnelProc(stderr=b"Session Manager channel failed", polls=[None, 23])
+        self._accepts(monkeypatch, [False])
+        monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", lambda *a, **k: proc)
         monkeypatch.setattr(ssm_tunnel.time, "sleep", lambda _seconds: None)
-
         with pytest.raises(RuntimeError, match=r"exit code 23.*Session Manager channel failed"):
             ssm_tunnel.start_api_tunnel(
                 "i-0123456789abcdef0",
@@ -495,33 +558,25 @@ class TestStartApiTunnel:
                 ready_wait_seconds=5,
             )
 
-    def test_timeout_terminates_and_reaps_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        class _Proc:
-            def __init__(self) -> None:
-                self.terminated = False
-                self.reaped = False
-
-            def poll(self) -> int | None:
-                return -15 if self.terminated else None
-
-            def terminate(self) -> None:
-                self.terminated = True
-
-            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
-                self.reaped = True
-                return b"", b"listener setup failed"
-
-        proc = _Proc()
-        clock = iter((0.0, 2.0))
-
-        def refused(*args: object, **kwargs: object) -> None:
-            raise ConnectionRefusedError(61, "Connection refused")
-
+    def test_a_session_exit_after_the_listener_accepts_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        proc = _TunnelProc(stdout=_opened(), stderr=b"session closed", polls=[None, 17])
+        self._accepts(monkeypatch, [False, True])
         monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", lambda *a, **k: proc)
-        monkeypatch.setattr(ssm_tunnel.socket, "create_connection", refused)
-        monkeypatch.setattr(ssm_tunnel.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(ssm_tunnel.time, "sleep", lambda _seconds: None)
+        with pytest.raises(RuntimeError, match="exited during readiness: exit code 17"):
+            ssm_tunnel.start_api_tunnel(
+                "i-0123456789abcdef0", "h.example.com", 8443, "us-east-1", ready_wait_seconds=5
+            )
 
-        with pytest.raises(RuntimeError, match="did not accept local connections") as exc_info:
+    def test_timeout_terminates_and_reaps_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        proc = _TunnelProc(stdout=_opened(), stderr=b"listener setup failed")
+        clock = iter((0.0, 2.0))
+        self._accepts(monkeypatch, [False, False])
+        monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", lambda *a, **k: proc)
+        monkeypatch.setattr(ssm_tunnel.time, "monotonic", lambda: next(clock, 2.0))
+        with pytest.raises(RuntimeError, match="did not open its listener") as exc_info:
             ssm_tunnel.start_api_tunnel(
                 "i-0123456789abcdef0",
                 "https://ABC.gr7.us-east-1.eks.amazonaws.com",
@@ -529,124 +584,21 @@ class TestStartApiTunnel:
                 "us-east-1",
                 ready_wait_seconds=1,
             )
+        assert "the reported listener did not accept a connection" in str(exc_info.value)
         assert "listener setup failed" in str(exc_info.value)
-        assert proc.terminated is True
-        assert proc.reaped is True
-
-    def test_stop_escalates_complete_posix_process_group(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        class _Proc:
-            pid = 4321
-            stdout = None
-            stderr = None
-
-            def __init__(self) -> None:
-                self.communications = 0
-
-            def poll(self) -> None:
-                return None
-
-            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
-                self.communications += 1
-                if self.communications == 1:
-                    raise ssm_tunnel.subprocess.TimeoutExpired("aws", timeout)
-                return b"stdout", b"stderr"
-
-        signals: list[tuple[int, int]] = []
-        monkeypatch.setattr(ssm_tunnel.os, "name", "posix")
-        monkeypatch.setattr(
-            ssm_tunnel.os,
-            "killpg",
-            lambda pid, sent_signal: signals.append((pid, sent_signal)),
-        )
-
-        stdout, stderr = ssm_tunnel.stop_api_tunnel(_Proc(), wait_seconds=1)
-
-        assert signals == [
-            (4321, ssm_tunnel.signal.SIGTERM),
-            (4321, ssm_tunnel.signal.SIGKILL),
-        ]
-        assert (stdout, stderr) == (b"stdout", b"stderr")
-
-    def test_stop_forces_windows_tree_before_wrapper_fallback(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        class _Proc:
-            pid = 4321
-            stdout = None
-            stderr = None
-
-            def __init__(self) -> None:
-                self.communications = 0
-                self.terminate_calls = 0
-                self.kill_calls = 0
-
-            def poll(self) -> None:
-                return None
-
-            def terminate(self) -> None:
-                self.terminate_calls += 1
-
-            def kill(self) -> None:
-                self.kill_calls += 1
-
-            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
-                self.communications += 1
-                if self.communications == 1:
-                    raise ssm_tunnel.subprocess.TimeoutExpired("aws", timeout)
-                return b"", b""
-
-        class _Result:
-            def __init__(self, returncode: int) -> None:
-                self.returncode = returncode
-
-        commands: list[list[str]] = []
-
-        def taskkill(command: list[str], **kwargs: object) -> _Result:
-            commands.append(command)
-            return _Result(1 if len(commands) == 1 else 0)
-
-        proc = _Proc()
-        monkeypatch.setattr(ssm_tunnel.os, "name", "nt")
-        monkeypatch.setattr(ssm_tunnel.shutil, "which", lambda _name: "taskkill.exe")
-        monkeypatch.setattr(ssm_tunnel.subprocess, "run", taskkill)
-
-        ssm_tunnel.stop_api_tunnel(proc, wait_seconds=1)
-
-        assert commands == [
-            ["taskkill.exe", "/PID", "4321", "/T"],
-            ["taskkill.exe", "/PID", "4321", "/T", "/F"],
-        ]
-        assert proc.terminate_calls == 0
-        assert proc.kill_calls == 0
+        assert proc.events[:2] == ["terminate", "wait"]
 
     def test_interrupted_startup_terminates_and_reaps_process(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        class _Proc:
-            def __init__(self) -> None:
-                self.terminated = False
-                self.reaped = False
+        proc = _TunnelProc()
 
-            def poll(self) -> int | None:
-                return -15 if self.terminated else None
-
-            def terminate(self) -> None:
-                self.terminated = True
-
-            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
-                self.reaped = True
-                return b"", b""
-
-        proc = _Proc()
-
-        def interrupt(*args: object, **kwargs: object) -> None:
+        def interrupt(_seconds: float) -> None:
             raise KeyboardInterrupt
 
+        self._accepts(monkeypatch, [False])
         monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", lambda *a, **k: proc)
-        monkeypatch.setattr(ssm_tunnel.socket, "create_connection", interrupt)
-
+        monkeypatch.setattr(ssm_tunnel.time, "sleep", interrupt)
         with pytest.raises(KeyboardInterrupt):
             ssm_tunnel.start_api_tunnel(
                 "i-0123456789abcdef0",
@@ -654,18 +606,12 @@ class TestStartApiTunnel:
                 8443,
                 "us-east-1",
             )
-        assert proc.terminated is True
-        assert proc.reaped is True
+        assert proc.events[:2] == ["terminate", "wait"]
 
     def test_raises_when_session_dies_immediately(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        class _Proc:
-            def poll(self) -> int:
-                return 1
-
-            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
-                return b"", b"SessionManagerPlugin not found"
-
-        monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", lambda *a, **k: _Proc())
+        proc = _TunnelProc(stderr=b"SessionManagerPlugin not found", polls=[1])
+        self._accepts(monkeypatch, [False])
+        monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", lambda *a, **k: proc)
         with pytest.raises(RuntimeError, match="SSM port-forwarding session failed"):
             ssm_tunnel.start_api_tunnel(
                 "i-0123456789abcdef0",
@@ -679,11 +625,83 @@ class TestStartApiTunnel:
         def _boom(*a: object, **k: object) -> None:
             raise FileNotFoundError
 
+        self._accepts(monkeypatch, [False])
         monkeypatch.setattr(ssm_tunnel.subprocess, "Popen", _boom)
         with pytest.raises(RuntimeError, match="AWS CLI not found"):
             ssm_tunnel.start_api_tunnel(
                 "i-0123456789abcdef0", "h.example.com", 8443, "us-east-1", ready_wait_seconds=0
             )
+
+    def test_local_port_probe_against_a_real_socket(self) -> None:
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+            assert ssm_tunnel._local_port_accepts(port, 1.0) is True
+        assert ssm_tunnel._local_port_accepts(port, 1.0) is False
+
+
+class TestStopApiTunnel:
+    def test_escalates_complete_posix_process_group(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _Stubborn(_TunnelProc):
+            """Ignores the graceful signal; dies to the forced one."""
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.events.append("wait")
+                if self.returncode is None:
+                    raise ssm_tunnel.subprocess.TimeoutExpired("aws", timeout or 0)
+                return self.returncode
+
+        proc = _Stubborn(stdout=b"stdout", stderr=b"stderr", pid=4321)
+        signals: list[tuple[int, int]] = []
+
+        def killpg(pid: int, sent_signal: int) -> None:
+            signals.append((pid, sent_signal))
+            if sent_signal == ssm_tunnel.signal.SIGKILL:
+                proc.returncode = -9
+
+        monkeypatch.setattr(ssm_tunnel.os, "name", "posix")
+        monkeypatch.setattr(ssm_tunnel.os, "killpg", killpg)
+        assert ssm_tunnel.stop_api_tunnel(proc, wait_seconds=1) == (b"stdout", b"stderr")
+        assert signals == [
+            (4321, ssm_tunnel.signal.SIGTERM),
+            (4321, ssm_tunnel.signal.SIGKILL),
+        ]
+
+    def test_forces_windows_tree_before_wrapper_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _Stubborn(_TunnelProc):
+            def wait(self, timeout: float | None = None) -> int:
+                self.events.append("wait")
+                if len(commands) < 2:
+                    raise ssm_tunnel.subprocess.TimeoutExpired("aws", timeout or 0)
+                return 1
+
+        class _Result:
+            def __init__(self, returncode: int) -> None:
+                self.returncode = returncode
+
+        commands: list[list[str]] = []
+
+        def taskkill(command: list[str], **kwargs: object) -> _Result:
+            commands.append(command)
+            return _Result(1 if len(commands) == 1 else 0)
+
+        proc = _Stubborn(pid=4321)
+        monkeypatch.setattr(ssm_tunnel.os, "name", "nt")
+        monkeypatch.setattr(ssm_tunnel.shutil, "which", lambda _name: "taskkill.exe")
+        monkeypatch.setattr(ssm_tunnel.subprocess, "run", taskkill)
+        ssm_tunnel.stop_api_tunnel(proc, wait_seconds=1)
+        assert commands == [
+            ["taskkill.exe", "/PID", "4321", "/T"],
+            ["taskkill.exe", "/PID", "4321", "/T", "/F"],
+        ]
+        assert "terminate" not in proc.events and "kill" not in proc.events
+
+    def test_rejects_a_non_positive_wait(self) -> None:
+        with pytest.raises(ValueError, match="wait_seconds must be positive"):
+            ssm_tunnel.stop_api_tunnel(_TunnelProc(), wait_seconds=0)
 
 
 class TestOpenErrorPaths:
@@ -703,7 +721,9 @@ class TestOpenErrorPaths:
     ) -> None:
         captured: dict[str, object] = {}
         monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
-        monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _recording_forward(captured))
+        monkeypatch.setattr(
+            monitoring_cmd.cluster_ui, "exec_port_forward", _recording_forward(captured)
+        )
 
         def _boom(cluster: str, region: str) -> dict[str, object]:
             raise RuntimeError("describe failed")
@@ -726,7 +746,7 @@ class TestOpenErrorPaths:
         def _boom(*a: object, **k: object) -> None:
             raise RuntimeError("tunnel failed")
 
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", _boom)
+        monkeypatch.setattr(cluster_tunnel.ssm_tunnel, "start_api_tunnel", _boom)
         result = runner.invoke(
             cli,
             ["monitoring", "open", "--region", "us-east-1", "--via-ssm", "i-0123456789abcdef0"],
@@ -804,7 +824,7 @@ def test_open_announces_the_url_only_once_kubectl_listens(
             f"kubectl port-forward exited with code 1 before localhost:{local_port} was listening"
         )
 
-    monkeypatch.setattr("cli.cluster_ui.exec_port_forward", never_listens)
+    monkeypatch.setattr(monitoring_cmd.cluster_ui, "exec_port_forward", never_listens)
     result = runner.invoke(cli, ["monitoring", "open", "--region", "us-east-1"])
     assert result.exit_code == 1
     assert "Starting kubectl port-forward for grafana on localhost:3000" in result.output
@@ -825,7 +845,9 @@ def test_open_resolves_region_from_cdk_json(
         "cli.kubectl_helpers.describe_cluster_access",
         lambda c, r: {"public": True, "endpoint": ""},
     )
-    monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _recording_forward(captured))
+    monkeypatch.setattr(
+        monitoring_cmd.cluster_ui, "exec_port_forward", _recording_forward(captured)
+    )
     monkeypatch.setattr("cli.config._load_cdk_json", lambda: {"regional": ["us-west-2"]})
     result = runner.invoke(cli, ["monitoring", "open", "--service", "prometheus"])
     assert result.exit_code == 0, result.output

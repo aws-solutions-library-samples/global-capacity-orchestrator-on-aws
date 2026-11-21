@@ -246,6 +246,44 @@ class TestLoadBalancerScanner:
             len(call.kwargs["ResourceArns"]) for call in client.describe_tags.call_args_list
         ] == [20, 1]
 
+    def test_a_load_balancer_a_project_cluster_created_is_owned(self) -> None:
+        # The AWS Load Balancer Controller and EKS Auto Mode name an Ingress or
+        # Service load balancer k8s-<namespace>-<name>-<hash> and tag it with
+        # the cluster only, as they do its target groups.
+        def arn(index: int) -> str:
+            return (
+                f"arn:aws:elasticloadbalancing:{_REGION}:{_ACCOUNT}:"
+                f"loadbalancer/app/k8s-gcojobs-web-{index}/id"
+            )
+
+        tags_by_arn = {
+            arn(0): _tags(**{"elbv2.k8s.aws/cluster": f"{_PROJECT}-{_REGION}"}),
+            arn(1): _tags(**{"eks:eks-cluster-name": f"{_PROJECT}-{_REGION}"}),
+            arn(2): _tags(**{"elbv2.k8s.aws/cluster": "other-cluster"}),
+            arn(3): _tags(**{"eks:eks-cluster-name": f"{_PROJECT}x-{_REGION}"}),
+        }
+        client = _paginated_client(
+            {
+                "describe_load_balancers": [
+                    {
+                        "LoadBalancers": [
+                            {"LoadBalancerArn": arn(index), "LoadBalancerName": f"k8s-{index}"}
+                            for index in range(4)
+                        ]
+                    }
+                ]
+            }
+        )
+        client.describe_tags.side_effect = lambda *, ResourceArns: {
+            "TagDescriptions": [
+                {"ResourceArn": item, "Tags": tags_by_arn.get(item, [])} for item in ResourceArns
+            ]
+        }
+
+        assert inventory_scanners._list_load_balancers(
+            _session_for(client, "elbv2"), _REGION, _PROJECT
+        ) == [arn(0), arn(1)]
+
 
 class TestInstanceScanner:
     def test_instance_without_an_id_fails_closed(self) -> None:
@@ -843,6 +881,37 @@ class TestLambdaApiGatewayLogSecretScanners:
         with pytest.raises(RuntimeError, match="project-owned secret without an ARN"):
             inventory_scanners._list_secrets(
                 _session_for(client, "secretsmanager"), _REGION, _PROJECT
+            )
+
+    def test_every_parameter_under_the_project_path_is_listed_by_name(self) -> None:
+        # The runtime records (add-on bookkeeping, the traffic dial) carry no
+        # tags, so only the path finds them.
+        client = _paginated_client(
+            {
+                "get_parameters_by_path": [
+                    {
+                        "Parameters": [
+                            {"Name": f"/{_PROJECT}/addons/{_REGION}/_input", "Value": "x"},
+                            {"Name": f"/{_PROJECT}/traffic-dial/state"},
+                        ]
+                    },
+                    {"Parameters": [{"Name": f"/{_PROJECT}-other/x"}]},
+                    {},
+                ]
+            }
+        )
+
+        assert inventory_scanners._list_project_ssm_parameters(
+            _session_for(client, "ssm"), _REGION, _PROJECT
+        ) == [f"/{_PROJECT}/addons/{_REGION}/_input", f"/{_PROJECT}/traffic-dial/state"]
+        client.get_paginator("get_parameters_by_path").paginate.assert_called_once_with(
+            Path=f"/{_PROJECT}", Recursive=True
+        )
+
+        client = _paginated_client({"get_parameters_by_path": [{"Parameters": [{"Value": "x"}]}]})
+        with pytest.raises(RuntimeError, match="parameter without a name under /gco-live"):
+            inventory_scanners._list_project_ssm_parameters(
+                _session_for(client, "ssm"), _REGION, _PROJECT
             )
 
 
@@ -2032,6 +2101,9 @@ class TestProjectInventory:
             "_list_api_gateway_v2_apis": self._regional({}),
             "_list_cloudwatch_log_groups": self._regional({}),
             "_list_secrets": self._regional({}),
+            "_list_project_ssm_parameters": self._regional(
+                {_REGION: [f"/{_PROJECT}/traffic-dial/state"]}
+            ),
             "_list_cluster_volumes": self._regional({_REGION: ["vol-1"]}),
             "_list_project_backup_resources": MagicMock(
                 return_value={
@@ -2118,6 +2190,7 @@ class TestProjectInventory:
         assert coverage["scanner_regions"]["hyperpod"] == [_REGION]
         assert coverage["regions_without_service"] == {"hyperpod": ["us-west-2"]}
         assert coverage["scanner_regions"]["ec2_networking"] == [_REGION, "us-west-2"]
+        assert coverage["scanner_regions"]["ssm_parameters"] == [_REGION, "us-west-2"]
         assert coverage["scanner_regions"]["s3_buckets"] == ["global"]
         assert coverage["scanner_regions"]["global_accelerators"] == ["us-west-2"]
         assert inventory["authority_scope"] == {"partition": "aws", "account": _ACCOUNT}
@@ -2149,6 +2222,9 @@ class TestProjectInventory:
         assert east["vpcs"] == ["vpc-1"]
         assert east["dynamodb_tables"] == [f"{_PROJECT}-jobs"]
         assert east["cluster_volumes"] == ["vol-1"]
+        # A parameter left under /<project>/ is residue the summary counts.
+        assert east["ssm_parameters"] == [f"/{_PROJECT}/traffic-dial/state"]
+        assert inventory_project.summarize_project_resources(inventory)["ssm_parameters"] == 1
         assert east["backup_vaults"] == ["vault-arn"]
         assert east["pcs_clusters"] == ["pcs-cluster-arn"]
         assert east["pcs_compute_node_groups"] == ["pcs-group-arn"]

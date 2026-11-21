@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-05T22:58:10Z">
-        <meta name="gco-source-commit" content="745b3fa3a9af9380bfe2797a5d9716fe8ce3a557">
-        <meta name="gco-flow-digest" content="795589f7edecdfe4">
+        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
+        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
+        <meta name="gco-flow-digest" content="661279014981f815">
         <title>Global queue fenced claim (conditional write + monotonic generation)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,43 +208,43 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1270=>operation: 'Claim a queued job with a unique token and monotonic fencing generation.'
-op1272=>operation: item = self._get_raw_job(job_id)
-cond1275=>condition: if item is None or item.get('status') != JobStatus.QUEUED.value or item.get('target_region') != target_region
-io1282=>inputoutput: output: None
-e1280=>end: end function return
-op1288=>operation: now = _utc_now_iso()
-op1290=>operation: lease_expires_at = _claim_lease_expiry_iso(self.claim_lease_seconds)
-op1292=>operation: claim_token = uuid.uuid4().hex
-op1294=>operation: generation = int(item.get('claim_generation', 0)) + 1
-op1296=>operation: history = self._history_with(item, status=JobStatus.CLAIMED.value, timestamp=now, message=f'Claimed by {claimed_by}')
-op1299=>operation: response = self._table.update_item(Key={'job_id': job_id}, UpdateExpression='SET #status = :claimed, region_status = :region_status, claimed_by = :claimed_by, claim_token = :claim_token, claim_generation = :generation, claimed_at = :now, updated_at = :now, lease_expires_at = :lease_expires_at, work_sort = :work_sort, status_history = :history', ConditionExpression='attribute_exists(job_id) AND #status = :queued AND target_region = :target_region AND updated_at = :expected_updated_at', ExpressionAttributeNames={'#status': 'status'}, ExpressionAttributeValues={':claimed': JobStatus.CLAIMED.value, ':queued': JobStatus.QUEUED.value, ':region_status': self._region_status(target_region, JobStatus.CLAIMED.value), ':target_region': target_region, ':claimed_by': claimed_by, ':claim_token': claim_token, ':generation': generation, ':now': now, ':expected_updated_at': item.get('updated_at'), ':lease_expires_at': lease_expires_at, ':work_sort': lease_expires_at, ':history': history}, ReturnValues='ALL_NEW')
+        <div><textarea id="code" style="width: 100%;" rows="11">op2398=>operation: 'Claim a queued job with a unique token and monotonic fencing generation.'
+op2400=>operation: item = self._get_raw_job(job_id)
+cond2403=>condition: if item is None or item.get('status') != JobStatus.QUEUED.value or item.get('target_region') != target_region
+io2410=>inputoutput: output: None
+e2408=>end: end function return
+op2416=>operation: now = _utc_now_iso()
+op2418=>operation: lease_expires_at = _claim_lease_expiry_iso(self.claim_lease_seconds)
+op2420=>operation: claim_token = uuid.uuid4().hex
+op2422=>operation: generation = int(item.get('claim_generation', 0)) + 1
+op2424=>operation: history = self._history_with(item, status=JobStatus.CLAIMED.value, timestamp=now, message=f'Claimed by {claimed_by}')
+op2427=>operation: response = self._table.update_item(Key={'job_id': job_id}, UpdateExpression='SET #status = :claimed, region_status = :region_status, claimed_by = :claimed_by, claim_token = :claim_token, claim_generation = :generation, claimed_at = :now, updated_at = :now, lease_expires_at = :lease_expires_at, work_sort = :work_sort, status_history = :history', ConditionExpression='attribute_exists(job_id) AND #status = :queued AND target_region = :target_region AND updated_at = :expected_updated_at', ExpressionAttributeNames={'#status': 'status'}, ExpressionAttributeValues={':claimed': JobStatus.CLAIMED.value, ':queued': JobStatus.QUEUED.value, ':region_status': self._region_status(target_region, JobStatus.CLAIMED.value), ':target_region': target_region, ':claimed_by': claimed_by, ':claim_token': claim_token, ':generation': generation, ':now': now, ':expected_updated_at': item.get('updated_at'), ':lease_expires_at': lease_expires_at, ':work_sort': lease_expires_at, ':history': history}, ReturnValues='ALL_NEW')
 return self._parse_job_item(response.get('Attributes', {}), include_internal=True)
-cond1298=>condition: exception raised?
-cond1301=>condition: except ClientError as error
-cond1306=>condition: if self._is_conditional_failure(error)
-io1313=>inputoutput: output: None
-e1311=>end: end function return
-sub1319=>subroutine: logger.error('Failed to claim job %s: %s', job_id, error)
-sub1321=>subroutine: raise
+cond2426=>condition: exception raised?
+cond2429=>condition: except ClientError as error
+cond2434=>condition: if self._is_conditional_failure(error)
+io2441=>inputoutput: output: None
+e2439=>end: end function return
+sub2447=>subroutine: logger.error('Failed to claim job %s: %s', job_id, error)
+sub2449=>subroutine: raise
 
-op1270->op1272
-op1272->cond1275
-cond1275(yes)->io1282
-io1282->e1280
-cond1275(no)->op1288
-op1288->op1290
-op1290->op1292
-op1292->op1294
-op1294->op1296
-op1296->op1299
-op1299->cond1298
-cond1298(yes)->cond1301
-cond1301(yes)->cond1306
-cond1306(yes)->io1313
-io1313->e1311
-cond1306(no)->sub1319
-sub1319->sub1321
+op2398->op2400
+op2400->cond2403
+cond2403(yes)->io2410
+io2410->e2408
+cond2403(no)->op2416
+op2416->op2418
+op2418->op2420
+op2420->op2422
+op2422->op2424
+op2424->op2427
+op2427->cond2426
+cond2426(yes)->cond2429
+cond2429(yes)->cond2434
+cond2434(yes)->io2441
+io2441->e2439
+cond2434(no)->sub2447
+sub2447->sub2449
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -254,17 +254,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-05T22:58:10Z -->
-        <!-- Generated from Git commit: 745b3fa3a9af9380bfe2797a5d9716fe8ce3a557 -->
+        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-05T22:58:10Z">2026-09-05T22:58:10Z</time>
+            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>745b3fa3a9af9380bfe2797a5d9716fe8ce3a557</code>
+            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>795589f7edecdfe4</code>
+            Flow content SHA-256: <code>661279014981f815</code>
           </p>
           <div id="canvas"></div>
         </div>

@@ -25,10 +25,12 @@
 #                 Slurm REST clients, the Slinky operator); the KubeRay
 #                 operator's namespace is admitted to Ray head pods on the
 #                 dashboard port.
-#   gco-inference model pods are isolated to each other and to the
-#                 authenticated proxy, which reaches them only on their TLS
-#                 sidecar's 8443; egress is DNS + HTTPS (model pulls, AWS
-#                 APIs) and the node's EKS Pod Identity Agent.
+#   gco-inference default-deny ingress; model pods are isolated to each
+#                 other and to the authenticated proxy, which reaches them
+#                 only on their TLS sidecar's 8443, the shared Mooncake
+#                 master admits model pods on its RPC and metadata ports, and
+#                 any other pod accepts nothing; egress is DNS + HTTPS (model
+#                 pulls, AWS APIs) and the node's EKS Pod Identity Agent.
 #
 # EKS Pod Identity serves credentials from the node itself: the cluster
 # injects AWS_CONTAINER_CREDENTIALS_FULL_URI=http://169.254.170.23/v1/credentials
@@ -380,6 +382,31 @@ spec:
       ports:
         - protocol: TCP
           port: 8265
+---
+# Default deny all ingress in gco-inference, as in the other two namespaces.
+# The rules below re-admit every pod the inference monitor creates, each from
+# its own clients only: model pods (classic, canary, prefill, decode, store
+# and PD proxy pods, all labelled gco.io/type: inference) from the inference
+# proxy on their TLS sidecar's 8443 and from each other, and the shared
+# Mooncake master from model pods on its RPC and metadata ports. Any other pod
+# in the namespace, such as a tenant Deployment whose pods do not carry
+# gco.io/type: inference, accepts nothing: label its pod template, or add a
+# NetworkPolicy that names its clients. No rule here names the node: the VPC
+# CNI's policy agent always admits a pod's own node (and Calico in kind admits
+# host-to-pod traffic), which is how model pods, already isolated by the rules
+# below, pass the kubelet's HTTP probes on their model port. kubectl
+# port-forward opens its connection inside the pod, so it needs no rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: gco-inference
+  labels:
+    project: gco
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
 ---
 # Allow DNS egress in gco-inference
 apiVersion: networking.k8s.io/v1

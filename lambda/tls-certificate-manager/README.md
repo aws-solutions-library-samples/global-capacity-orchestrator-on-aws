@@ -153,9 +153,9 @@ The SSM trust bundle may contain multiple public roots during staged rollover. I
 
 The function publishes to the `GCO/BackendTLS` [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) namespace:
 
-- `ReconciliationSuccess`, dimensioned by project. A missing heartbeat for two schedule intervals alarms even when EventBridge is disabled or no Lambda error metric is emitted.
+- `ReconciliationSuccess`, dimensioned by project, only when every region reconciled. A missing heartbeat for two schedule intervals alarms even when EventBridge is disabled or no Lambda error metric is emitted.
 - `RootCertificateDaysToExpiry`, dimensioned by project.
-- `LeafCertificateDaysToExpiry`, dimensioned by project and region.
+- `LeafCertificateDaysToExpiry`, dimensioned by project and region, for every region that reconciled, even when another region failed.
 
 The owning CDK stack also alarms on a missing reconciliation heartbeat, root/leaf expiry thresholds, manager errors, and dead-letter queue messages. Metric publication is best effort; certificate reconciliation still fails on any state, Secrets Manager, SSM, or ACM error.
 
@@ -183,7 +183,7 @@ The container entry point is `handler.lambda_handler`. A container image is requ
 
 ## Failure Behavior
 
-Configuration, malformed secret state, unsafe lifetime relationships, invalid ACM ARN ownership, certificate-signature mismatch, and issuance/import failures are fatal. A pending root's activation delay starts only after SSM successfully publishes a trust bundle containing it, so an SSM outage cannot silently consume the proxy propagation window. A retired certificate that is still attached is the deliberate exception: its ARN parameter and encrypted retirement record remain until a scheduled retry can safely remove both. CloudFormation or EventBridge retry behavior, the encrypted dead-letter queue, heartbeat/expiry metrics, and CloudWatch alarms surface failures. Expiry and heartbeat metric publication is the only best-effort operation because an observability outage must not interrupt an otherwise safe certificate rotation.
+Configuration, malformed secret state, unsafe lifetime relationships, invalid ACM ARN ownership, certificate-signature mismatch, and issuance/import failures are fatal. Each region's leaf is reconciled on its own: when one region fails, the error is logged, the remaining regions are still renewed and their `LeafCertificateDaysToExpiry` and the root's expiry are published, and the run then fails with one error naming every failed region. Such a run publishes no `ReconciliationSuccess` heartbeat and skips the retired-region cleanup, which waits for a run (or a CloudFormation rollback) that succeeds. A pending root's activation delay starts only after SSM successfully publishes a trust bundle containing it, so an SSM outage cannot silently consume the proxy propagation window. A retired certificate that is still attached is the deliberate exception: its ARN parameter and encrypted retirement record remain until a scheduled retry can safely remove both. CloudFormation or EventBridge retry behavior, the encrypted dead-letter queue, heartbeat/expiry metrics, and CloudWatch alarms surface failures. Expiry and heartbeat metric publication is the only best-effort operation because an observability outage must not interrupt an otherwise safe certificate rotation.
 
 ## Recovery Runbook
 

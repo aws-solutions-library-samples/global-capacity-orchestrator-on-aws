@@ -170,7 +170,8 @@ class TestSubmitJobSqsProducer:
             region=_REGION,
             namespace="fallback-ns",
         )
-        assert result["namespace"] == "fallback-ns"
+        # The envelope names where the first manifest runs: its own namespace.
+        assert result["namespace"] == "declared-ns"
 
         sqs = boto3.client("sqs", region_name=_REGION)
         message = _receive_one(sqs, regional_stack_queue)

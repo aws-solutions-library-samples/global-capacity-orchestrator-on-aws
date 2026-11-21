@@ -295,6 +295,42 @@ def test_pages_workflow_run_trigger_stays_fenced_to_trusted_code() -> None:
         assert required in condition, f"pages.yml lost its workflow_run guard: {required}"
 
 
+def test_pages_build_cannot_publish_and_the_publishing_job_runs_no_code() -> None:
+    """Only a job that runs no repository or third-party code may publish Pages.
+
+    The site build installs the docs toolchain and the npm tooling and runs
+    repository scripts. While it shared a job with actions/deploy-pages, any
+    of that code (a compromised transitive package included) could request
+    the Pages OIDC token, or read the checkout token, and publish arbitrary
+    content. The build is read-only with no persisted token; the one job
+    holding ``pages: write`` and ``id-token: write`` checks nothing out and
+    runs only the TMPDIR export and deploy-pages.
+    """
+    jobs = _jobs(_load(WORKFLOW_DIR / "pages.yml"))
+    publishing = {
+        name
+        for name, job in jobs.items()
+        if {"pages", "id-token"} & set(job.get("permissions") or {})
+    }
+    assert publishing == {"deploy"}
+    deploy = jobs["deploy"]
+    assert deploy["permissions"] == {"pages": "write", "id-token": "write"}
+    assert deploy["needs"] == "build", "the deploy must inherit the build's workflow_run guard"
+    assert [step.get("uses", "").split("@")[0] for step in _steps(deploy) if "uses" in step] == [
+        "actions/deploy-pages"
+    ]
+    assert [step["run"] for step in _steps(deploy) if "run" in step] == [
+        'echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"'
+    ]
+    for name, job in jobs.items():
+        if name == "deploy":
+            continue
+        assert set((job.get("permissions") or {}).values()) == {"read"}, name
+        for step in _steps(job):
+            if str(step.get("uses", "")).startswith("actions/checkout"):
+                assert (step.get("with") or {}).get("persist-credentials") is False, name
+
+
 @pytest.mark.parametrize("path", _action_reference_files(), ids=_ref_id)
 def test_every_third_party_action_is_pinned_with_an_exact_version_comment(path: Path) -> None:
     """A tag is a mutable pointer; whoever owns the action can move it.

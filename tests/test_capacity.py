@@ -12,7 +12,38 @@ high fault tolerance regimes and includes live-signal fallbacks
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from datetime import UTC, datetime, timedelta
+from unittest.mock import DEFAULT, MagicMock, patch
+
+
+def _serve_spot_history_pages(ec2: MagicMock) -> None:
+    """Serve ``ec2.describe_spot_price_history`` through its paginator.
+
+    The checker reads every page through ``get_paginator``; these fixtures
+    describe one response without timestamps, so each record is stamped an
+    hour apart, newest first, as EC2 returns them. Other paginators keep
+    whatever the test configured.
+    """
+
+    def paginate(**kwargs):
+        response = ec2.describe_spot_price_history(**kwargs)
+        now = datetime.now(UTC)
+        return [
+            {
+                "SpotPriceHistory": [
+                    {"Timestamp": now - timedelta(hours=index), **item}
+                    for index, item in enumerate(response["SpotPriceHistory"])
+                ]
+            }
+        ]
+
+    spot_paginator = MagicMock()
+    spot_paginator.paginate.side_effect = paginate
+
+    def get_paginator(name):
+        return spot_paginator if name == "describe_spot_price_history" else DEFAULT
+
+    ec2.get_paginator.side_effect = get_paginator
 
 
 class TestInstanceTypeInfo:
@@ -448,6 +479,7 @@ class TestCapacityCheckerSpotPrices:
                         },
                     ]
                 }
+                _serve_spot_history_pages(mock_ec2)
 
                 prices = checker.get_spot_price_history("g4dn.xlarge", "us-east-1")
 
@@ -467,6 +499,7 @@ class TestCapacityCheckerSpotPrices:
                 mock_ec2 = MagicMock()
                 mock_session.client.return_value = mock_ec2
                 mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
+                _serve_spot_history_pages(mock_ec2)
 
                 prices = checker.get_spot_price_history("g4dn.xlarge", "us-east-1")
                 assert prices == []
@@ -659,6 +692,7 @@ class TestCapacityCheckerSpotEstimation:
             with patch("boto3.Session") as mock_session:
                 mock_ec2 = MagicMock()
                 mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
+                _serve_spot_history_pages(mock_ec2)
                 mock_session.return_value.client.return_value = mock_ec2
 
                 checker = CapacityChecker()
@@ -684,6 +718,7 @@ class TestCapacityCheckerSpotEstimation:
                         {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.30"},
                     ]
                 }
+                _serve_spot_history_pages(mock_ec2)
                 mock_pricing = MagicMock()
                 mock_pricing.get_products.return_value = {
                     "PriceList": [
@@ -1340,6 +1375,7 @@ class TestCapacityCheckerSpotPriceHistoryEdgeCases:
                     {"Error": {"Code": "InvalidParameterValue", "Message": "Invalid"}},
                     "DescribeSpotPriceHistory",
                 )
+                _serve_spot_history_pages(mock_ec2)
                 mock_session.return_value.client.return_value = mock_ec2
 
                 checker = CapacityChecker()
@@ -1365,6 +1401,7 @@ class TestCapacityCheckerSpotPriceHistoryEdgeCases:
                         {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.29"},
                     ]
                 }
+                _serve_spot_history_pages(mock_ec2)
                 mock_session.return_value.client.return_value = mock_ec2
 
                 checker = CapacityChecker()
@@ -1394,7 +1431,9 @@ class TestCapacityCheckerEstimateSpotWithPlacementScores:
                     return_value={"regional": 9, "use1-az1": 9},
                 ),
                 patch.object(checker, "get_spot_price_history", return_value=[]),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
@@ -1419,7 +1458,9 @@ class TestCapacityCheckerEstimateSpotWithPlacementScores:
                     return_value={"regional": 6},
                 ),
                 patch.object(checker, "get_spot_price_history", return_value=[]),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
@@ -1443,7 +1484,9 @@ class TestCapacityCheckerEstimateSpotWithPlacementScores:
                     return_value={"regional": 2},
                 ),
                 patch.object(checker, "get_spot_price_history", return_value=[]),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
@@ -1643,6 +1686,7 @@ class TestCapacityCheckerSpotPricesExtended:
                     {"AvailabilityZone": "us-east-1b", "SpotPrice": "0.11"},
                 ]
             }
+            _serve_spot_history_pages(mock_ec2)
 
             checker = CapacityChecker()
             prices = checker.get_spot_price_history("m5.large", "us-east-1")
@@ -1668,6 +1712,7 @@ class TestCapacityCheckerSpotPricesExtended:
                 {"Error": {"Code": "InvalidParameterValue", "Message": "Invalid"}},
                 "DescribeSpotPriceHistory",
             )
+            _serve_spot_history_pages(mock_ec2)
 
             checker = CapacityChecker()
             prices = checker.get_spot_price_history("invalid-type", "us-east-1")
@@ -1765,6 +1810,7 @@ class TestCapacityCheckerEstimateExtended:
             mock_ec2.describe_spot_price_history.return_value = {
                 "SpotPriceHistory": [{"AvailabilityZone": "us-east-1a", "SpotPrice": "0.05"}]
             }
+            _serve_spot_history_pages(mock_ec2)
 
             mock_ec2.describe_availability_zones.return_value = {
                 "AvailabilityZones": [{"ZoneName": "us-east-1a"}]
@@ -2046,6 +2092,7 @@ class TestCapacityCheckerSpotPriceHistoryErrors:
                     {"Error": {"Code": "InvalidParameterValue", "Message": "Invalid"}},
                     "DescribeSpotPriceHistory",
                 )
+                _serve_spot_history_pages(mock_ec2)
 
                 checker = CapacityChecker()
                 prices = checker.get_spot_price_history("invalid.type", "us-east-1")
@@ -2096,7 +2143,9 @@ class TestCapacityCheckerSpotEstimationWithPlacementScore:
                         SpotPriceInfo("g4dn.xlarge", "us-east-1a", 0.30, 0.30, 0.25, 0.35, 0.9)
                     ],
                 ),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
@@ -2116,7 +2165,9 @@ class TestCapacityCheckerSpotEstimationWithPlacementScore:
             with (
                 patch.object(checker, "get_spot_placement_score", return_value={"regional": 6}),
                 patch.object(checker, "get_spot_price_history", return_value=[]),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
@@ -2136,7 +2187,9 @@ class TestCapacityCheckerSpotEstimationWithPlacementScore:
             with (
                 patch.object(checker, "get_spot_placement_score", return_value={"regional": 2}),
                 patch.object(checker, "get_spot_price_history", return_value=[]),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
@@ -3394,40 +3447,6 @@ class TestWeightedRecommendRegion:
                 assert result["region"] == "us-east-1"
                 assert result["scoring_method"] == "weighted"
 
-    def test_weighted_recommend_gpu_count_passed_to_placement_score(self):
-        """gpu_count should be passed as target_capacity to spot placement score."""
-        from cli.capacity import MultiRegionCapacityChecker, RegionCapacity
-
-        with patch("cli.capacity.multi_region.get_config") as mock_config:
-            mock_config.return_value = MagicMock()
-
-            checker = MultiRegionCapacityChecker()
-
-            capacities = [
-                RegionCapacity(region="us-east-1", recommendation_score=0.0),
-            ]
-
-            with (
-                patch.object(checker, "get_all_regions_capacity", return_value=capacities),
-                patch("cli.capacity.multi_region.CapacityChecker") as MockCapChecker,
-            ):
-                mock_cap = MagicMock()
-                MockCapChecker.return_value = mock_cap
-                mock_cap.get_spot_placement_score.return_value = {"regional": 5}
-                mock_cap.get_spot_price_history.return_value = []
-                mock_cap.get_on_demand_price.return_value = None
-                mock_cap.get_capacity_block_trend.return_value = 0.0
-
-                checker.recommend_region_for_job(
-                    instance_type="p4d.24xlarge",
-                    gpu_count=8,
-                )
-
-                # Verify target_capacity was set to gpu_count
-                mock_cap.get_spot_placement_score.assert_called_once_with(
-                    "p4d.24xlarge", "us-east-1", target_capacity=8
-                )
-
 
 class TestEstimateOnDemandCapacityWithoutDryRun:
     """Tests for the updated _estimate_on_demand_capacity without dry-run."""
@@ -3660,16 +3679,14 @@ class TestGatherCapacityDataEnhanced:
                     "all_regions": [],
                 }
                 mock_cap.get_spot_placement_score.return_value = {}
-                mock_cap.get_spot_price_history.return_value = []
+                mock_cap.get_spot_price_history_and_series.return_value = ([], {})
                 mock_cap.get_on_demand_price.return_value = None
                 mock_cap.check_instance_available_in_region.return_value = True
                 mock_cap.list_capacity_reservations.return_value = []
                 mock_cap.list_capacity_block_offerings.return_value = []
                 mock_cap.get_capacity_block_trend.return_value = 0.5
 
-                mock_ec2 = MagicMock()
-                mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
-                mock_session.client.return_value = mock_ec2
+                mock_session.client.return_value = MagicMock()
 
                 data = advisor.gather_capacity_data(
                     instance_types=["g5.xlarge"],
@@ -3709,24 +3726,17 @@ class TestGatherCapacityDataEnhanced:
                 mock_cap.get_spot_placement_score.return_value = {"regional": 7}
                 from cli.capacity import SpotPriceInfo
 
-                mock_cap.get_spot_price_history.return_value = [
-                    SpotPriceInfo("g5.xlarge", "us-east-1a", 0.50, 0.48, 0.40, 0.55, 0.9)
-                ]
+                # One sweep of the window serves the summary and the trend.
+                mock_cap.get_spot_price_history_and_series.return_value = (
+                    [SpotPriceInfo("g5.xlarge", "us-east-1a", 0.50, 0.48, 0.40, 0.55, 0.9)],
+                    {"us-east-1a": [0.50, 0.48, 0.45]},
+                )
                 mock_cap.get_on_demand_price.return_value = 1.00
                 mock_cap.check_instance_available_in_region.return_value = True
                 mock_cap.list_capacity_reservations.return_value = []
                 mock_cap.list_capacity_block_offerings.return_value = []
                 mock_cap.get_capacity_block_trend.return_value = 0.0
-
-                # Mock raw spot price history for trend analysis
                 mock_ec2 = MagicMock()
-                mock_ec2.describe_spot_price_history.return_value = {
-                    "SpotPriceHistory": [
-                        {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.50"},
-                        {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.48"},
-                        {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.45"},
-                    ]
-                }
                 mock_session.client.return_value = mock_ec2
 
                 data = advisor.gather_capacity_data(
@@ -3778,7 +3788,7 @@ def _setup_advisor_mocks(advisor):
         recommendation_score=0,
     )
     cap.get_spot_placement_score.return_value = {}
-    cap.get_spot_price_history.return_value = []
+    cap.get_spot_price_history_and_series.return_value = ([], {})
     cap.get_on_demand_price.return_value = 1.0
     cap.check_instance_available_in_region.return_value = True
     cap.list_capacity_reservations.return_value = []
@@ -3855,15 +3865,20 @@ class TestAdvisorGatherExceptions:
         assert advisor.config.default_region in data["regions_analyzed"]
         assert len(data["instance_types_analyzed"]) > 1
 
-    def test_price_trend_exception(self):
+    def test_price_history_exception(self):
+        """The summary and the trend come from one sweep; its failure is a gap."""
         advisor = _make_advisor_with_mocks()
         _setup_advisor_mocks(advisor)
-        advisor._session = MagicMock()
-        mock_ec2 = MagicMock()
-        mock_ec2.describe_spot_price_history.side_effect = RuntimeError("fail")
-        advisor._session.client.return_value = mock_ec2
+        advisor._capacity_checker.get_spot_price_history_and_series.side_effect = RuntimeError(
+            "fail"
+        )
         data = advisor.gather_capacity_data(instance_types=["g4dn.xlarge"], regions=["us-east-1"])
-        assert "g4dn.xlarge" in data["spot_data"]
+        entry = data["spot_data"]["g4dn.xlarge"]["us-east-1"]
+        assert entry["prices"] == []
+        assert "price_trends" not in entry
+        assert ("spot price history", "RuntimeError") in {
+            (gap["source"], gap["error"]) for gap in data["data_gaps"]
+        }
 
 
 class TestAdvisorGetRecommendationErrors:
@@ -3972,3 +3987,162 @@ class TestAdvisorGetRecommendationErrors:
             pytest.raises(RuntimeError, match="Failed to get AI recommendation"),
         ):
             advisor.get_recommendation()
+
+
+@pytest.mark.parametrize(
+    ("gpu_count", "gpus_per_instance", "expected_instances"),
+    [
+        (8, 8, 1),  # one p4d.24xlarge holds 8 GPUs
+        (16, 8, 2),
+        (12, 8, 2),  # rounded up to whole instances
+        (0, 8, 1),  # no GPU count asked for
+        (8, None, 1),  # the type's GPU count is unknown in the Region
+    ],
+)
+def test_weighted_recommend_converts_gpu_count_to_instances_for_placement_score(
+    gpu_count, gpus_per_instance, expected_instances
+):
+    """Spot Placement Score's TargetCapacity counts instances ("units"), so
+    asking for 8 GPUs of p4d.24xlarge must score 1 instance, not 8."""
+    from cli.capacity import MultiRegionCapacityChecker, RegionCapacity
+
+    with patch("cli.capacity.multi_region.get_config") as mock_config:
+        mock_config.return_value = MagicMock()
+
+        checker = MultiRegionCapacityChecker()
+
+        capacities = [
+            RegionCapacity(region="us-east-1", recommendation_score=0.0),
+        ]
+
+        with (
+            patch.object(checker, "get_all_regions_capacity", return_value=capacities),
+            patch("cli.capacity.multi_region.CapacityChecker") as MockCapChecker,
+        ):
+            mock_cap = MagicMock()
+            MockCapChecker.return_value = mock_cap
+            mock_cap.gpus_per_instance.return_value = gpus_per_instance
+            mock_cap.get_spot_placement_score.return_value = {"regional": 5}
+            mock_cap.get_spot_price_history.return_value = []
+            mock_cap.get_on_demand_price.return_value = None
+            mock_cap.get_capacity_block_trend.return_value = 0.0
+
+            result = checker.recommend_region_for_job(
+                instance_type="p4d.24xlarge",
+                gpu_count=gpu_count,
+            )
+
+            mock_cap.get_spot_placement_score.assert_called_once_with(
+                "p4d.24xlarge", "us-east-1", target_capacity=expected_instances
+            )
+            assert result["all_regions"][0]["spot_target_instances"] == expected_instances
+
+
+def _weighted_checker_with(capacities, offered, *, failing=()):
+    """A MultiRegionCapacityChecker over ``capacities`` whose EC2 offering
+    check answers ``offered`` (a set of Regions) or raises for ``failing``."""
+    from cli.capacity import CapacityCheckError, MultiRegionCapacityChecker
+
+    with patch("cli.capacity.multi_region.get_config") as mock_config:
+        mock_config.return_value = MagicMock(default_region="us-east-1")
+        checker = MultiRegionCapacityChecker()
+
+    cap_checker = MagicMock()
+
+    def is_offered(instance_type, region):
+        if region in failing:
+            raise CapacityCheckError(f"Could not check instance availability in {region}")
+        return region in offered
+
+    cap_checker.check_instance_available_in_region.side_effect = is_offered
+    cap_checker.gpus_per_instance.return_value = 8
+    cap_checker.get_spot_placement_score.return_value = {}
+    cap_checker.get_spot_price_history.return_value = []
+    cap_checker.get_on_demand_price.return_value = None
+    cap_checker.get_capacity_block_trend.return_value = 0.0
+    return checker, cap_checker
+
+
+def test_weighted_recommend_never_picks_a_region_that_does_not_offer_the_type():
+    """An idle Region without p5 used to outrank a busy Region that sells it,
+    with a reason that read like an endorsement."""
+    from cli.capacity import RegionCapacity
+
+    capacities = [
+        RegionCapacity(region="us-east-1", queue_depth=30, gpu_utilization=90.0),
+        RegionCapacity(region="eu-west-3"),
+    ]
+    for cap in capacities:
+        cap.telemetry_status = "complete"
+    checker, cap_checker = _weighted_checker_with(capacities, offered={"us-east-1"})
+    with (
+        patch.object(checker, "get_all_regions_capacity", return_value=capacities),
+        patch("cli.capacity.multi_region.CapacityChecker", return_value=cap_checker),
+    ):
+        result = checker.recommend_region_for_job(instance_type="p5.48xlarge")
+
+    assert result["region"] == "us-east-1"
+    assert [entry["region"] for entry in result["all_regions"]] == ["us-east-1"]
+    assert result["ineligible_regions"] == [
+        {"region": "eu-west-3", "reason": "p5.48xlarge is not offered in eu-west-3"}
+    ]
+
+
+def test_weighted_recommend_fails_when_no_region_offers_the_type():
+    from cli.capacity import NoEligibleRegionError, RegionCapacity
+
+    capacities = [RegionCapacity(region="eu-west-3"), RegionCapacity(region="sa-east-1")]
+    checker, cap_checker = _weighted_checker_with(capacities, offered=set())
+    with (
+        patch.object(checker, "get_all_regions_capacity", return_value=capacities),
+        patch("cli.capacity.multi_region.CapacityChecker", return_value=cap_checker),
+        pytest.raises(
+            NoEligibleRegionError, match=r"No deployed Region offers p5\.48xlarge"
+        ) as exc,
+    ):
+        checker.recommend_region_for_job(instance_type="p5.48xlarge")
+
+    assert [entry["region"] for entry in exc.value.ineligible] == ["eu-west-3", "sa-east-1"]
+
+
+def test_weighted_recommend_ranks_an_unverified_offering_after_confirmed_ones():
+    """A failed offering check is a missing signal, not "offered"."""
+    from cli.capacity import RegionCapacity
+
+    capacities = [
+        RegionCapacity(region="us-east-1", queue_depth=30, gpu_utilization=90.0),
+        RegionCapacity(region="eu-west-3"),
+    ]
+    for cap in capacities:
+        cap.telemetry_status = "complete"
+    checker, cap_checker = _weighted_checker_with(
+        capacities, offered={"us-east-1"}, failing={"eu-west-3"}
+    )
+    with (
+        patch.object(checker, "get_all_regions_capacity", return_value=capacities),
+        patch("cli.capacity.multi_region.CapacityChecker", return_value=cap_checker),
+    ):
+        result = checker.recommend_region_for_job(instance_type="p5.48xlarge")
+
+    assert [entry["region"] for entry in result["all_regions"]] == ["us-east-1", "eu-west-3"]
+    unverified = result["all_regions"][1]
+    assert unverified["offered"] is None
+    assert "Could not check instance availability in eu-west-3" in unverified["telemetry_errors"][0]
+    assert result["all_regions"][0]["offered"] is True
+
+
+def test_weighted_recommend_checks_the_canonical_type_for_an_alias():
+    from cli.capacity import RegionCapacity
+
+    capacities = [RegionCapacity(region="us-east-1")]
+    checker, cap_checker = _weighted_checker_with(capacities, offered={"us-east-1"})
+    with (
+        patch.object(checker, "get_all_regions_capacity", return_value=capacities),
+        patch("cli.capacity.multi_region.CapacityChecker", return_value=cap_checker),
+    ):
+        result = checker.recommend_region_for_job(instance_type="p6-b200")
+
+    cap_checker.check_instance_available_in_region.assert_called_once_with(
+        "p6-b200.48xlarge", "us-east-1"
+    )
+    assert result["instance_type"] == "p6-b200.48xlarge"

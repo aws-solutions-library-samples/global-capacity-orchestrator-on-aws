@@ -153,6 +153,7 @@ def test_create_failure_blocks_dependent_pods_and_reports_error(monitor):
     stays closed, the endpoint stays in ``creating`` with a create-failure
     error, and no dependent pod is materialized.
     """
+    monitor.core_v1.read_namespaced_service.side_effect = ApiException(status=404)
     monitor.core_v1.create_namespaced_service.side_effect = ApiException(
         status=500, reason="Internal Server Error"
     )

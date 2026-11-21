@@ -36,7 +36,8 @@ Kubernetes, and is resolved at the cluster's minor (`-kubernetes-version
 than kubeconform's floating `master` default, so a field the deployed API
 server does not know yet fails here. CRDs this repo depends on (Karpenter `NodePool`, the AWS Load
 Balancer Controller Gateway API configuration CRDs, Kueue, KEDA) are resolved
-via the community datreeio/CRDs-catalog as a second `-schema-location`. Two CRDs used in
+via the community datreeio/CRDs-catalog, read at the commit `CRD_CATALOG_COMMIT`
+pins, as a second `-schema-location`. Two CRDs used in
 `examples/` aren't in that catalog yet (KubeRay's `RayCluster`, Volcano's
 `Job`) — those are validated for YAML-shape only (via the structural check)
 and explicitly `-skip`ped in the schema pass so kubeconform doesn't report a
@@ -200,8 +201,17 @@ def kubernetes_schema_version(cdk_json: Path = CDK_JSON_PATH) -> str:
 # KEDA, and hundreds of other CRDs — see https://github.com/datreeio/CRDs-catalog.
 # kubeconform tries -schema-location entries in order and stops at the first
 # match, so this is consulted only when a Kind isn't a built-in K8s resource.
+#
+# The catalog is read at one commit of its main branch, never at main itself,
+# so a schema upstream adds, tightens or drops changes this gate's verdict
+# only when the pin moves. Its last release is v0.0.12 (2023-07), older than
+# schemas this repository needs, so a main commit is the pin. The monthly
+# dependency scan (CI tooling) reports when main moves past it; to move it, set
+# CRD_CATALOG_COMMIT to main's head and run this script.
+CRD_CATALOG_REPOSITORY = "datreeio/CRDs-catalog"
+CRD_CATALOG_COMMIT = "784ec895547a36e548e6810b41f27baade3a0890"
 CRD_CATALOG_SCHEMA_LOCATION = (
-    "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/"
+    f"https://raw.githubusercontent.com/{CRD_CATALOG_REPOSITORY}/{CRD_CATALOG_COMMIT}/"
     "{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
 )
 
@@ -228,6 +238,14 @@ _STRUCTURAL_STUBS: dict[str, str] = {
     "{{PCS_RESTAPI_CIDR}}": "10.0.0.0/16",
     "{{ARGOCD_SOURCE_REPOS}}": '["https://github.com/example/*"]',
     "{{ARGOCD_GITOPS_SYNC_POLICY}}": '{"automated": {"selfHeal": true, "prune": false}}',
+    # The platform ALB health check in post-helm-gateway.yaml: bare integers
+    # the TargetGroupConfiguration CRD bounds (interval 5-300, timeout 2-120,
+    # thresholds 2-10), so they render to the shipped defaults of
+    # gco/gateway_health_check_config.py rather than the generic integer 1.
+    "{{GATEWAY_HEALTH_CHECK_INTERVAL_SECONDS}}": "15",
+    "{{GATEWAY_HEALTH_CHECK_TIMEOUT_SECONDS}}": "5",
+    "{{GATEWAY_HEALTHY_THRESHOLD_COUNT}}": "2",
+    "{{GATEWAY_UNHEALTHY_THRESHOLD_COUNT}}": "2",
 }
 
 # Placeholders that sit in a bare (unquoted) numeric scalar position — e.g.
@@ -262,6 +280,9 @@ _QUANTITY_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
         "{{QUOTA_MAX_CPU}}",
         "{{QUOTA_MAX_MEMORY}}",
         "{{QUOTA_MAX_GPU}}",
+        # The default ClusterQueue's vpc.amazonaws.com/efa quota
+        # (gco.resource_governance.kueue_efa_quota).
+        "{{QUOTA_MAX_EFA}}",
         # The default ClusterQueue's eks.amazonaws.com/nitro-sandbox quota,
         # one slot per pod (the namespace pod quota).
         "{{QUOTA_MAX_PODS}}",
@@ -270,6 +291,7 @@ _QUANTITY_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
         "{{HYPERPOD_QUEUE_MAX_CPU}}",
         "{{HYPERPOD_QUEUE_MAX_MEMORY}}",
         "{{HYPERPOD_QUEUE_MAX_GPU}}",
+        "{{HYPERPOD_QUEUE_MAX_EFA}}",
         # The Slurm accounting database's volumeClaimTemplate size
         # (29-slurm-accounting-db.yaml).
         "{{SLURM_ACCOUNTING_DB_STORAGE_SIZE}}",

@@ -338,7 +338,10 @@ class TestMultiRegionCapacity:
 
                 assert capacity.region == "us-east-1"
                 assert capacity.queue_depth == 5
-                assert capacity.running_jobs == 2
+                # In-flight messages are not running jobs; with no ActiveJobs
+                # datapoints the count is unknown.
+                assert capacity.running_jobs == 0
+                assert "jobs" in capacity.unavailable_signals
 
     def test_recommend_region_for_job(self, config):
         """Test region recommendation."""

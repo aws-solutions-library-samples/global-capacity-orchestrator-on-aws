@@ -49,8 +49,8 @@ from kubernetes.client.exceptions import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-16T21:53:25Z
-# Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298
+# Generated at (UTC): 2026-11-19T06:05:34Z
+# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png``)
@@ -906,13 +906,9 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ("v1", "PersistentVolume", None, "gco-fsx-pv-system"),
         ("storage.k8s.io/v1", "StorageClass", None, "fsx-sc"),
     ),
-    ("{{VALKEY_ENDPOINT}}", False): tuple(
-        ("v1", "ConfigMap", namespace, "gco-valkey")
-        for namespace in ("gco-system", "gco-jobs", "gco-inference")
-    ),
-    ("{{AURORA_PGVECTOR_ENDPOINT}}", False): tuple(
-        ("v1", "ConfigMap", namespace, "gco-aurora-pgvector")
-        for namespace in ("gco-system", "gco-jobs", "gco-inference")
+    ("{{VALKEY_ENDPOINT}}", False): (("v1", "ConfigMap", "gco-jobs", "gco-valkey"),),
+    ("{{AURORA_PGVECTOR_ENDPOINT}}", False): (
+        ("v1", "ConfigMap", "gco-jobs", "gco-aurora-pgvector"),
     ),
     ("{{VECTOR_STORE_TABLE_NAME}}", False): tuple(
         ("v1", "ConfigMap", namespace, "gco-vector-store")
@@ -1164,8 +1160,9 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     ),
     # Self-managed Argo CD (cdk.json helm.argocd; post-helm-argocd-access.yaml).
     # Bindings before the roles they reference. The AppProject is normally
-    # gone already: the helm installer deletes every argoproj.io object before
-    # it uninstalls the chart (the CRDs stay, so this delete is a clean no-op).
+    # gone already: the helm installer deletes every argoproj.io object in
+    # argocd before it uninstalls the chart (the CRDs stay, so this delete is a
+    # clean no-op).
     ("{{ARGOCD_ENABLED}}", True): (
         ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-jobs", "gco-argocd-deploy"),
         ("rbac.authorization.k8s.io/v1", "Role", "gco-jobs", "gco-argocd-deploy"),
@@ -1248,11 +1245,34 @@ _FEATURE_RESOURCE_INVENTORY: dict[
 # valid, and is re-issued by the new issuer as soon as its issuerRef changes.
 # On a fresh cluster the cert-manager CRDs do not exist yet in the base pass,
 # which the sweep treats as already absent.
+#
+# gco-ingress (gco-system), IngressClass alb, IngressClassParams alb: the ALB
+# entry point of v0.1.0 through v4.1.0 (10-ingressclass.yaml, 11-ingress.yaml),
+# an internet-facing EKS Auto Mode ALB in the `gco` group routing to the API
+# Services on port 80. v5.0.0 replaced it with the Gateway API entry point
+# (post-helm-gateway.yaml) and the Services now publish only 443, so on a
+# cluster updated in place the old ALB stays up with no valid backend. Deleting
+# the Ingress lets EKS Auto Mode delete that load balancer. The order is the
+# one the EKS Auto Mode guide gives for removing an ALB: the Ingress, then the
+# IngressClass it names, then the IngressClassParams the class references.
+# IngressClassParams is an EKS Auto Mode API; where it does not exist the
+# sweep treats the object as already absent.
 _LEGACY_REMOVED_RESOURCES: tuple[tuple[str, str, str | None, str], ...] = (
     ("apps/v1", "DaemonSet", "kube-system", "nvidia-device-plugin-daemonset"),
     ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-vpc-endpoint-egress"),
     ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-ray-cluster-internal"),
     ("cert-manager.io/v1", "Issuer", "gco-system", "gco-api-selfsigned"),
+    # The Valkey and Aurora connection ConfigMaps releases up to v8.23.0 also
+    # published where no egress rule reaches either endpoint
+    # (23-storage-valkey.yaml, 24-storage-aurora-pgvector.yaml).
+    *(
+        ("v1", "ConfigMap", namespace, name)
+        for namespace in ("gco-system", "gco-inference")
+        for name in ("gco-valkey", "gco-aurora-pgvector")
+    ),
+    ("networking.k8s.io/v1", "Ingress", "gco-system", "gco-ingress"),
+    ("networking.k8s.io/v1", "IngressClass", None, "alb"),
+    ("eks.amazonaws.com/v1", "IngressClassParams", None, "alb"),
 )
 
 
@@ -1270,7 +1290,7 @@ def _delete_exact_resources(
     if not targets:
         return result
 
-    dynamic_client = dynamic.DynamicClient(client.ApiClient())
+    dynamic_client = dynamic.DynamicClient(_api_client())
     delete_options = client.V1DeleteOptions(propagation_policy="Background")
     for api_version, kind, namespace, name in targets:
         identifier = f"{api_version}/{kind}/{namespace or '<cluster>'}/{name}"
@@ -1379,36 +1399,83 @@ def send_response(
 
 
 def get_eks_token(cluster_name: str, region: str) -> str:
-    """Generate EKS authentication token using STS presigned URL."""
-    from botocore.signers import RequestSigner
+    """Generate EKS authentication token using STS presigned URL.
 
-    # Create STS client
+    The URL is the STS client's resolved endpoint, signed by that client's own
+    signer, so host and signing region always match the partition: in aws-cn
+    the host is ``sts.<region>.amazonaws.com.cn``, and a hand-built
+    ``.amazonaws.com`` host there yields a token EKS rejects.
+    """
     session = boto3.Session()
     sts_client = session.client("sts", region_name=region)
-    service_id = sts_client.meta.service_model.service_id
+    sts_endpoint = str(sts_client.meta.endpoint_url).rstrip("/")
 
-    # Create request signer
-    signer = RequestSigner(
-        service_id, region, "sts", "v4", session.get_credentials(), session.events
-    )
-
-    # Build the presigned URL for GetCallerIdentity
-    params = {
-        "method": "GET",
-        "url": f"https://sts.{region}.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15",
-        "body": {},
-        "headers": {"x-k8s-aws-id": cluster_name},
-        "context": {},
-    }
-
-    # Generate presigned URL (valid for 60 seconds)
-    url = signer.generate_presigned_url(
-        params, region_name=region, expires_in=60, operation_name=""
+    # Presigned GetCallerIdentity, valid for 60 seconds, with the cluster name
+    # in the signed x-k8s-aws-id header.
+    url = sts_client._request_signer.generate_presigned_url(
+        request_dict={
+            "method": "GET",
+            "url": f"{sts_endpoint}/?Action=GetCallerIdentity&Version=2011-06-15",
+            "body": {},
+            "headers": {"x-k8s-aws-id": cluster_name},
+            "context": {},
+        },
+        operation_name="GetCallerIdentity",
+        expires_in=60,
     )
 
     # Encode as base64 and create the k8s-aws-v1 token
     token_b64 = base64.urlsafe_b64encode(url.encode("utf-8")).decode("utf-8").rstrip("=")
     return f"k8s-aws-v1.{token_b64}"
+
+
+#: (connect, read) seconds for every Kubernetes API call that does not set its
+#: own ``_request_timeout``, the 30-second request bound the helm installer's
+#: kubectl calls use. Without one the client passes urllib3 ``timeout=None``,
+#: and urllib3 applies it to the socket (``settimeout(None)`` overrides
+#: ``socket.setdefaulttimeout``), so a call could block forever: one stalled
+#: API-server connection held the invocation until Lambda's 15-minute limit,
+#: and the 5-minute gateway teardown task, which has no retry, failed with it.
+_K8S_REQUEST_TIMEOUT_SECONDS = (10.0, 30.0)
+
+
+class _BoundedApiClient(client.ApiClient):
+    """An ApiClient whose calls default to ``_K8S_REQUEST_TIMEOUT_SECONDS``.
+
+    Every typed API method and the dynamic client, discovery included, send
+    their requests through ``call_api``.
+    """
+
+    def call_api(
+        self,
+        method: Any,
+        url: Any,
+        header_params: Any = None,
+        body: Any = None,
+        post_params: Any = None,
+        _request_timeout: Any = None,
+    ) -> Any:
+        return super().call_api(
+            method,
+            url,
+            header_params,
+            body,
+            post_params,
+            _request_timeout=(
+                _K8S_REQUEST_TIMEOUT_SECONDS if _request_timeout is None else _request_timeout
+            ),
+        )
+
+
+def _api_client() -> client.ApiClient:
+    """The ApiClient ``configure_k8s_client`` installed, or a new bounded one.
+
+    ``ApiClient.get_default`` makes a plain, unbounded client when none is
+    installed, as for a caller that loaded a kubeconfig itself (the kind CI
+    jobs that call ``_delete_exact_resources``).
+    """
+    installed = client.ApiClient.get_default()
+    return installed if isinstance(installed, _BoundedApiClient) else _BoundedApiClient()
 
 
 def configure_k8s_client(cluster_name: str, region: str) -> None:
@@ -1424,13 +1491,11 @@ def configure_k8s_client(cluster_name: str, region: str) -> None:
     configuration.host = cluster["endpoint"]
     configuration.verify_ssl = True
 
-    # Set connection timeouts (important for Lambda!)
+    # The invocation's calls are sequential, so one connection serves them.
+    # urllib3 retries a call that cannot connect, and an idempotent one whose
+    # read fails or times out (_K8S_REQUEST_TIMEOUT_SECONDS), up to three times.
     configuration.connection_pool_maxsize = 1
     configuration.retries = 3
-    # Set socket timeout to 30 seconds
-    import socket
-
-    socket.setdefaulttimeout(30)
 
     # Decode and write CA certificate to temp file using secure method
     ca_cert = base64.b64decode(cluster["certificateAuthority"]["data"])
@@ -1457,6 +1522,8 @@ def configure_k8s_client(cluster_name: str, region: str) -> None:
     )
 
     client.Configuration.set_default(configuration)
+    # Typed APIs built without an api_client use this one.
+    client.ApiClient.set_default(_BoundedApiClient(configuration))
 
 
 def restart_deployments(namespace: str, deployment_names: list[str]) -> dict[str, Any]:
@@ -2998,7 +3065,7 @@ def validate_manifests(
     }
 
     configure_k8s_client(cluster_name, region)
-    dynamic_client = dynamic.DynamicClient(client.ApiClient())
+    dynamic_client = dynamic.DynamicClient(_api_client())
     resource_cache: dict[tuple[str, str], Any] = {}
     validated_resources: list[dict[str, str]] = []
     failures: list[str] = []

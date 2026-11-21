@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
-        <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
-        <meta name="gco-flow-digest" content="351eeb42d9565cc3">
+        <meta name="gco-generated-at" content="2026-11-19T00:26:15Z">
+        <meta name="gco-source-commit" content="b6581899649d40769798e294f2ea42237f493c03">
+        <meta name="gco-flow-digest" content="f848a73d7c5b1a44">
         <title>MCP local-data path boundary (pinned root, traversal and symlink-escape rejection)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,96 +208,96 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2010=>operation: "Resolve ``local_path`` beneath the configured local-data root.\n\n    Relative paths (including short forms such as ``weights`` and\n    ``./weights``) resolve beneath ``GCO_STORAGE_LOCAL_ROOT`` rather than the\n    server process's working directory. Lexical traversal and realpath symlink\n    escapes are rejected. Existing source identity is captured so short upload\n    tools can verify it again while building a private no-follow snapshot.\n    "
-op2012=>operation: configured_root = os.environ.get(_LOCAL_ROOT_ENV, '').strip()
-cond2015=>operation: raise ValueError(f'{_LOCAL_ROOT_ENV} must be set before enabling local data access') if  not configured_root
-cond2026=>operation: raise ValueError('Local data access requires descriptor-relative no-follow filesystem support') if  os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or (not hasattr(os, 'O_DIRECTORY'))
-op2039=>operation: root = Path(configured_root).expanduser().resolve(strict=True)
-cond2036=>condition: exception raised?
-cond2041=>condition: except OSError as exc
-cond2046=>operation: raise if  exc.errno != errno.ELOOP
-sub2056=>subroutine: raise ValueError(f'{_LOCAL_ROOT_ENV} could not be resolved safely') from exc
-cond2058=>condition: except RuntimeError as exc
-sub2062=>subroutine: raise ValueError(f'{_LOCAL_ROOT_ENV} could not be resolved safely') from exc
-op2067=>operation: root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)
-op2069=>operation: root_fd = os.open(root, root_flags)
-op2074=>operation: root_stat = os.fstat(root_fd)
-cond2071=>condition: exception raised?
-sub2080=>subroutine: os.close(root_fd)
-op2082=>operation: supplied = Path(local_path).expanduser()
-op2084=>operation: candidate = supplied if supplied.is_absolute() else root / supplied
-op2086=>operation: lexical = Path(os.path.abspath(candidate))
-op2091=>operation: relative = lexical.relative_to(root)
-cond2088=>condition: exception raised?
-cond2093=>condition: except ValueError as exc
-sub2097=>subroutine: raise ValueError(f'{purpose} path must stay within {_LOCAL_ROOT_ENV}: {local_path}') from exc
-op2105=>operation: resolved = lexical.resolve(strict=require_exists)
-cond2102=>condition: exception raised?
-cond2107=>condition: except FileNotFoundError as exc
-sub2111=>subroutine: raise ValueError(f'{purpose} source does not exist: {local_path}') from exc
-cond2113=>condition: except OSError as exc
-cond2118=>operation: raise if  exc.errno != errno.ELOOP
-sub2128=>subroutine: raise ValueError(f'{purpose} path could not be resolved safely: {local_path}') from exc
-cond2130=>condition: except RuntimeError as exc
-sub2134=>subroutine: raise ValueError(f'{purpose} path could not be resolved safely: {local_path}') from exc
-cond2140=>operation: raise ValueError(f'{purpose} path must stay within {_LOCAL_ROOT_ENV}: {local_path}') if  not resolved.is_relative_to(root)
-op2150=>operation: source_stat: os.stat_result | None
-op2155=>operation: source_stat = os.stat(resolved, follow_symlinks=False)
-cond2152=>condition: exception raised?
-cond2157=>condition: except FileNotFoundError
-cond2162=>operation: raise ValueError(f'{purpose} source does not exist: {local_path}') from None if  require_exists
-op2172=>operation: source_stat = None
-cond2178=>operation: raise ValueError(f'{purpose} source must be a regular file or directory: {local_path}') if  source_stat is not None and (not (stat.S_ISREG(source_stat.st_mode) or stat.S_ISDIR(source_stat.st_mode)))
-io2191=>inputoutput: output: LocalPathContract(local_argument=str(relative) if relative.parts else '.', resolved_path=resolved, root=root, device=root_stat.st_dev, inode=root_stat.st_ino, source_device=source_stat.st_dev if source_stat is not None else None, source_inode=source_stat.st_ino if source_stat is not None else None, source_mode=source_stat.st_mode if source_stat is not None else None)
-e2189=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2850=>operation: "Resolve ``local_path`` beneath the configured local-data root.\n\n    Relative paths (including short forms such as ``weights`` and\n    ``./weights``) resolve beneath ``GCO_STORAGE_LOCAL_ROOT`` rather than the\n    server process's working directory. Lexical traversal and realpath symlink\n    escapes are rejected. Existing source identity is captured so short upload\n    tools can verify it again while building a private no-follow snapshot.\n    "
+op2852=>operation: configured_root = os.environ.get(_LOCAL_ROOT_ENV, '').strip()
+cond2855=>operation: raise ValueError(f'{_LOCAL_ROOT_ENV} must be set before enabling local data access') if  not configured_root
+cond2866=>operation: raise ValueError('Local data access requires descriptor-relative no-follow filesystem support') if  os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or (not hasattr(os, 'O_DIRECTORY'))
+op2879=>operation: root = Path(configured_root).expanduser().resolve(strict=True)
+cond2876=>condition: exception raised?
+cond2881=>condition: except OSError as exc
+cond2886=>operation: raise if  exc.errno != errno.ELOOP
+sub2896=>subroutine: raise ValueError(f'{_LOCAL_ROOT_ENV} could not be resolved safely') from exc
+cond2898=>condition: except RuntimeError as exc
+sub2902=>subroutine: raise ValueError(f'{_LOCAL_ROOT_ENV} could not be resolved safely') from exc
+op2907=>operation: root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)
+op2909=>operation: root_fd = os.open(root, root_flags)
+op2914=>operation: root_stat = os.fstat(root_fd)
+cond2911=>condition: exception raised?
+sub2920=>subroutine: os.close(root_fd)
+op2922=>operation: supplied = Path(local_path).expanduser()
+op2924=>operation: candidate = supplied if supplied.is_absolute() else root / supplied
+op2926=>operation: lexical = Path(os.path.abspath(candidate))
+op2931=>operation: relative = lexical.relative_to(root)
+cond2928=>condition: exception raised?
+cond2933=>condition: except ValueError as exc
+sub2937=>subroutine: raise ValueError(f'{purpose} path must stay within {_LOCAL_ROOT_ENV}: {local_path}') from exc
+op2945=>operation: resolved = lexical.resolve(strict=require_exists)
+cond2942=>condition: exception raised?
+cond2947=>condition: except FileNotFoundError as exc
+sub2951=>subroutine: raise ValueError(f'{purpose} source does not exist: {local_path}') from exc
+cond2953=>condition: except OSError as exc
+cond2958=>operation: raise if  exc.errno != errno.ELOOP
+sub2968=>subroutine: raise ValueError(f'{purpose} path could not be resolved safely: {local_path}') from exc
+cond2970=>condition: except RuntimeError as exc
+sub2974=>subroutine: raise ValueError(f'{purpose} path could not be resolved safely: {local_path}') from exc
+cond2980=>operation: raise ValueError(f'{purpose} path must stay within {_LOCAL_ROOT_ENV}: {local_path}') if  not resolved.is_relative_to(root)
+op2990=>operation: source_stat: os.stat_result | None
+op2995=>operation: source_stat = os.stat(resolved, follow_symlinks=False)
+cond2992=>condition: exception raised?
+cond2997=>condition: except FileNotFoundError
+cond3002=>operation: raise ValueError(f'{purpose} source does not exist: {local_path}') from None if  require_exists
+op3012=>operation: source_stat = None
+cond3018=>operation: raise ValueError(f'{purpose} source must be a regular file or directory: {local_path}') if  source_stat is not None and (not (stat.S_ISREG(source_stat.st_mode) or stat.S_ISDIR(source_stat.st_mode)))
+io3031=>inputoutput: output: LocalPathContract(local_argument=str(relative) if relative.parts else '.', resolved_path=resolved, root=root, device=root_stat.st_dev, inode=root_stat.st_ino, source_device=source_stat.st_dev if source_stat is not None else None, source_inode=source_stat.st_ino if source_stat is not None else None, source_mode=source_stat.st_mode if source_stat is not None else None)
+e3029=>end: end function return
 
-op2010->op2012
-op2012->cond2015
-cond2015->cond2026
-cond2026->op2039
-op2039->cond2036
-cond2036(yes)->cond2041
-cond2041(yes)->cond2046
-cond2046->sub2056
-cond2041(no)->cond2058
-cond2058(yes)->sub2062
-cond2058(no)->op2067
-op2067->op2069
-op2069->op2074
-op2074->cond2071
-cond2071(yes)->sub2080
-sub2080->op2082
-op2082->op2084
-op2084->op2086
-op2086->op2091
-op2091->cond2088
-cond2088(yes)->cond2093
-cond2093(yes)->sub2097
-cond2093(no)->op2105
-op2105->cond2102
-cond2102(yes)->cond2107
-cond2107(yes)->sub2111
-cond2107(no)->cond2113
-cond2113(yes)->cond2118
-cond2118->sub2128
-cond2113(no)->cond2130
-cond2130(yes)->sub2134
-cond2130(no)->cond2140
-cond2140->op2150
-op2150->op2155
-op2155->cond2152
-cond2152(yes)->cond2157
-cond2157(yes)->cond2162
-cond2162->op2172
-op2172->cond2178
-cond2178->io2191
-io2191->e2189
-cond2157(no)->cond2178
-cond2152(no)->cond2178
-cond2102(no)->cond2140
-cond2088(no)->op2105
-cond2071(no)->sub2080
-cond2036(no)->op2067
+op2850->op2852
+op2852->cond2855
+cond2855->cond2866
+cond2866->op2879
+op2879->cond2876
+cond2876(yes)->cond2881
+cond2881(yes)->cond2886
+cond2886->sub2896
+cond2881(no)->cond2898
+cond2898(yes)->sub2902
+cond2898(no)->op2907
+op2907->op2909
+op2909->op2914
+op2914->cond2911
+cond2911(yes)->sub2920
+sub2920->op2922
+op2922->op2924
+op2924->op2926
+op2926->op2931
+op2931->cond2928
+cond2928(yes)->cond2933
+cond2933(yes)->sub2937
+cond2933(no)->op2945
+op2945->cond2942
+cond2942(yes)->cond2947
+cond2947(yes)->sub2951
+cond2947(no)->cond2953
+cond2953(yes)->cond2958
+cond2958->sub2968
+cond2953(no)->cond2970
+cond2970(yes)->sub2974
+cond2970(no)->cond2980
+cond2980->op2990
+op2990->op2995
+op2995->cond2992
+cond2992(yes)->cond2997
+cond2997(yes)->cond3002
+cond3002->op3012
+op3012->cond3018
+cond3018->io3031
+io3031->e3029
+cond2997(no)->cond3018
+cond2992(no)->cond3018
+cond2942(no)->cond2980
+cond2928(no)->op2945
+cond2911(no)->sub2920
+cond2876(no)->op2907
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -307,17 +307,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-29T11:35:23Z -->
-        <!-- Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657 -->
+        <!-- Generated at (UTC): 2026-11-19T00:26:15Z -->
+        <!-- Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-29T11:35:23Z">2026-09-29T11:35:23Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T00:26:15Z">2026-11-19T00:26:15Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
+            Source commit: <code>b6581899649d40769798e294f2ea42237f493c03</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>351eeb42d9565cc3</code>
+            Flow content SHA-256: <code>f848a73d7c5b1a44</code>
           </p>
           <div id="canvas"></div>
         </div>

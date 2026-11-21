@@ -9,6 +9,8 @@ from typing import Any
 
 import click
 
+from gco.fsx_lustre_config import FSX_DEFAULT_THROUGHPUT, FSX_THROUGHPUT_CHOICES
+
 from ..config import GCOConfig, _load_cdk_json
 from ..output import confirm, get_output_formatter, interactive_echo
 
@@ -380,7 +382,8 @@ def deploy_all_orchestrated(
     """Deploy all stacks in the correct order.
 
     Deploys in four phases:
-    1. Global stacks (gco-global, gco-api-gateway)
+    1. Global stacks (gco-global, then gco-analytics when enabled, then
+       gco-api-gateway, which imports the analytics stack's Studio wiring)
     2. Regional stacks (gco-us-east-1, etc.) - can be parallelized
     3. Regional API bridges (gco-regional-api-us-east-1, etc.) - depend on
        their regional stacks
@@ -481,7 +484,8 @@ def deploy_all_orchestrated(
     is_flag=True,
     help=(
         "Destroy only the regional API bridges and regional stacks; leave the global, "
-        "API Gateway and monitoring stacks standing (scale to zero workload Regions)"
+        "API Gateway, monitoring and analytics stacks standing (scale to zero workload "
+        "Regions)"
     ),
 )
 @click.option(
@@ -508,7 +512,8 @@ def destroy_all_orchestrated(
     1. Monitoring stack (<project>-monitoring)
     2. Regional API bridges (<project>-regional-api-<region>)
     3. Base regional stacks (<project>-<region>) - can be parallelized
-    4. Global stacks (<project>-api-gateway, <project>-global)
+    4. Global stacks (<project>-api-gateway, then <project>-analytics when
+       deployed, then <project>-global)
 
     Automatically retries up to 3 times (with 30s waits) if any stacks fail,
     which handles transient issues like orphaned resources during teardown.
@@ -528,9 +533,10 @@ def destroy_all_orchestrated(
     --keep-control-plane scales the deployment to zero workload Regions
     instead of removing it: only phases 2 and 3 run, after the monitoring
     stack is updated in place so it stops referencing the regional stacks.
-    The global, API Gateway and monitoring stacks — and the shared state they
-    own (DynamoDB tables, the model and cluster-shared buckets, the image
-    registry, EFS recovery points, cost reports) — stay. Data inside the
+    The global, API Gateway and monitoring stacks, the analytics stack when
+    deployed, and the shared state they own (DynamoDB tables, the model and
+    cluster-shared buckets, the image registry, EFS recovery points, cost
+    reports, Studio home directories and Cognito users) stay. Data inside the
     regional stacks (EFS and FSx file systems, Valkey, Aurora, in-cluster
     volumes) is still deleted, so back it up to the cluster-shared bucket
     first. Remove the Regions from cdk.json afterwards ('gco stacks regions
@@ -570,7 +576,7 @@ def destroy_all_orchestrated(
         )
         if keep_control_plane:
             # Only the workload tier goes; the control-plane stacks are updated
-            # in place (monitoring) or left alone (global, API Gateway).
+            # in place (monitoring) or left alone (global, API Gateway, analytics).
             stacks = list(ordered)
 
         if not yes:
@@ -596,6 +602,11 @@ def destroy_all_orchestrated(
                 confirm("\nAre you sure you want to destroy all stacks?", abort=True)
 
         total_stacks = len(stacks)
+        destroy_set = set(stacks)
+        # Every attempt re-runs the whole teardown and reports only what it
+        # reached before stopping, so a stack counts as destroyed when any
+        # attempt deleted it and the last one did not report it as failed.
+        destroyed: set[str] = set()
 
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
@@ -609,7 +620,7 @@ def destroy_all_orchestrated(
                     "Inspecting VPCs for resources that can block teardown "
                     "(orphaned ENIs, EKS security groups)..."
                 )
-                manager.cleanup_orphaned_network_interfaces()
+                manager.cleanup_orphaned_network_interfaces(keep_control_plane=keep_control_plane)
                 formatter.print_warning(
                     f"Attempt {attempt}/{max_attempts}: waiting 30 seconds before retrying..."
                 )
@@ -628,7 +639,7 @@ def destroy_all_orchestrated(
                 else:
                     formatter.print_error(f"  ✗ {stack_name} failed")
 
-            success, _successful, failed = manager.destroy_orchestrated(
+            success, successful, failed = manager.destroy_orchestrated(
                 force=True,
                 on_stack_start=on_start,
                 on_stack_complete=on_complete,
@@ -637,26 +648,44 @@ def destroy_all_orchestrated(
                 retain_volumes=retain_volumes,
                 keep_control_plane=keep_control_plane,
             )
+            destroyed.update(name for name in successful if name in destroy_set)
+            # With --keep-control-plane the monitoring stack is updated in
+            # place, not destroyed; when that update fails it is reported here.
+            not_updated = [name for name in failed if name not in destroy_set]
+            failed = [name for name in failed if name in destroy_set]
 
             if success:
                 break
 
             if attempt < max_attempts:
-                formatter.print_warning(f"{len(failed)} stack(s) failed: {', '.join(failed)}")
+                for name in not_updated:
+                    formatter.print_warning(
+                        f"Could not update {name} to stop referencing the regional stacks"
+                    )
+                if failed:
+                    formatter.print_warning(f"{len(failed)} stack(s) failed: {', '.join(failed)}")
 
+        destroyed.difference_update(failed)
         formatter.print_info("")
-        formatter.print_info(f"Destroyed: {total_stacks - len(failed)}/{total_stacks} stacks")
+        formatter.print_info(f"Destroyed: {len(destroyed)}/{total_stacks} stacks")
 
         if success and keep_control_plane:
             formatter.print_success(
-                "Workload tier destroyed; the global, API Gateway and monitoring stacks are "
-                "standing. Run 'gco stacks regions remove <region>' to make the scale-down "
+                "Workload tier destroyed; the global, API Gateway and monitoring stacks (and "
+                "the analytics stack, when deployed) are standing. Run "
+                "'gco stacks regions remove <region>' to make the scale-down "
                 "permanent, or 'gco stacks deploy-all' to recreate the regional stacks."
             )
         elif success:
             formatter.print_success("All stacks destroyed successfully")
         else:
-            formatter.print_error(f"Some stacks failed to destroy: {', '.join(failed)}")
+            for name in not_updated:
+                formatter.print_error(
+                    f"Could not update {name} to stop referencing the regional stacks, so "
+                    "the workload stacks still standing were not destroyed"
+                )
+            if failed:
+                formatter.print_error(f"Some stacks failed to destroy: {', '.join(failed)}")
             sys.exit(1)
 
     except Exception as e:
@@ -785,6 +814,28 @@ def stack_outputs(config: Any, stack_name: Any, region: Any) -> None:
         sys.exit(1)
 
 
+#: kubectl's wording when it never reached the API server (connect, DNS, TLS
+#: and request timeouts); kubectl prefixes most of them with the first phrase.
+_KUBECTL_CONNECT_FAILURES = (
+    "unable to connect to the server",
+    "i/o timeout",
+    "no route to host",
+    "connection refused",
+    "dial tcp",
+    "tls handshake timeout",
+    "context deadline exceeded",
+    "client.timeout exceeded",
+    "no such host",
+    "network is unreachable",
+)
+
+
+def _kubectl_could_not_connect(stderr: str) -> bool:
+    """Return whether a failed kubectl call never reached the API server."""
+    lowered = stderr.lower()
+    return any(phrase in lowered for phrase in _KUBECTL_CONNECT_FAILURES)
+
+
 @stacks.command("access")
 @click.option("--cluster", "-c", help="Cluster name (default: <project_name>-<region>)")
 @click.option("--region", "-r", help="AWS region (default: first deployment region)")
@@ -794,6 +845,18 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
 
     Updates kubeconfig, creates an EKS access entry for your IAM principal,
     and associates the cluster admin policy. Handles assumed roles automatically.
+
+    Exits non-zero when a step fails: an access entry that cannot be created
+    (one that already exists is fine), a policy that cannot be associated, or
+    a final 'kubectl get nodes' that fails for any reason but reaching the
+    API server, whose error is printed. An API server this host cannot reach
+    (a private endpoint, a CIDR allowlist) is a warning: the access still
+    applies from inside the network.
+
+    With -o json or -o yaml a successful run prints one document with
+    cluster, region, principal_arn, api_server_reachable, node_count,
+    kubectl_error and warning. When kubectl reached the API server,
+    kubectl_error and warning are null; when it could not, node_count is.
 
     Examples:
         gco stacks access
@@ -806,6 +869,7 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
     from ..config import _load_cdk_json
 
     formatter = get_output_formatter(config)
+    table = config.output_format == "table"
 
     # Determine region. An explicitly empty workload list (a control-plane-only
     # deployment) has no cluster to reach, so say so instead of guessing.
@@ -942,7 +1006,9 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                 principal_arn = f"arn:{partition}:iam::{account_id}:role/{role_name.group(1)}"
                 formatter.print_info(f"Using role ARN: {principal_arn}")
 
-        # Step 3: Create access entry
+        # Step 3: Create access entry. Only ResourceInUseException means the
+        # entry exists; anything else (AccessDenied, an unknown cluster, an
+        # authentication mode without access entries) stops here.
         formatter.print_info("Creating EKS access entry...")
         try:
             subprocess.run(
@@ -961,8 +1027,10 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                 capture_output=True,
                 text=True,
             )
-        except subprocess.CalledProcessError:
-            formatter.print_info("Access entry may already exist")
+        except subprocess.CalledProcessError as exc:
+            if "ResourceInUseException" not in (exc.stderr or ""):
+                raise
+            formatter.print_info("Access entry already exists")
 
         # Step 4: Associate admin policy
         formatter.print_info("Associating cluster admin policy...")
@@ -987,8 +1055,15 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                 capture_output=True,
                 text=True,
             )
-        except subprocess.CalledProcessError:
-            formatter.print_info("Policy may already be associated")
+        except subprocess.CalledProcessError as exc:
+            # The API re-associates an existing policy without error; tolerate
+            # only an explicit conflict, never AccessDenied or a missing entry.
+            detail = exc.stderr or ""
+            if "ResourceInUseException" not in detail and "already associated" not in (
+                detail.lower()
+            ):
+                raise
+            formatter.print_info("Policy already associated")
 
         # Step 5: Verify access
         formatter.print_info("Waiting for permissions to propagate...")
@@ -1002,46 +1077,67 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
             text=True,
             check=False,
         )
+        stderr = (result.stderr or "").strip()
+        document: dict[str, Any] = {
+            "cluster": cluster,
+            "region": region,
+            "principal_arn": principal_arn,
+            "api_server_reachable": result.returncode == 0,
+            "node_count": None,
+            "kubectl_error": None,
+            "warning": None,
+        }
         if result.returncode == 0:
             node_count = len(
                 [line for line in result.stdout.strip().split("\n")[1:] if line.strip()]
             )
-            print(result.stdout)
+            document["node_count"] = node_count
+            if table:
+                print(result.stdout)
             formatter.print_info(f"Access configured successfully. {node_count} node(s) ready.")
-        elif private_endpoint_only:
-            # Don't double-warn — we already explained this above. Just
-            # restate the fix so the operator doesn't have to scroll up.
-            formatter.print_warning(
-                "kubectl could not reach the API server, as expected for a "
-                "private-only cluster from outside the VPC. The IAM access entry "
-                "and admin policy association above did succeed, so kubectl will "
-                "work from inside the VPC (e.g. SSM Session Manager into a node) "
-                "or after redeploying with endpoint_access=PUBLIC_AND_PRIVATE."
-            )
-        else:
-            stderr = (result.stderr or "").strip()
-            # When the laptop's egress IP isn't in the CIDR allowlist, AWS
-            # returns the API server endpoint but kubectl times out at the
-            # TLS handshake. Surface the same actionable hint as the
-            # private-only case.
-            looks_like_network_block = (
-                "i/o timeout" in stderr
-                or "no route to host" in stderr
-                or "connection refused" in stderr
-                or "dial tcp" in stderr
-            )
-            if looks_like_network_block:
-                formatter.print_warning(
+        elif _kubectl_could_not_connect(stderr):
+            # Reachability is a property of this host's network path, not of
+            # the access just granted, so it warns rather than fails.
+            formatter.print_info(f"kubectl: {stderr}")
+            if private_endpoint_only:
+                # Don't double-warn — we already explained this above. Just
+                # restate the fix so the operator doesn't have to scroll up.
+                warning = (
+                    "kubectl could not reach the API server, as expected for a "
+                    "private-only cluster from outside the VPC. The IAM access entry "
+                    "and admin policy association above did succeed, so kubectl will "
+                    "work from inside the VPC (e.g. SSM Session Manager into a node) "
+                    "or after redeploying with endpoint_access=PUBLIC_AND_PRIVATE."
+                )
+            else:
+                # When the laptop's egress IP isn't in the CIDR allowlist, AWS
+                # returns the API server endpoint but kubectl times out at the
+                # TLS handshake.
+                warning = (
                     "kubectl could not reach the API server. If the cluster's "
                     "endpoint_access is restricted to a CIDR allowlist, confirm "
                     "your egress IP is covered, or set endpoint_access to "
                     '"PUBLIC_AND_PRIVATE" in cdk.json and run: gco stacks deploy '
                     f"{config.project_name}-{region} -y"
                 )
-            else:
-                formatter.print_warning(
-                    "kubectl connected but no nodes found (cluster may be scaling to zero)"
-                )
+            formatter.print_warning(warning)
+            document["kubectl_error"] = stderr
+            document["warning"] = warning
+        else:
+            # The API server answered (Unauthorized, Forbidden) or kubectl
+            # could not even build a request (a broken credential plugin).
+            formatter.print_error(
+                f"kubectl get nodes failed: {stderr or f'exit status {result.returncode}'}"
+            )
+            formatter.print_error(
+                "The access entry and the admin policy association were applied, but "
+                "kubectl cannot use them yet. A new access entry can take a minute to "
+                "reach the cluster: rerun 'gco stacks access', and run 'gco cluster "
+                "doctor' if it still fails."
+            )
+            sys.exit(1)
+        if not table:
+            formatter.print(document)
 
     except subprocess.CalledProcessError as e:
         formatter.print_error(f"Command failed: {e.stderr or e.stdout or str(e)}")
@@ -1193,7 +1289,7 @@ def capabilities_status(config: Any, region: Any, all_regions: bool) -> None:
     Examples:
         gco stacks capabilities status
         gco stacks capabilities status -r us-west-2
-        gco stacks capabilities status --all-regions --output json
+        gco -o json stacks capabilities status --all-regions
     """
     from ..eks_capabilities import capabilities_status as _capabilities_status
     from ..eks_capabilities import load_eks_capabilities_config
@@ -1778,6 +1874,16 @@ def fsx_status(config: Any, region: Any) -> None:
         sys.exit(1)
 
 
+#: Per-unit storage throughput (MB/s per TiB) FSx for Lustre accepts for each
+#: SSD deployment type, with the value ``fsx enable`` writes by default — the
+#: same tables ConfigLoader validates against (gco/fsx_lustre_config.py).
+#: SCRATCH file systems take none.
+_FSX_THROUGHPUT_CHOICES: dict[str, tuple[tuple[int, ...], int]] = {
+    deployment_type: (choices, FSX_DEFAULT_THROUGHPUT[deployment_type])
+    for deployment_type, choices in FSX_THROUGHPUT_CHOICES.items()
+}
+
+
 @fsx_cmd.command("enable")
 @click.option("--region", "-r", help="Enable FSx for specific region only")
 @click.option("--storage-capacity", "-s", default=1200, help="Storage capacity in GiB (min 1200)")
@@ -1788,7 +1894,17 @@ def fsx_status(config: Any, region: Any) -> None:
     default="SCRATCH_2",
     help="FSx deployment type",
 )
-@click.option("--throughput", "-t", default=200, help="Per-unit storage throughput (MB/s)")
+@click.option(
+    "--throughput",
+    "-t",
+    type=int,
+    default=None,
+    help=(
+        "Per-unit storage throughput in MB/s per TiB, PERSISTENT types only: 50, 100 or "
+        "200 for PERSISTENT_1 (default 200); 125, 250, 500 or 1000 for PERSISTENT_2 "
+        "(default 250)"
+    ),
+)
 @click.option("--compression", "-c", type=click.Choice(["LZ4", "NONE"]), default="LZ4")
 @click.option("--import-path", help="S3 path for data import (s3://bucket/prefix)")
 @click.option("--export-path", help="S3 path for data export (s3://bucket/prefix)")
@@ -1810,10 +1926,20 @@ def fsx_enable(
     FSx for Lustre provides high-performance parallel file system storage
     ideal for ML training workloads requiring high throughput and low latency.
 
+    --throughput sets the per-unit storage throughput of a PERSISTENT file
+    system, which each type limits to its own values (PERSISTENT_2 rejects
+    PERSISTENT_1's 200). SCRATCH file systems have no such setting, so none
+    is written for them and the option is refused.
+
+    The command writes the configuration it shows: an option you leave out
+    is removed from the block, so an import path, export path or throughput
+    from an earlier run does not carry over.
+
     Examples:
         gco stacks fsx enable
         gco stacks fsx enable --region us-east-1
         gco stacks fsx enable --storage-capacity 2400 --deployment-type PERSISTENT_2
+        gco stacks fsx enable -d PERSISTENT_2 --throughput 500
         gco stacks fsx enable -r us-west-2 --import-path s3://my-bucket/training-data
     """
     from ..stacks import update_fsx_config
@@ -1824,13 +1950,34 @@ def fsx_enable(
         formatter.print_error("Storage capacity must be at least 1200 GiB")
         sys.exit(1)
 
+    choices = _FSX_THROUGHPUT_CHOICES.get(deployment_type)
+    if choices is None:
+        if throughput is not None:
+            formatter.print_error(
+                "--throughput applies only to PERSISTENT_1 and PERSISTENT_2; "
+                f"{deployment_type} file systems have no per-unit storage throughput"
+            )
+            sys.exit(1)
+    else:
+        allowed, default_throughput = choices
+        if throughput is None:
+            throughput = default_throughput
+        elif throughput not in allowed:
+            accepted = ", ".join(str(value) for value in allowed[:-1])
+            formatter.print_error(
+                f"{deployment_type} accepts {accepted} or {allowed[-1]} MB/s per TiB, "
+                f"not {throughput}"
+            )
+            sys.exit(1)
+
     scope = f"region {region}" if region else "all regions (global)"
 
     if not yes:
         formatter.print_info(f"FSx for Lustre configuration for {scope}:")
         formatter.print_info(f"  Storage Capacity: {storage_capacity} GiB")
         formatter.print_info(f"  Deployment Type: {deployment_type}")
-        formatter.print_info(f"  Throughput: {throughput} MB/s per TiB")
+        if throughput is not None:
+            formatter.print_info(f"  Throughput: {throughput} MB/s per TiB")
         formatter.print_info(f"  Compression: {compression}")
         if import_path:
             formatter.print_info(f"  Import Path: {import_path}")
@@ -1850,7 +1997,12 @@ def fsx_enable(
             "auto_import_policy": "NEW_CHANGED_DELETED" if import_path else None,
         }
 
-        update_fsx_config(fsx_settings, region)
+        # The options left out are removed, so the block holds what the
+        # summary above showed: an import path, export path or PERSISTENT
+        # throughput written by an earlier run does not linger, and the
+        # deprecated node_group key goes.
+        unset = [key for key, value in fsx_settings.items() if value is None]
+        update_fsx_config(fsx_settings, region, remove=[*unset, "node_group"])
         formatter.print_success(f"FSx for Lustre enabled in cdk.json for {scope}")
         if region:
             formatter.print_info(
@@ -1939,7 +2091,7 @@ def pcs_status(config: Any, region: Any, all_regions: bool) -> None:
 
     Examples:
         gco stacks pcs status
-        gco stacks pcs status --all-regions --output json
+        gco -o json stacks pcs status --all-regions
     """
     from gco.pcs_config import managed_cluster_name
 
@@ -2187,7 +2339,7 @@ def pcs_preflight_command(config: Any, region: Any, all_regions: bool) -> None:
 
     Examples:
         gco stacks pcs preflight
-        gco stacks pcs preflight -r us-east-1 --output json
+        gco -o json stacks pcs preflight -r us-east-1
     """
     from .. import pcs_preflight
 
@@ -2400,7 +2552,7 @@ def hyperpod_status(config: Any, region: Any, all_regions: bool) -> None:
 
     Examples:
         gco stacks hyperpod status
-        gco stacks hyperpod status --all-regions --output json
+        gco -o json stacks hyperpod status --all-regions
     """
     from gco.hyperpod_config import cluster_name
 
@@ -2667,7 +2819,7 @@ def hyperpod_preflight_command(config: Any, region: Any, all_regions: bool) -> N
 
     Examples:
         gco stacks hyperpod preflight
-        gco stacks hyperpod preflight -r us-east-1 --output json
+        gco -o json stacks hyperpod preflight -r us-east-1
     """
     from .. import hyperpod_preflight
 
@@ -2982,15 +3134,30 @@ def addons_cmd(config: Any) -> None:
 def addons_status(config: Any, region: Any, all_regions: bool) -> None:
     """Show per-chart add-on install status (from SSM).
 
+    With -o json or -o yaml the output is one list of
+    {region, name, status, message} rows across the Regions; a Region whose
+    status cannot be read contributes a row with status "error" and no name.
+    Exits 1 when a Region cannot be read or any row is not healthy.
+
     Examples:
         gco stacks addons status
         gco stacks addons status -r us-west-2
         gco stacks addons status --all-regions
+        gco -o json stacks addons status --all-regions
     """
     formatter = get_output_formatter(config)
     project = _project_name()
+    table = config.output_format == "table"
+    rows: list[dict[str, Any]] = []
+    healthy = True
     for target in _target_regions(config, region, all_regions):
-        _addons_status_one(formatter, project, target)
+        region_rows, region_healthy = _addons_status_one(formatter, project, target, table=table)
+        rows.extend(region_rows)
+        healthy = healthy and region_healthy
+    if not table:
+        formatter.print(rows)
+    if not healthy:
+        sys.exit(1)
 
 
 # Terminal states the installer, kubectl applier and validators record when a
@@ -2998,10 +3165,20 @@ def addons_status(config: Any, region: Any, all_regions: bool) -> None:
 _ADDON_HEALTHY_STATUSES = frozenset({"installed", "uninstalled", "absent", "applied", "validated"})
 # SSM parameters under /<project>/addons/<region>/ that are not status records.
 _ADDON_BOOKKEEPING_PARAMS = frozenset({"_input", "_execution"})
+# Parts of a replay input too large for one parameter (_input.<digest>.<k>).
+_ADDON_INPUT_PART_PREFIX = "_input."
+# The teardown provider's fence: its value is the teardown execution name.
+_ADDON_TEARDOWN_FENCE = "_teardown"
 
 
-def _addons_status_one(formatter: Any, project: str, region: str) -> None:
-    """Print the add-on status table for a single region."""
+def _addons_status_one(
+    formatter: Any, project: str, region: str, *, table: bool = True
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read one Region's add-on status records, printing them in table mode.
+
+    Returns the Region's ``{region, name, status, message}`` rows and whether
+    it is healthy: readable, with every row in a healthy state.
+    """
     import json
 
     import boto3
@@ -3015,15 +3192,21 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
         for page in paginator.paginate(Path=prefix, Recursive=False):
             params.extend(page.get("Parameters", []))
     except Exception as e:
-        formatter.print_error(f"[{region}] Failed to read add-on status from SSM: {e}")
-        return
+        message = f"Failed to read add-on status from SSM: {e}"
+        formatter.print_error(f"[{region}] {message}")
+        return [{"region": region, "name": None, "status": "error", "message": message}], False
 
     rows = []
     for p in params:
         name = p["Name"].rsplit("/", 1)[-1]
-        # _input (replay input) and _execution (orchestrator run metadata)
-        # are bookkeeping, not add-on status records.
-        if name in _ADDON_BOOKKEEPING_PARAMS:
+        # _input (replay input), its parts and _execution (orchestrator run
+        # metadata) are bookkeeping, not add-on status records.
+        if name in _ADDON_BOOKKEEPING_PARAMS or name.startswith(_ADDON_INPUT_PART_PREFIX):
+            continue
+        if name == _ADDON_TEARDOWN_FENCE:
+            # Not JSON, so it used to read as an "unknown" chart; an active
+            # fence means the add-ons are being (or were) torn down.
+            rows.append((name, "teardown-active", f"execution {p.get('Value', '')}"))
             continue
         try:
             data = json.loads(p["Value"])
@@ -3039,14 +3222,22 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
             message = message[:80]
         rows.append((name, status, message))
 
+    rows.sort()
+    records = [
+        {"region": region, "name": name, "status": status, "message": message}
+        for name, status, message in rows
+    ]
+    healthy = all(status in _ADDON_HEALTHY_STATUSES for _name, status, _message in rows)
+    if not table:
+        return records, healthy
+
     if not rows:
         formatter.print_info(
             f"[{region}] No add-on status recorded under {prefix} yet. "
             "The installer writes status as charts are processed."
         )
-        return
+        return records, healthy
 
-    rows.sort()
     formatter.print_info(f"Add-on status for {project} in {region}:")
     for name, status, message in rows:
         line = f"  {name:<28} {status:<12} {message}"
@@ -3054,6 +3245,7 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
             formatter.print_success(line)
         else:
             formatter.print_error(line)
+    return records, healthy
 
 
 @addons_cmd.command("install")
@@ -3084,6 +3276,11 @@ def addons_install(config: Any, region: Any, all_regions: bool) -> None:
         sys.exit(1)
 
 
+#: Construct id of the regional stack's Helm install state machine
+#: (gco/stacks/regional_stack.py); CDK appends a hash to form the logical id.
+_HELM_INSTALL_STATE_MACHINE_ID = "HelmInstallStateMachine"
+
+
 def _decode_addon_replay_input(stored_value: str) -> str:
     """Reverse the helm orchestrator's zlib+base64 replay-input encoding.
 
@@ -3098,6 +3295,73 @@ def _decode_addon_replay_input(stored_value: str) -> str:
         return stored_value
     compressed = base64.b64decode(stored_value.encode("ascii"), validate=True)
     return zlib.decompress(compressed).decode("utf-8")
+
+
+#: ``_input`` value when the encoded replay input is stored in parts
+#: (``_replay_input_writes`` in lambda/helm-orchestrator/handler.py).
+_ADDON_CHUNKED_INPUT_HEADER = re.compile(
+    r"chunked:v1:(?P<count>[1-9][0-9]*):(?P<sha256>[0-9a-f]{64})"
+)
+
+
+def _read_addon_replay_input(ssm: Any, input_param: str) -> str:
+    """Read the replay input at ``input_param`` and return its execution-input JSON.
+
+    ``input_param`` holds raw JSON (older releases), one zlib+base64 value, or,
+    when that encoding is larger than one SSM value (8 KiB), the header
+    ``chunked:v1:<n>:<sha256>``. The encoded value is then split across
+    ``<input_param>.<sha256[:16]>.1`` to ``.<n>``, which are read in order and
+    must join to the SHA-256 the header names. A malformed header, a missing
+    part or a digest mismatch raises ``ValueError``.
+    """
+    import hashlib
+
+    from botocore.exceptions import ClientError
+
+    stored = ssm.get_parameter(Name=input_param)["Parameter"]["Value"]
+    if not stored.startswith("chunked:"):
+        return _decode_addon_replay_input(stored)
+    header = _ADDON_CHUNKED_INPUT_HEADER.fullmatch(stored)
+    if header is None:
+        raise ValueError(f"malformed chunked-input header {stored[:120]!r}")
+    count = int(header["count"])
+    digest = header["sha256"]
+    parts: list[str] = []
+    for index in range(1, count + 1):
+        part_param = f"{input_param}.{digest[:16]}.{index}"
+        try:
+            parts.append(ssm.get_parameter(Name=part_param)["Parameter"]["Value"])
+        except ClientError as exc:
+            reason = (
+                "does not exist"
+                if exc.response.get("Error", {}).get("Code") == "ParameterNotFound"
+                else f"could not be read ({exc})"
+            )
+            raise ValueError(
+                f"its header names {count} parts, and part {index}, {part_param}, {reason}"
+            ) from exc
+    encoded = "".join(parts)
+    if hashlib.sha256(encoded.encode("utf-8")).hexdigest() != digest:
+        raise ValueError(f"its {count}-part value does not match the SHA-256 in its header")
+    return _decode_addon_replay_input(encoded)
+
+
+def _helm_install_state_machine_arn(cloudformation: Any, stack_name: str) -> str | None:
+    """ARN of the Helm install state machine the regional stack ``stack_name`` owns.
+
+    The state machine has no explicit name, so CloudFormation generates one
+    of the same shape for every deployment in the Region. It is found among
+    the stack's own resources by its construct id instead; the physical id
+    of a state machine is its ARN.
+    """
+    paginator = cloudformation.get_paginator("list_stack_resources")
+    for page in paginator.paginate(StackName=stack_name):
+        for resource in page.get("StackResourceSummaries", []):
+            if resource.get("ResourceType") == "AWS::StepFunctions::StateMachine" and str(
+                resource.get("LogicalResourceId", "")
+            ).startswith(_HELM_INSTALL_STATE_MACHINE_ID):
+                return str(resource.get("PhysicalResourceId") or "") or None
+    return None
 
 
 def _addons_install_one(formatter: Any, project: str, region: str) -> bool:
@@ -3120,8 +3384,7 @@ def _addons_install_one(formatter: Any, project: str, region: str) -> bool:
                 f"[{region}] Add-on teardown is active ({fence_param}); refusing to start."
             )
             return False
-        stored_input = ssm.get_parameter(Name=input_param)["Parameter"]["Value"]
-        execution_input = _decode_addon_replay_input(stored_input)
+        execution_input = _read_addon_replay_input(ssm, input_param)
     except Exception as e:
         formatter.print_error(
             f"[{region}] Could not read {input_param}: {e}. "
@@ -3129,16 +3392,25 @@ def _addons_install_one(formatter: Any, project: str, region: str) -> bool:
         )
         return False
 
+    stack_name = f"{project}-{region}"
+    try:
+        cloudformation = boto3.client("cloudformation", region_name=region)
+        arn = _helm_install_state_machine_arn(cloudformation, stack_name)
+    except Exception as e:
+        formatter.print_error(
+            f"[{region}] Could not read the resources of stack {stack_name}: {e}. "
+            f"Deploy the regional stack first (gco stacks deploy {stack_name} -y)."
+        )
+        return False
+    if not arn:
+        formatter.print_error(
+            f"[{region}] Stack {stack_name} has no Helm install state machine. "
+            f"Deploy the regional stack first (gco stacks deploy {stack_name} -y)."
+        )
+        return False
+
     try:
         sfn = boto3.client("stepfunctions", region_name=region)
-        machines = sfn.list_state_machines(maxResults=1000)["stateMachines"]
-        arn = next(
-            (m["stateMachineArn"] for m in machines if "HelmInstall" in m["name"]),
-            None,
-        )
-        if not arn:
-            formatter.print_error(f"[{region}] No HelmInstall state machine found.")
-            return False
         resp = sfn.start_execution(stateMachineArn=arn, input=execution_input)
     except Exception as e:
         formatter.print_error(f"[{region}] Failed to start add-on install: {e}")

@@ -4,7 +4,7 @@ Tests for gco/config/config_loader.ConfigLoader.
 Drives ConfigLoader against a MockApp/MockNode pair that surfaces a
 hand-crafted CDK context dict. Verifies happy-path loading of every
 top-level field (project_name, deployment_regions, kubernetes_version,
-resource_thresholds, global_accelerator, alb_config, inference_proxy,
+resource_thresholds, global_accelerator, inference_proxy,
 manifest_processor, job_validation_policy, api_gateway, tags) and
 that missing required fields raise ConfigValidationError with an
 informative message. Companion suite to test_config_loader_validation.py
@@ -42,6 +42,35 @@ class MockApp:
         self.node = MockNode(context)
 
 
+def minimal_context() -> dict:
+    """The smallest context that passes validation: every optional block is omitted.
+
+    Validation always runs, so the getters' defaults for omitted blocks are
+    observed through a context that carries only the required fields.
+    """
+    return {
+        "deployment_regions": {
+            "global": "us-east-2",
+            "api_gateway": "us-east-2",
+            "monitoring": "us-east-2",
+        },
+        "kubernetes_version": "1.37",
+        "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 80, "gpu_threshold": -1},
+        "manifest_processor": {
+            "replicas": 3,
+            "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
+        },
+        "job_validation_policy": {"allowed_namespaces": ["gco-jobs"], "resource_quotas": {}},
+        "api_gateway": {
+            "throttle_rate_limit": 1000,
+            "throttle_burst_limit": 2000,
+            "log_level": "INFO",
+            "metrics_enabled": True,
+            "tracing_enabled": True,
+        },
+    }
+
+
 @pytest.fixture
 def valid_context():
     """Create valid configuration context."""
@@ -57,9 +86,7 @@ def valid_context():
         "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 85, "gpu_threshold": 90},
         "global_accelerator": {
             "name": "gco-accelerator",
-            "health_check_grace_period": 30,
             "health_check_interval": 30,
-            "health_check_timeout": 5,
             "health_check_path": "/api/v1/health",
         },
         "alb_config": {
@@ -73,7 +100,6 @@ def valid_context():
             "tls_proxy_cpu_target_utilization_percentage": 70,
         },
         "manifest_processor": {
-            "image": "gco/manifest-processor:latest",
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
             "validation_enabled": True,
@@ -120,16 +146,46 @@ class TestConfigLoaderValidation:
         """Non-object Region configuration fails with an actionable error."""
         valid_context["deployment_regions"] = ["us-east-1"]
         app = MockApp(valid_context)
-        with pytest.raises(ConfigValidationError, match="must be a non-empty object"):
+        with pytest.raises(
+            ConfigValidationError, match=re.escape("deployment_regions must be an object, got list")
+        ):
             ConfigLoader(app)
 
-    def test_empty_context_skips_validation(self):
-        """Test that empty context (outside CDK) skips validation."""
-        app = MockApp({})
-        config = ConfigLoader(app)
-        # Should use defaults
+    def test_empty_context_is_validated(self):
+        """An empty context is validated like any other, so required fields fail it."""
+        with pytest.raises(
+            ConfigValidationError,
+            match="Required configuration field 'kubernetes_version' is missing",
+        ):
+            ConfigLoader(MockApp({}))
+
+    def test_missing_project_name_defaults_and_still_validates(self):
+        """Without project_name the documented default applies and every block is checked.
+
+        An absent project_name used to skip all validation, so an invalid region,
+        Global Accelerator interval, TLS lifetime or API Gateway log level was
+        synthesized as written.
+        """
+        context = minimal_context()
+        config = ConfigLoader(MockApp(context))
         assert config.get_project_name() == "gco"
         assert config.get_regions() == ["us-east-1"]
+        invalid_blocks = {
+            "deployment_regions": {**context["deployment_regions"], "regional": ["us-east-99"]},
+            "global_accelerator": {"health_check_interval": 15},
+            "backend_tls": {"leaf_validity_days": 5000},
+            "api_gateway": {**context["api_gateway"], "log_level": "DEBUG"},
+        }
+        for key, value in invalid_blocks.items():
+            with pytest.raises(ConfigValidationError):
+                ConfigLoader(MockApp({**context, key: value}))
+
+    @pytest.mark.parametrize("project_name", ["", "Invalid_Name", 7])
+    def test_explicit_project_name_is_never_replaced_by_the_default(self, project_name):
+        """Only an absent project_name defaults; an explicit invalid one is an error."""
+        context = {**minimal_context(), "project_name": project_name}
+        with pytest.raises(ConfigValidationError, match="Invalid project_name"):
+            ConfigLoader(MockApp(context))
 
 
 def test_config_and_public_stack_exports_import_in_a_clean_interpreter() -> None:
@@ -171,7 +227,7 @@ class TestRegionValidation:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match=rf"Invalid {field} region 'invalid-region'",
+            match=rf"deployment_regions\.{field} is not a valid region: 'invalid-region'",
         ):
             ConfigLoader(app)
 
@@ -248,7 +304,7 @@ class TestResourceThresholdsValidation:
         del valid_context["resource_thresholds"]["gpu_threshold"]
         app = MockApp(valid_context)
         with pytest.raises(
-            ConfigValidationError, match="Missing threshold configuration: gpu_threshold"
+            ConfigValidationError, match=r"resource_thresholds\.gpu_threshold is required"
         ):
             ConfigLoader(app)
 
@@ -262,6 +318,22 @@ class TestGlobalAcceleratorValidation:
         config = ConfigLoader(app)
         ga_config = config.get_global_accelerator_config()
         assert ga_config["name"] == "gco-accelerator"
+
+    @pytest.mark.parametrize("path", ["/api/v1/jobs", "/health", "/api/v1/health/", "/"])
+    def test_health_check_path_that_needs_authentication_fails(self, valid_context, path):
+        """A probe of an authenticated path gets 401, so GA would mark every Region unhealthy."""
+        valid_context["global_accelerator"]["health_check_path"] = path
+        with pytest.raises(ConfigValidationError) as raised:
+            ConfigLoader(MockApp(valid_context))
+        message = str(raised.value)
+        assert message.startswith(f"global_accelerator.health_check_path {path!r} needs request")
+        assert "/api/v1/health, /healthz, /metrics, /readyz" in message
+
+    @pytest.mark.parametrize("path", ["/healthz", "/readyz", "/api/v1/health?source=ga"])
+    def test_health_check_path_the_services_answer_unauthenticated(self, valid_context, path):
+        valid_context["global_accelerator"]["health_check_path"] = path
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_global_accelerator_config()["health_check_path"] == path
 
     def test_invalid_health_check_path(self, valid_context):
         """Test health check path not starting with / raises error."""
@@ -340,6 +412,225 @@ class TestGlobalAcceleratorValidation:
             ConfigLoader(app)
 
 
+class TestRegionOverlayNames:
+    """Per-Region overlays are keyed by real Regions; undeployed ones only warn."""
+
+    @pytest.mark.parametrize("key", ["fsx_lustre_regions", "pcs_regions", "hyperpod_regions"])
+    def test_an_unknown_region_name_fails(self, valid_context, key):
+        valid_context[key] = {"us-east1": {"enabled": True}}
+        with pytest.raises(
+            ConfigValidationError,
+            match=rf"{key}\.us-east1 is not an AWS Region known to the installed SDK",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("key", ["fsx_lustre_regions", "pcs_regions", "hyperpod_regions"])
+    def test_a_region_that_is_not_deployed_warns(self, valid_context, key):
+        valid_context[key] = {"eu-west-1": {"enabled": False}}
+        config = ConfigLoader(MockApp(valid_context))
+        assert [w for w in config.warnings if w.startswith(key)] == [
+            f"{key}.eu-west-1 has no effect: eu-west-1 is not in deployment_regions.regional, "
+            "so no regional stack reads it (expected while staging a Region before adding it)."
+        ]
+
+    def test_deployed_regions_draw_no_warning(self, valid_context):
+        valid_context["fsx_lustre_regions"] = {"us-east-1": {"enabled": True}}
+        config = ConfigLoader(MockApp(valid_context))
+        assert not [w for w in config.warnings if "fsx_lustre_regions" in w]
+
+
+class TestKubernetesVersion:
+    """kubernetes_version is a quoted "<major>.<minor>" string."""
+
+    @pytest.mark.parametrize("version", ["1.37", "1.30", "1.0", "2.10"])
+    def test_minor_version_strings_are_accepted(self, valid_context, version):
+        valid_context["kubernetes_version"] = version
+        assert ConfigLoader(MockApp(valid_context)).get_kubernetes_version() == version
+
+    @pytest.mark.parametrize("version", [1.30, 1.37, 2, "1.30.1", "v1.30", "1.030", " 1.30", True])
+    def test_anything_else_fails_at_synth(self, valid_context, version):
+        """A JSON number 1.30 used to become the version "1.3"."""
+        valid_context["kubernetes_version"] = version
+        with pytest.raises(
+            ConfigValidationError, match=r'kubernetes_version must be a "<major>\.<minor>" string'
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+
+class TestPublicAccessCidrs:
+    """eks_cluster.public_access_cidrs is a list of IPv4 CIDRs."""
+
+    @pytest.mark.parametrize("cidrs", [[], ["203.0.113.7/32"], ["0.0.0.0/0", "10.1.0.0/16"]])
+    def test_lists_of_cidrs_are_accepted(self, valid_context, cidrs):
+        valid_context["eks_cluster"] = {
+            "endpoint_access": "PUBLIC_AND_PRIVATE",
+            "public_access_cidrs": cidrs,
+        }
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_eks_cluster_config()["public_access_cidrs"] == cidrs
+
+    @pytest.mark.parametrize(
+        ("cidrs", "invalid"),
+        [
+            ("203.0.113.7/32", "'203.0.113.7/32'"),
+            (["203.0.113.7"], "'203.0.113.7'"),
+            (["203.0.113.0/33"], "'203.0.113.0/33'"),
+            (["300.0.0.0/8"], "'300.0.0.0/8'"),
+            (["2001:db8::/32"], "'2001:db8::/32'"),
+            ([24], "24"),
+            ({"cidr": "10.0.0.0/8"}, "{'cidr': '10.0.0.0/8'}"),
+        ],
+    )
+    def test_anything_else_fails_at_synth(self, valid_context, cidrs, invalid):
+        """A string used to be split into one-character "CIDRs"."""
+        valid_context["eks_cluster"] = {"public_access_cidrs": cidrs}
+        with pytest.raises(ConfigValidationError) as raised:
+            ConfigLoader(MockApp(valid_context))
+        message = str(raised.value)
+        assert message.startswith("eks_cluster.public_access_cidrs must be a list of IPv4 CIDR")
+        assert message.endswith(f"(invalid: {invalid})")
+
+
+class TestManifestProcessorPolicyDefaults:
+    """job_validation_policy has one source of defaults, not a second copy in the getter."""
+
+    def test_omitted_trust_lists_are_not_invented_by_the_getter(self, valid_context):
+        """The getter's lists (with "gco" as a registry, without vllm) never reached a service."""
+        mp_config = ConfigLoader(MockApp(valid_context)).get_manifest_processor_config()
+        assert "trusted_registries" not in mp_config
+        assert "trusted_dockerhub_orgs" not in mp_config
+
+    def test_the_policy_block_is_merged_as_written(self, valid_context):
+        valid_context["job_validation_policy"]["trusted_registries"] = ["registry.example.com"]
+        mp_config = ConfigLoader(MockApp(valid_context)).get_manifest_processor_config()
+        assert mp_config["trusted_registries"] == ["registry.example.com"]
+        assert (
+            mp_config["resource_quotas"]
+            == valid_context["job_validation_policy"]["resource_quotas"]
+        )
+
+
+class TestManifestProcessorImage:
+    """manifest_processor.image was required but never read: deprecated, no longer required."""
+
+    def test_absent_image_is_valid(self, valid_context):
+        assert "image" not in valid_context["manifest_processor"]
+        config = ConfigLoader(MockApp(valid_context))
+        assert not [w for w in config.warnings if "manifest_processor.image" in w]
+        assert "image" not in config.get_manifest_processor_config()
+
+    def test_an_image_key_warns_and_is_ignored(self, valid_context):
+        valid_context["manifest_processor"]["image"] = "example.com/anything:1"
+        config = ConfigLoader(MockApp(valid_context))
+        assert [w for w in config.warnings if w.startswith("manifest_processor.image")] == [
+            "manifest_processor.image is deprecated and ignored: nothing reads it: the regional "
+            "stack builds the manifest processor image from "
+            "dockerfiles/Dockerfile.manifest-processor and deploys it from ECR. Remove it from "
+            "cdk.json."
+        ]
+
+
+class TestPendingThresholdDefaults:
+    """An omitted pending_* threshold means the same thing to the loader and the monitor."""
+
+    def test_omitted_keys_match_the_health_monitor_fallbacks(self, valid_context, monkeypatch):
+        from gco.services.health_monitor import thresholds_from_env
+
+        for variable in (
+            "PENDING_PODS_THRESHOLD",
+            "PENDING_REQUESTED_CPU_VCPUS",
+            "PENDING_REQUESTED_MEMORY_GB",
+            "PENDING_REQUESTED_GPUS",
+        ):
+            monkeypatch.delenv(variable, raising=False)
+        loaded = ConfigLoader(MockApp(valid_context)).get_resource_thresholds()
+        monitor = thresholds_from_env()
+        for field in (
+            "pending_pods_threshold",
+            "pending_requested_cpu_vcpus",
+            "pending_requested_memory_gb",
+            "pending_requested_gpus",
+        ):
+            assert getattr(loaded, field) == getattr(monitor, field), field
+        assert loaded.pending_requested_gpus == 8
+
+    def test_the_shipped_file_disables_the_pending_gpu_check(self):
+        import json
+        from pathlib import Path
+
+        context = json.loads(
+            (Path(__file__).resolve().parents[1] / "cdk.json").read_text(encoding="utf-8")
+        )["context"]
+        thresholds = ConfigLoader(MockApp(context)).get_resource_thresholds()
+        assert thresholds.pending_requested_gpus == -1
+        assert thresholds.is_disabled("pending_requested_gpus")
+
+
+class TestResourceQuota:
+    """resource_quota is merged over its defaults and validated by the loader too."""
+
+    def test_absent_block_is_the_default_quota(self, valid_context):
+        from gco.resource_governance import DEFAULT_RESOURCE_QUOTA
+
+        assert ConfigLoader(MockApp(valid_context)).get_resource_quota() == dict(
+            DEFAULT_RESOURCE_QUOTA
+        )
+
+    def test_partial_block_keeps_the_other_defaults(self, valid_context):
+        valid_context["resource_quota"] = {"max_cpu": "500", "_comment_max_cpu": "doc"}
+        quota = ConfigLoader(MockApp(valid_context)).get_resource_quota()
+        assert quota["max_cpu"] == "500"
+        assert "_comment_max_cpu" not in quota
+
+    @pytest.mark.parametrize(
+        ("block", "message"),
+        [
+            ({"max_cpus": "1"}, "has unknown key(s) ['max_cpus']"),
+            (
+                {"max_cpu": "lots"},
+                "resource_quota.max_cpu='lots' is not a valid Kubernetes quantity",
+            ),
+            ({"container_max_cpu": "500"}, "resource_quota.container_max_cpu='500' exceeds"),
+            ([], "'resource_quota' must be an object"),
+        ],
+    )
+    def test_invalid_blocks_fail_validation(self, valid_context, block, message):
+        valid_context["resource_quota"] = block
+        with pytest.raises(ConfigValidationError, match=re.escape(message)):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_the_stack_keeps_its_old_import(self):
+        from gco.resource_governance import validated_resource_quota
+        from gco.stacks.regional_stack import _validated_resource_quota
+
+        assert _validated_resource_quota is validated_resource_quota
+
+
+class TestGlobalAcceleratorName:
+    """global_accelerator.name follows the CreateAccelerator naming rule."""
+
+    @pytest.mark.parametrize("name", ["gco-accelerator", "A", "team.b-accelerator", "x" * 64])
+    def test_valid_names_are_accepted(self, valid_context, name):
+        valid_context["global_accelerator"]["name"] = name
+        assert ConfigLoader(MockApp(valid_context)).get_global_accelerator_config()["name"] == name
+
+    @pytest.mark.parametrize(
+        "name", ["", "-gco", "gco-", ".gco", "gco.", "gco accelerator", "gco_x", "x" * 65, 5]
+    )
+    def test_invalid_names_fail_at_synth(self, valid_context, name):
+        valid_context["global_accelerator"]["name"] = name
+        with pytest.raises(
+            ConfigValidationError, match=r"global_accelerator\.name must be 1-64 letters"
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_the_default_name_follows_the_project(self, valid_context):
+        del valid_context["global_accelerator"]["name"]
+        valid_context["project_name"] = "team-b"
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_global_accelerator_config()["name"] == "team-b-accelerator"
+
+
 class TestTrafficDialValidation:
     """Tests for the global_accelerator.traffic_dial sub-block."""
 
@@ -371,7 +662,7 @@ class TestTrafficDialValidation:
         valid_context["global_accelerator"]["traffic_dial"] = 5
         with pytest.raises(
             ConfigValidationError,
-            match=re.escape("global_accelerator.traffic_dial must be a mapping"),
+            match=re.escape("global_accelerator.traffic_dial must be an object, got int: 5"),
         ):
             ConfigLoader(MockApp(valid_context))
 
@@ -455,7 +746,7 @@ class TestApiGatewayValidation:
         valid_context["api_gateway"]["throttle_burst_limit"] = 500
         app = MockApp(valid_context)
         with pytest.raises(
-            ConfigValidationError, match="throttle_burst_limit should be greater than or equal"
+            ConfigValidationError, match="throttle_burst_limit must be greater than or equal"
         ):
             ConfigLoader(app)
 
@@ -465,6 +756,30 @@ class TestApiGatewayValidation:
         app = MockApp(valid_context)
         with pytest.raises(ConfigValidationError, match="metrics_enabled must be a boolean"):
             ConfigLoader(app)
+
+    @pytest.mark.parametrize("value", [True, False, "yes"])
+    def test_regional_api_enabled_warns_and_is_ignored(self, valid_context, value):
+        """The resource policies no longer read the flag, so any value only warns.
+
+        It used to admit every principal of the account to the regional
+        bridges; callers now need their own execute-api:Invoke permission
+        whatever it says. Nothing reads it, so not even its type is checked.
+        """
+        valid_context["api_gateway"]["regional_api_enabled"] = value
+        config = ConfigLoader(MockApp(valid_context))
+        assert [w for w in config.warnings if w.startswith("api_gateway.")] == [
+            "api_gateway.regional_api_enabled is deprecated and ignored: it no longer changes "
+            "anything: the API resource policies admit no principal of the account, so a caller "
+            "reaches the global API and every regional API bridge with its own "
+            "execute-api:Invoke permission, whatever this says (docs/UPGRADING.md, API calls "
+            "need an IAM permission). Remove it from cdk.json."
+        ]
+
+    def test_regional_api_enabled_has_no_default(self, valid_context):
+        """Without the key, the loader supplies none: nothing reads it."""
+        config = ConfigLoader(MockApp(valid_context))
+        assert "regional_api_enabled" not in config.get_api_gateway_config()
+        assert not [w for w in config.warnings if "regional_api_enabled" in w]
 
 
 class TestConfigLoaderGetters:
@@ -495,12 +810,15 @@ class TestConfigLoaderGetters:
         assert mp_config["replicas"] == 3
         assert mp_config["allowed_namespaces"] == ["gco-jobs"]
 
-    def test_get_alb_config(self, valid_context):
-        """Test getting ALB config."""
+    def test_alb_config_is_deprecated_and_its_values_are_ignored(self, valid_context):
+        """alb_config validates with a warning; the ALB probe comes from gateway_health_check."""
         app = MockApp(valid_context)
         config = ConfigLoader(app)
-        alb_config = config.get_alb_config()
-        assert alb_config["health_check_interval"] == 30
+        assert not hasattr(config, "get_alb_config")
+        assert config.get_gateway_health_check_config()["interval_seconds"] == 15
+        assert [w.split(":")[0] for w in config.warnings] == [
+            "alb_config is deprecated and ignored"
+        ]
 
 
 class TestInferenceProxyConfig:
@@ -597,7 +915,7 @@ class TestInferenceProxyConfig:
         """CDK normalizes top-level JSON null to omission before validation."""
         from aws_cdk import App
 
-        app = App(context={"inference_proxy": None})
+        app = App(context={**minimal_context(), "inference_proxy": None})
 
         assert "inference_proxy" not in app.node.get_all_context()
         assert ConfigLoader(app).get_inference_proxy_config() == self.DEFAULTS
@@ -739,8 +1057,14 @@ class TestManifestProcessorSizingConfig:
         with pytest.raises(ConfigValidationError) as exc_info:
             ConfigLoader(MockApp(valid_context))
         message = str(exc_info.value)
-        assert "manifest_processor.autoscaling contains unknown key(s): min_replicas" in message
-        assert "cpu_target_utilization_percentage, enabled, max_replicas" in message
+        assert (
+            "manifest_processor.autoscaling contains unknown key(s): "
+            "manifest_processor.autoscaling.min_replicas" in message
+        )
+        assert (
+            "manifest_processor.autoscaling.cpu_target_utilization_percentage, "
+            "manifest_processor.autoscaling.enabled, manifest_processor.autoscaling.max_replicas"
+        ) in message
 
     @pytest.mark.parametrize("value", [None, "true", 1, 0])
     def test_autoscaling_enabled_must_be_a_boolean(self, valid_context, value):
@@ -858,8 +1182,10 @@ class TestNetworkPostureConfig:
         valid_context["vpc_endpoints"] = {"gateways": ["s3"]}
         with pytest.raises(ConfigValidationError) as exc_info:
             ConfigLoader(MockApp(valid_context))
-        assert "vpc_endpoints contains unknown key(s): gateways" in str(exc_info.value)
-        assert "allowed keys: gateway, interface" in str(exc_info.value)
+        assert "vpc_endpoints contains unknown key(s): vpc_endpoints.gateways" in str(
+            exc_info.value
+        )
+        assert "allowed keys: vpc_endpoints.gateway, vpc_endpoints.interface" in str(exc_info.value)
 
     @pytest.mark.parametrize(
         ("key", "value"),
@@ -903,42 +1229,41 @@ class TestDefaultValues:
 
     def test_default_project_name(self):
         """Test default project name."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         assert config.get_project_name() == "gco"
 
     def test_default_regions(self):
         """Test default regions."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         assert config.get_regions() == ["us-east-1"]
 
     def test_default_kubernetes_version(self):
         """Test default Kubernetes version."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         assert config.get_kubernetes_version() == "1.37"
 
     def test_omitted_valkey_config_is_disabled(self):
         """Valkey is opt-in when the entire context block is omitted."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         assert config.get_valkey_config()["enabled"] is False
 
     def test_default_resource_thresholds(self):
-        """Test default resource thresholds."""
-        app = MockApp({})
+        """The optional thresholds a resource_thresholds block leaves out take their defaults."""
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         thresholds = config.get_resource_thresholds()
-        # 80/80 leaves headroom above the idle-cluster platform baseline
-        # (observability stack ~65-70% memory on right-sized Auto Mode nodes).
+        # cpu/memory/gpu are required; minimal_context() sets the shipped values.
         assert thresholds.cpu_threshold == 80
         assert thresholds.memory_threshold == 80
-        assert thresholds.gpu_threshold == -1  # disabled by default for inference workloads
+        assert thresholds.gpu_threshold == -1
         assert thresholds.pending_pods_threshold == 10
         assert thresholds.pending_requested_cpu_vcpus == 100
         assert thresholds.pending_requested_memory_gb == 200
-        assert thresholds.pending_requested_gpus == -1  # disabled by default
+        assert thresholds.pending_requested_gpus == 8
 
 
 class TestFsxLustreConfig:
@@ -946,7 +1271,7 @@ class TestFsxLustreConfig:
 
     def test_get_fsx_lustre_config_defaults(self):
         """Test getting FSx config with defaults."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         fsx_config = config.get_fsx_lustre_config()
 
@@ -954,12 +1279,13 @@ class TestFsxLustreConfig:
         assert fsx_config["storage_capacity_gib"] == 1200
         assert fsx_config["deployment_type"] == "SCRATCH_2"
         assert fsx_config["file_system_type_version"] == "2.15"
-        assert fsx_config["per_unit_storage_throughput"] == 200
+        # SCRATCH_2 takes no per-unit storage throughput.
+        assert fsx_config["per_unit_storage_throughput"] is None
         assert fsx_config["data_compression_type"] == "LZ4"
         assert fsx_config["import_path"] is None
         assert fsx_config["export_path"] is None
         assert fsx_config["auto_import_policy"] == "NEW_CHANGED_DELETED"
-        assert "node_group" in fsx_config
+        assert "node_group" not in fsx_config
 
     def test_get_fsx_lustre_config_custom(self, valid_context):
         """Test getting FSx config with custom values."""
@@ -1008,68 +1334,206 @@ class TestFsxLustreConfig:
         fsx_config_east = config.get_fsx_lustre_config(region="us-east-1")
         assert fsx_config_east["storage_capacity_gib"] == 1200
 
-    def test_get_fsx_lustre_config_node_group_defaults(self):
-        """Test FSx config node_group has all default fields."""
-        app = MockApp({})
-        config = ConfigLoader(app)
-        fsx_config = config.get_fsx_lustre_config()
-
-        node_group = fsx_config["node_group"]
-        assert "instance_types" in node_group
-        assert node_group["min_size"] == 0
-        assert node_group["max_size"] == 10
-        assert node_group["desired_size"] == 1
-        assert node_group["ami_type"] == "AL2023_X86_64_STANDARD"
-        assert node_group["capacity_type"] == "ON_DEMAND"
-        assert node_group["disk_size"] == 100
-        assert node_group["labels"] == {}
-
-    def test_get_fsx_lustre_config_node_group_custom(self, valid_context):
-        """Test FSx config with custom node_group settings."""
+    def test_fsx_node_group_is_deprecated_and_ignored(self, valid_context):
+        """node_group was documented but never read: it warns and is not returned."""
         valid_context["fsx_lustre"] = {
             "enabled": True,
-            "node_group": {
-                "instance_types": ["m6i.2xlarge"],
-                "max_size": 20,
-                "desired_size": 5,
-            },
+            "node_group": {"instance_types": ["m6i.2xlarge"], "max_size": 20},
         }
-        app = MockApp(valid_context)
-        config = ConfigLoader(app)
-        fsx_config = config.get_fsx_lustre_config()
+        valid_context["fsx_lustre_regions"] = {"us-west-2": {"node_group": {"max_size": 5}}}
+        config = ConfigLoader(MockApp(valid_context))
+        assert "node_group" not in config.get_fsx_lustre_config()
+        assert "node_group" not in config.get_fsx_lustre_config(region="us-west-2")
+        deprecated = [w for w in config.warnings if "node_group" in w]
+        assert [w.split(" is deprecated")[0] for w in deprecated] == [
+            "fsx_lustre.node_group",
+            "fsx_lustre_regions.us-west-2.node_group",
+        ]
 
-        node_group = fsx_config["node_group"]
-        assert node_group["instance_types"] == ["m6i.2xlarge"]
-        assert node_group["max_size"] == 20
-        assert node_group["desired_size"] == 5
-        # Defaults should still be present
-        assert node_group["min_size"] == 0
-        assert node_group["ami_type"] == "AL2023_X86_64_STANDARD"
+    @pytest.mark.parametrize(
+        ("deployment_type", "expected"),
+        [("PERSISTENT_1", 200), ("PERSISTENT_2", 250), ("SCRATCH_1", None), ("SCRATCH_2", None)],
+    )
+    def test_fsx_throughput_defaults_per_deployment_type(
+        self, valid_context, deployment_type, expected
+    ):
+        """PERSISTENT_2 has no 200 setting, so its default is 250; SCRATCH types take none."""
+        valid_context["fsx_lustre"] = {"enabled": True, "deployment_type": deployment_type}
+        fsx_config = ConfigLoader(MockApp(valid_context)).get_fsx_lustre_config()
+        assert fsx_config["per_unit_storage_throughput"] == expected
 
-    def test_get_fsx_lustre_config_region_node_group_override(self, valid_context):
-        """Test FSx config with region-specific node_group override."""
+    def test_fsx_scratch_ignores_a_configured_throughput(self, valid_context):
+        """v8.23.0 shipped 200 next to SCRATCH_2: it is ignored, without a warning."""
         valid_context["fsx_lustre"] = {
-            "enabled": True,
-            "node_group": {
-                "instance_types": ["m5.large"],
-                "max_size": 10,
-            },
+            "deployment_type": "SCRATCH_2",
+            "per_unit_storage_throughput": 200,
         }
-        valid_context["fsx_lustre_regions"] = {
-            "eu-west-1": {
-                "node_group": {
-                    "instance_types": ["m6i.large"],
-                    "max_size": 5,
-                }
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_fsx_lustre_config()["per_unit_storage_throughput"] is None
+        assert not [w for w in config.warnings if "fsx_lustre" in w]
+
+    @pytest.mark.parametrize(
+        ("deployment_type", "allowed", "rejected"),
+        [
+            ("PERSISTENT_1", (50, 100, 200), (125, 250, 12, 40)),
+            ("PERSISTENT_2", (125, 250, 500, 1000), (50, 100, 200)),
+        ],
+    )
+    def test_fsx_throughput_must_suit_the_deployment_type(
+        self, valid_context, deployment_type, allowed, rejected
+    ):
+        for value in allowed:
+            valid_context["fsx_lustre"] = {
+                "deployment_type": deployment_type,
+                "per_unit_storage_throughput": value,
             }
-        }
-        app = MockApp(valid_context)
-        config = ConfigLoader(app)
+            config = ConfigLoader(MockApp(valid_context))
+            assert config.get_fsx_lustre_config()["per_unit_storage_throughput"] == value
+        for value in (*rejected, True, "200"):
+            valid_context["fsx_lustre"] = {
+                "deployment_type": deployment_type,
+                "per_unit_storage_throughput": value,
+            }
+            with pytest.raises(
+                ConfigValidationError,
+                match=rf"fsx_lustre\.per_unit_storage_throughput must be one of .* for "
+                rf"{deployment_type}",
+            ):
+                ConfigLoader(MockApp(valid_context))
 
-        fsx_config = config.get_fsx_lustre_config(region="eu-west-1")
-        node_group = fsx_config["node_group"]
-        assert node_group["instance_types"] == ["m6i.large"]
-        assert node_group["max_size"] == 5
+    @pytest.mark.parametrize(("value", "enabled"), [(True, True), (False, False)])
+    def test_fsx_enabled_takes_json_booleans(self, valid_context, value, enabled):
+        valid_context["fsx_lustre"] = {"enabled": value}
+        assert ConfigLoader(MockApp(valid_context)).get_fsx_lustre_config()["enabled"] is enabled
+
+    def test_fsx_region_overlay_string_false_is_rejected(self, valid_context):
+        """An overlay flag follows the same rule, and the error names the overlay."""
+        valid_context["fsx_lustre_regions"] = {"us-west-2": {"enabled": "false"}}
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"fsx_lustre_regions\.us-west-2\.enabled must be true or false .*"
+            r"which deletes the FSx for Lustre file system and the data on it",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("value", [1, 0, None, "yes", "", [True]])
+    def test_fsx_enabled_rejects_non_booleans(self, valid_context, value):
+        valid_context["fsx_lustre"] = {"enabled": value}
+        with pytest.raises(
+            ConfigValidationError, match=r"fsx_lustre\.enabled must be true or false"
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize(
+        ("block", "message"),
+        [
+            ({"deployment_type": "PERSISTENT_3"}, r"fsx_lustre\.deployment_type must be one of"),
+            ({"deployment_type": "scratch_2"}, r"fsx_lustre\.deployment_type must be one of"),
+            (
+                {"storage_capacity_gib": 1000},
+                r"storage_capacity_gib must be an integer of at least",
+            ),
+            ({"storage_capacity_gib": 3600}, r"multiple of 2400 GiB for SCRATCH_2"),
+            (
+                {"storage_capacity_gib": 4800, "deployment_type": "SCRATCH_1"},
+                r"multiple of 3600 GiB for SCRATCH_1",
+            ),
+            ({"storage_capacity_gib": True}, r"storage_capacity_gib must be an integer"),
+            ({"file_system_type_version": "2.16"}, r"file_system_type_version must be one of"),
+            ({"file_system_type_version": 2.15}, r"file_system_type_version must be one of"),
+            (
+                {"deployment_type": "PERSISTENT_2", "file_system_type_version": "2.10"},
+                r"2\.10 is not supported by PERSISTENT_2",
+            ),
+            ({"data_compression_type": "ZSTD"}, r"data_compression_type must be one of"),
+            ({"auto_import_policy": "ALL"}, r"auto_import_policy must be one of"),
+            ({"import_path": "my-bucket/data"}, r"import_path must be an S3 URI"),
+            ({"import_path": "s3://"}, r"import_path must be an S3 URI"),
+            ({"export_path": "s3://bucket/out"}, r"export_path needs an import_path"),
+            (
+                {"import_path": "s3://a/in", "export_path": "s3://b/out"},
+                r"export_path must use the import_path bucket",
+            ),
+            ({"node_groups": {}}, r"fsx_lustre contains unknown key\(s\): fsx_lustre\.node_groups"),
+            ("on", r"fsx_lustre must be an object, got str"),
+        ],
+    )
+    def test_fsx_invalid_values_fail_with_the_key_path(self, valid_context, block, message):
+        valid_context["fsx_lustre"] = block
+        with pytest.raises(ConfigValidationError, match=message):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_fsx_capacities_fsx_accepts(self, valid_context):
+        for deployment_type, capacity in (
+            ("SCRATCH_1", 1200),
+            ("SCRATCH_1", 2400),
+            ("SCRATCH_1", 7200),
+            ("SCRATCH_2", 4800),
+            ("PERSISTENT_2", 2400),
+        ):
+            valid_context["fsx_lustre"] = {
+                "deployment_type": deployment_type,
+                "storage_capacity_gib": capacity,
+            }
+            config = ConfigLoader(MockApp(valid_context))
+            assert config.get_fsx_lustre_config()["storage_capacity_gib"] == capacity
+
+    def test_fsx_same_bucket_import_and_export_are_accepted(self, valid_context):
+        valid_context["fsx_lustre"] = {
+            "import_path": "s3://data-bucket/training",
+            "export_path": "s3://data-bucket/results",
+        }
+        fsx_config = ConfigLoader(MockApp(valid_context)).get_fsx_lustre_config()
+        assert fsx_config["export_path"] == "s3://data-bucket/results"
+
+    def test_fsx_region_overlay_errors_name_the_overlay(self, valid_context):
+        """A bad value in an overlay names fsx_lustre_regions.<region>, not the global block."""
+        valid_context["fsx_lustre_regions"] = {
+            "us-west-2": {"deployment_type": "PERSISTENT_2", "per_unit_storage_throughput": 200}
+        }
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"fsx_lustre_regions\.us-west-2\.per_unit_storage_throughput must be one of",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_fsx_region_overlay_merges_over_a_global_value(self, valid_context):
+        """A global PERSISTENT_2 throughput of 500 stays valid when an overlay changes size."""
+        valid_context["fsx_lustre"] = {
+            "deployment_type": "PERSISTENT_2",
+            "per_unit_storage_throughput": 500,
+        }
+        valid_context["fsx_lustre_regions"] = {"us-west-2": {"storage_capacity_gib": 2400}}
+        west = ConfigLoader(MockApp(valid_context)).get_fsx_lustre_config("us-west-2")
+        assert (west["deployment_type"], west["per_unit_storage_throughput"]) == (
+            "PERSISTENT_2",
+            500,
+        )
+        assert west["storage_capacity_gib"] == 2400
+
+    @pytest.mark.parametrize(
+        ("overlays", "message"),
+        [
+            (["us-east-1"], r"fsx_lustre_regions must be an object, got list"),
+            ({"us-east-1": "on"}, r"fsx_lustre_regions\.us-east-1 must be an object, got str"),
+            (
+                {"us-east-1": {"enable": True}},
+                r"fsx_lustre_regions\.us-east-1 contains unknown key\(s\): "
+                r"fsx_lustre_regions\.us-east-1\.enable",
+            ),
+        ],
+    )
+    def test_fsx_region_overlays_must_be_objects_of_known_keys(
+        self, valid_context, overlays, message
+    ):
+        valid_context["fsx_lustre_regions"] = overlays
+        with pytest.raises(ConfigValidationError, match=message):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_fsx_override_forces_enabled(self, valid_context):
+        valid_context["fsx_lustre"] = {"enabled": False}
+        valid_context["feature_enabled_overrides"] = "fsx_lustre"
+        assert ConfigLoader(MockApp(valid_context)).get_fsx_lustre_config()["enabled"] is True
 
 
 class TestEksClusterConfig:
@@ -1077,7 +1541,7 @@ class TestEksClusterConfig:
 
     def test_get_eks_cluster_config_defaults(self):
         """Test getting EKS cluster config with defaults."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         eks_config = config.get_eks_cluster_config()
 
@@ -1217,12 +1681,11 @@ class TestConfigValidationEdgeCases:
         assert ga_config["traffic_dial"]["enabled"] is False
         assert ga_config["traffic_dial"]["mode"] == "monitor"
 
-    def test_missing_alb_config(self, valid_context):
-        """Test that missing alb_config raises error."""
+    def test_missing_alb_config_is_valid(self, valid_context):
+        """alb_config is deprecated, so leaving it out is valid and warns about nothing."""
         del valid_context["alb_config"]
         app = MockApp(valid_context)
-        with pytest.raises(ConfigValidationError, match="alb_config configuration is required"):
-            ConfigLoader(app)
+        assert ConfigLoader(app).warnings == []
 
     def test_missing_manifest_processor_config(self, valid_context):
         """Test that missing manifest_processor config raises error."""
@@ -1245,7 +1708,7 @@ class TestConfigValidationEdgeCases:
         valid_context["manifest_processor"]["replicas"] = 0
         app = MockApp(valid_context)
         with pytest.raises(
-            ConfigValidationError, match="manifest_processor replicas must be a positive integer"
+            ConfigValidationError, match=r"manifest_processor\.replicas must be a positive integer"
         ):
             ConfigLoader(app)
 
@@ -1337,31 +1800,22 @@ class TestConfigValidationEdgeCases:
         # Explicit keys still override their defaults.
         assert ga_config["name"] == "gco-accelerator"
 
-    def test_missing_alb_field(self, valid_context):
-        """Test that missing ALB field raises error."""
-        del valid_context["alb_config"]["healthy_threshold"]
+    @pytest.mark.parametrize(
+        "alb_config",
+        [{"health_check_interval": 30}, {"healthy_threshold": -1}, {"health_check_timeout": "5"}],
+    )
+    def test_alb_config_contents_are_no_longer_validated(self, valid_context, alb_config):
+        """The deprecated block is ignored whole: partial or invalid contents only warn."""
+        valid_context["alb_config"] = alb_config
         app = MockApp(valid_context)
-        with pytest.raises(
-            ConfigValidationError, match="Missing alb_config configuration: healthy_threshold"
-        ):
-            ConfigLoader(app)
-
-    def test_negative_alb_value(self, valid_context):
-        """Test that negative ALB value raises error."""
-        valid_context["alb_config"]["unhealthy_threshold"] = 0
-        app = MockApp(valid_context)
-        with pytest.raises(
-            ConfigValidationError, match="unhealthy_threshold must be a positive integer"
-        ):
-            ConfigLoader(app)
+        config = ConfigLoader(app)
+        assert config.warnings[0].startswith("alb_config is deprecated and ignored")
 
     def test_missing_api_gateway_field(self, valid_context):
         """Test that missing API Gateway field raises error."""
         del valid_context["api_gateway"]["log_level"]
         app = MockApp(valid_context)
-        with pytest.raises(
-            ConfigValidationError, match="Missing api_gateway configuration: log_level"
-        ):
+        with pytest.raises(ConfigValidationError, match=r"api_gateway\.log_level is required"):
             ConfigLoader(app)
 
     def test_optional_pending_thresholds_negative(self, valid_context):
@@ -1414,7 +1868,7 @@ class TestConfigValidationEdgeCases:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="Missing manifest_processor configuration: replicas",
+            match=r"manifest_processor\.replicas is required",
         ):
             ConfigLoader(app)
 
@@ -1426,7 +1880,7 @@ class TestConfigValidationEdgeCases:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="Missing job_validation_policy configuration: allowed_namespaces",
+            match=r"job_validation_policy\.allowed_namespaces is required",
         ):
             ConfigLoader(app)
 
@@ -1438,7 +1892,7 @@ class TestConfigValidationEdgeCases:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="Missing job_validation_policy configuration: resource_quotas",
+            match=r"job_validation_policy\.resource_quotas is required",
         ):
             ConfigLoader(app)
 
@@ -1504,7 +1958,7 @@ class TestAuroraPgvectorConfig:
 
     def test_get_aurora_pgvector_config_defaults(self):
         """Test getting Aurora pgvector config with defaults."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         aurora_config = config.get_aurora_pgvector_config()
 
@@ -1552,7 +2006,7 @@ class TestAuroraPgvectorConfig:
 
     def test_get_aurora_pgvector_config_min_acu_zero_for_scale_to_zero(self):
         """Test that min_acu=0 is the default for scale-to-zero support."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         aurora_config = config.get_aurora_pgvector_config()
 
@@ -1573,22 +2027,451 @@ class TestAuroraPgvectorConfig:
 
         assert aurora_config["min_acu"] == 0.5
 
-    def test_get_aurora_pgvector_config_non_dict_context_uses_defaults(self):
-        """Test that non-dict context value falls back to defaults."""
-        app = MockApp({"aurora_pgvector": "invalid"})
-        config = ConfigLoader(app)
-        aurora_config = config.get_aurora_pgvector_config()
-
-        assert aurora_config["enabled"] is False
-        assert aurora_config["min_acu"] == 0
+    def test_get_aurora_pgvector_config_non_dict_context_is_rejected(self):
+        """A scalar where the block belongs is an error, not a silent fall back to defaults."""
+        app = MockApp({**minimal_context(), "aurora_pgvector": "invalid"})
+        with pytest.raises(ConfigValidationError, match="aurora_pgvector must be an object"):
+            ConfigLoader(app)
 
     def test_get_aurora_pgvector_config_disabled_by_default(self):
         """Test that Aurora pgvector is disabled by default."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         aurora_config = config.get_aurora_pgvector_config()
 
         assert aurora_config["enabled"] is False
+
+
+class TestValkeyConfigValidation:
+    """The valkey block: strict flag, integer usage limits, known keys only."""
+
+    def test_defaults(self, valid_context):
+        assert ConfigLoader(MockApp(valid_context)).get_valkey_config() == {
+            "enabled": False,
+            "max_data_storage_gb": 5,
+            "max_ecpu_per_second": 5000,
+            "snapshot_retention_limit": 1,
+        }
+
+    @pytest.mark.parametrize(
+        ("block", "message"),
+        [
+            ({"enabled": "no"}, r"valkey\.enabled must be true or false"),
+            (
+                {"max_data_storage_gb": 0},
+                r"valkey\.max_data_storage_gb must be an integer of at least 1",
+            ),
+            ({"max_data_storage_gb": 5.5}, r"valkey\.max_data_storage_gb must be an integer"),
+            (
+                {"max_ecpu_per_second": 999},
+                r"valkey\.max_ecpu_per_second must be an integer of at least 1000",
+            ),
+            ({"max_ecpu_per_second": True}, r"valkey\.max_ecpu_per_second must be an integer"),
+            (
+                {"snapshot_retention_limit": -1},
+                r"valkey\.snapshot_retention_limit must be an integer of at least 0",
+            ),
+            ({"max_storage_gb": 5}, r"valkey contains unknown key\(s\): valkey\.max_storage_gb"),
+            (True, r"valkey must be an object, got bool"),
+        ],
+    )
+    def test_invalid_values_fail_with_the_key_path(self, valid_context, block, message):
+        valid_context["valkey"] = block
+        with pytest.raises(ConfigValidationError, match=message):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_comment_keys_are_allowed(self, valid_context):
+        valid_context["valkey"] = {"_comment_limits": "caps", "enabled": True}
+        assert ConfigLoader(MockApp(valid_context)).get_valkey_config()["enabled"] is True
+
+
+class TestAuroraPgvectorConfigValidation:
+    """The aurora_pgvector block: capacity units, retention and the two flags."""
+
+    @pytest.mark.parametrize(
+        ("block", "expected"),
+        [
+            ({"min_acu": 0.5, "max_acu": 1}, (0.5, 1)),
+            ({"min_acu": 0, "max_acu": 256}, (0, 256)),
+            ({"min_acu": 8, "max_acu": 8}, (8, 8)),
+        ],
+    )
+    def test_capacity_ranges_aurora_accepts(self, valid_context, block, expected):
+        valid_context["aurora_pgvector"] = block
+        aurora = ConfigLoader(MockApp(valid_context)).get_aurora_pgvector_config()
+        assert (aurora["min_acu"], aurora["max_acu"]) == expected
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_flags_take_json_booleans(self, valid_context, value):
+        valid_context["aurora_pgvector"] = {"enabled": value, "deletion_protection": value}
+        aurora = ConfigLoader(MockApp(valid_context)).get_aurora_pgvector_config()
+        assert aurora["enabled"] is value
+        assert aurora["deletion_protection"] is value
+
+    def test_string_deletion_protection_makes_no_claim_about_the_past(self, valid_context):
+        """Earlier releases failed the synth on a string here instead of reading it."""
+        valid_context["aurora_pgvector"] = {"deletion_protection": "false"}
+        with pytest.raises(ConfigValidationError) as raised:
+            ConfigLoader(MockApp(valid_context))
+        assert str(raised.value) == (
+            "aurora_pgvector.deletion_protection must be true or false (a JSON boolean), "
+            "not the string 'false'."
+        )
+
+    def test_string_true_deletion_protection_reads_as_true_with_a_warning(self, valid_context):
+        valid_context["aurora_pgvector"] = {"deletion_protection": "TRUE"}
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_aurora_pgvector_config()["deletion_protection"] is True
+        assert any(w.startswith("aurora_pgvector.deletion_protection is") for w in config.warnings)
+
+    @pytest.mark.parametrize(
+        ("block", "message"),
+        [
+            ({"min_acu": -0.5}, r"aurora_pgvector\.min_acu must be a number from 0 to 256"),
+            (
+                {"min_acu": 0.25},
+                r"aurora_pgvector\.min_acu must be a number from 0 to 256 in steps of 0\.5",
+            ),
+            ({"max_acu": 0.5}, r"aurora_pgvector\.max_acu must be a number from 1 to 256"),
+            ({"max_acu": 257}, r"aurora_pgvector\.max_acu must be a number from 1 to 256"),
+            ({"max_acu": True}, r"aurora_pgvector\.max_acu must be a number"),
+            ({"max_acu": "16"}, r"aurora_pgvector\.max_acu must be a number"),
+            (
+                {"min_acu": 4, "max_acu": 2},
+                r"aurora_pgvector\.max_acu \(2\) must be at least aurora_pgvector\.min_acu \(4\)",
+            ),
+            (
+                {"backup_retention_days": 0},
+                r"aurora_pgvector\.backup_retention_days must be an integer between 1 and 35",
+            ),
+            (
+                {"backup_retention_days": 36},
+                r"aurora_pgvector\.backup_retention_days must be an integer between 1 and 35",
+            ),
+            (
+                {"deletion_protection": "maybe"},
+                r"aurora_pgvector\.deletion_protection must be true or false",
+            ),
+            (
+                {"min_capacity": 1},
+                r"aurora_pgvector contains unknown key\(s\): aurora_pgvector\.min_capacity",
+            ),
+        ],
+    )
+    def test_invalid_values_fail_with_the_key_path(self, valid_context, block, message):
+        valid_context["aurora_pgvector"] = block
+        with pytest.raises(ConfigValidationError, match=message):
+            ConfigLoader(MockApp(valid_context))
+
+
+class TestBlockShapes:
+    """Every block is an object of known keys, checked before anything reads it."""
+
+    @pytest.mark.parametrize(
+        ("mutate", "message"),
+        [
+            (
+                lambda c: c.__setitem__("cluster_observability", False),
+                "cluster_observability must be an object, got bool: False",
+            ),
+            (
+                lambda c: c.__setitem__("cost_monitoring", False),
+                "cost_monitoring must be an object, got bool: False",
+            ),
+            (
+                lambda c: c.__setitem__("mission_memory", False),
+                "mission_memory must be an object, got bool: False",
+            ),
+            (
+                lambda c: c.__setitem__("cost_monitoring", {"reports": 30}),
+                "cost_monitoring.reports must be an object, got int: 30",
+            ),
+            (
+                lambda c: c.__setitem__("cluster_observability", {"grafana": "x"}),
+                "cluster_observability.grafana must be an object, got str: 'x'",
+            ),
+            (
+                lambda c: c.__setitem__("helm", {"volcano": True}),
+                "helm.volcano must be an object, got bool: True",
+            ),
+            (
+                lambda c: c.__setitem__("resource_thresholds", 80),
+                "resource_thresholds must be an object, got int: 80",
+            ),
+        ],
+    )
+    def test_a_scalar_where_a_block_belongs_is_rejected(self, valid_context, mutate, message):
+        """These used to read as absent blocks (defaults on) or crash later."""
+        mutate(valid_context)
+        with pytest.raises(ConfigValidationError, match=re.escape(message)):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize(
+        ("mutate", "unknown"),
+        [
+            (
+                lambda c: c.__setitem__("queue_processor", {"enable": False}),
+                "queue_processor.enable",
+            ),
+            (
+                lambda c: c.__setitem__("helm", {"volcano": {"enabled": True, "version": "1"}}),
+                "helm.volcano.version",
+            ),
+            (lambda c: c.__setitem__("helm", {"volcanoo": {"enabled": True}}), "helm.volcanoo"),
+            (
+                lambda c: c.__setitem__("cost_monitoring", {"reports": {"interval": 5}}),
+                "cost_monitoring.reports.interval",
+            ),
+            (
+                lambda c: c["api_gateway"].__setitem__("throttle_limit", 5),
+                "api_gateway.throttle_limit",
+            ),
+        ],
+    )
+    def test_unknown_keys_fail_with_their_full_path(self, valid_context, mutate, unknown):
+        mutate(valid_context)
+        with pytest.raises(ConfigValidationError, match=re.escape(f"unknown key(s): {unknown};")):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_comment_keys_and_null_blocks_are_allowed(self, valid_context):
+        valid_context["queue_processor"] = {"_comment_enabled": "doc", "enabled": True}
+        valid_context["cost_monitoring"] = None
+        valid_context["helm"] = {"_comment": "charts", "kueue": {"enabled": False}}
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_cost_monitoring_config()["enabled"] is True
+
+    def test_tag_values_must_be_strings(self, valid_context):
+        valid_context["tags"] = {"Environment": "test", "CostCenter": 42}
+        with pytest.raises(
+            ConfigValidationError, match=re.escape("tags.CostCenter must be a string, got 42")
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_tags_must_be_an_object(self, valid_context):
+        valid_context["tags"] = ["Environment=test"]
+        with pytest.raises(ConfigValidationError, match=re.escape("tags must be an object")):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_legacy_global_accelerator_keys_are_deprecated(self, valid_context):
+        valid_context["global_accelerator"].update(
+            {"health_check_grace_period": 30, "health_check_timeout": 5}
+        )
+        config = ConfigLoader(MockApp(valid_context))
+        assert [w.split(" is deprecated")[0] for w in config.warnings if "global_acc" in w] == [
+            "global_accelerator.health_check_grace_period",
+            "global_accelerator.health_check_timeout",
+        ]
+
+    def test_images_destroy_and_lifecycle_keys_are_deprecated(self, valid_context):
+        """No stack creates or deletes the image repositories, so these never took effect."""
+        valid_context["images"] = {
+            "removal_policy": "destroy",
+            "empty_on_delete": True,
+            "lifecycle": {"keep_tagged": 20, "expire_untagged_days": 7},
+            "replication": {"enabled": True},
+        }
+        config = ConfigLoader(MockApp(valid_context))
+        deprecated = {w.split(" is deprecated")[0]: w for w in config.warnings if "images." in w}
+        assert sorted(deprecated) == [
+            "images.empty_on_delete",
+            "images.lifecycle",
+            "images.removal_policy",
+        ]
+        assert "gco images delete-repo <name> --force -y" in deprecated["images.removal_policy"]
+        assert "gco images lifecycle set" in deprecated["images.lifecycle"]
+
+    @pytest.mark.parametrize(
+        "images",
+        [
+            {"removal_policy": "shred"},
+            {"empty_on_delete": "false"},
+            {"lifecycle": "keep 20"},
+            {"lifecycle": {"keep_everything": True}},
+        ],
+    )
+    def test_deprecated_images_values_are_not_validated(self, valid_context, images):
+        """Ignored keys cannot fail the synth, whatever they hold."""
+        valid_context["images"] = images
+        config = ConfigLoader(MockApp(valid_context))
+        assert any(" is deprecated and ignored" in w for w in config.warnings)
+
+    def test_unknown_top_level_keys_in_gco_style_warn(self, valid_context):
+        valid_context.update(
+            {
+                "cluster_observabilty": {"enabled": False},
+                "@aws-cdk/core:newStyleStackSynthesis": True,
+                "aws:cdk:enable-path-metadata": True,
+                "availability-zones:account=123456789012:region=us-east-1": ["us-east-1a"],
+                "acknowledged-issue-numbers": [1],
+                "_comment_top": "doc",
+                "feature_enabled_overrides": "valkey",
+            }
+        )
+        config = ConfigLoader(MockApp(valid_context))
+        unknown = [w for w in config.warnings if "is not a GCO cdk.json key" in w]
+        assert unknown == [
+            "cluster_observabilty is not a GCO cdk.json key and is ignored; check its "
+            "spelling against docs/CUSTOMIZATION.md."
+        ]
+
+    def test_a_node_without_get_all_context_skips_the_top_level_check(self, valid_context):
+        class _BareNode:
+            def __init__(self, context: dict) -> None:
+                self._context = context
+
+            def try_get_context(self, key: str):
+                return self._context.get(key)
+
+        class _BareApp:
+            def __init__(self, context: dict) -> None:
+                self.node = _BareNode(context)
+
+        valid_context["cluster_observabilty"] = {}
+        config = ConfigLoader(_BareApp(valid_context))
+        assert not [w for w in config.warnings if "is not a GCO cdk.json key" in w]
+
+    def test_every_key_of_the_shipped_cdk_json_is_known(self):
+        """The committed file draws no unknown-key warning and no deprecation."""
+        import json
+        from pathlib import Path
+
+        context = json.loads(
+            (Path(__file__).resolve().parents[1] / "cdk.json").read_text(encoding="utf-8")
+        )["context"]
+        assert ConfigLoader(MockApp(context)).warnings == []
+
+
+def _stateful_flag_context(valid_context: dict, block: str, value: object) -> dict:
+    """``valid_context`` with ``<block>.enabled`` set; ``block`` may be dotted once."""
+    outer, _, inner = block.partition(".")
+    valid_context[outer] = {inner: {"enabled": value}} if inner else {"enabled": value}
+    return valid_context
+
+
+#: The storage features whose "off" deletes data: (block, what turning it off
+#: deletes, how to read the parsed flag back).
+_STATEFUL_FLAGS = [
+    pytest.param(
+        "fsx_lustre",
+        "the FSx for Lustre file system and the data on it",
+        lambda config: config.get_fsx_lustre_config()["enabled"],
+        id="fsx_lustre",
+    ),
+    pytest.param(
+        "valkey",
+        "the Valkey cache and the data in it",
+        lambda config: config.get_valkey_config()["enabled"],
+        id="valkey",
+    ),
+    pytest.param(
+        "aurora_pgvector",
+        "the Aurora pgvector cluster and its data",
+        lambda config: config.get_aurora_pgvector_config()["enabled"],
+        id="aurora_pgvector",
+    ),
+    pytest.param(
+        "cluster_observability.mlflow",
+        "the MLflow tracking server and its run-metadata volume",
+        lambda config: config.get_cluster_observability_config()["mlflow"]["enabled"],
+        id="mlflow",
+    ),
+]
+
+
+class TestStatefulFlagStrings:
+    """A string flag in a storage block is never quietly reinterpreted on upgrade.
+
+    Earlier releases read these flags by truthiness, so ``"false"`` (any
+    non-empty string) has been running as enabled. Reading it as false now
+    would delete the resource and its data on the next deploy, so every
+    string except ``"true"`` fails validation and says what to write.
+    """
+
+    @pytest.mark.parametrize(("block", "deletes", "read_flag"), _STATEFUL_FLAGS)
+    @pytest.mark.parametrize("value", ["false", "False", "0", "off"])
+    def test_non_empty_strings_fail_and_explain(
+        self, valid_context, block, deletes, read_flag, value
+    ):
+        context = _stateful_flag_context(valid_context, block, value)
+        with pytest.raises(ConfigValidationError) as raised:
+            ConfigLoader(MockApp(context))
+        assert str(raised.value) == (
+            f"{block}.enabled must be true or false (a JSON boolean), not the string "
+            f"{value!r}. Earlier releases read every non-empty string here as true, so this "
+            "setting has been on. Write true to keep it on, or false to turn it off, which "
+            f"deletes {deletes}."
+        )
+
+    @pytest.mark.parametrize(("block", "deletes", "read_flag"), _STATEFUL_FLAGS)
+    def test_empty_string_fails_and_says_it_has_been_off(
+        self, valid_context, block, deletes, read_flag
+    ):
+        context = _stateful_flag_context(valid_context, block, "")
+        with pytest.raises(ConfigValidationError) as raised:
+            ConfigLoader(MockApp(context))
+        assert str(raised.value) == (
+            f"{block}.enabled must be true or false (a JSON boolean), not the string ''. "
+            "Earlier releases read an empty string here as false, so this setting has been "
+            "off. Write false to keep it off, or true to turn it on."
+        )
+
+    @pytest.mark.parametrize(("block", "deletes", "read_flag"), _STATEFUL_FLAGS)
+    @pytest.mark.parametrize("value", ["true", "TRUE", "True"])
+    def test_string_true_keeps_the_feature_on_with_a_warning(
+        self, valid_context, block, deletes, read_flag, value
+    ):
+        config = ConfigLoader(MockApp(_stateful_flag_context(valid_context, block, value)))
+        assert read_flag(config) is True
+        assert (
+            f"{block}.enabled is the string {value!r}, read as true; write the JSON boolean "
+            "true instead (string flags in cdk.json blocks are deprecated)."
+        ) in config.warnings
+
+    @pytest.mark.parametrize(("block", "deletes", "read_flag"), _STATEFUL_FLAGS)
+    @pytest.mark.parametrize("value", [True, False])
+    def test_json_booleans_are_read_as_written_without_a_warning(
+        self, valid_context, block, deletes, read_flag, value
+    ):
+        config = ConfigLoader(MockApp(_stateful_flag_context(valid_context, block, value)))
+        assert read_flag(config) is value
+        assert not [w for w in config.warnings if f"{block}.enabled" in w]
+
+
+class TestParseFlags:
+    """The two flag parsers, called directly."""
+
+    def test_block_flag_without_a_data_consequence(self):
+        from gco.config.config_loader import parse_block_flag
+
+        with pytest.raises(ConfigValidationError) as raised:
+            parse_block_flag("no", "queue_processor.enabled", lambda _message: None)
+        assert str(raised.value).endswith("Write true to keep it on, or false to turn it off.")
+
+    def test_block_flag_rejects_non_strings_by_name(self):
+        from gco.config.config_loader import parse_block_flag
+
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"^x\.enabled must be true or false \(a JSON boolean\), got 1$",
+        ):
+            parse_block_flag(1, "x.enabled", lambda _message: None)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(True, True), (False, False), ("true", True), ("FALSE", False), ("False", False)],
+    )
+    def test_top_level_flag_takes_both_strings(self, value, expected):
+        """``--context key=value`` passes strings, so both spellings are read as written."""
+        from gco.config.config_loader import parse_bool_flag
+
+        assert parse_bool_flag(value, "gco:control-plane-only") is expected
+
+    @pytest.mark.parametrize("value", ["yes", "", 1, None])
+    def test_top_level_flag_rejects_everything_else(self, value):
+        from gco.config.config_loader import parse_bool_flag
+
+        with pytest.raises(ConfigValidationError, match=r"^k must be true or false, got "):
+            parse_bool_flag(value, "k")
 
 
 class TestAnalyticsEnvironmentConfig:
@@ -1596,7 +2479,7 @@ class TestAnalyticsEnvironmentConfig:
 
     def test_get_analytics_config_defaults(self):
         """Missing analytics_environment block → defaults apply."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         analytics_config = config.get_analytics_config()
 
@@ -1611,7 +2494,7 @@ class TestAnalyticsEnvironmentConfig:
 
     def test_get_analytics_enabled_defaults_to_false(self):
         """Missing analytics_environment block → get_analytics_enabled() is False."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
 
         assert config.get_analytics_enabled() is False
@@ -1766,19 +2649,14 @@ class TestAnalyticsEnvironmentConfig:
         ):
             ConfigLoader(app)
 
-    def test_non_dict_analytics_environment_context_uses_defaults(self):
-        """Non-dict analytics_environment context value → falls back to defaults."""
-        app = MockApp({"analytics_environment": "invalid"})
-        config = ConfigLoader(app)
-        analytics_config = config.get_analytics_config()
-
-        assert analytics_config["enabled"] is False
-        assert config.get_analytics_enabled() is False
-        assert analytics_config["cognito"] == {
-            "domain_prefix": None,
-            "removal_policy": "destroy",
-        }
-        assert analytics_config["efs"] == {"removal_policy": "destroy"}
+    def test_non_dict_analytics_environment_context_is_rejected(self):
+        """A scalar where the block belongs fails instead of reading as the defaults."""
+        app = MockApp({**minimal_context(), "analytics_environment": "invalid"})
+        with pytest.raises(
+            ConfigValidationError,
+            match=re.escape("analytics_environment must be an object, got str: 'invalid'"),
+        ):
+            ConfigLoader(app)
 
 
 class TestAnalyticsConstants:
@@ -1930,8 +2808,11 @@ class TestTracingConfig:
             ConfigLoader(MockApp(valid_context))
 
         message = str(exc_info.value)
-        assert "tracing contains unknown key(s): sampling_ratio" in message
-        assert "allowed keys: enable_transaction_search, enabled, sample_ratio" in message
+        assert "tracing contains unknown key(s): tracing.sampling_ratio" in message
+        assert (
+            "allowed keys: tracing.enable_transaction_search, tracing.enabled, tracing.sample_ratio"
+            in message
+        )
 
     @pytest.mark.parametrize(
         ("enabled", "transaction_search", "expected"),
@@ -1995,7 +2876,7 @@ class TestTracingConfig:
         valid_context["tracing_overrides"] = '{"sampling": 1}'
         with pytest.raises(ConfigValidationError) as exc_info:
             ConfigLoader(MockApp(valid_context))
-        assert "tracing (after tracing_overrides) contains unknown key(s): sampling" in str(
+        assert "tracing (after tracing_overrides) contains unknown key(s): tracing.sampling" in str(
             exc_info.value
         )
 

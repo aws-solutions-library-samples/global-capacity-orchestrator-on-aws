@@ -22,19 +22,19 @@
 #   - integration:docker:cost-monitor             — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:dev-container            — Dockerfile.dev native-arch matrix (amd64 + arm64 runners)
 #   - integration:docker:health-monitor           — build + import smoke + functional boot/probe/shutdown contract
-#   - integration:docker:helm-installer           — build + `helm version`/`kubectl version` + RIE invoke + read-only helm render
+#   - integration:docker:helm-installer           — build + handler import + `helm version`/`kubectl version` + RIE invoke + read-only helm render
 #   - integration:docker:inference-monitor        — build + import smoke + functional metrics/resilience/shutdown contract
 #   - integration:docker:inference-proxy          — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:manifest-processor       — build + import smoke + functional boot/probe/shutdown contract
-#   - integration:docker:queue-processor          — build + import smoke + moto-SQS consume/reject/exit-code contract
-#   - integration:docker:tls-certificate-manager  — build + Lambda handler import + RIE invoke
+#   - integration:docker:queue-processor          — build + import smoke + consume/reject/exit-code contract against the Floci SQS emulator
+#   - integration:docker:tls-certificate-manager  — build + handler import + RIE invoke
 #   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
 #   - integration:kind:cluster-e2e                — kind + Calico + Metrics Server + HPA + services + policy/RBAC + SQS consumer + inference dry-run
 #   - integration:kind:cost-pipeline              — kind + Calico + pinned kube-prometheus-stack/OpenCost + real cost-monitor report to Floci S3
 #   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow/trust-manager + TrainJob e2e + SAR sweep + mlflow over HTTPS
 #   - integration:kind:platform-addons            — kind + pinned Argo CD/Crossplane/Crossview + repo-server HPA + PR-commit sync + fences + captures
-#   - integration:lambda:imports                  — import each Lambda handler
+#   - integration:lambda:imports                  — import each zipped Lambda handler in the Lambda base image with only its SDK + what it deploys
 #   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
 #   - integration:pytest:cross-module             — pytest tests/test_integration.py
 #
@@ -114,7 +114,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project (provides PyYAML for the validator)
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Derive the Helm pin from the production installer Dockerfile
         # lambda/helm-installer/Dockerfile is the single source for the Helm
         # version + checksum: this step loads HELM_VERSION / HELM_SHA256 from
@@ -175,7 +175,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project
         run: |
-          pip install -e .
+          pip install -c requirements-lock.txt -e .
       - name: Install pinned kubeconform
         run: |
           set -euo pipefail
@@ -319,21 +319,34 @@ jobs:
 
   integration-lambda-imports:
     name: "integration:lambda:imports"
+    # x86_64, the architecture every GCO Python Lambda runs on, so the
+    # linux/amd64 base image (and the manylinux x86_64 wheels the build action
+    # stages for kubectl-applier-simple) run natively.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # Several Lambda modules (notably lambda/api-gateway-proxy/proxy_utils.py)
-    # instantiate boto3 clients at module import time, so boto3 needs a
-    # region even though no AWS calls are made. Matches the top-level
-    # AWS_DEFAULT_REGION=us-east-1 variable from the retired GitLab pipeline.
-    env:
-      AWS_DEFAULT_REGION: us-east-1
-      AWS_REGION: us-east-1
+    # Each zipped handler is imported inside the Lambda Python base image the
+    # image Lambdas' Dockerfiles build FROM (pulled once by the script), one
+    # container per handler, with no network and only what it deploys with:
+    # the runtime's SDK (boto3 and the packages it requires, read from the
+    # image) plus its zip's files mounted read-only at /var/task. The script
+    # passes AWS_REGION into each container, because several Lambda modules
+    # (notably lambda/api-gateway-proxy/proxy_utils.py) create boto3 clients
+    # at import time. The project install below runs the build action and the
+    # script; no handler imports from it. The two image Lambdas are imported
+    # inside their own images by integration:docker:helm-installer and
+    # integration:docker:tls-certificate-manager.
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
         run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: ".nvmrc"
+          # Nothing here installs from the root lockfile; the build action's
+          # npm ci of the streaming Lambda fetches its own three packages.
+          package-manager-cache: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
@@ -341,7 +354,8 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project
         run: |
-          pip install -e .
+          pip install -c requirements-lock.txt -e .
+      - uses: ./.github/actions/build-lambda-package
       - name: Import each Lambda handler
         run: python3 .github/scripts/verify_lambda_imports.py
 
@@ -379,7 +393,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install test dependencies
         run: |
-          pip install -e ".[test]"
+          pip install -c requirements-lock.txt -e ".[test]"
       - name: Run integration pytest
         run: |
           pytest tests/test_integration.py -v --tb=short \
@@ -420,7 +434,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install dev + mcp
         run: |
-          pip install -e ".[dev,mcp]"
+          pip install -c requirements-lock.txt -e ".[dev,mcp]"
       - name: Run MCP integration tests
         run: |
           pytest tests/test_mcp_integration.py -v --tb=short \
@@ -478,9 +492,10 @@ jobs:
         # [mcp] brings fastmcp so the gco server entry in the generated
         # config (python3 gco_mcp/run_mcp.py, straight off this checkout)
         # can actually boot under claude.
-        run: pip install -e ".[mcp]"
+        run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
-        run: pip install uv
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
       - name: Boot the autopilot session to the credential boundary
         run: bash .github/scripts/autopilot_claude_code_boot_probe.sh
       - name: Upload session evidence
@@ -536,9 +551,10 @@ jobs:
         # [mcp] brings fastmcp so the gco server entry in the generated
         # config (python3 gco_mcp/run_mcp.py, straight off this checkout)
         # can actually boot under codex.
-        run: pip install -e ".[mcp]"
+        run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
-        run: pip install uv
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
       - name: Boot the codex autopilot session to the credential boundary
         run: bash .github/scripts/autopilot_codex_boot_probe.sh
       - name: Upload session evidence
@@ -597,9 +613,10 @@ jobs:
         # [mcp] brings fastmcp so the gco server entry in the generated
         # config (python3 gco_mcp/run_mcp.py, straight off this checkout)
         # can actually boot under opencode.
-        run: pip install -e ".[mcp]"
+        run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
-        run: pip install uv
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
       - name: Boot the opencode autopilot session to the credential boundary
         run: bash .github/scripts/autopilot_opencode_boot_probe.sh
       - name: Upload session evidence
@@ -1227,6 +1244,25 @@ jobs:
           load: true
           cache-from: type=gha,scope=helm-installer
           cache-to: type=gha,mode=max,scope=helm-installer,ignore-error=true
+      - name: Import the handler inside the image
+        # The image is the deployment, so its handler is imported here rather
+        # than by integration:lambda:imports: no network, -I -B keep the working
+        # directory, PYTHON* variables and bytecode writes out, and the task
+        # root goes first on sys.path with its .pth files processed, as the
+        # Lambda bootstrap does. The entrypoint is the Dockerfile's CMD;
+        # tests/test_ci_runtime_verifiers.py holds this step to gco/stacks.
+        run: |
+          docker run --rm --network none -e AWS_REGION=us-east-1 -e AWS_DEFAULT_REGION=us-east-1 \
+            --entrypoint python helm-installer:ci -I -B -c '
+          import os, site, sys
+          root = os.environ["LAMBDA_TASK_ROOT"]
+          sys.path.insert(0, root)
+          site.addsitedir(root)
+          from handler import lambda_handler
+          if not callable(lambda_handler):
+              sys.exit("handler.lambda_handler is not callable")
+          print("handler.lambda_handler imports from", root)
+          '
       - name: Verify helm + kubectl binaries
         # Require each installed binary to match the reviewed, authenticated
         # release URL in the image's Dockerfile—not merely execute successfully.
@@ -1287,10 +1323,25 @@ jobs:
           load: true
           cache-from: type=gha,scope=tls-certificate-manager
           cache-to: type=gha,mode=max,scope=tls-certificate-manager,ignore-error=true
-      - name: Verify Lambda handler imports
+      - name: Import the handler inside the image
+        # The image is the deployment, so its handler is imported here rather
+        # than by integration:lambda:imports: no network, -I -B keep the working
+        # directory, PYTHON* variables and bytecode writes out, and the task
+        # root goes first on sys.path with its .pth files processed, as the
+        # Lambda bootstrap does. The entrypoint is the Dockerfile's CMD;
+        # tests/test_ci_runtime_verifiers.py holds this step to gco/stacks.
         run: |
-          docker run --rm --entrypoint python tls-certificate-manager:ci \
-            -c "import handler; print('tls-certificate-manager import OK:', handler.__name__)"
+          docker run --rm --network none -e AWS_REGION=us-east-1 -e AWS_DEFAULT_REGION=us-east-1 \
+            --entrypoint python tls-certificate-manager:ci -I -B -c '
+          import os, site, sys
+          root = os.environ["LAMBDA_TASK_ROOT"]
+          sys.path.insert(0, root)
+          site.addsitedir(root)
+          from handler import lambda_handler
+          if not callable(lambda_handler):
+              sys.exit("handler.lambda_handler is not callable")
+          print("handler.lambda_handler imports from", root)
+          '
       - name: Invoke the handler through the Runtime Interface Emulator
         # Boots the image exactly as Lambda does (read-only root, tmpfs /tmp)
         # and invokes handler.lambda_handler through the bundled RIE. The
@@ -1361,7 +1412,7 @@ jobs:
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev gco capacity --help
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev gco stacks --help
       - name: Verify pinned toolchain versions
-        # The verifier reads all eight reviewed Dockerfile ARG pins and fails
+        # The verifier reads every Dockerfile ARG pin DEV_PIN_NAMES lists and fails
         # when any installed tool reports a different runtime version.
         run: >-
           python3 .github/scripts/verify_container_tool_versions.py
@@ -1626,7 +1677,7 @@ jobs:
         # stack calls, and the SQS job envelope `gco jobs submit-sqs` builds —
         # and parse manifests with PyYAML, so the project supplies its own
         # dependencies to this job.
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Reclaim runner disk space before Kind image builds
         uses: ./.github/actions/free-disk-space
       - name: Pre-pull Kind bootstrap images with retry
@@ -1659,68 +1710,11 @@ jobs:
         # what Docker 29's containerd image store needs (kind#4224).
         run: python3 .github/scripts/preload_kind_images.py --cluster gco-ci --image busybox:1.38.0
       - name: Install Calico for NetworkPolicy enforcement
-        # kind's default kindnet does not enforce NetworkPolicy. Calico does,
-        # so 03-network-policies.yaml is actually exercised here.
-        #
-        # Use `rollout status` rather than `kubectl wait --for=condition=Ready
-        # pods -l …` because wait returns "no matching resources found" if
-        # the pods haven't been scheduled yet by the apiserver — a race that
-        # fires within a second of the apply. rollout status waits for the
-        # workload to exist first, then waits for it to become Ready.
-        #
-        # The rollout wait is wrapped in a retry loop because calico-node
-        # readiness is a known CI flake: the DaemonSet pod pulls its image
-        # from quay.io and runs the install-cni / mount-bpffs init containers,
-        # which can exceed a single timeout window under runner image-pull
-        # latency or resource contention. The apply is idempotent, so each
-        # attempt re-applies (a no-op once the objects exist) and re-waits;
-        # transient slowness converges on a later attempt. On the final
-        # failure we dump pod/event diagnostics so a genuine (non-transient)
-        # break is debuggable from the log rather than just "timed out".
-        #
-        # Budget: 3 attempts x (4m node + 2m controllers) = 18m worst case,
-        # inside the job's 30m timeout-minutes.
-        run: |
-          set -euo pipefail
-          calico_manifest="${RUNNER_TEMP}/calico.yaml"
-          curl --fail --show-error --location \
-            --connect-timeout 15 --max-time 60 \
-            --retry 3 --retry-all-errors --retry-max-time 180 \
-            --remove-on-error \
-            --output "${calico_manifest}" \
-            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
-          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
-          kubectl apply -f "${calico_manifest}"
-
-          attempts=3
-          for i in $(seq 1 "${attempts}"); do
-            echo "::group::Calico rollout attempt ${i}/${attempts}"
-            # Re-apply is idempotent; nudges anything that failed to schedule.
-            kubectl apply -f "${calico_manifest}"
-            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
-               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
-              echo "Calico is ready."
-              echo "::endgroup::"
-              exit 0
-            fi
-            echo "Calico not ready on attempt ${i}/${attempts}."
-            echo "::endgroup::"
-            if [ "${i}" -lt "${attempts}" ]; then
-              echo "Retrying in 15s..."
-              sleep 15
-            fi
-          done
-
-          echo "::error::Calico did not become ready after ${attempts} attempts."
-          echo "===== Diagnostics: calico pods ====="
-          kubectl -n kube-system get pods -l k8s-app=calico-node -o wide || true
-          kubectl -n kube-system get pods -l k8s-app=calico-kube-controllers -o wide || true
-          echo "===== Diagnostics: describe calico-node ====="
-          kubectl -n kube-system describe daemonset/calico-node || true
-          kubectl -n kube-system describe pods -l k8s-app=calico-node || true
-          echo "===== Diagnostics: recent kube-system events ====="
-          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
-          exit 1
+        # kind's default kindnet does not enforce NetworkPolicy; Calico does.
+        # The one script every kind job shares downloads the pinned manifest
+        # (CALICO_VERSION / CALICO_SHA256 in this workflow's env), checks it,
+        # applies it, waits with retries and prints diagnostics on failure.
+        run: bash .github/scripts/install-calico.sh
       - name: Install Metrics Server for HPA reconciliation
         # Production uses the EKS managed metrics-server add-on. kind needs the
         # upstream component plus insecure kubelet TLS because its node serving
@@ -2231,11 +2225,11 @@ jobs:
               "COST_REPORT_BUCKET_PARAMETER_REGION",
               "HEALTH_MONITOR_ROLE_ARN",
               "INFERENCE_ENDPOINTS_TABLE_NAME",
+              "INFERENCE_MONITOR_ROLE_ARN",
               "INFERENCE_PROXY_ROLE_ARN",
               "JOBS_TABLE_NAME",
               "MANIFEST_PROCESSOR_ROLE_ARN",
               "MOONCAKE_MASTER_IMAGE",
-              "SERVICE_ACCOUNT_ROLE_ARN",
               "TEMPLATES_TABLE_NAME",
               "WEBHOOKS_TABLE_NAME",
           }
@@ -2499,13 +2493,14 @@ jobs:
             exit 1
           fi
 
-          allowed_output=$(kubectl auth can-i get pods -n gco-system \
+          # The health monitor lists pods cluster-wide; it never gets one.
+          allowed_output=$(kubectl auth can-i list pods -n gco-system \
             --as=system:serviceaccount:gco-system:gco-health-monitor-sa 2>&1) || {
             echo "FAIL: RBAC allow probe errored: $allowed_output"
             exit 1
           }
           if [ "$allowed_output" = "yes" ]; then
-            echo "PASS: gco-health-monitor-sa can get pods in gco-system"
+            echo "PASS: gco-health-monitor-sa can list pods in gco-system"
           else
             echo "FAIL: expected an explicit RBAC allow; output=$allowed_output"
             exit 1
@@ -2518,7 +2513,7 @@ jobs:
         # failure; scheduling, image-pull and kubectl failures produce other
         # states and fail the step instead of being accepted as a deny.
         #
-        # The five assertions are the documented posture, both directions:
+        # The six assertions are the documented posture, both directions:
         #   1. gco-jobs pod -> gco-system pod on an unlisted port: BLOCKED
         #      (default-deny ingress in gco-system; the client's egress rules
         #      do not cover a pod address on 8080 either).
@@ -2538,6 +2533,9 @@ jobs:
         #      pod -> the same pod on 8443: BLOCKED (the proxy reaches model
         #      pods only on their endpoint-tls-proxy sidecar's port, and
         #      nothing outside gco-inference but the proxy reaches them).
+        #   6. default-namespace pod -> a gco-inference pod without the model
+        #      label: BLOCKED (default-deny ingress in gco-inference; only
+        #      the pods the inference monitor labels are re-admitted).
         # Targets serve plain HTTP on the TLS port numbers: the verdict under
         # test is the policy's, per port, not the protocol's.
         run: |
@@ -2644,10 +2642,13 @@ jobs:
           # and allow-inference-proxy-ingress. 8000 stands in for the model
           # server's own port behind the endpoint-tls-proxy sidecar.
           start_target gco-inference netpol-target-model app=netpol-model,gco.io/type=inference 8443 8000
+          # A tenant pod the monitor did not label: no allow rule selects it.
+          start_target gco-inference netpol-target-tenant app=netpol-tenant 8080
           system_ip=$(target_ip gco-system netpol-target-system)
           jobs_ip=$(target_ip gco-jobs netpol-target-jobs)
           metrics_ip=$(target_ip gco-system netpol-target-metrics)
           model_ip=$(target_ip gco-inference netpol-target-model)
+          tenant_ip=$(target_ip gco-inference netpol-target-tenant)
 
           probe gco-jobs netpol-test-cross-system app=netpol-probe-client "$system_ip" 8080 blocked \
             "gco-jobs -> gco-system:8080 (default-deny ingress, no egress rule)"
@@ -2670,10 +2671,12 @@ jobs:
             "inference-proxy -> model:8000 (only the endpoint-tls-proxy port is admitted)"
           probe default netpol-test-model-foreign app=netpol-probe-client "$model_ip" 8443 blocked \
             "default -> model:8443 (only the inference proxy is admitted)"
+          probe default netpol-test-inference-tenant app=netpol-probe-client "$tenant_ip" 8080 blocked \
+            "default -> unlabelled gco-inference pod:8080 (default-deny ingress in gco-inference)"
 
           kubectl -n gco-system delete pod netpol-target-system netpol-target-metrics --wait=false
           kubectl -n gco-jobs delete pod netpol-target-jobs --wait=false
-          kubectl -n gco-inference delete pod netpol-target-model --wait=false
+          kubectl -n gco-inference delete pod netpol-target-model netpol-target-tenant --wait=false
       - name: Apply ResourceQuotas and LimitRanges
         # Apply governance only after the synthetic NetworkPolicy client exits.
         # Otherwise this LimitRange injects a 100m CPU request into that probe,
@@ -2945,6 +2948,9 @@ jobs:
               "{{QP_BLOCK_ADDED_CAPABILITIES}}": "true",
               "{{QP_BLOCK_RUN_AS_ROOT}}": "true",
               "{{QP_REQUIRE_ACCELERATOR_TOLERATION}}": "true",
+              # The YAML nesting-depth limit both submission paths share (the
+              # REST processor above is rendered with the same value).
+              "{{MP_YAML_MAX_DEPTH}}": "50",
               # KEDA-side numbers: unused by the Job below, substituted so the
               # rendered ScaledJob still parses as the shipped document.
               "{{QP_POLLING_INTERVAL}}": "30",
@@ -3412,7 +3418,7 @@ jobs:
         # -e . provides PyYAML for validate_helm_charts.py --emit-* and the
         # render step below, which parses the shipped cost-monitor manifest
         # rather than patching it with sed.
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Derive the Helm pin from the production installer Dockerfile
         # Single source: lambda/helm-installer/Dockerfile (see the
         # charts-valid job for the full rationale).
@@ -3522,45 +3528,11 @@ jobs:
           python3 .github/scripts/preload_kind_images.py --cluster gco-cost-pipeline \
             --pinned "${CI_S3_EMULATOR_IMAGE}=${CI_S3_LOCAL_IMAGE}"
       - name: Install Calico for NetworkPolicy enforcement
-        # Mirrors the proven step in integration:kind:cluster-e2e, including
-        # the retry loop: calico-node readiness is a known CI flake because
-        # it pulls from quay.io and runs install-cni / mount-bpffs init
-        # containers, which can exceed one timeout window under runner
-        # image-pull latency. The apply is idempotent, so each attempt
-        # re-applies and re-waits.
-        run: |
-          set -euo pipefail
-          calico_manifest="${RUNNER_TEMP}/calico.yaml"
-          curl --fail --show-error --location \
-            --connect-timeout 15 --max-time 60 \
-            --retry 3 --retry-all-errors --retry-max-time 180 \
-            --remove-on-error \
-            --output "${calico_manifest}" \
-            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
-          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
-          kubectl apply -f "${calico_manifest}"
-
-          attempts=3
-          for i in $(seq 1 "${attempts}"); do
-            echo "::group::Calico rollout attempt ${i}/${attempts}"
-            kubectl apply -f "${calico_manifest}"
-            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
-               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
-              echo "Calico is ready."
-              echo "::endgroup::"
-              exit 0
-            fi
-            echo "Calico not ready on attempt ${i}/${attempts}."
-            echo "::endgroup::"
-            if [ "${i}" -lt "${attempts}" ]; then
-              sleep 15
-            fi
-          done
-
-          echo "::error::Calico did not become ready after ${attempts} attempts."
-          kubectl -n kube-system get pods -o wide || true
-          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
-          exit 1
+        # kind's default kindnet does not enforce NetworkPolicy; Calico does.
+        # The one script every kind job shares downloads the pinned manifest
+        # (CALICO_VERSION / CALICO_SHA256 in this workflow's env), checks it,
+        # applies it, waits with retries and prints diagnostics on failure.
+        run: bash .github/scripts/install-calico.sh
       - name: Set up Buildx (enables shared GHA layer cache)
         uses: ./.github/actions/setup-buildx-with-retry
       - name: Build cost-monitor image
@@ -4620,7 +4592,7 @@ jobs:
         # gco.services.manifest_processor importable so the can-i sweep
         # derives (group, plural) pairs from the SAME constants production
         # enforces — no hardcoded copy to drift.
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Derive the Helm pin from the production installer Dockerfile
         # Single source: lambda/helm-installer/Dockerfile (see the
         # charts-valid job for the full rationale).
@@ -4728,45 +4700,11 @@ jobs:
           # installs Calico and waits via rollout status.
           wait: "0s"
       - name: Install Calico for NetworkPolicy enforcement
-        # Mirrors the proven step in integration:kind:cluster-e2e, including
-        # the retry loop: calico-node readiness is a known CI flake because
-        # it pulls from quay.io and runs install-cni / mount-bpffs init
-        # containers, which can exceed one timeout window under runner
-        # image-pull latency. The apply is idempotent, so each attempt
-        # re-applies and re-waits.
-        run: |
-          set -euo pipefail
-          calico_manifest="${RUNNER_TEMP}/calico.yaml"
-          curl --fail --show-error --location \
-            --connect-timeout 15 --max-time 60 \
-            --retry 3 --retry-all-errors --retry-max-time 180 \
-            --remove-on-error \
-            --output "${calico_manifest}" \
-            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
-          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
-          kubectl apply -f "${calico_manifest}"
-
-          attempts=3
-          for i in $(seq 1 "${attempts}"); do
-            echo "::group::Calico rollout attempt ${i}/${attempts}"
-            kubectl apply -f "${calico_manifest}"
-            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
-               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
-              echo "Calico is ready."
-              echo "::endgroup::"
-              exit 0
-            fi
-            echo "Calico not ready on attempt ${i}/${attempts}."
-            echo "::endgroup::"
-            if [ "${i}" -lt "${attempts}" ]; then
-              sleep 15
-            fi
-          done
-
-          echo "::error::Calico did not become ready after ${attempts} attempts."
-          kubectl -n kube-system get pods -o wide || true
-          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
-          exit 1
+        # kind's default kindnet does not enforce NetworkPolicy; Calico does.
+        # The one script every kind job shares downloads the pinned manifest
+        # (CALICO_VERSION / CALICO_SHA256 in this workflow's env), checks it,
+        # applies it, waits with retries and prints diagnostics on failure.
+        run: bash .github/scripts/install-calico.sh
       - name: Apply platform namespaces + RBAC
         # 01-serviceaccounts / 02-rbac carry {{...ROLE_ARN}} IRSA annotation
         # tokens; annotations are opaque strings to the apiserver, so the
@@ -5247,13 +5185,15 @@ jobs:
         # the kro, Argo CD and Crossplane tenant roles must not do in
         # gco-inference: write the model endpoints' keypair, create an object
         # carrying the monitor's label, change what a monitor ConfigMap
-        # carries or unlabel it, recreate a deleted <name>-tls-proxy
-        # ConfigMap without the label, change a monitor Deployment's pod
-        # template, create the shared mooncake-master, or forge the monitor's
-        # provenance. The same identity may still annotate, scale and delete
-        # those objects, and the inference monitor's ServiceAccount may do all
-        # of it (it alone does not write the keypair). The probe Deployment
-        # keeps zero replicas, so no image is pulled.
+        # carries or unlabel it, set, change or remove the gco.io/endpoint
+        # label or the project label of an object the monitor manages,
+        # recreate a deleted <name>-tls-proxy ConfigMap without the label,
+        # change a monitor Deployment's pod template, create the shared
+        # mooncake-master, or forge the monitor's provenance. The same
+        # identity may still label, annotate, scale and delete those objects,
+        # and the inference monitor's ServiceAccount may do all of it (it
+        # alone does not write the keypair). The probe Deployment keeps zero
+        # replicas, so no image is pulled.
         # tests/test_tenant_write_fence.py evaluates the same rules offline.
         run: |
           set -euo pipefail
@@ -5264,6 +5204,8 @@ jobs:
           policy="ValidatingAdmissionPolicy 'gco-tenant-write-fence'"
           only_monitor="only the inference monitor (system:serviceaccount:gco-system:gco-inference-monitor-sa) may"
           managed="is managed by the inference monitor: only"
+          endpoint_label="only the inference monitor may set, change or remove the gco.io/endpoint label of an object it manages"
+          project_label="only the inference monitor may set, change or remove the project label of an object it manages"
           # config_map <file> <name> <labels JSON> <data JSON>
           config_map() {
             printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"%s","namespace":"gco-inference","labels":%s},"data":%s}\n' \
@@ -5314,13 +5256,37 @@ jobs:
           # A monitor pod program: its data is the monitor's, and once deleted
           # it cannot come back without the label.
           config_map "${work}/program.json" gco-ci-fence-tls-proxy \
-            '{"app":"gco-ci-fence","project":"gco","gco.io/type":"inference"}' '{"tls_proxy.py":"print(1)"}'
+            '{"app":"gco-ci-fence","project":"gco","gco.io/type":"inference","gco.io/endpoint":"gco-ci-fence"}' \
+            '{"tls_proxy.py":"print(1)"}'
           kubectl "${monitor[@]}" create -f "${work}/program.json"
           refused "a tenant rewriting a monitor ConfigMap" "${managed}" \
             kubectl "${tenant[@]}" -n gco-inference patch configmap gco-ci-fence-tls-proxy --type=merge \
               -p '{"data":{"tls_proxy.py":"print(2)"}}'
           refused "a tenant unlabelling a monitor ConfigMap" "${only_monitor}" \
             kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco.io/type-
+
+          # The label naming the endpoint that owns a monitor object, and the
+          # project label its provenance check reads: the monitor's to set,
+          # change or remove.
+          refused "a tenant relabelling a monitor ConfigMap for another endpoint" "${endpoint_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label --overwrite configmap gco-ci-fence-tls-proxy \
+              gco.io/endpoint=gco-ci-other
+          refused "a tenant removing a monitor ConfigMap's endpoint label" "${endpoint_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco.io/endpoint-
+          refused "a tenant changing a monitor ConfigMap's project label" "${project_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label --overwrite configmap gco-ci-fence-tls-proxy \
+              project=gco-ci-other
+          refused "a tenant removing a monitor ConfigMap's project label" "${project_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy project-
+          kubectl "${monitor[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco.io/endpoint- project-
+          refused "a tenant setting a monitor ConfigMap's endpoint label" "${endpoint_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy \
+              gco.io/endpoint=gco-ci-fence
+          refused "a tenant setting a monitor ConfigMap's project label" "${project_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy project=gco
+          kubectl "${monitor[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy \
+            gco.io/endpoint=gco-ci-fence project=gco
+          kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco-ci/note=admitted
           kubectl "${tenant[@]}" -n gco-inference annotate configmap gco-ci-fence-tls-proxy gco-ci/note=admitted
           kubectl "${tenant[@]}" -n gco-inference delete configmap gco-ci-fence-tls-proxy
           config_map "${work}/unlabelled.json" gco-ci-fence-tls-proxy '{"app":"gco-ci-fence"}' '{"tls_proxy.py":"print(3)"}'
@@ -5923,8 +5889,10 @@ jobs:
   #     else; the server only reads); deleting the root Application detaches
   #     the Job instead of deleting it; the shipped example Application syncs
   #     and its resources finalizer cascades when the helm installer's
-  #     pre-uninstall cleanup deletes every argoproj.io object; the applier's
-  #     disable-path inventories remove the rest.
+  #     pre-uninstall cleanup deletes the argoproj.io objects in the argocd
+  #     namespace (it does so only while GCO's own Argo CD release exists),
+  #     and an AppProject in another namespace comes through untouched; the
+  #     applier's disable-path inventories remove the rest.
   #   * Crossplane: the go-templating function turns Healthy, the example XRD
   #     and Composition serve BatchJob, an XR in gco-jobs composes a Job that
   #     completes and marks the XR Ready, an XR in gco-system cannot compose
@@ -5972,7 +5940,7 @@ jobs:
         # own helpers, the teardown runs the Lambda handlers' own functions and
         # the dashboards are captured by the CLI's screenshot code. The
         # diagrams extra is the pinned Playwright those commands need.
-        run: pip install -e ".[diagrams]"
+        run: pip install -c requirements-lock.txt -e ".[diagrams]"
       - name: Install the headless Chromium the captures drive (with retry)
         run: |
           set -euo pipefail
@@ -6393,14 +6361,29 @@ jobs:
           PY
       - name: Cascade the example Application through the installer cleanup
         # The example Application DOES carry the resources finalizer: when the
-        # helm installer's pre-uninstall cleanup deletes every argoproj.io
-        # object (what a disabled chart or a stack delete runs), Argo CD
+        # helm installer's pre-uninstall cleanup deletes the argoproj.io
+        # objects in the argocd namespace (what a disabled chart or a stack
+        # delete runs while GCO's own Argo CD release exists), Argo CD
         # deletes the Job before the Application goes. The projects get a
         # later pass (the controller finalizes nothing whose project is
         # gone), so the cascade must finish inside the wait: needing the
-        # finalizer-strip fallback fails the step.
+        # finalizer-strip fallback fails the step. The cleanup stays in that
+        # namespace: argoproj.io is also the group of Argo Workflows, Rollouts
+        # and Events, and of a cluster's own Argo CD, so an AppProject in
+        # another namespace must survive it untouched.
         run: |
           set -euo pipefail
+          kubectl create namespace gco-ci-foreign-argo
+          kubectl apply -f - <<'EOF'
+          apiVersion: argoproj.io/v1alpha1
+          kind: AppProject
+          metadata:
+            name: gco-ci-foreign
+            namespace: gco-ci-foreign-argo
+            finalizers: ["gco-ci.example.com/foreign"]
+          spec:
+            description: not GCO's; the installer cleanup must not touch it
+          EOF
           python3 - <<'PY'
           import logging
           import os
@@ -6428,18 +6411,31 @@ jobs:
           print(message)
           if not ok:
               raise SystemExit(message)
+          if not message.endswith(" in namespace argocd"):
+              raise SystemExit(f"the cleanup was not limited to the release namespace: {message}")
           if recorder.stalls:
               raise SystemExit(f"the cascade fell back to stripping finalizers: {recorder.stalls}")
           PY
-          if kubectl get applications.argoproj.io,appprojects.argoproj.io -A -o name | grep -q .; then
-            echo "::error::argoproj.io objects survived the installer cleanup"
+          if kubectl -n argocd get applications.argoproj.io,appprojects.argoproj.io -o name | grep -q .; then
+            echo "::error::argoproj.io objects in argocd survived the installer cleanup"
             exit 1
           fi
           if kubectl -n gco-jobs get job gco-gitops-hello >/dev/null 2>&1; then
             echo "::error::the resources finalizer did not delete the synced Job"
             exit 1
           fi
-          echo "the example Application's finalizer deleted the Job during the installer cleanup"
+          # Neither deleted nor stripped of its finalizer: the cleanup never reached it.
+          foreign="$(kubectl -n gco-ci-foreign-argo get appproject gco-ci-foreign \
+            -o 'jsonpath={.metadata.deletionTimestamp}|{.metadata.finalizers[*]}' 2>&1 || true)"
+          if [ "${foreign}" != '|gco-ci.example.com/foreign' ]; then
+            echo "::error::the installer cleanup reached an AppProject outside argocd (${foreign})"
+            exit 1
+          fi
+          kubectl -n gco-ci-foreign-argo patch appproject gco-ci-foreign --type=merge \
+            -p '{"metadata":{"finalizers":null}}'
+          kubectl delete namespace gco-ci-foreign-argo --wait=true
+          echo "the example Application's finalizer deleted the Job during the installer cleanup;"
+          echo "the AppProject outside argocd was left alone"
       - name: Prune the Argo CD post-Helm objects and uninstall the chart
         run: |
           set -euo pipefail

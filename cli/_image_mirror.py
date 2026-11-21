@@ -59,10 +59,13 @@ used. The concrete mechanism is chosen at runtime — Docker Buildx
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
+import os
 import shutil
 import subprocess  # invokes container CLI / skopeo with fixed, non-shell argv
-from collections.abc import Callable, Mapping
+import tempfile
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -73,8 +76,8 @@ import yaml
 from ._image_uri import ecr_registry_host
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-11-19T12:23:38Z
+# Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894
 # Flowchart(s) generated from this file:
 #   * ``read_mirror_config`` -> ``diagrams/code_diagrams/cli/_image_mirror.read_mirror_config.html``
 #     (PNG: ``diagrams/code_diagrams/cli/_image_mirror.read_mirror_config.png``)
@@ -245,33 +248,63 @@ def plan_from_sources(
     return items
 
 
-def read_mirror_config(cdk_json_path: Path = _CDK_JSON) -> dict[str, Any]:
-    """Return ``{enabled, ecr_namespace}`` from cdk.json ``volcano_image_mirror``.
+def _mirror_settings(cdk_json_path: Path) -> tuple[object, str]:
+    """Return cdk.json's raw ``volcano_image_mirror`` block and its ECR namespace.
 
-    Defaults to disabled / ``<project_name>/dockerhub`` (``gco/dockerhub`` for
-    the stock project) when the block is absent, so a second deployment mirrors
-    into its own ECR namespace (#139).
-    Used by the deploy path to decide whether to auto-mirror. (The cdk.json key
-    is still named ``volcano_image_mirror`` — Volcano is the only consumer today
-    — but the mirror itself is general; see :func:`collect_source_refs`.)
+    The block is ``None`` when it, or a readable cdk.json, is absent.
     """
     try:
         with open(cdk_json_path, encoding="utf-8") as f:
             ctx = json.load(f).get("context", {}) or {}
     except OSError, json.JSONDecodeError:
-        return {"enabled": False, "ecr_namespace": _DEFAULT_NAMESPACE}
+        return None, _DEFAULT_NAMESPACE
     # Default the mirror namespace to the deployment's own project prefix
     # (``<project_name>/dockerhub``) so a second deployment mirrors into its own
     # ECR namespace (#139); resolves to ``gco/dockerhub`` for the stock project.
     default_namespace = f"{ctx.get('project_name') or 'gco'}/dockerhub"
-    block = ctx.get("volcano_image_mirror") or {}
+    raw = ctx.get("volcano_image_mirror")
+    block = raw if isinstance(raw, dict) else {}
     namespace = str(block.get("ecr_namespace", default_namespace)).strip("/") or default_namespace
-    return {"enabled": bool(block.get("enabled", False)), "ecr_namespace": namespace}
+    return raw, namespace
+
+
+def _mirror_enabled(block: object) -> bool:
+    """Read ``volcano_image_mirror.enabled`` the way the regional stack does.
+
+    That is :func:`gco.config.config_loader.read_block_flag`: a JSON boolean,
+    or the string ``"true"``; any other value is a ``ConfigValidationError``
+    (a string such as ``"false"`` is not read by truthiness). An absent key and
+    a JSON boolean need no parsing, so the loader, which imports aws_cdk (the
+    ``cdk`` extra), is imported only for the other values.
+    """
+    if block is None:
+        return False
+    if isinstance(block, dict) and isinstance(block.get("enabled", False), bool):
+        return bool(block.get("enabled", False))
+    from gco.config.config_loader import read_block_flag
+
+    return read_block_flag(block, "volcano_image_mirror.enabled", default=False)
+
+
+def read_mirror_config(cdk_json_path: Path = _CDK_JSON) -> dict[str, Any]:
+    """Return ``{enabled, ecr_namespace}`` from cdk.json ``volcano_image_mirror``.
+
+    Defaults to disabled / ``<project_name>/dockerhub`` (``gco/dockerhub`` for
+    the stock project) when the block is absent, so a second deployment mirrors
+    into its own ECR namespace (#139). ``enabled`` is read with the regional
+    stack's rules (:func:`_mirror_enabled`), so a value the synth rejects raises
+    here, before the deploy path mirrors anything.
+    Used by the deploy path to decide whether to auto-mirror. (The cdk.json key
+    is still named ``volcano_image_mirror`` — Volcano is the only consumer today
+    — but the mirror itself is general; see :func:`collect_source_refs`.)
+    """
+    block, namespace = _mirror_settings(cdk_json_path)
+    return {"enabled": _mirror_enabled(block), "ecr_namespace": namespace}
 
 
 def cdk_default_namespace(cdk_json_path: Path = _CDK_JSON) -> str:
     """Return ``volcano_image_mirror.ecr_namespace`` from cdk.json (default gco/dockerhub)."""
-    return str(read_mirror_config(cdk_json_path)["ecr_namespace"])
+    return _mirror_settings(cdk_json_path)[1]
 
 
 def _account_id() -> str:
@@ -306,6 +339,7 @@ def _runtime_has_buildx(runtime: str) -> bool:
         return (
             subprocess.run(  # fixed argv, no shell
                 [runtime, "buildx", "version"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=15,
                 check=False,
@@ -321,6 +355,7 @@ def _runtime_supports_all_platforms(runtime: str) -> bool:
     try:
         out = subprocess.run(  # fixed argv, no shell
             [runtime, "pull", "--help"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=15,
@@ -432,11 +467,33 @@ def runtime_login(
     log(f"  authenticated {runtime} to {registry_host}")
 
 
-def _copy_commands(item: MirrorItem, runtime: str, strategy: str, password: str) -> list[list[str]]:
+@contextlib.contextmanager
+def registry_authfile(registry_host: str, username: str, password: str) -> Iterator[str]:
+    """Yield the path of a containers-auth.json file holding one registry login.
+
+    skopeo reads the ECR token from this file (``--dest-authfile``) instead of
+    from ``--dest-creds`` on its command line, which every local user can read
+    (``ps``, ``/proc/<pid>/cmdline``) while the copy runs. The file is created
+    ``0600`` in a new ``0700`` directory, and both are removed on exit.
+    """
+    auth = base64.b64encode(f"{username}:{password}".encode()).decode()
+    with tempfile.TemporaryDirectory(prefix="gco-registry-auth-") as directory:
+        path = os.path.join(directory, "auth.json")
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"auths": {registry_host: {"auth": auth}}}, handle)
+        yield path
+
+
+def _copy_commands(
+    item: MirrorItem, runtime: str, strategy: str, authfile: str | None = None
+) -> list[list[str]]:
     """Build the argv list(s) for one image copy under the chosen strategy.
 
     Factored out (pure) so the command shape is unit-testable without invoking
     any runtime. All strategies preserve the full multi-arch manifest list.
+    ``authfile`` is the destination login :func:`registry_authfile` wrote; only
+    skopeo takes one (without it skopeo looks up its own stored credentials).
     """
     if strategy == "buildx":
         return [
@@ -449,13 +506,13 @@ def _copy_commands(item: MirrorItem, runtime: str, strategy: str, password: str)
             [runtime, "push", "--all-platforms", item.dest_ref],
         ]
     if strategy == "skopeo":
+        credentials = ["--dest-authfile", authfile] if authfile else []
         return [
             [
                 "skopeo",
                 "copy",
                 "--all",
-                "--dest-creds",
-                f"AWS:{password}",
+                *credentials,
                 f"docker://{item.source_ref}",
                 f"docker://{item.dest_ref}",
             ]
@@ -467,7 +524,7 @@ def copy_image(
     item: MirrorItem,
     runtime: str = "docker",
     strategy: str = "buildx",
-    password: str = "",  # nosec B107  # empty means "no registry login"; callers pass the real token
+    authfile: str | None = None,
     log: LogFn = print,
 ) -> None:
     """Copy one image registry-to-registry, preserving the full manifest list.
@@ -475,11 +532,12 @@ def copy_image(
     Dispatches to the resolved ``strategy`` (``buildx`` / ``all-platforms`` /
     ``skopeo``) — see :func:`resolve_copy_strategy`. Every strategy carries all
     architectures so both amd64 and arm64 (Graviton) nodes find a match.
+    ``authfile`` (skopeo only) is the file :func:`registry_authfile` wrote.
     """
     log(f"  copying {item.source_ref} -> {item.dest_ref}  [{strategy}]")
-    for cmd in _copy_commands(item, runtime, strategy, password):
+    for cmd in _copy_commands(item, runtime, strategy, authfile):
         result = subprocess.run(  # fixed argv, no shell
-            cmd, capture_output=True, text=True, check=False
+            cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -601,8 +659,8 @@ def mirror_images(
     )
 
     # Auth: every strategy needs ECR push credentials. buildx / all-platforms
-    # use the runtime's credential store (so we `<runtime> login`); skopeo takes
-    # the password inline via --dest-creds.
+    # use the runtime's credential store (so we `<runtime> login`); skopeo
+    # reads them from a private auth file that exists only for the copies.
     username, password = ecr_auth(region)
     if strategy != "skopeo":
         runtime_login(runtime, registry_host, username, password, log=log)
@@ -616,21 +674,27 @@ def mirror_images(
         if on_repository_created is not None
         else None
     )
-    for item in plan:
-        if ensure_repository(
-            ecr_client,
-            item.dest_repo,
-            log=log,
-            repository_tags=repository_tags,
-            on_created=on_created,
-        ):
-            created_repositories.append(item.dest_repo)
-        if skip_existing and tag_exists(ecr_client, item.dest_repo, item.tag):
-            log(f"  skip (already mirrored): {item.dest_ref}")
-            skipped.append(item.dest_ref)
-            continue
-        copy_image(item, runtime=runtime, strategy=strategy, password=password, log=log)
-        mirrored.append(item.dest_ref)
+    with contextlib.ExitStack() as scope:
+        authfile = (
+            scope.enter_context(registry_authfile(registry_host, username, password))
+            if strategy == "skopeo"
+            else None
+        )
+        for item in plan:
+            if ensure_repository(
+                ecr_client,
+                item.dest_repo,
+                log=log,
+                repository_tags=repository_tags,
+                on_created=on_created,
+            ):
+                created_repositories.append(item.dest_repo)
+            if skip_existing and tag_exists(ecr_client, item.dest_repo, item.tag):
+                log(f"  skip (already mirrored): {item.dest_ref}")
+                skipped.append(item.dest_ref)
+                continue
+            copy_image(item, runtime=runtime, strategy=strategy, authfile=authfile, log=log)
+            mirrored.append(item.dest_ref)
 
     return {
         "registry": f"{registry_host}/{ecr_namespace}",

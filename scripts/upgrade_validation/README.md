@@ -11,10 +11,10 @@ the way it is.
 
 The harness is a thin layer over
 [`scripts/live_release_validation`](../live_release_validation/README.md):
-`registry.py` reuses that package's baseline, topology, destroy, and
-final-inventory actions verbatim, and its runner executes the registry. Read
-that README first for the run model (identity gates, checkpoints, ownership,
-reporting).
+`registry.py` reuses that package's baseline, destroy, and final-inventory
+actions verbatim and runs its topology check against the upgraded clone's
+cdk.json, and its runner executes the registry. Read that README first for the
+run model (identity gates, checkpoints, ownership, reporting).
 
 ## Table of Contents
 
@@ -30,9 +30,9 @@ reporting).
 | Path | Responsibility |
 |---|---|
 | `__main__.py` | CLI entry (`python -m scripts.upgrade_validation`): the sibling harness's identity flags, `--base-ref` (by default the newest release tag in the checkout's history that is not the checkout), and `--workspace-dir`. Removes the workspace once teardown completed. `gco release validate-upgrade` is the no-prompt wrapper around it. |
-| `registry.py` | The ordered action registry: four reused actions plus the six in `actions.py`. Held in lockstep with the contract table in `docs/UPGRADE_VALIDATION.md` by `tests/test_upgrade_validation.py`. |
+| `registry.py` | The ordered action registry: three reused actions plus the seven in `actions.py`. Held in lockstep with the contract table in `docs/UPGRADE_VALIDATION.md` by `tests/test_upgrade_validation.py`. |
 | `models.py` | `UpgradeRunSettings`: the sibling's `RunSettings` plus the base release (the tag, pinned to its commit) and the workspace, all part of `identity()`. It is the only settings class with `allows_run_tag_adoption`. |
-| `actions.py` | `preflight`, `prepare`, `deploy`, `sentinels`, `upgrade`, and `verify-upgrade`, and the phase bookkeeping `deploy` and `upgrade` share. |
+| `actions.py` | `preflight`, `prepare`, `deploy`, `sentinels`, `upgrade`, `topology`, and `verify-upgrade`, and the phase bookkeeping `deploy` and `upgrade` share. |
 | `workspace.py` | Everything local: the private git mirror and clone, the run-scoped cdk.json, the cloud-assembly reader, the environment the base `gco` runs in, and `run_logged`, which runs a command in its own session with its output logged and mirrored to the console. |
 | `sentinel.py` | The job template written through the API before the upgrade and required unchanged after it. |
 
@@ -46,7 +46,7 @@ reporting).
 | `deploy` | `baseline`, `prepare` | Requires the image mirror's repositories in the baseline, runs the base `gco stacks deploy-all`, then adopts what it created by run tag. |
 | `sentinels` | `deploy` | Writes the sentinel through the base release's API. |
 | `upgrade` | `sentinels` | Tags the candidate in the mirror, checks the plan with `gco upgrade --check`, then runs the base `gco upgrade` and adopts the recreated stacks. |
-| `topology` | `upgrade` | Reused, against the upgraded deployment. |
+| `topology` | `upgrade` | The release check against the upgraded deployment, given the clone's cdk.json in place of this checkout's: `gco upgrade` keeps that file byte for byte, so it is what the redeploy synthesized, and settings such as `kubernetes_version` are compared with it. |
 | `verify-upgrade` | `topology` | The clone is at this commit with cdk.json intact, the control plane kept its stack IDs, every workload stack is a new generation, and the sentinel came back unchanged. |
 | `destroy` | `deploy` | Reused. |
 | `final-inventory` | `destroy` | Reused. |

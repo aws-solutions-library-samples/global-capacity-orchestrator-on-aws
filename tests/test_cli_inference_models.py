@@ -11,6 +11,7 @@ during tests.
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -632,6 +633,43 @@ class TestInferenceAddRegion:
         assert result.exit_code == 1
         assert "Failed to add us-west-2 to endpoint 'ep': throttled" in result.output
 
+    def test_a_failed_write_reports_its_error_not_a_missing_endpoint(self, runner):
+        """The manager turned a store failure into "not found"."""
+        store = _region_store(["us-east-1"])
+        result = self._invoke(
+            runner, _real_manager(store), _region_client("us-east-1", "us-west-2")
+        )
+        assert result.exit_code == 1
+        assert "Failed to add us-west-2 to endpoint 'ep': ProvisionedThroughputExceeded" in (
+            result.output
+        )
+        assert "not found" not in result.output
+
+
+def _region_store(target_regions: list[str]) -> MagicMock:
+    """A store holding endpoint ``ep`` whose Region write fails."""
+    store = MagicMock()
+    store.get_endpoint.return_value = {
+        "endpoint_name": "ep",
+        "desired_state": "running",
+        "lifecycle_id": "life-1",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "target_regions": list(target_regions),
+        "cleanup_regions": list(target_regions),
+    }
+    store.update_target_regions.side_effect = RuntimeError("ProvisionedThroughputExceeded")
+    return store
+
+
+def _real_manager(store: MagicMock) -> Any:
+    from cli.inference import InferenceManager
+
+    manager = InferenceManager.__new__(InferenceManager)
+    manager.config = MagicMock()
+    manager._aws_client = MagicMock()
+    manager._get_store = MagicMock(return_value=store)  # type: ignore[method-assign]
+    return manager
+
 
 class TestInferenceRemoveRegion:
     def _invoke(self, runner, mgr, client, *args, input=None):
@@ -741,6 +779,19 @@ class TestInferenceRemoveRegion:
         assert result.exit_code == 0, result.output
         assert "Could not list the deployed Regions (throttled)" in result.output
 
+    def test_a_failed_write_reports_its_error_not_a_missing_endpoint(self, runner):
+        """The manager turned a store failure into "not found"."""
+        store = _region_store(["us-east-1", "us-west-2"])
+        result = self._invoke(
+            runner, _real_manager(store), _region_client("us-east-1"), *self._command("-y")
+        )
+        assert result.exit_code == 1
+        assert (
+            "Failed to remove us-west-2 from endpoint 'ep': ProvisionedThroughputExceeded"
+            in result.output
+        )
+        assert "not found" not in result.output
+
 
 # =============================================================================
 # inference delete
@@ -798,6 +849,67 @@ class TestInferenceUpdateImage:
         with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
             result = runner.invoke(cli, ["inference", "update-image", "ep", "-i", "new:v2"])
         assert result.exit_code != 0
+
+
+class TestSpecChangeOnStoppedEndpoint:
+    """A stopped endpoint keeps a spec change until it is started."""
+
+    NOTE = "Endpoint 'ep' is stopped; the change takes effect when it starts"
+    CASES = [
+        (["update-image", "ep", "-i", "new:v2"], "update_image", "Rolling update will be applied"),
+        (
+            ["set-topology", "ep", "--prefill", "2", "--decode", "2"],
+            "set_topology",
+            "adjust prefill",
+        ),
+        (
+            ["configure-store", "ep", "--offload", "cpu"],
+            "configure_store",
+            "re-render the KV-cache",
+        ),
+        (["canary", "ep", "-i", "new:v2"], "canary_deploy", None),
+        (["promote", "ep", "-y"], "promote_canary", None),
+        (["rollback", "ep", "-y"], "rollback_canary", None),
+    ]
+
+    @staticmethod
+    def _manager(method: str, desired_state: str) -> MagicMock:
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = {
+            "endpoint_name": "ep",
+            "spec": {"image": "img:v1", "canary": {"image": "new:v2", "weight": 10}},
+        }
+        getattr(mock_mgr, method).return_value = {
+            "endpoint_name": "ep",
+            "desired_state": desired_state,
+            "spec": {"image": "new:v2"},
+        }
+        return mock_mgr
+
+    @pytest.mark.parametrize(("args", "method", "rollout_message"), CASES)
+    def test_a_stopped_endpoint_is_told_the_change_waits_for_start(
+        self, runner, args, method, rollout_message
+    ):
+        with patch(
+            "cli.inference.get_inference_manager", return_value=self._manager(method, "stopped")
+        ):
+            result = runner.invoke(cli, ["inference", *args])
+        assert result.exit_code == 0, result.output
+        assert self.NOTE in result.output
+        assert "gco inference start ep" in result.output
+        if rollout_message is not None:
+            assert rollout_message not in result.output
+
+    @pytest.mark.parametrize(("args", "method", "rollout_message"), CASES)
+    def test_a_live_endpoint_gets_no_stopped_note(self, runner, args, method, rollout_message):
+        with patch(
+            "cli.inference.get_inference_manager", return_value=self._manager(method, "deploying")
+        ):
+            result = runner.invoke(cli, ["inference", *args])
+        assert result.exit_code == 0, result.output
+        assert self.NOTE not in result.output
+        if rollout_message is not None:
+            assert rollout_message in result.output
 
 
 # =============================================================================
@@ -887,6 +999,21 @@ class TestModelsDelete:
             result = runner.invoke(cli, ["models", "delete", "empty", "-y"])
         assert result.exit_code == 0
         assert "No files found" in result.output
+
+    @pytest.mark.parametrize("deleted", [5, 0])
+    @pytest.mark.parametrize(
+        ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
+    )
+    def test_delete_prints_one_document_with_the_count(self, runner, deleted, output_format, parse):
+        """JSON/YAML mode printed {"status": "ok"} whether or not
+        anything was deleted; the count is now the document."""
+        mock_mgr = MagicMock()
+        mock_mgr.delete_model.return_value = deleted
+        with patch("cli.models.get_model_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["-o", output_format, "models", "delete", "llama3", "-y"])
+        assert result.exit_code == 0, result.output
+        assert parse(result.stdout) == {"model_name": "llama3", "files_deleted": deleted}
+        assert ("No files found" in result.stderr) is (deleted == 0)
 
     def test_delete_error(self, runner):
         mock_mgr = MagicMock()
@@ -2302,8 +2429,9 @@ class TestInferenceCanaryTransitions:
                 input="n\n",
             )
 
-        assert result.exit_code == 0
-        assert "Cancelled" in result.output
+        # Declining aborts like every other confirmation: a failure exit.
+        assert result.exit_code == 1
+        assert "Aborted" in result.output
         getattr(mock_mgr, manager_method).assert_not_called()
 
     @pytest.mark.parametrize(
@@ -2543,6 +2671,19 @@ class TestInferenceConfigureStore:
         assert result.exit_code != 0
         assert "No store settings given" in result.output
         mock_mgr.configure_store.assert_not_called()
+
+    def test_configure_store_without_settings_leaves_a_configured_store_alone(self, runner):
+        """No flags re-wrote the current store block and redeployed."""
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint({"enabled": True, "offload": "cpu"})
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["inference", "configure-store", "ep"])
+
+        assert result.exit_code == 1
+        assert "No store settings given" in result.output
+        assert "nothing was changed" in result.output
+        mock_mgr.configure_store.assert_not_called()
+        mock_mgr.get_endpoint.assert_not_called()
 
     def test_configure_store_tolerates_malformed_stored_spec(self, runner):
         mock_mgr = MagicMock()
@@ -2848,3 +2989,193 @@ class TestModelNamedOnlyByEnv:
         from cli.commands.inference_cmd import _model_named_only_by_env
 
         assert _model_named_only_by_env(spec, _REQUESTED) is expected
+
+
+# =============================================================================
+# Machine-readable results of the mutation commands
+# =============================================================================
+
+_CANARY_ENDPOINT = {
+    "endpoint_name": "ep",
+    "desired_state": "running",
+    "spec": {"image": "img:v1", "canary": {"image": "img:v2", "weight": 10, "replicas": 1}},
+}
+
+#: (arguments after ``inference``, the manager method that returns the record)
+_MUTATIONS = [
+    (["scale", "ep", "--replicas", "3"], "scale"),
+    (["stop", "ep", "-y"], "stop"),
+    (["start", "ep"], "start"),
+    (["delete", "ep", "-y"], "delete"),
+    (["update-image", "ep", "-i", "img:v2"], "update_image"),
+    (["canary", "ep", "-i", "img:v2"], "canary_deploy"),
+    (["promote", "ep", "-y"], "promote_canary"),
+    (["rollback", "ep", "-y"], "rollback_canary"),
+]
+
+
+class TestMutationResults:
+    @pytest.mark.parametrize("output", ["json", "yaml"])
+    @pytest.mark.parametrize(("args", "method"), _MUTATIONS, ids=[a[0] for a, _m in _MUTATIONS])
+    def test_machine_output_is_the_updated_record(self, runner, args, method, output):
+        record = {"endpoint_name": "ep", "desired_state": "running", "spec": {"image": "img:v2"}}
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = _CANARY_ENDPOINT
+        getattr(mgr, method).return_value = record
+        with patch("cli.inference.get_inference_manager", return_value=mgr):
+            result = runner.invoke(cli, ["-o", output, "inference", *args])
+        assert result.exit_code == 0, result.output
+        loads = json.loads if output == "json" else yaml.safe_load
+        assert loads(result.output) == record
+
+    @pytest.mark.parametrize(("args", "method"), _MUTATIONS, ids=[a[0] for a, _m in _MUTATIONS])
+    def test_table_output_prints_no_record(self, runner, args, method):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = _CANARY_ENDPOINT
+        getattr(mgr, method).return_value = {"endpoint_name": "ep", "spec": {"image": "img:v2"}}
+        with patch("cli.inference.get_inference_manager", return_value=mgr):
+            result = runner.invoke(cli, ["inference", *args])
+        assert result.exit_code == 0, result.output
+        assert "endpoint_name" not in result.output
+
+    @pytest.mark.parametrize(
+        ("command", "method"), [("promote", "promote_canary"), ("rollback", "rollback_canary")]
+    )
+    def test_a_declined_confirmation_aborts_with_a_failure(self, runner, command, method):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = _CANARY_ENDPOINT
+        with patch("cli.inference.get_inference_manager", return_value=mgr):
+            result = runner.invoke(cli, ["inference", command, "ep"], input="n\n")
+        assert result.exit_code == 1, result.output
+        assert "Aborted" in result.output
+        assert "Cancelled" not in result.output
+        assert "Failed to" not in result.output
+        getattr(mgr, method).assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("command", "method"), [("promote", "promote_canary"), ("rollback", "rollback_canary")]
+    )
+    def test_an_accepted_confirmation_proceeds(self, runner, command, method):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = _CANARY_ENDPOINT
+        getattr(mgr, method).return_value = {"spec": {"image": "img:v2"}}
+        with patch("cli.inference.get_inference_manager", return_value=mgr):
+            result = runner.invoke(cli, ["inference", command, "ep"], input="y\n")
+        assert result.exit_code == 0, result.output
+        getattr(mgr, method).assert_called_once_with("ep")
+
+
+# =============================================================================
+# deploy option validation
+# =============================================================================
+
+
+class TestDeployOptionValidation:
+    def _deploy(self, runner, *extra):
+        mgr = MagicMock()
+        mgr.deploy.return_value = {
+            "endpoint_name": "ep",
+            "target_regions": ["us-east-1"],
+            "ingress_path": "/inference/ep",
+        }
+        with patch("cli.inference.get_inference_manager", return_value=mgr):
+            result = runner.invoke(cli, ["inference", "deploy", "ep", "-i", "img:v1", *extra])
+        return result, mgr
+
+    @pytest.mark.parametrize(
+        ("extra", "option", "fragment"),
+        [
+            (["--autoscale-metric", "cpu:70%"], "'--autoscale-metric'", "'cpu:70%'"),
+            (["--autoscale-metric", "cpu:"], "'--autoscale-metric'", "'cpu:'"),
+            (["--autoscale-metric", "cpu:0"], "'--autoscale-metric'", "'cpu:0'"),
+            (["--autoscale-metric", "qps:10"], "'--autoscale-metric'", "gpu_memory"),
+            (["-e", "MODEL"], "'--env' / '-e'", "'MODEL'"),
+            (["-e", "=value"], "'--env' / '-e'", "'=value'"),
+            (["-l", "team"], "'--label' / '-l'", "'team'"),
+            (["--node-selector", "inf2"], "'--node-selector'", "'inf2'"),
+            (["--min-replicas", "0", "--autoscale-metric", "cpu"], "'--min-replicas'", "0"),
+            (["--max-replicas", "0", "--autoscale-metric", "cpu"], "'--max-replicas'", "0"),
+        ],
+        ids=[
+            "percent-sign",
+            "empty-target",
+            "zero-target",
+            "unknown-metric",
+            "env-without-value",
+            "env-without-key",
+            "label-without-value",
+            "selector-without-value",
+            "zero-min",
+            "zero-max",
+        ],
+    )
+    def test_a_malformed_value_is_a_usage_error(self, runner, extra, option, fragment):
+        result, mgr = self._deploy(runner, *extra)
+        assert result.exit_code == 2, result.output
+        assert isinstance(result.exception, SystemExit)
+        assert f"Invalid value for {option}" in result.output
+        assert fragment in result.output
+        mgr.deploy.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "extra",
+        [["--min-replicas", "2", "--max-replicas", "8"], ["--max-replicas", "3"]],
+        ids=["min-and-max", "max-only"],
+    )
+    def test_bounds_without_a_metric_are_refused(self, runner, extra):
+        result, mgr = self._deploy(runner, *extra)
+        assert result.exit_code == 2, result.output
+        assert "--autoscale-metric" in result.output
+        assert "--replicas" in result.output
+        mgr.deploy.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("extra", "fragment"),
+        [
+            (["--min-replicas", "5", "--max-replicas", "2"], "--max-replicas (2)"),
+            (["--min-replicas", "12"], "--max-replicas (10, the default)"),
+        ],
+        ids=["explicit", "default-max"],
+    )
+    def test_a_maximum_below_the_minimum_is_refused(self, runner, extra, fragment):
+        result, mgr = self._deploy(runner, *extra, "--autoscale-metric", "cpu")
+        assert result.exit_code == 2, result.output
+        assert fragment in result.output
+        mgr.deploy.assert_not_called()
+
+    def test_well_formed_values_reach_the_manager(self, runner):
+        result, mgr = self._deploy(
+            runner,
+            "-e",
+            "EMPTY=",
+            "-e",
+            "URL=http://example.com/?a=b",
+            "-l",
+            "team=ml",
+            "--node-selector",
+            "eks.amazonaws.com/instance-family=inf2",
+            "--autoscale-metric",
+            "gpu_memory:60",
+            "--autoscale-metric",
+            "cpu:150",
+            "--max-replicas",
+            "3",
+        )
+        assert result.exit_code == 0, result.output
+        kwargs = mgr.deploy.call_args.kwargs
+        assert kwargs["env"] == {"EMPTY": "", "URL": "http://example.com/?a=b"}
+        assert kwargs["labels"] == {"team": "ml"}
+        assert kwargs["node_selector"] == {"eks.amazonaws.com/instance-family": "inf2"}
+        assert kwargs["autoscaling"] == {
+            "enabled": True,
+            "min_replicas": 1,
+            "max_replicas": 3,
+            "metrics": [{"type": "gpu_memory", "target": 60}, {"type": "cpu", "target": 150}],
+        }
+
+    def test_no_flags_send_no_maps_and_no_autoscaling(self, runner):
+        result, mgr = self._deploy(runner)
+        assert result.exit_code == 0, result.output
+        kwargs = mgr.deploy.call_args.kwargs
+        assert (kwargs["env"], kwargs["labels"], kwargs["node_selector"]) == (None, None, None)
+        assert kwargs["autoscaling"] is None

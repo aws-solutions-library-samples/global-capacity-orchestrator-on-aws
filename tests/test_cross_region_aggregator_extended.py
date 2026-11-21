@@ -452,7 +452,7 @@ class TestLambdaHandlerEdgeCases:
             assert result["statusCode"] == 200
 
     def test_handler_delete_with_invalid_json_body(self):
-        """DELETE handler should return 500 on invalid JSON body."""
+        """An invalid JSON body is the client's error: 400, and no region is asked."""
 
         event = {
             "httpMethod": "DELETE",
@@ -460,8 +460,11 @@ class TestLambdaHandlerEdgeCases:
             "body": "not-valid-json{",
         }
 
-        result = handler.lambda_handler(event, None)
-        assert result["statusCode"] == 500
+        with patch.object(handler, "bulk_delete_jobs") as bulk_delete:
+            result = handler.lambda_handler(event, None)
+        assert result["statusCode"] == 400
+        assert json.loads(result["body"]) == {"error": "Request body must be a JSON object"}
+        bulk_delete.assert_not_called()
 
     def test_handler_get_jobs_with_custom_limit(self):
         """GET jobs should respect custom limit parameter."""

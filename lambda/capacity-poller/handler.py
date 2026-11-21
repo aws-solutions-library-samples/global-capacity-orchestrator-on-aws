@@ -94,8 +94,8 @@ from typing import Any, Literal
 import boto3
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-10T23:26:44Z
-# Generated from Git commit: 4c42b84d53d6cc01cd2b3c7e4011a43f850678b6
+# Generated at (UTC): 2026-11-18T16:59:04Z
+# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/capacity-poller/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/capacity-poller/handler.lambda_handler.png``)
@@ -419,21 +419,29 @@ def _collect_spot_placement_scores(
 
 
 def _spot_price_summary(ec2: Any, instance_type: str) -> tuple[float | None, int | None]:
-    """Return (mean latest price, AZ count), preserving probe failure as None."""
+    """Return (mean latest price, AZ count), preserving probe failure as None.
+
+    Every page is read: an AZ whose price did not change in the window has a
+    single, oldest entry (its price as of the window's start), which can be on
+    a later page. A failure on any page is a probe failure.
+    """
     end = datetime.now(UTC)
     start = end - timedelta(days=SPOT_PRICE_LOOKBACK_DAYS)
     try:
-        resp = ec2.describe_spot_price_history(
-            InstanceTypes=[instance_type],
-            ProductDescriptions=["Linux/UNIX"],
-            StartTime=start,
-            EndTime=end,
+        pages = list(
+            ec2.get_paginator("describe_spot_price_history").paginate(
+                InstanceTypes=[instance_type],
+                ProductDescriptions=["Linux/UNIX"],
+                StartTime=start,
+                EndTime=end,
+            )
         )
     except Exception as exc:
         logger.warning("spot price history failed for %s: %s", instance_type, exc)
         return None, None
+    history = [item for page in pages for item in page.get("SpotPriceHistory", [])]
     latest_by_az: dict[str, float] = {}
-    for item in resp.get("SpotPriceHistory", []):
+    for item in history:
         az = item.get("AvailabilityZone")
         if az and az not in latest_by_az:
             latest_by_az[az] = float(item["SpotPrice"])
@@ -448,15 +456,17 @@ def _capacity_block_summary(
     """Return offering/instance counts, or ``(None, None)`` on probe failure.
 
     ``duration_hours`` is the Capacity Block duration to probe; the poller calls
-    this once for the short tier and once for the long tier. A successful empty
-    response is ``(0, 0)``; failure stays absent so it cannot become false
-    zero-capacity history.
+    this once for the short tier and once for the long tier. Every page of
+    offerings is counted. A successful empty response is ``(0, 0)``; a failure
+    on any page stays absent so it cannot become false zero-capacity history.
     """
     try:
-        resp = ec2.describe_capacity_block_offerings(
-            InstanceType=instance_type,
-            InstanceCount=1,
-            CapacityDurationHours=duration_hours,
+        pages = list(
+            ec2.get_paginator("describe_capacity_block_offerings").paginate(
+                InstanceType=instance_type,
+                InstanceCount=1,
+                CapacityDurationHours=duration_hours,
+            )
         )
     except Exception as exc:
         logger.debug(
@@ -466,7 +476,7 @@ def _capacity_block_summary(
             exc,
         )
         return None, None
-    offerings = resp.get("CapacityBlockOfferings", [])
+    offerings = [offer for page in pages for offer in page.get("CapacityBlockOfferings", [])]
     total = sum(int(o.get("InstanceCount", 0)) for o in offerings)
     return len(offerings), total
 

@@ -556,3 +556,65 @@ def test_default_control_set_excludes_the_nine_session_management_names() -> Non
     assert len(validation.MISSION_CONTROL_TOOLS) == 9
     for control_name in validation.MISSION_CONTROL_TOOLS:
         assert control_name not in result
+
+
+class TestLoopManagementToolsNeverResolve:
+    """Neither path may hand a session a tool that starts or drives sessions."""
+
+    _REGISTRY: dict[str, set[str]] = {
+        "list_jobs": {"safe"},
+        "mission_start": {"mission"},
+        "mission_iterate": {"mission"},
+        "mission_memory_search": {"mission"},
+        "swarm_start": {"swarm"},
+        "swarm_status": {"swarm"},
+    }
+
+    @pytest.mark.parametrize(
+        "control_tool",
+        ["mission_start", "mission_iterate", "swarm_start", "swarm_status", "mission_spawn"],
+    )
+    def test_explicit_list_naming_a_control_tool_is_rejected(self, control_tool: str) -> None:
+        with pytest.raises(validation.MissionValidationError) as exc_info:
+            validation.resolve_effective_allowlist(
+                allow_all_tools=False,
+                explicit_allowlist=["list_jobs", control_tool],
+                registered_tools=self._REGISTRY,
+            )
+
+        assert exc_info.value.code == "validation_error"
+        assert exc_info.value.details == {
+            "field": "tool_allowlist",
+            "tool_name": control_tool,
+            "reason": "control_tool_not_allowed",
+        }
+
+    def test_explicit_list_may_name_ordinary_and_read_only_mission_tools(self) -> None:
+        assert validation.resolve_effective_allowlist(
+            allow_all_tools=False,
+            explicit_allowlist=["list_jobs", "mission_memory_search"],
+            registered_tools=self._REGISTRY,
+        ) == ["list_jobs", "mission_memory_search"]
+
+    def test_explicit_value_that_is_not_a_list_is_still_rejected_as_such(self) -> None:
+        with pytest.raises(validation.MissionValidationError) as exc_info:
+            validation.resolve_effective_allowlist(
+                allow_all_tools=False,
+                explicit_allowlist="mission_start",  # type: ignore[arg-type]
+                registered_tools=self._REGISTRY,
+            )
+
+        assert exc_info.value.details == {"field": "tool_allowlist", "reason": "not_a_list"}
+
+    def test_all_tools_expansion_drops_swarm_tools_even_with_a_narrow_control_set(self) -> None:
+        """The MCP and CLI pass only the mission-tagged names as control tools."""
+        mission_tagged = {name for name, tags in self._REGISTRY.items() if "mission" in tags}
+
+        resolved = validation.resolve_effective_allowlist(
+            allow_all_tools=True,
+            explicit_allowlist=None,
+            registered_tools=self._REGISTRY,
+            control_tools=mission_tagged,
+        )
+
+        assert resolved == ["list_jobs"]

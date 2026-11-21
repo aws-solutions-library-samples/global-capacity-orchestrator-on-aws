@@ -198,9 +198,11 @@ def test_studio_login_polls_until_profile_is_ready(runner: CliRunner) -> None:
         )
 
     assert result.exit_code == 0, result.output
-    assert "Waiting for user profile to provision..." in result.output
-    assert ".. ready" in result.output
-    assert "https://studio.example/session" in result.output
+    # The URL is printed alone on stdout for `URL=$(gco analytics studio
+    # login ...)`; the provisioning progress used to precede it there.
+    assert result.stdout == "https://studio.example/session\n"
+    assert "Waiting for user profile to provision..." in result.stderr
+    assert ".. ready" in result.stderr
     assert fetch.call_count == 3
 
 
@@ -216,6 +218,7 @@ def test_studio_login_times_out_after_bounded_polling(runner: CliRunner) -> None
 
     assert result.exit_code == 2
     assert "did not become ready within 120s" in result.output
+    assert result.stdout == ""
     assert fetch.call_count == 24
 
 

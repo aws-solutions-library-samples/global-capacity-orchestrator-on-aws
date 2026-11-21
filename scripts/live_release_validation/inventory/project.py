@@ -37,6 +37,7 @@ from .scanners import (
     _list_project_kms_keys,
     _list_project_pcs_resources,
     _list_project_s3_buckets,
+    _list_project_ssm_parameters,
     _list_project_tagged_resources,
     _list_secrets,
     _list_sqs_queues,
@@ -218,6 +219,7 @@ def collect_project_resources(
         "apigatewayv2",
         "logs",
         "secretsmanager",
+        "ssm",
         "backup",
         "pcs",
         "sagemaker",
@@ -279,6 +281,9 @@ def collect_project_resources(
             _list_cloudwatch_log_groups,
         ),
         ("secrets_manager", "secretsmanager", "secrets", _list_secrets),
+        # Every parameter under /<project>/, including the untagged ones GCO's
+        # Lambdas and the traffic-dial command write at runtime.
+        ("ssm_parameters", "ssm", "ssm_parameters", _list_project_ssm_parameters),
         # Last of the regional collectors: the CSI driver's volumes are the one
         # category identified purely by a Kubernetes tag, so they are scanned
         # independently of the stack- and project-tag matching above.

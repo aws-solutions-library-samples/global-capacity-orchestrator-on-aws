@@ -161,6 +161,7 @@ class HyperpodCluster(Construct):
         *,
         config: Mapping[str, Any],
         project_name: str,
+        project_tag: str,
         region: str,
         vpc: ec2.IVpc,
         subnets: Sequence[ec2.ISubnet],
@@ -178,6 +179,7 @@ class HyperpodCluster(Construct):
             raise ValueError("HyperpodCluster needs at least one subnet")
         self.config = config
         self.project_name = project_name
+        self.project_tag = project_tag
         self.region = region
         self.vpc = vpc
         self.eks_cluster_security_group = eks_cluster_security_group
@@ -418,10 +420,19 @@ class HyperpodCluster(Construct):
             description="HyperPod nodes to the EKS control plane and cluster pods",
         )
         security_group.apply_removal_policy(self.removal_policy)
+        # CDK files the rule that names this group as its source under the
+        # (imported) EKS cluster security group, so that group's children are
+        # searched too, for the one rule whose source is this group.
         all_traffic_rules = [
             child
             for child in security_group.node.children
             if isinstance(child, ec2.CfnSecurityGroupIngress) and child.ip_protocol == "-1"
+        ] + [
+            child
+            for child in self.eks_cluster_security_group.node.children
+            if isinstance(child, ec2.CfnSecurityGroupIngress)
+            and child.ip_protocol == "-1"
+            and child.source_security_group_id == security_group.security_group_id
         ]
         for rule in all_traffic_rules:
             acknowledge_nag_findings(
@@ -431,11 +442,12 @@ class HyperpodCluster(Construct):
                         id=rule_id,
                         reason=(
                             "The HyperPod node security group admits all traffic from itself "
-                            "and from the EKS cluster security group only (security-group "
-                            "sources, no CIDR): the AWS-documented shape for HyperPod nodes, "
-                            "which carries EFA's SRD protocol and the kubelet/control-plane "
-                            "traffic in both directions. The rule packs flag protocol -1 "
-                            "regardless of source."
+                            "and from the EKS cluster security group, and the cluster "
+                            "security group admits all traffic from the node group "
+                            "(security-group sources, no CIDR): the AWS-documented shape for "
+                            "HyperPod nodes, which carries EFA's SRD protocol and the "
+                            "kubelet/control-plane traffic in both directions. The rule "
+                            "packs flag protocol -1 regardless of source."
                         ),
                     )
                     for rule_id in _ALL_TRAFFIC_RULES
@@ -615,9 +627,13 @@ class HyperpodCluster(Construct):
         return cluster
 
     def _tags(self) -> dict[str, str]:
-        """Tags on the cluster (HyperPod propagates them to the instances it launches)."""
+        """Tags on the cluster (HyperPod propagates them to the instances it launches).
+
+        ``Project`` carries ``project_tag`` (cdk.json ``context.tags.Project``,
+        which the cost reports filter on); ``gco:project`` the project name.
+        """
         return {
-            "Project": self.project_name,
+            "Project": self.project_tag,
             "gco:project": self.project_name,
             "gco:hyperpod-cluster": self.cluster_name,
         }

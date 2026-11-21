@@ -1,10 +1,10 @@
 """Tests for ``gco/services/aws_ssm.py``.
 
 The SSM helpers are the single source of truth for every callsite
-in the tree (``cli/models.py``, ``cli/analytics_user_mgmt.py``,
-``gco/services/health_monitor.py``, ``gco_mcp/mission/state.py``). This
-file pins their contract so a regression in any of those callsites
-fails here first.
+in the tree (``cli/models.py``, ``cli/storage.py``, ``cli/vector_store.py``,
+``cli/analytics_user_mgmt.py``, ``gco/services/inference_monitor.py``,
+``gco_mcp/mission/state.py``). This file pins their contract so a
+regression in any of those callsites fails here first.
 
 Three concerns under test:
 
@@ -33,7 +33,6 @@ from gco.services.aws_ssm import (
     check_ssm_parameter,
     get_ssm_parameter,
     get_ssm_parameter_optional,
-    put_ssm_parameter,
 )
 
 # ---------------------------------------------------------------------------
@@ -143,62 +142,6 @@ class TestCheckSsmParameter:
             ok, msg = check_ssm_parameter("/gco/foo", region="us-east-2")
             assert ok is False
             assert "ThrottlingException" in msg or "slow down" in msg
-
-
-# ---------------------------------------------------------------------------
-# put_ssm_parameter
-# ---------------------------------------------------------------------------
-
-
-class TestPutSsmParameter:
-    @mock_aws
-    def test_creates_new_parameter(self) -> None:
-        put_ssm_parameter("/gco/new", "val", region="us-east-2")
-        ssm = boto3.client("ssm", region_name="us-east-2")
-        resp = ssm.get_parameter(Name="/gco/new")
-        assert resp["Parameter"]["Value"] == "val"
-
-    @mock_aws
-    def test_overwrites_existing_parameter_by_default(self) -> None:
-        ssm = boto3.client("ssm", region_name="us-east-2")
-        ssm.put_parameter(Name="/gco/existing", Value="old", Type="String")
-        put_ssm_parameter("/gco/existing", "new", region="us-east-2")
-        resp = ssm.get_parameter(Name="/gco/existing")
-        assert resp["Parameter"]["Value"] == "new"
-
-    @mock_aws
-    def test_overwrite_false_rejects_existing_parameter(self) -> None:
-        ssm = boto3.client("ssm", region_name="us-east-2")
-        ssm.put_parameter(Name="/gco/existing", Value="old", Type="String")
-        with pytest.raises(ClientError) as excinfo:
-            put_ssm_parameter(
-                "/gco/existing",
-                "new",
-                region="us-east-2",
-                overwrite=False,
-            )
-        # boto3 raises ParameterAlreadyExists when Overwrite is False
-        # and the name is taken; pin the exact code so a regression
-        # silently swallowing the conflict shows up here.
-        assert excinfo.value.response["Error"]["Code"] == "ParameterAlreadyExists"
-
-    @mock_aws
-    def test_parameter_type_threaded_through(self) -> None:
-        put_ssm_parameter(
-            "/gco/list",
-            "a,b,c",
-            region="us-east-2",
-            parameter_type="StringList",
-        )
-        ssm = boto3.client("ssm", region_name="us-east-2")
-        resp = ssm.get_parameter(Name="/gco/list")
-        # StringList parameters carry a comma-separated value but the
-        # ``Type`` field on the describe response confirms the kind.
-        describe = ssm.describe_parameters(
-            Filters=[{"Key": "Name", "Values": ["/gco/list"]}],
-        )
-        assert describe["Parameters"][0]["Type"] == "StringList"
-        assert resp["Parameter"]["Value"] == "a,b,c"
 
 
 # ---------------------------------------------------------------------------

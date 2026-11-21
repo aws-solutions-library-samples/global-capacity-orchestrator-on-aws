@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from cli import analytics_user_mgmt as aum
@@ -214,6 +215,21 @@ class TestUserMgmtHelpers:
         assert row["email"] == "alice@example.com"
         assert row["status"]
         assert row["enabled"] in ("True", "False")
+
+    @mock_aws
+    def test_list_users_reads_every_page(self):
+        """ListUsers returns at most 60 users per call; the listing used to stop
+        at the first page."""
+        cognito = boto3.client("cognito-idp", region_name="us-east-2")
+        pool_id = cognito.create_user_pool(PoolName="gco-studio")["UserPool"]["Id"]
+        for index in range(65):
+            cognito.admin_create_user(
+                UserPoolId=pool_id, Username=f"user{index:02d}", MessageAction="SUPPRESS"
+            )
+
+        rows = aum.list_users(pool_id, "us-east-2")
+
+        assert sorted(row["username"] for row in rows) == [f"user{i:02d}" for i in range(65)]
 
     @mock_aws
     def test_admin_delete_user_removes_user(self):
@@ -467,94 +483,246 @@ class TestDoctorHelpers:
 # ---------------------------------------------------------------------------
 
 
+class _FakeCloudFormation:
+    """CloudFormation answering for one deleted and (optionally) one live
+    ``gco-analytics`` stack, as ListStacks/ListStackResources do."""
+
+    def __init__(self, *, deleted=(), live=None, error=None):
+        self.deleted = list(deleted)  # [(stack_id, [resource summaries])]
+        self.live = live  # [resource summaries] or None (no live stack)
+        self.error = error
+
+    def get_paginator(self, name):
+        fake = self
+
+        class _Paginator:
+            def paginate(self, **kwargs):
+                if fake.error is not None:
+                    raise fake.error
+                if name == "list_stacks":
+                    assert kwargs == {"StackStatusFilter": ["DELETE_COMPLETE"]}
+                    return [
+                        {
+                            "StackSummaries": [
+                                {"StackName": "other-analytics", "StackId": "arn:other"},
+                                *(
+                                    {"StackName": "gco-analytics", "StackId": stack_id}
+                                    for stack_id, _ in fake.deleted
+                                ),
+                            ]
+                        }
+                    ]
+                stack = kwargs["StackName"]
+                for stack_id, resources in fake.deleted:
+                    if stack == stack_id:
+                        return [{"StackResourceSummaries": resources}]
+                assert stack == "gco-analytics"
+                if fake.live is None:
+                    raise ClientError(
+                        {
+                            "Error": {
+                                "Code": "ValidationError",
+                                "Message": "Stack with id gco-analytics does not exist",
+                            }
+                        },
+                        "ListStackResources",
+                    )
+                return [{"StackResourceSummaries": fake.live}]
+
+        return _Paginator()
+
+
+def _skipped(resource_type, physical_id):
+    return {
+        "ResourceType": resource_type,
+        "PhysicalResourceId": physical_id,
+        "ResourceStatus": "DELETE_SKIPPED",
+    }
+
+
+def _scan_with(cfn, region="us-east-2"):
+    real_client = boto3.client
+
+    def client(service, region_name=None):
+        if service == "cloudformation":
+            return cfn
+        return real_client(service, region_name=region_name)
+
+    with patch("boto3.client", side_effect=client):
+        return aum.scan_orphan_analytics_resources(region, "gco")
+
+
+def _studio_efs(efs, ec2, *, name="gco-analytics/StudioEfs", tags=()):
+    fs_id = efs.create_file_system(
+        CreationToken=name + str(len(efs.describe_file_systems()["FileSystems"])),
+        Tags=[{"Key": "Name", "Value": name}, *tags],
+    )["FileSystemId"]
+    subnet = ec2.describe_subnets()["Subnets"][0]["SubnetId"]
+    mount_target = efs.create_mount_target(FileSystemId=fs_id, SubnetId=subnet)["MountTargetId"]
+    access_point = efs.create_access_point(
+        FileSystemId=fs_id, Tags=[{"Key": "gco:analytics:managed", "Value": "true"}]
+    )["AccessPointId"]
+    return fs_id, mount_target, access_point
+
+
 class TestScanOrphanResources:
-    def test_no_orphans_returns_empty_list(self):
-        """Clean environment: EFS and Cognito return no matching resources."""
-        efs = MagicMock()
-        efs.describe_file_systems.return_value = {"FileSystems": []}
-        cognito = MagicMock()
-        cognito.list_user_pools.return_value = {"UserPools": []}
+    """The scan used to look for a tag only per-user EFS access points carry,
+    so it could never flag a retained file system or user pool."""
 
-        def _fake_client(service, region_name=None):
-            return {"efs": efs, "cognito-idp": cognito}[service]
-
-        with patch("boto3.client", side_effect=_fake_client):
-            remediation = aum.scan_orphan_analytics_resources("us-east-2")
-        assert remediation == []
-
-    def test_reports_efs_and_cognito_orphans(self):
-        """Tagged resources produce copy-pasteable delete commands."""
-        efs = MagicMock()
-        efs.describe_file_systems.return_value = {"FileSystems": [{"FileSystemId": "fs-abc"}]}
-        efs.list_tags_for_resource.return_value = {
-            "Tags": [{"Key": "gco:analytics:managed", "Value": "true"}]
-        }
-
-        cognito = MagicMock()
-        cognito.list_user_pools.return_value = {"UserPools": [{"Id": "pool-1"}]}
-        cognito.describe_user_pool.return_value = {
-            "UserPool": {"UserPoolTags": {"gco:analytics:managed": "true"}}
-        }
-
-        def _fake_client(service, region_name=None):
-            return {"efs": efs, "cognito-idp": cognito}[service]
-
-        with patch("boto3.client", side_effect=_fake_client):
-            remediation = aum.scan_orphan_analytics_resources("us-east-2")
-        assert any("fs-abc" in cmd for cmd in remediation)
-        assert any("pool-1" in cmd for cmd in remediation)
-
-    def test_skips_resources_without_matching_tag(self):
-        efs = MagicMock()
-        efs.describe_file_systems.return_value = {"FileSystems": [{"FileSystemId": "fs-abc"}]}
-        efs.list_tags_for_resource.return_value = {"Tags": [{"Key": "Name", "Value": "irrelevant"}]}
-
-        cognito = MagicMock()
-        cognito.list_user_pools.return_value = {"UserPools": [{"Id": "pool-1"}]}
-        cognito.describe_user_pool.return_value = {
-            "UserPool": {"UserPoolTags": {"Name": "irrelevant"}}
-        }
-
-        def _fake_client(service, region_name=None):
-            return {"efs": efs, "cognito-idp": cognito}[service]
-
-        with patch("boto3.client", side_effect=_fake_client):
-            remediation = aum.scan_orphan_analytics_resources("us-east-2")
-        assert remediation == []
-
-    def test_handles_efs_client_error_gracefully(self):
-        """EFS failure emits a diagnostic line, does not raise."""
-        from botocore.exceptions import ClientError
-
-        efs = MagicMock()
-        efs.describe_file_systems.side_effect = ClientError(
-            {"Error": {"Code": "AccessDenied", "Message": "no"}},
-            "DescribeFileSystems",
-        )
-        cognito = MagicMock()
-        cognito.list_user_pools.return_value = {"UserPools": []}
-
-        def _fake_client(service, region_name=None):
-            return {"efs": efs, "cognito-idp": cognito}[service]
-
-        with patch("boto3.client", side_effect=_fake_client):
-            remediation = aum.scan_orphan_analytics_resources("us-east-2")
-        assert any("EFS orphan scan failed" in line for line in remediation)
-
-    def test_handles_cognito_client_error_gracefully(self):
-        from botocore.exceptions import ClientError
-
-        efs = MagicMock()
-        efs.describe_file_systems.return_value = {"FileSystems": []}
-        cognito = MagicMock()
-        cognito.list_user_pools.side_effect = ClientError(
-            {"Error": {"Code": "AccessDenied", "Message": "no"}},
-            "ListUserPools",
+    @mock_aws
+    def test_reports_what_a_deleted_stack_retained_with_ordered_cleanup(self):
+        efs = boto3.client("efs", region_name="us-east-2")
+        ec2 = boto3.client("ec2", region_name="us-east-2")
+        cognito = boto3.client("cognito-idp", region_name="us-east-2")
+        fs_id, mount_target, access_point = _studio_efs(efs, ec2)
+        pool_id = cognito.create_user_pool(
+            PoolName="StudioUserPool3816E37C-abc", UserPoolTags={"Project": "GCO"}
+        )["UserPool"]["Id"]
+        cognito.create_user_pool_domain(Domain="gco-studio-123456789012", UserPoolId=pool_id)
+        unrelated_pool = cognito.create_user_pool(PoolName="someone-else")["UserPool"]["Id"]
+        cfn = _FakeCloudFormation(
+            deleted=[
+                (
+                    "arn:aws:cloudformation:us-east-2:123456789012:stack/gco-analytics/1",
+                    [
+                        _skipped("AWS::EFS::FileSystem", fs_id),
+                        _skipped("AWS::Cognito::UserPool", pool_id),
+                        {
+                            "ResourceType": "AWS::IAM::Role",
+                            "PhysicalResourceId": "role",
+                            "ResourceStatus": "DELETE_SKIPPED",
+                        },
+                        {
+                            "ResourceType": "AWS::Cognito::UserPool",
+                            "PhysicalResourceId": "us-east-2_deleted",
+                            "ResourceStatus": "DELETE_COMPLETE",
+                        },
+                    ],
+                )
+            ]
         )
 
-        def _fake_client(service, region_name=None):
-            return {"efs": efs, "cognito-idp": cognito}[service]
+        remediation = _scan_with(cfn)
 
-        with patch("boto3.client", side_effect=_fake_client):
-            remediation = aum.scan_orphan_analytics_resources("us-east-2")
-        assert any("Cognito orphan scan failed" in line for line in remediation)
+        assert remediation == [
+            f"aws efs delete-access-point --access-point-id {access_point} --region us-east-2",
+            f"aws efs delete-mount-target --mount-target-id {mount_target} --region us-east-2",
+            f"aws efs delete-file-system --file-system-id {fs_id} --region us-east-2",
+            "aws cognito-idp delete-user-pool-domain --domain gco-studio-123456789012 "
+            f"--user-pool-id {pool_id} --region us-east-2",
+            f"aws cognito-idp delete-user-pool --user-pool-id {pool_id} --region us-east-2",
+        ]
+        assert all(unrelated_pool not in command for command in remediation)
+
+    @mock_aws
+    def test_never_reports_the_live_stacks_resources(self):
+        efs = boto3.client("efs", region_name="us-east-2")
+        ec2 = boto3.client("ec2", region_name="us-east-2")
+        cognito = boto3.client("cognito-idp", region_name="us-east-2")
+        live_fs, _, _ = _studio_efs(efs, ec2)
+        live_pool = cognito.create_user_pool(
+            PoolName="StudioUserPool3816E37C-live",
+            UserPoolTags={"gco:analytics:managed": "true", "gco:project": "gco"},
+        )["UserPool"]["Id"]
+        cfn = _FakeCloudFormation(
+            live=[
+                {"ResourceType": "AWS::EFS::FileSystem", "PhysicalResourceId": live_fs},
+                {"ResourceType": "AWS::Cognito::UserPool", "PhysicalResourceId": live_pool},
+            ]
+        )
+
+        assert _scan_with(cfn) == []
+
+    @mock_aws
+    def test_recognises_an_old_studio_file_system_by_its_tags(self):
+        """Past CloudFormation's 90 days, the Name tag CDK sets (or the
+        managed/project tags) still identify this project's Studio EFS."""
+        efs = boto3.client("efs", region_name="us-east-2")
+        ec2 = boto3.client("ec2", region_name="us-east-2")
+        by_name, _, _ = _studio_efs(efs, ec2)
+        by_tags, _, _ = _studio_efs(
+            efs,
+            ec2,
+            name="renamed",
+            tags=[
+                {"Key": "gco:analytics:managed", "Value": "true"},
+                {"Key": "gco:project", "Value": "gco"},
+            ],
+        )
+        other_project, _, _ = _studio_efs(efs, ec2, name="other-analytics/StudioEfs")
+        other_managed, _, _ = _studio_efs(
+            efs,
+            ec2,
+            name="x",
+            tags=[
+                {"Key": "gco:analytics:managed", "Value": "true"},
+                {"Key": "gco:project", "Value": "other"},
+            ],
+        )
+
+        remediation = _scan_with(_FakeCloudFormation())
+
+        deleted = [cmd.split()[-3] for cmd in remediation if "delete-file-system" in cmd]
+        assert sorted(deleted) == sorted([by_name, by_tags])
+        assert other_project not in " ".join(remediation)
+        assert other_managed not in " ".join(remediation)
+
+    @mock_aws
+    def test_a_retained_pool_deleted_by_hand_since_is_not_reported(self):
+        cfn = _FakeCloudFormation(
+            deleted=[("arn:stack/1", [_skipped("AWS::Cognito::UserPool", "us-east-2_gone")])]
+        )
+        assert _scan_with(cfn) == []
+
+    def test_cloudformation_failure_offers_nothing_for_deletion(self):
+        """Without the stack's resource lists a live file system could look
+        retained, so the scan stops with one diagnostic line."""
+        from botocore.exceptions import ClientError
+
+        cfn = _FakeCloudFormation(
+            error=ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "ListStacks")
+        )
+        with patch("boto3.client", return_value=cfn):
+            remediation = aum.scan_orphan_analytics_resources("us-east-2", "gco")
+        assert len(remediation) == 1
+        assert remediation[0].startswith("(orphan scan skipped:")
+
+    def test_live_stack_lookup_errors_other_than_missing_stack_propagate(self):
+        cfn = MagicMock()
+        cfn.get_paginator.return_value.paginate.side_effect = [
+            [{"StackSummaries": []}],
+            ClientError({"Error": {"Code": "Throttling", "Message": "slow"}}, "ListStackResources"),
+        ]
+        with patch("boto3.client", return_value=cfn):
+            remediation = aum.scan_orphan_analytics_resources("us-east-2", "gco")
+        assert remediation == [
+            "(orphan scan skipped: the CloudFormation lookup of gco-analytics failed: "
+            "An error occurred (Throttling) when calling the ListStackResources operation: slow)"
+        ]
+
+    def test_efs_and_cognito_failures_emit_diagnostics(self):
+        from botocore.exceptions import ClientError
+
+        denied = ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "Describe")
+        efs = MagicMock()
+        efs.get_paginator.return_value.paginate.side_effect = denied
+        cognito = MagicMock()
+        cognito.get_paginator.return_value.paginate.return_value = [
+            {"UserPools": [{"Id": "us-east-2_pool"}, {}]}
+        ]
+        cognito.describe_user_pool.side_effect = denied
+        clients = {"cloudformation": _FakeCloudFormation(), "efs": efs, "cognito-idp": cognito}
+        with patch("boto3.client", side_effect=lambda service, region_name=None: clients[service]):
+            remediation = aum.scan_orphan_analytics_resources("us-east-2", "gco")
+        assert remediation[0].startswith("(EFS orphan scan failed:")
+        assert remediation[1].startswith("(Cognito orphan scan failed:")
+        assert len(remediation) == 2
+
+    def test_skips_file_systems_without_an_id(self):
+        efs = MagicMock()
+        efs.get_paginator.return_value.paginate.return_value = [{"FileSystems": [{}]}]
+        cognito = MagicMock()
+        cognito.get_paginator.return_value.paginate.return_value = [{"UserPools": []}]
+        clients = {"cloudformation": _FakeCloudFormation(), "efs": efs, "cognito-idp": cognito}
+        with patch("boto3.client", side_effect=lambda service, region_name=None: clients[service]):
+            assert aum.scan_orphan_analytics_resources("us-east-2", "gco") == []

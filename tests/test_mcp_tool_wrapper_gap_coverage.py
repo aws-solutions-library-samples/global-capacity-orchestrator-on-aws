@@ -94,7 +94,15 @@ def _isolated_tool_module(
     stage_upload_path = Mock()
     load_cdk_json = Mock(return_value={"regional": []})
 
-    cli_runner = _stub_module("cli_runner", _run_cli=run_cli)
+    # The path checks are pinned in test_mcp_path_arguments.py; here they
+    # accept every value so the argv matrices stay about argv shape.
+    cli_runner = _stub_module(
+        "cli_runner",
+        _run_cli=run_cli,
+        TRANSFER_TIMEOUT_SECONDS=3600,
+        reject_paths_outside_project_root=Mock(return_value=None),
+        reject_traversal_segments=Mock(return_value=None),
+    )
     audit = _stub_module("audit", audit_logged=lambda function: function)
     server = _stub_module("server", mcp=_McpStub())
     feature_flags = _stub_module(
@@ -683,7 +691,7 @@ def test_capacity_runai_wrapper_argv(
             "reserve_capacity",
             ("cb-offering", "us-east-1"),
             {},
-            ("capacity", "reserve", "-o", "cb-offering", "-r", "us-east-1"),
+            ("capacity", "reserve", "-o", "cb-offering", "-r", "us-east-1", "-y"),
         ),
         (
             "reserve_capacity",
@@ -696,6 +704,7 @@ def test_capacity_runai_wrapper_argv(
                 "cb-offering",
                 "-r",
                 "us-east-1",
+                "-y",
                 "--dry-run",
             ),
         ),
@@ -714,6 +723,7 @@ def test_capacity_runai_wrapper_argv(
                 "us-east-1a",
                 "-c",
                 "1",
+                "-y",
             ),
         ),
         (
@@ -739,6 +749,7 @@ def test_capacity_runai_wrapper_argv(
                 "us-west-2b",
                 "-c",
                 "4",
+                "-y",
                 "--platform",
                 "Linux with SQL Server",
                 "--tenancy",
@@ -816,31 +827,10 @@ def test_monitoring_fixed_wrappers(function_name: str, expected_argv: tuple[str,
 @pytest.mark.parametrize(
     ("email", "expected_argv"),
     [
-        (
-            None,
-            (
-                "monitoring",
-                "users",
-                "add",
-                "--username",
-                "alice",
-                "--password",
-                "secret",
-            ),
-        ),
+        (None, ("monitoring", "users", "add", "--username", "alice")),
         (
             "alice@example.com",
-            (
-                "monitoring",
-                "users",
-                "add",
-                "--username",
-                "alice",
-                "--password",
-                "secret",
-                "--email",
-                "alice@example.com",
-            ),
+            ("monitoring", "users", "add", "--username", "alice", "--email", "alice@example.com"),
         ),
     ],
 )
@@ -848,13 +838,94 @@ def test_monitoring_user_add_email_branch(
     email: str | None, expected_argv: tuple[str, ...]
 ) -> None:
     with _isolated_tool_module("monitoring") as loaded:
+        result = _invoke(loaded.module.monitoring_user_add, "alice", "secret", email=email)
+        assert result == CLI_RESULT
+        loaded.run_cli.assert_called_once_with(
+            *expected_argv, env={"GCO_GRAFANA_USER_PASSWORD": "secret"}
+        )
+
+
+_INSTANCE = "i-0123456789abcdef0"
+_CLUSTER_TARGETS = [
+    ({}, ()),
+    ({"region": "us-west-2"}, ("--region", "us-west-2")),
+    ({"via_ssm": _INSTANCE}, ("--via-ssm", _INSTANCE)),
+    (
+        {"region": "us-west-2", "via_ssm": _INSTANCE},
+        ("--region", "us-west-2", "--via-ssm", _INSTANCE),
+    ),
+]
+
+
+@pytest.mark.parametrize(("target", "target_argv"), _CLUSTER_TARGETS)
+def test_monitoring_users_list_reads_the_secret_on_the_named_cluster(
+    target: dict[str, str], target_argv: tuple[str, ...]
+) -> None:
+    # `gco monitoring users list` reads the Grafana Secret on the --region
+    # cluster, through --via-ssm when the API endpoint is private.
+    with _isolated_tool_module("monitoring") as loaded:
         _assert_cli_call(
             loaded,
-            "monitoring_user_add",
-            ("alice", "secret"),
-            {"email": email},
-            expected_argv,
+            "monitoring_users_list",
+            (),
+            target,
+            ("monitoring", "users", "list", *target_argv),
         )
+
+
+@pytest.mark.parametrize(("target", "target_argv"), _CLUSTER_TARGETS)
+def test_monitoring_user_add_reads_the_secret_on_the_named_cluster(
+    target: dict[str, str], target_argv: tuple[str, ...]
+) -> None:
+    with _isolated_tool_module("monitoring") as loaded:
+        result = _invoke(loaded.module.monitoring_user_add, "alice", "secret", **target)
+        assert result == CLI_RESULT
+        loaded.run_cli.assert_called_once_with(
+            "monitoring",
+            "users",
+            "add",
+            "--username",
+            "alice",
+            *target_argv,
+            env={"GCO_GRAFANA_USER_PASSWORD": "secret"},
+        )
+
+
+@pytest.mark.parametrize(("target", "target_argv"), _CLUSTER_TARGETS)
+def test_monitoring_user_remove_reads_the_secret_on_the_named_cluster(
+    target: dict[str, str], target_argv: tuple[str, ...]
+) -> None:
+    with _isolated_tool_module("monitoring", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
+        loaded.module._ctx_warning = AsyncMock()
+        _assert_cli_call(
+            loaded,
+            "monitoring_user_remove",
+            ("alice",),
+            target,
+            ("monitoring", "users", "remove", "--username", "alice", "--yes", *target_argv),
+        )
+
+
+@pytest.mark.parametrize(
+    ("function_name", "args"),
+    [
+        ("monitoring_users_list", ()),
+        ("monitoring_user_add", ("alice", "secret")),
+        ("monitoring_user_remove", ("alice",)),
+    ],
+)
+def test_monitoring_user_tools_never_provision_a_bastion(
+    function_name: str, args: tuple[str, ...]
+) -> None:
+    # `--via-ssm auto` launches a billable EC2 instance, and remove's --yes
+    # would also skip the CLI's bastion prompt; the tools refuse it.
+    with _isolated_tool_module("monitoring", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
+        loaded.module._ctx_warning = AsyncMock()
+        result = json.loads(_invoke(getattr(loaded.module, function_name), *args, via_ssm="auto"))
+        assert result["code"] == "bastion_not_provisioned"
+        assert result["parameter"] == "via_ssm"
+        assert "gco monitoring users" in result["error"]
+        loaded.run_cli.assert_not_called()
 
 
 def test_monitoring_context_warning_succeeds() -> None:
@@ -1077,27 +1148,8 @@ def test_images_destructive_cleanup_scope_and_prune_warning_branches() -> None:
 
 
 # ---------------------------------------------------------------------------
-# inference.py — parse guards, store flags, disaggregated deploy/delete gate
+# inference.py — store flags, disaggregated deploy, gated delete
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("not-json", False),
-        ("[]", False),
-        ('{"spec":[]}', False),
-        ('{"spec":{"mooncake":[]}}', False),
-        ('{"spec":{"mooncake":{"mode":"store"}}}', False),
-        ('{"spec":{"mooncake":{"mode":"disaggregated"}}}', True),
-        ('{"spec":{"mooncake":{"mode":"both"}}}', True),
-    ],
-)
-def test_inference_disaggregated_status_parse_guards(raw: str, expected: bool) -> None:
-    with _isolated_tool_module("inference") as loaded:
-        loaded.run_cli.return_value = raw
-        assert loaded.module._endpoint_is_disaggregated("endpoint-a") is expected
-        loaded.run_cli.assert_called_once_with("inference", "status", "endpoint-a")
 
 
 def test_inference_configure_store_requires_a_setting() -> None:
@@ -1229,28 +1281,10 @@ def test_inference_disaggregated_deploy_matrix(
         )
 
 
-def test_inference_delete_refuses_disaggregated_when_flag_changes_off() -> None:
+def test_inference_delete_runs_the_cli_delete_directly() -> None:
+    """Registration is the only gate: no status lookup, no second flag check."""
     with _isolated_tool_module("inference", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
         loaded.module.is_enabled = Mock(return_value=False)
-        loaded.module._endpoint_is_disaggregated = Mock(return_value=True)
-        loaded.module._ctx_warning = AsyncMock()
-        result = asyncio.run(loaded.module.delete_inference("split"))
-        expected_message = (
-            "Refusing to delete disaggregated endpoint 'split': destructive operations "
-            "are disabled. Set GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true to allow this deletion."
-        )
-        assert result == json.dumps(
-            {"error": expected_message, "destructive_operations_disabled": True}
-        )
-        loaded.module._ctx_warning.assert_awaited_once_with(expected_message)
-        loaded.run_cli.assert_not_called()
-
-
-@pytest.mark.parametrize(("flag_enabled", "disaggregated"), [(True, True), (False, False)])
-def test_inference_delete_allowed_paths(flag_enabled: bool, disaggregated: bool) -> None:
-    with _isolated_tool_module("inference", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
-        loaded.module.is_enabled = Mock(return_value=flag_enabled)
-        loaded.module._endpoint_is_disaggregated = Mock(return_value=disaggregated)
         loaded.module._ctx_warning = AsyncMock()
         _assert_cli_call(
             loaded,
@@ -1259,13 +1293,10 @@ def test_inference_delete_allowed_paths(flag_enabled: bool, disaggregated: bool)
             {},
             ("inference", "delete", "endpoint-a", "-y"),
         )
+        loaded.module.is_enabled.assert_not_called()
         loaded.module._ctx_warning.assert_awaited_once_with(
             "Deleting inference endpoint 'endpoint-a' — this cannot be undone."
         )
-        if flag_enabled:
-            loaded.module._endpoint_is_disaggregated.assert_not_called()
-        else:
-            loaded.module._endpoint_is_disaggregated.assert_called_once_with("endpoint-a")
 
 
 # ---------------------------------------------------------------------------
@@ -1540,27 +1571,7 @@ def test_models_upload_reports_staging_failure_without_cli_call() -> None:
             "analytics_user_add",
             ("alice", "alice@example.com"),
             {},
-            ("analytics", "users", "add", "alice", "--email", "alice@example.com"),
-        ),
-        (
-            "analytics_login_url",
-            ("alice",),
-            {},
-            ("analytics", "studio", "login", "--username", "alice"),
-        ),
-        (
-            "analytics_login_url",
-            ("alice",),
-            {"password": "secret"},
-            (
-                "analytics",
-                "studio",
-                "login",
-                "--username",
-                "alice",
-                "--password",
-                "secret",
-            ),
+            ("analytics", "users", "add", "--username", "alice", "--email", "alice@example.com"),
         ),
     ],
 )
@@ -1572,6 +1583,22 @@ def test_analytics_wrapper_matrix(
 ) -> None:
     with _isolated_tool_module("analytics") as loaded:
         _assert_cli_call(loaded, function_name, args, kwargs, expected_argv)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_env"),
+    [({}, None), ({"password": "secret"}, {"GCO_STUDIO_PASSWORD": "secret"})],
+)
+def test_analytics_login_url_passes_the_password_in_the_environment(
+    kwargs: dict[str, Any], expected_env: dict[str, str] | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without a password argument the child inherits the server's variable.
+    monkeypatch.setenv("GCO_STUDIO_PASSWORD", "from-the-server-env")
+    with _isolated_tool_module("analytics") as loaded:
+        assert _invoke(loaded.module.analytics_login_url, "alice", **kwargs) == CLI_RESULT
+        loaded.run_cli.assert_called_once_with(
+            "analytics", "studio", "login", "--username", "alice", env=expected_env
+        )
 
 
 @pytest.mark.parametrize(
@@ -1651,31 +1678,6 @@ def test_jobs_wrapper_branch_matrix(
             {"region": "us-east-1"},
             ("webhooks", "get", "alerts", "-r", "us-east-1"),
         ),
-        (
-            "webhooks_create",
-            ("https://example.test/hook", ["job.started", "job.failed"]),
-            {
-                "namespace": "training",
-                "region": "us-west-2",
-                "secret": "hmac-secret",
-            },
-            (
-                "webhooks",
-                "create",
-                "--url",
-                "https://example.test/hook",
-                "--event",
-                "job.started",
-                "--event",
-                "job.failed",
-                "--namespace",
-                "training",
-                "-r",
-                "us-west-2",
-                "--secret",
-                "hmac-secret",
-            ),
-        ),
     ],
 )
 def test_webhook_wrapper_matrix(
@@ -1686,6 +1688,35 @@ def test_webhook_wrapper_matrix(
 ) -> None:
     with _isolated_tool_module("webhooks") as loaded:
         _assert_cli_call(loaded, function_name, args, kwargs, expected_argv)
+
+
+def test_webhook_create_passes_url_and_secret_in_the_environment() -> None:
+    with _isolated_tool_module("webhooks") as loaded:
+        result = _invoke(
+            loaded.module.webhooks_create,
+            "https://example.test/hook",
+            ["job.started", "job.failed"],
+            namespace="training",
+            region="us-west-2",
+            secret="hmac-secret",
+        )
+        assert result == CLI_RESULT
+        loaded.run_cli.assert_called_once_with(
+            "webhooks",
+            "create",
+            "--event",
+            "job.started",
+            "--event",
+            "job.failed",
+            "--namespace",
+            "training",
+            "-r",
+            "us-west-2",
+            env={
+                "GCO_WEBHOOK_URL": "https://example.test/hook",
+                "GCO_WEBHOOK_SECRET": "hmac-secret",
+            },
+        )
 
 
 def test_webhook_create_rejects_empty_events_before_cli() -> None:

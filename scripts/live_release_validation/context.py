@@ -77,24 +77,36 @@ def effective_kubernetes_version(ctx: RunContext) -> str:
     return version.strip()
 
 
-def _direct_regional_access_enabled(ctx: RunContext) -> bool:
+def _global_api_carries_workloads(ctx: RunContext) -> bool:
+    """Whether the global API is a workload ingress: in the commercial ``aws`` partition only.
+
+    Elsewhere Global Accelerator is omitted and the global API only aggregates,
+    so the regional API bridges are the workload ingress.
+    """
     partition = ctx.session.get_partition_for_region(ctx.config.global_region)
     if not partition:
         raise RuntimeError(f"Could not resolve AWS partition for {ctx.config.global_region}")
-    configured = bool((ctx.cdk_context.get("api_gateway") or {}).get("regional_api_enabled", False))
-    return partition != "aws" or configured
+    return bool(partition == "aws")
 
 
 def _job_transport_region(ctx: RunContext, execution_region: str) -> str | None:
-    """Choose authorized transport without probing a denied regional bridge."""
-    if _direct_regional_access_enabled(ctx):
-        return execution_region
-    if len(ctx.deployment_regions) == 1 and execution_region == ctx.deployment_regions[0]:
+    """The Region whose API bridge a workload call goes to, or ``None`` for the global API.
+
+    Every deployment has a regional API bridge in each regional Region, and an
+    identity allowed ``execute-api:Invoke`` (the operator running the harness)
+    may call it, so a call is pinned to the exact execution Region through that
+    bridge. A single-Region run in the ``aws`` partition drives the global API
+    instead: the path an unpinned ``gco`` call takes. The cdk.json key
+    ``api_gateway.regional_api_enabled`` plays no part: it no longer changes
+    the bridges, and a cdk.json may carry it or not.
+    """
+    if (
+        len(ctx.deployment_regions) == 1
+        and execution_region == ctx.deployment_regions[0]
+        and _global_api_carries_workloads(ctx)
+    ):
         return None
-    raise RuntimeError(
-        "Multi-Region workload validation requires api_gateway.regional_api_enabled=true "
-        "so each Job can be observed and deleted in its exact execution Region"
-    )
+    return execution_region
 
 
 def _project_ecr_name(name: str, project_name: str) -> bool:

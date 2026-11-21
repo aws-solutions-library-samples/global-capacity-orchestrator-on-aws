@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
-        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
-        <meta name="gco-flow-digest" content="412e49d7a82d4459">
+        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
+        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
+        <meta name="gco-flow-digest" content="198154a0447a1116">
         <title>Mission engine factory (live vs stub dispatcher, sampling, sandbox wiring)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,35 +208,35 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4011=>operation: "Build the :class:`MissionEngine` dependency triple for ``session``.\n\n    Looks up the live FastMCP registry to populate the registered-tools\n    map and per-tool docstring cache, then assembles the production\n    wiring: a live tool dispatcher (or the canned-stub when\n    ``use_stub_dispatcher`` is True), the Strategy_Revision sampler\n    when sampling resolved to a real backend, and a sandbox runner\n    when the session permits scripted strategies.\n\n    The CLI passes ``use_stub_dispatcher=True`` only on the\n    ``--dry-run`` path; the MCP tool surface always uses the live\n    dispatcher.\n\n    ``extra_tool_metadata`` is an optional ``(tools_map, docstrings)``\n    pair merged over the live registry snapshot before the sampler is\n    built. The swarm layer uses it to teach an orchestrator's\n    Strategy_Revision sampler the in-process supervisor tools — which\n    are deliberately never FastMCP-registered — so spawn proposals\n    validate against the catalog like any other call. It never touches\n    dispatch: the dispatcher wrapper routes those names in-process.\n    "
-cond4014=>condition: if use_stub_dispatcher
-io4021=>inputoutput: output: EngineDependencies(tool_dispatcher=make_stub_dispatcher(), sampling_callable=None, sandbox_runner=_build_sandbox_runner(session))
-e4019=>end: end function return
-op4027=>operation: registered_tools, tool_docstrings = await fetch_registered_tool_metadata()
-cond4030=>condition: if extra_tool_metadata is not None
-op4034=>operation: extra_tools, extra_docs = extra_tool_metadata
-op4036=>operation: registered_tools = {**registered_tools, **extra_tools}
-op4038=>operation: tool_docstrings = {**tool_docstrings, **extra_docs}
-op4043=>operation: sampling_callable = _build_sampling_callable(session, ctx, registered_tools=registered_tools, tool_docstrings=tool_docstrings)
-op4045=>operation: sandbox_runner = _build_sandbox_runner(session)
-op4047=>operation: final_lessons = _build_final_lessons_callable(session, ctx, tool_docstrings)
-io4052=>inputoutput: output: EngineDependencies(tool_dispatcher=_live_dispatch_tool, sampling_callable=sampling_callable, sandbox_runner=sandbox_runner, final_lessons_callable=final_lessons, memory_store=_build_memory_store())
-e4050=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op4316=>operation: "Build the :class:`MissionEngine` dependency triple for ``session``.\n\n    Looks up the live FastMCP registry to populate the registered-tools\n    map and per-tool docstring cache, then assembles the production\n    wiring: a live tool dispatcher (or the canned-stub when\n    ``use_stub_dispatcher`` is True), the Strategy_Revision sampler\n    when sampling resolved to a real backend, and a sandbox runner\n    when the session permits scripted strategies.\n\n    The CLI passes ``use_stub_dispatcher=True`` only on the\n    ``--dry-run`` path; the MCP tool surface always uses the live\n    dispatcher.\n\n    ``extra_tool_metadata`` is an optional ``(tools_map, docstrings)``\n    pair merged over the live registry snapshot before the sampler is\n    built. The swarm layer uses it to teach an orchestrator's\n    Strategy_Revision sampler the in-process supervisor tools — which\n    are deliberately never FastMCP-registered — so spawn proposals\n    validate against the catalog like any other call. It never touches\n    dispatch: the dispatcher wrapper routes those names in-process.\n    "
+cond4319=>condition: if use_stub_dispatcher
+io4326=>inputoutput: output: EngineDependencies(tool_dispatcher=make_stub_dispatcher(), sampling_callable=None, sandbox_runner=_build_sandbox_runner(session))
+e4324=>end: end function return
+op4332=>operation: registered_tools, tool_docstrings = await fetch_registered_tool_metadata()
+cond4335=>condition: if extra_tool_metadata is not None
+op4339=>operation: extra_tools, extra_docs = extra_tool_metadata
+op4341=>operation: registered_tools = {**registered_tools, **extra_tools}
+op4343=>operation: tool_docstrings = {**tool_docstrings, **extra_docs}
+op4348=>operation: sampling_callable = _build_sampling_callable(session, ctx, registered_tools=registered_tools, tool_docstrings=tool_docstrings)
+op4350=>operation: sandbox_runner = _build_sandbox_runner(session)
+op4352=>operation: final_lessons = _build_final_lessons_callable(session, ctx, tool_docstrings)
+io4357=>inputoutput: output: EngineDependencies(tool_dispatcher=_live_dispatch_tool, sampling_callable=sampling_callable, sandbox_runner=sandbox_runner, final_lessons_callable=final_lessons, memory_store=_build_memory_store())
+e4355=>end: end function return
 
-op4011->cond4014
-cond4014(yes)->io4021
-io4021->e4019
-cond4014(no)->op4027
-op4027->cond4030
-cond4030(yes)->op4034
-op4034->op4036
-op4036->op4038
-op4038->op4043
-op4043->op4045
-op4045->op4047
-op4047->io4052
-io4052->e4050
-cond4030(no)->op4043
+op4316->cond4319
+cond4319(yes)->io4326
+io4326->e4324
+cond4319(no)->op4332
+op4332->cond4335
+cond4335(yes)->op4339
+op4339->op4341
+op4341->op4343
+op4343->op4348
+op4348->op4350
+op4350->op4352
+op4352->io4357
+io4357->e4355
+cond4335(no)->op4348
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -246,17 +246,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
-        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
+        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
+            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
+            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>412e49d7a82d4459</code>
+            Flow content SHA-256: <code>198154a0447a1116</code>
           </p>
           <div id="canvas"></div>
         </div>

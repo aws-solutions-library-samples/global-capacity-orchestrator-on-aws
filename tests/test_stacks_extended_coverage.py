@@ -4,12 +4,6 @@ Extended unit coverage for ``cli/stacks.py``.
 Targets the long tail of destroy-flow helpers and supporting AWS
 plumbing that the existing test suite doesn't reach:
 
-* ``_read_images_config`` — the cdk.json parser used by the destroy
-  preflight, including the missing-file and parse-error fallbacks.
-* ``_build_image_registry_inventory`` — aggregation of repo / tag /
-  size / reference counts via a mocked ``ImageManager``.
-* ``_image_registry_destroy_preflight`` — every refusal/confirmation
-  branch.
 * ``_stack_exists_in_cloudformation`` and ``_cloudformation_delete_stack``
   — the boto3-shaped helpers used to delete by-name when CDK can't.
 * ``_get_destroy_region`` — the deploy-region lookup.
@@ -40,19 +34,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
-from click import Abort
 
 
 @pytest.fixture
-def stacks_module() -> Any:
-    """Reload cli.stacks so the runtime cache starts fresh."""
-    import importlib
+def stacks_module(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Return cli.stacks with its container-runtime cache reset for the test.
 
+    The module is not reloaded: a reload builds a new ``StackManager`` class,
+    and tests/conftest.py's no-op stubs for the destroy-cleanup sweeps and the
+    stuck-stack pre-check are patched onto the class that existed before it.
+    """
     import cli.stacks as stacks_mod
 
-    importlib.reload(stacks_mod)
-    yield stacks_mod
-    importlib.reload(stacks_mod)
+    monkeypatch.setattr(stacks_mod, "_container_runtime_cache", None)
+    monkeypatch.setattr(stacks_mod, "_container_runtime_checked", False)
+    return stacks_mod
 
 
 @pytest.fixture
@@ -66,278 +62,26 @@ def manager(stacks_module: Any) -> Any:
     return stacks_module.StackManager(config)
 
 
-# ---------------------------------------------------------------------------
-# _read_images_config
-# ---------------------------------------------------------------------------
+def test_conftest_aws_stubs_cover_this_modules_managers(manager: Any) -> None:
+    """The fixtures must not hand tests a StackManager the conftest stubs miss.
 
+    tests/conftest.py no-ops every destroy-cleanup sweep and the stuck-stack
+    pre-check by patching cli.stacks.StackManager; a manager built from any
+    other class object, such as one a module reload created, would run them
+    against AWS.
+    """
+    import cli.stacks as stacks
 
-class TestReadImagesConfig:
-    def test_no_cdk_json_returns_defaults(self, manager: Any) -> None:
-        with patch("cli.stacks._find_cdk_json", return_value=None):
-            result = manager._read_images_config()
-        assert result == {"removal_policy": "retain", "empty_on_delete": False}
-
-    def test_unparseable_cdk_json_returns_defaults(self, manager: Any, tmp_path: Any) -> None:
-        bad = tmp_path / "cdk.json"
-        bad.write_text("{ not valid")
-        with patch("cli.stacks._find_cdk_json", return_value=str(bad)):
-            result = manager._read_images_config()
-        assert result == {"removal_policy": "retain", "empty_on_delete": False}
-
-    def test_destroy_policy_round_trips(self, manager: Any, tmp_path: Any) -> None:
-        good = tmp_path / "cdk.json"
-        good.write_text(
-            json.dumps(
-                {
-                    "context": {
-                        "images": {
-                            "removal_policy": "destroy",
-                            "empty_on_delete": True,
-                        }
-                    }
-                }
-            )
-        )
-        with patch("cli.stacks._find_cdk_json", return_value=str(good)):
-            result = manager._read_images_config()
-        assert result == {"removal_policy": "destroy", "empty_on_delete": True}
-
-    def test_unknown_policy_coerced_to_retain(self, manager: Any, tmp_path: Any) -> None:
-        bad_policy = tmp_path / "cdk.json"
-        bad_policy.write_text(json.dumps({"context": {"images": {"removal_policy": "shred"}}}))
-        with patch("cli.stacks._find_cdk_json", return_value=str(bad_policy)):
-            result = manager._read_images_config()
-        assert result["removal_policy"] == "retain"
-
-
-# ---------------------------------------------------------------------------
-# _build_image_registry_inventory
-# ---------------------------------------------------------------------------
-
-
-class TestBuildImageRegistryInventory:
-    def test_aggregates_repos_and_tags(self, manager: Any) -> None:
-        fake_mgr = MagicMock()
-        fake_mgr.list_repos.return_value = [
-            {"name": "gco/svc-a"},
-            {"name": "gco/svc-b"},
-            {"name": "other/skipped"},
-        ]
-        fake_mgr.list_tags.side_effect = [
-            [
-                {"size_bytes": 100},
-                {"size_bytes": 200},
-            ],
-            [{"size_bytes": 300}],
-        ]
-        fake_mgr._collect_inference_image_refs.return_value = {"a", "b"}
-        fake_mgr._collect_recent_job_image_refs.return_value = {"x"}
-        with patch("cli.images.ImageManager", return_value=fake_mgr):
-            inventory = manager._build_image_registry_inventory()
-        assert inventory["repo_count"] == 3
-        assert inventory["tag_count"] == 3
-        assert inventory["total_bytes"] == 600
-        assert inventory["endpoint_refs"] == 2
-        assert inventory["job_refs"] == 1
-
-    def test_inference_ref_failure_does_not_break(self, manager: Any) -> None:
-        fake_mgr = MagicMock()
-        fake_mgr.list_repos.return_value = [{"name": "gco/svc"}]
-        fake_mgr.list_tags.return_value = []
-        fake_mgr._collect_inference_image_refs.side_effect = RuntimeError("boom")
-        fake_mgr._collect_recent_job_image_refs.side_effect = RuntimeError("boom")
-        with patch("cli.images.ImageManager", return_value=fake_mgr):
-            inventory = manager._build_image_registry_inventory()
-        assert inventory["endpoint_refs"] == 0
-        assert inventory["job_refs"] == 0
-
-    def test_list_tags_failure_skips_repo(self, manager: Any) -> None:
-        fake_mgr = MagicMock()
-        fake_mgr.list_repos.return_value = [
-            {"name": "gco/a"},
-            {"name": "gco/b"},
-        ]
-        fake_mgr.list_tags.side_effect = [RuntimeError("denied"), [{"size_bytes": 7}]]
-        fake_mgr._collect_inference_image_refs.return_value = set()
-        fake_mgr._collect_recent_job_image_refs.return_value = set()
-        with patch("cli.images.ImageManager", return_value=fake_mgr):
-            inventory = manager._build_image_registry_inventory()
-        assert inventory["tag_count"] == 1
-        assert inventory["total_bytes"] == 7
-
-    def test_list_repos_failure_returns_partial(self, manager: Any) -> None:
-        fake_mgr = MagicMock()
-        fake_mgr.list_repos.side_effect = RuntimeError("denied")
-        with patch("cli.images.ImageManager", return_value=fake_mgr):
-            inventory = manager._build_image_registry_inventory()
-        assert inventory["repo_count"] == 0
-
-
-# ---------------------------------------------------------------------------
-# _image_registry_destroy_preflight
-# ---------------------------------------------------------------------------
-
-
-class TestImageRegistryDestroyPreflight:
-    def test_retain_policy_short_circuits(self, manager: Any) -> None:
-        with patch.object(
-            manager,
-            "_read_images_config",
-            return_value={"removal_policy": "retain", "empty_on_delete": False},
-        ):
-            assert manager._image_registry_destroy_preflight(force=False) is True
-
-    def test_destroy_without_empty_refuses(self, manager: Any, capsys: Any) -> None:
-        with patch.object(
-            manager,
-            "_read_images_config",
-            return_value={"removal_policy": "destroy", "empty_on_delete": False},
-        ):
-            assert manager._image_registry_destroy_preflight(force=False) is False
-        captured = capsys.readouterr().out
-        assert "gco images cleanup --all" in captured
-
-    def test_destroy_with_empty_force_proceeds(self, manager: Any, capsys: Any) -> None:
-        inventory = {
-            "repo_count": 2,
-            "tag_count": 5,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        with (
-            patch.object(
-                manager,
-                "_read_images_config",
-                return_value={"removal_policy": "destroy", "empty_on_delete": True},
-            ),
-            patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-        ):
-            assert manager._image_registry_destroy_preflight(force=True) is True
-        captured = capsys.readouterr().out
-        assert "Image registry inventory" in captured
-
-    def test_destroy_non_tty_proceeds_without_prompt(self, manager: Any) -> None:
-        inventory = {
-            "repo_count": 1,
-            "tag_count": 1,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        with (
-            patch.object(
-                manager,
-                "_read_images_config",
-                return_value={"removal_policy": "destroy", "empty_on_delete": True},
-            ),
-            patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-            patch("cli.stacks.sys.stdin") as mock_stdin,
-        ):
-            mock_stdin.isatty.return_value = False
-            assert manager._image_registry_destroy_preflight(force=False) is True
-
-    def test_destroy_tty_prompt_yes(self, manager: Any) -> None:
-        inventory = {
-            "repo_count": 1,
-            "tag_count": 1,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        with (
-            patch.object(
-                manager,
-                "_read_images_config",
-                return_value={"removal_policy": "destroy", "empty_on_delete": True},
-            ),
-            patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-            patch("cli.stacks.sys.stdin") as mock_stdin,
-            patch("cli.stacks.confirm", return_value=True),
-        ):
-            mock_stdin.isatty.return_value = True
-            assert manager._image_registry_destroy_preflight(force=False) is True
-
-    def test_destroy_tty_prompt_no(self, manager: Any, capsys: Any) -> None:
-        inventory = {
-            "repo_count": 1,
-            "tag_count": 1,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        with (
-            patch.object(
-                manager,
-                "_read_images_config",
-                return_value={"removal_policy": "destroy", "empty_on_delete": True},
-            ),
-            patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-            patch("cli.stacks.sys.stdin") as mock_stdin,
-            patch("cli.stacks.confirm", return_value=False),
-        ):
-            mock_stdin.isatty.return_value = True
-            assert manager._image_registry_destroy_preflight(force=False) is False
-        assert "Aborted" in capsys.readouterr().out
-
-    def test_destroy_tty_prompt_eof_aborts(self, manager: Any, capsys: Any) -> None:
-        inventory = {
-            "repo_count": 1,
-            "tag_count": 1,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        with (
-            patch.object(
-                manager,
-                "_read_images_config",
-                return_value={"removal_policy": "destroy", "empty_on_delete": True},
-            ),
-            patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-            patch("cli.stacks.sys.stdin") as mock_stdin,
-            patch("cli.stacks.confirm", side_effect=Abort),
-        ):
-            mock_stdin.isatty.return_value = True
-            assert manager._image_registry_destroy_preflight(force=False) is False
-        assert "Aborted" in capsys.readouterr().out
-
-    def test_destroy_tty_machine_mode_keeps_inventory_and_prompt_on_stderr(
-        self,
-        manager: Any,
-        capsys: Any,
-    ) -> None:
-        import cli.output as output_module
-
-        inventory = {
-            "repo_count": 1,
-            "tag_count": 1,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        token = output_module._structured_emissions_var.set([])
-        try:
-            with (
-                patch.object(
-                    manager,
-                    "_read_images_config",
-                    return_value={"removal_policy": "destroy", "empty_on_delete": True},
-                ),
-                patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-                patch("cli.stacks.sys.stdin") as mock_stdin,
-                patch("cli.output.click.confirm", return_value=False) as click_confirm,
-            ):
-                mock_stdin.isatty.return_value = True
-                assert manager._image_registry_destroy_preflight(force=False) is False
-        finally:
-            output_module._structured_emissions_var.reset(token)
-
-        captured = capsys.readouterr()
-        assert captured.out == ""
-        assert "Image registry inventory" in captured.err
-        assert "Aborted" in captured.err
-        assert click_confirm.call_args.kwargs["err"] is True
+    assert type(manager) is stacks.StackManager
+    for helper in (
+        "_check_and_fix_stuck_stack",
+        "_cleanup_cluster_volumes",
+        "_cleanup_eks_security_groups",
+        "_cleanup_implicit_log_groups",
+        "_stop_backup_vault_jobs",
+    ):
+        assert isinstance(getattr(stacks.StackManager, helper), MagicMock), helper
+    assert manager._cleanup_cluster_volumes() == {"deleted": [], "surviving": [], "errors": []}
 
 
 # ---------------------------------------------------------------------------
@@ -689,7 +433,7 @@ class TestCleanupBackupVault:
         )
         backup = MagicMock()
         backup.describe_backup_vault.return_value = {"BackupVaultArn": vault_arn}
-        backup.get_paginator.return_value = _make_paginator(
+        backup.recovery_points = _make_paginator(
             [
                 {
                     "RecoveryPoints": [
@@ -698,6 +442,10 @@ class TestCleanupBackupVault:
                     ]
                 }
             ]
+        )
+        backup.backup_jobs = _make_paginator_callable([{"BackupJobs": []}])
+        backup.get_paginator.side_effect = lambda operation: (
+            backup.backup_jobs if operation == "list_backup_jobs" else backup.recovery_points
         )
         if recovery_delete_error is not None:
             backup.delete_recovery_point.side_effect = recovery_delete_error
@@ -720,10 +468,11 @@ class TestCleanupBackupVault:
             StackName=self._STACK_ID
         )
         backup.describe_backup_vault.assert_called_once_with(BackupVaultName="GcoBackupVault")
-        backup.get_paginator.assert_called_once_with("list_recovery_points_by_backup_vault")
-        backup.get_paginator.return_value.paginate.assert_called_once_with(
-            BackupVaultName="GcoBackupVault"
-        )
+        assert [call.args for call in backup.get_paginator.call_args_list] == [
+            ("list_backup_jobs",),
+            ("list_recovery_points_by_backup_vault",),
+        ]
+        backup.recovery_points.paginate.assert_called_once_with(BackupVaultName="GcoBackupVault")
         assert backup.delete_recovery_point.call_count == 2
         assert "Cleaned up 2 backup recovery points" in capsys.readouterr().out
 
@@ -749,6 +498,147 @@ class TestCleanupBackupVault:
             manager._cleanup_backup_vault()
         assert backup.delete_recovery_point.call_count == 2
 
+    def test_unfinished_jobs_are_stopped_before_the_points_are_deleted(
+        self, manager: Any, capsys: Any
+    ) -> None:
+        """A scheduled job must not add a recovery point right after the sweep."""
+        resources = [
+            {
+                "LogicalResourceId": "BackupVault",
+                "ResourceType": "AWS::Backup::BackupVault",
+                "PhysicalResourceId": (
+                    "arn:aws:backup:us-east-2:123456789012:backup-vault:GcoBackupVault"
+                ),
+                "ResourceStatus": "DELETE_FAILED",
+            }
+        ]
+        _cloudformation, backup, client = self._clients(resources=resources)
+        order: list[str] = []
+        backup.delete_recovery_point.side_effect = lambda **_kwargs: order.append("delete")
+
+        def stop_jobs(backup_client: Any, vault_name: str) -> dict[str, list[Any]]:
+            assert backup_client is backup
+            assert vault_name == "GcoBackupVault"
+            order.append("stop")
+            return {"stopped": ["job-1"], "unstoppable": [], "errors": [{"error": "denied"}]}
+
+        with (
+            patch("boto3.client", side_effect=client),
+            patch.object(manager, "_stop_backup_vault_jobs", side_effect=stop_jobs),
+        ):
+            result = manager._cleanup_backup_vault()
+
+        assert order == ["stop", "delete", "delete"]
+        assert result["stopped_backup_jobs"] == ["job-1"]
+        assert result["errors"] == [{"error": "denied"}]
+        assert result["status"] == "partial"
+        assert result["resource_status"] == "DELETE_FAILED"
+        assert "Stopped 1 unfinished AWS Backup job(s) writing to GcoBackupVault" in (
+            capsys.readouterr().out
+        )
+
+    def test_a_vault_cloudformation_already_deleted_is_absent(self, manager: Any) -> None:
+        """After a stack delete that failed elsewhere, the vault resource is DELETE_COMPLETE."""
+        resources = [
+            {
+                "LogicalResourceId": "BackupVault",
+                "ResourceType": "AWS::Backup::BackupVault",
+                "PhysicalResourceId": "GcoBackupVault",
+                "ResourceStatus": "DELETE_COMPLETE",
+            }
+        ]
+        _cloudformation, backup, client = self._clients(resources=resources)
+        with patch("boto3.client", side_effect=client):
+            result = manager._cleanup_backup_vault()
+        assert result["status"] == "vault-resource-absent"
+        assert result["errors"] == []
+        backup.describe_backup_vault.assert_not_called()
+
+
+def _client_error(code: str, operation: str) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": code}}, operation)
+
+
+class TestStopBackupVaultJobs:
+    """``ListBackupJobs`` takes one state per call; every unfinished job gets a stop request."""
+
+    @staticmethod
+    def _backup(jobs_by_state: dict[str, list[dict[str, Any]]]) -> Any:
+        backup = MagicMock()
+        backup.get_paginator.return_value.paginate.side_effect = lambda ByBackupVaultName, ByState: [
+            {"BackupJobs": jobs_by_state.get(ByState, [])}
+        ]
+        return backup
+
+    def test_stops_each_unfinished_job_of_the_exact_vault(self, manager: Any) -> None:
+        backup = self._backup(
+            {
+                "CREATED": [{"BackupJobId": "job-created", "BackupVaultName": "vault"}],
+                "RUNNING": [
+                    {"BackupJobId": "job-running", "BackupVaultName": "vault"},
+                    {"BackupJobId": "job-elsewhere", "BackupVaultName": "other-vault"},
+                    {"BackupVaultName": "vault"},
+                ],
+            }
+        )
+
+        outcome = manager._stop_backup_vault_jobs(backup, "vault")
+
+        backup.get_paginator.assert_called_once_with("list_backup_jobs")
+        assert [
+            call.kwargs for call in backup.get_paginator.return_value.paginate.call_args_list
+        ] == [
+            {"ByBackupVaultName": "vault", "ByState": state}
+            for state in ("CREATED", "PENDING", "RUNNING")
+        ]
+        assert [call.kwargs for call in backup.stop_backup_job.call_args_list] == [
+            {"BackupJobId": "job-created"},
+            {"BackupJobId": "job-running"},
+        ]
+        assert outcome == {
+            "stopped": ["job-created", "job-running"],
+            "unstoppable": [],
+            "errors": [],
+        }
+
+    def test_a_job_that_already_finished_is_not_an_error(self, manager: Any) -> None:
+        backup = self._backup(
+            {
+                "PENDING": [
+                    {"BackupJobId": "job-done", "BackupVaultName": "vault"},
+                    {"BackupJobId": "job-gone", "BackupVaultName": "vault"},
+                ]
+            }
+        )
+        backup.stop_backup_job.side_effect = [
+            _client_error("InvalidRequestException", "StopBackupJob"),
+            _client_error("ResourceNotFoundException", "StopBackupJob"),
+        ]
+
+        outcome = manager._stop_backup_vault_jobs(backup, "vault")
+
+        assert outcome == {
+            "stopped": [],
+            "unstoppable": [
+                {"backup_job_id": "job-done", "code": "InvalidRequestException"},
+                {"backup_job_id": "job-gone", "code": "ResourceNotFoundException"},
+            ],
+            "errors": [],
+        }
+
+    def test_other_failures_are_recorded_not_raised(self, manager: Any) -> None:
+        backup = self._backup({"RUNNING": [{"BackupJobId": "job-1", "BackupVaultName": "vault"}]})
+        backup.stop_backup_job.side_effect = _client_error("AccessDeniedException", "StopBackupJob")
+        outcome = manager._stop_backup_vault_jobs(backup, "vault")
+        assert outcome["stopped"] == [] and outcome["unstoppable"] == []
+        assert outcome["errors"][0]["error"].startswith("ClientError: ")
+
+        listing = MagicMock()
+        listing.get_paginator.side_effect = RuntimeError("throttled")
+        assert manager._stop_backup_vault_jobs(listing, "vault")["errors"] == [
+            {"error": "RuntimeError: throttled"}
+        ]
+
 
 # ---------------------------------------------------------------------------
 # EKS security group cleanup + watchdog
@@ -767,7 +657,11 @@ class TestEksSecurityGroupCleanup:
         ec2 = MagicMock()
         ec2.describe_security_groups.return_value = {
             "SecurityGroups": [
-                {"GroupId": "sg-123", "GroupName": "eks-cluster-sg-gco-us-east-1-abc"}
+                {
+                    "GroupId": "sg-123",
+                    "GroupName": "eks-cluster-sg-gco-us-east-1-abc",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                }
             ]
         }
         ec2.describe_network_interfaces.return_value = {
@@ -790,7 +684,13 @@ class TestEksSecurityGroupCleanup:
     ) -> None:
         ec2 = MagicMock()
         ec2.describe_security_groups.return_value = {
-            "SecurityGroups": [{"GroupId": "sg-x", "GroupName": "eks-cluster-sg-x"}]
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-x",
+                    "GroupName": "eks-cluster-sg-x",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                }
+            ]
         }
         ec2.describe_network_interfaces.return_value = {"NetworkInterfaces": []}
         with patch("boto3.client", return_value=ec2):
@@ -801,7 +701,13 @@ class TestEksSecurityGroupCleanup:
     def test_sg_delete_failure_logged(self, manager: Any) -> None:
         ec2 = MagicMock()
         ec2.describe_security_groups.return_value = {
-            "SecurityGroups": [{"GroupId": "sg-x", "GroupName": "eks-cluster-sg-x"}]
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-x",
+                    "GroupName": "eks-cluster-sg-x",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                }
+            ]
         }
         ec2.describe_network_interfaces.return_value = {"NetworkInterfaces": []}
         ec2.delete_security_group.side_effect = RuntimeError("dependency")
@@ -819,7 +725,14 @@ class TestEksSecurityGroupCleanup:
             patch.object(
                 manager,
                 "list_stacks",
-                return_value=["gco-global", "gco-api-gateway", "gco-monitoring", "gco-us-east-1"],
+                return_value=[
+                    "gco-global",
+                    "gco-api-gateway",
+                    "gco-monitoring",
+                    "gco-analytics",
+                    "gco-regional-api-us-east-1",
+                    "gco-us-east-1",
+                ],
             ),
             patch.object(manager, "_cleanup_eks_security_groups") as mock_clean,
         ):
@@ -827,6 +740,13 @@ class TestEksSecurityGroupCleanup:
         # Only the regional stack is cleaned.
         called_stacks = [c.args[0] for c in mock_clean.call_args_list]
         assert called_stacks == ["gco-us-east-1"]
+
+    def test_a_stack_naming_no_region_owns_no_cluster_security_group(self, manager: Any) -> None:
+        with patch("boto3.client") as client:
+            outcome = manager._cleanup_eks_security_groups("gco-analytics", region="us-east-1")
+        client.assert_not_called()
+        assert outcome["skipped"] == "not-a-regional-stack"
+        assert outcome["errors"] == [] and outcome["deleted"] == []
 
 
 class TestClusterVolumeCleanup:
@@ -1058,11 +978,30 @@ class TestClusterVolumeCleanup:
 
     def test_public_wrapper_skips_global_stacks(self, manager: Any) -> None:
         with patch.object(manager, "_cleanup_cluster_volumes") as worker:
-            for stack in ("gco-global", "gco-api-gateway", "gco-monitoring"):
+            for stack in (
+                "gco-global",
+                "gco-api-gateway",
+                "gco-monitoring",
+                "gco-analytics",
+                "gco-regional-api-us-east-1",
+            ):
                 assert manager.cleanup_cluster_volumes(stack)["skipped"] == "not-a-regional-stack"
             worker.assert_not_called()
             manager.cleanup_cluster_volumes("gco-us-east-1", retain=True)
         worker.assert_called_once_with("gco-us-east-1", region=None, retain=True)
+
+    def test_a_stack_naming_no_region_is_never_swept(self, manager: Any) -> None:
+        """``gco-analytics`` used to resolve to the Region ``analytics``.
+
+        The operator then saw ``Could not dispose of EBS volume gco-analytics:
+        EndpointConnectionError ... eks.analytics.amazonaws.com``.
+        """
+        with patch("boto3.client") as client, patch("builtins.print") as printed:
+            outcome = manager._cleanup_cluster_volumes("gco-analytics", region="us-east-1")
+        client.assert_not_called()
+        printed.assert_not_called()
+        assert outcome["skipped"] == "not-a-regional-stack"
+        assert outcome["errors"] == [] and outcome["deleted"] == []
 
 
 class TestEksSgWatchdog:
@@ -2296,7 +2235,6 @@ class TestStrictOrchestrationPreflight:
         with (
             patch.object(manager, "list_stacks", return_value=stacks),
             patch.object(manager, "_resolve_strict_teardown_resources") as resolve,
-            patch.object(manager, "_image_registry_destroy_preflight") as image_preflight,
             patch.object(manager, "cleanup_orphaned_bastions") as bastions,
             pytest.raises(RuntimeError, match="target map is incomplete"),
         ):
@@ -2309,7 +2247,6 @@ class TestStrictOrchestrationPreflight:
             )
 
         resolve.assert_not_called()
-        image_preflight.assert_not_called()
         bastions.assert_not_called()
 
     def test_authoritative_absence_rejects_same_name_replacement(self, manager: Any) -> None:
@@ -2430,7 +2367,6 @@ class TestStrictTeardownHelpers:
                 "_resolve_strict_teardown_resources",
                 return_value={self._STACK_NAME: details},
             ),
-            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(manager, "cleanup_orphaned_bastions", return_value=1) as bastions,
             patch.object(manager, "_cleanup_backup_vault", return_value={"errors": []}),
             patch.object(manager, "destroy", return_value=True),
@@ -2490,7 +2426,6 @@ class TestStrictTeardownHelpers:
                 "_resolve_strict_teardown_resources",
                 return_value={self._STACK_NAME: details},
             ),
-            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(
                 manager,
                 "cleanup_orphaned_bastions",
@@ -2672,17 +2607,47 @@ class TestCdkWorkerCancellation:
         self,
         manager: Any,
     ) -> None:
-        first = MagicMock()
-        second = MagicMock()
+        first = MagicMock(pid=101)
+        second = MagicMock(pid=202)
         manager._active_cdk_processes = {101: first, 202: second}
         with patch.object(manager, "_terminate_cdk_process") as terminate:
             manager.cancel_active_cdk_processes()
 
         assert manager._cdk_cancel_event.is_set()
-        assert terminate.call_args_list == [
-            ((first,), {}),
-            ((second,), {}),
-        ]
+        # Terminated concurrently, so the call order is not fixed.
+        assert sorted(call.args[0].pid for call in terminate.call_args_list) == [101, 202]
+
+    def test_cancel_terminates_every_group_at_once(self, manager: Any) -> None:
+        """Stopping N parallel groups takes one grace window, not N of them.
+
+        Each fake termination blocks until every group's termination has
+        started. Terminating one group after another would never get the
+        second one going and the barrier would time out.
+        """
+        import threading
+
+        processes = {pid: MagicMock(pid=pid) for pid in (101, 202, 303)}
+        manager._active_cdk_processes = dict(processes)
+        barrier = threading.Barrier(len(processes), timeout=10)
+        terminated: list[int] = []
+
+        def blocking_terminate(process: Any) -> None:
+            barrier.wait()
+            terminated.append(process.pid)
+
+        with patch.object(manager, "_terminate_cdk_process", side_effect=blocking_terminate):
+            manager.cancel_active_cdk_processes()
+
+        assert sorted(terminated) == [101, 202, 303]
+        assert not barrier.broken
+
+    def test_cancel_with_no_registered_process_only_sets_the_event(self, manager: Any) -> None:
+        manager._active_cdk_processes = {}
+        with patch.object(manager, "_terminate_cdk_process") as terminate:
+            manager.cancel_active_cdk_processes()
+
+        assert manager._cdk_cancel_event.is_set()
+        terminate.assert_not_called()
 
     def test_windows_termination_targets_the_complete_process_tree(self, manager: Any) -> None:
         process = MagicMock(pid=4321)

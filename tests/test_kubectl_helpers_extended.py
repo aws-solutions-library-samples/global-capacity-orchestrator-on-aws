@@ -49,7 +49,7 @@ class TestUpdateKubeconfig:
     @patch("subprocess.run")
     def test_passes_correct_region(self, mock_run):
         """Should pass the correct region to the AWS CLI."""
-        mock_run.return_value = MagicMock(returncode=0)
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         update_kubeconfig("gco-eu-west-1", "eu-west-1")
         cmd = mock_run.call_args[0][0]
         assert "eu-west-1" in cmd
@@ -57,7 +57,7 @@ class TestUpdateKubeconfig:
     @patch("subprocess.run")
     def test_passes_correct_cluster_name(self, mock_run):
         """Should pass the correct cluster name to the AWS CLI."""
-        mock_run.return_value = MagicMock(returncode=0)
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         update_kubeconfig("my-custom-cluster", "ap-southeast-1")
         cmd = mock_run.call_args[0][0]
         assert "my-custom-cluster" in cmd
@@ -88,7 +88,7 @@ class TestUpdateKubeconfigCommandStructure:
     @patch("subprocess.run")
     def test_uses_capture_output(self, mock_run):
         """Should use capture_output to avoid polluting stdout."""
-        mock_run.return_value = MagicMock(returncode=0)
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         update_kubeconfig("gco-us-east-1", "us-east-1")
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["capture_output"] is True

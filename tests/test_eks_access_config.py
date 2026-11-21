@@ -46,9 +46,10 @@ _EKS_DEFAULTS: dict[str, Any] = {
     "developer_access": [],
 }
 
-# The two access entries the mocked platform baseline synthesizes (the real
-# stack adds the helm installer's, mocked away by the fixture).
-_PLATFORM_ENTRY_COUNT = 2
+# The access entries the mocked platform baseline synthesizes: two platform
+# entries plus the MCP server role's read-only entry (the real stack also adds
+# the helm installer's, mocked away by the fixture).
+_PLATFORM_ENTRY_COUNT = 3
 
 
 def _synth_stack(eks_cluster: dict[str, Any] | None = None) -> GCORegionalStack:

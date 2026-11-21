@@ -246,12 +246,14 @@ def test_image_orphans_ignores_tag_rows_without_a_tag() -> None:
         ("jobs", "_collect_recent_job_image_refs", (30,)),
     ],
 )
-def test_image_reference_collectors_degrade_when_optional_manager_import_fails(
+def test_image_reference_collectors_fail_when_their_manager_cannot_be_imported(
     monkeypatch: pytest.MonkeyPatch,
     module_name: str,
     method_name: str,
     args: tuple[object, ...],
 ) -> None:
+    """An unreadable reference source fails the orphan scan: an empty
+    set would report every old tag, in-use ones included, as an orphan."""
     manager = _image_manager()
     original_import = builtins.__import__
 
@@ -262,7 +264,8 @@ def test_image_reference_collectors_degrade_when_optional_manager_import_fails(
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
 
-    assert getattr(manager, method_name)(*args) == set()
+    with pytest.raises(ImportError, match=f"no {module_name}"):
+        getattr(manager, method_name)(*args)
 
 
 @pytest.mark.parametrize(
@@ -380,15 +383,16 @@ def test_fetch_studio_url_returns_pending_provisioning_state() -> None:
 
 
 def test_orphan_scan_skips_resources_without_identifiers() -> None:
+    cfn = MagicMock()
+    cfn.get_paginator.return_value.paginate.return_value = [{"StackResourceSummaries": []}]
     efs = MagicMock()
-    efs.describe_file_systems.return_value = {"FileSystems": [{}]}
+    efs.get_paginator.return_value.paginate.return_value = [{"FileSystems": [{}]}]
     cognito = MagicMock()
-    cognito.list_user_pools.return_value = {"UserPools": [{}]}
+    cognito.get_paginator.return_value.paginate.return_value = [{"UserPools": [{}]}]
 
-    with patch("boto3.client", side_effect=[efs, cognito]):
-        assert analytics_user_mgmt.scan_orphan_analytics_resources("us-east-1") == []
+    with patch("boto3.client", side_effect=[cfn, efs, cognito]):
+        assert analytics_user_mgmt.scan_orphan_analytics_resources("us-east-1", "gco") == []
 
-    efs.list_tags_for_resource.assert_not_called()
     cognito.describe_user_pool.assert_not_called()
 
 

@@ -13,7 +13,9 @@ The monitor:
   pod; model Services publish only that sidecar's port 8443
 - Leaves public routing on the shared ``gco-system/gco-gateway`` HTTPRoute:
   ``/inference`` -> ``gco-system/inference-proxy``
-- Removes legacy endpoint-specific Ingresses so upgrades cannot retain a bypass
+- Deletes the per-endpoint Ingresses releases up to v4.1.0 created
+  (``inference-{name}``, ``inference-{name}-proxy``) together with the
+  endpoint's other objects, when it is deleted or leaves a Region
 - Updates existing deployments when spec changes
 - Scales deployments up/down
 - Tears down resources when endpoints are deleted
@@ -43,11 +45,11 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from functools import partial
+from functools import cache, partial
 from pathlib import Path
-from typing import Any, NoReturn, TypedDict
+from typing import Any, NamedTuple, NoReturn, TypedDict
 from urllib.parse import urlsplit
 
 from kubernetes import client, config
@@ -66,12 +68,14 @@ from gco.models.inference_models import (
     INSTANCE_TYPE_NODE_LABEL,
     SGLANG_UNSUPPORTED_GPU_NAMES,
 )
-from gco.services.inference_store import InferenceEndpointStore
+from gco.services.inference_store import InferenceEndpointStore, endpoint_object_names
+from gco.services.k8s_client import BoundedApiClient, k8s_api_timeout_from_env
+from gco.services.leader_lease import LEASE_REQUEST_TIMEOUT
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-16T21:53:25Z
-# Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298
+# Generated at (UTC): 2026-11-18T16:59:04Z
+# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint_authorized`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.png``)
@@ -296,64 +300,45 @@ def _regional_shared_ssm_parameter_prefix() -> str:
     return f"/{project_name}/{REGIONAL_SHARED_SSM_PARAMETER_SUFFIX}"
 
 
-# Matches an AWS region identifier embedded in an address (host or URI), e.g.
-# ``us-east-1``, ``eu-west-2``, ``ap-southeast-1``, ``us-gov-west-1``. KV
+# Matches an AWS region identifier embedded in an external host, e.g.
+# ``us-east-1``, ``eu-west-2``, ``ap-southeast-1``, ``us-gov-west-1``: a known
+# partition prefix, a compass direction, and a number, so endpoint-like words
+# such as ``my-llama-3`` or ``pd-test-2`` are not mistaken for regions. KV
 # transfer over RoCE is intra-region, so any address a topology wires to must
 # resolve to the monitor's own region; an embedded token naming a different
-# region marks the address as out-of-region. An address that carries no token
-# (a bare in-cluster Service name) is region-local by construction.
-_REGION_TOKEN_PATTERN = re.compile(r"\b[a-z]{2}-(?:gov-)?[a-z]+-\d+\b")
+# region marks the address as out-of-region. In-cluster names (a bare Service
+# name or a ``.svc`` name) are region-local by construction and are classified
+# before any token is looked for.
+_REGION_TOKEN_PATTERN = re.compile(
+    r"\b(?:us-gov|us|eu|ap|sa|ca|me|af|il|mx|cn)-"
+    r"(?:east|west|north|south|central|northeast|southeast|northwest|southwest)-\d+\b"
+)
 
 # --- PD proxy behavior -------------------------------------------------------
 #
-# The prefill-decode proxy that fronts a disaggregated endpoint checks whether a
-# prompt's KV blocks already live in the shared store before it sends the prompt
-# to a prefill pod. That check is bounded: it is given this many seconds, and a
-# miss or a check that does not finish in time is treated as "not resident" so
-# the prompt goes to prefill without the request waiting any longer. Holding the
-# bound here keeps the proxy responsive even when the store is slow or
-# unreachable.
-PD_PROXY_RESIDENCY_TIMEOUT_SECONDS = 2
-
-# Default strategy for spreading requests across the backends of a single role.
-PD_PROXY_DEFAULT_SCHEDULING = "round_robin"
-
-# Where a residency miss or timed-out lookup is sent. The prompt always goes to
-# a prefill pod in that case; the proxy never stalls the request on the store.
-PD_PROXY_RESIDENCY_MISS_TARGET = "prefill"
-
-# The residency lookup never blocks the request: a slow or failed store check
-# falls through to prefill rather than holding the client.
-PD_PROXY_RESIDENCY_BLOCKING = "false"
-
-# Decode-phase requests only ever reach decode pods that report Ready; pods that
-# are still starting are skipped.
-PD_PROXY_DECODE_ROUTING_READY_ONLY = "ready_only"
-
-# When no decode pod reports Ready, the proxy refuses the request outright
-# instead of streaming a partial generation. The refusal carries a stable
-# status and message so clients can distinguish "no backend yet" from a model
-# error.
-PD_PROXY_NO_DECODE_BACKEND_ACTION_REJECT = "reject"
+# When the prefill-decode proxy that fronts a disaggregated endpoint cannot hand
+# a request to a decode pod, it refuses the request instead of streaming a
+# partial generation. The refusal carries a stable status and message so
+# clients can distinguish "no backend yet" from a model error. These are the
+# settings the proxy program (gco/services/mooncake_pd_proxy.py) reads besides
+# its listen address, role Service URLs, CA bundle and admin key;
+# ``build_pd_proxy_config`` renders them.
 PD_PROXY_NO_DECODE_BACKEND_STATUS = "503"
 PD_PROXY_NO_DECODE_BACKEND_MESSAGE = "no available decode backend"
-
-# Environment variable names the proxy container reads to pick up the behavior
-# above. Surfacing them here keeps the proxy's runtime contract in one place;
-# the reconcile path attaches the values produced by ``build_pd_proxy_config``.
-PD_PROXY_RESIDENCY_TIMEOUT_ENV = "PD_PROXY_RESIDENCY_TIMEOUT_SECONDS"
-PD_PROXY_RESIDENCY_BLOCKING_ENV = "PD_PROXY_RESIDENCY_CHECK_BLOCKING"
-PD_PROXY_RESIDENCY_MISS_TARGET_ENV = "PD_PROXY_RESIDENCY_MISS_TARGET"
-PD_PROXY_DECODE_ROUTING_ENV = "PD_PROXY_DECODE_ROUTING"
-PD_PROXY_NO_DECODE_BACKEND_ACTION_ENV = "PD_PROXY_NO_DECODE_BACKEND_ACTION"
 PD_PROXY_NO_DECODE_BACKEND_STATUS_ENV = "PD_PROXY_NO_DECODE_BACKEND_STATUS"
 PD_PROXY_NO_DECODE_BACKEND_MESSAGE_ENV = "PD_PROXY_NO_DECODE_BACKEND_MESSAGE"
-PD_PROXY_SCHEDULING_ENV = "PD_PROXY_SCHEDULING"
-PD_PROXY_STORE_ADDRESS_ENV = "PD_PROXY_STORE_ADDRESS"
+
+# The first setting releases up to v8.23.0 gave every PD proxy, and one the
+# program never acted on. A live proxy that carries it keeps that release's
+# environment (see ``build_pd_proxy_config``).
+PD_PROXY_RELEASED_ENV_MARKER = "PD_PROXY_RESIDENCY_TIMEOUT_SECONDS"
 
 # Marker label carried by proxy pods so a Service can select the proxy alone,
 # distinct from the prefill/decode role pods (which carry their own role marker).
 PD_PROXY_ROLE_LABEL = "proxy"
+
+# Name of the container that runs the proxy program in each proxy pod.
+PD_PROXY_CONTAINER = "proxy"
 
 # TCP port the proxy container listens on for authenticated serving requests.
 PD_PROXY_PORT = 8000
@@ -454,10 +439,11 @@ ENDPOINT_TLS_PROXY_DRAIN_SECONDS = MODEL_POD_TERMINATION_GRACE_SECONDS - 5
 SKIP_CONTAINERS_ANNOTATION = "eks.amazonaws.com/skip-containers"
 
 # Digest of the rendered sidecar and its volumes, stamped on the pod template.
-# Reconcile patches a Deployment in place only when the digest differs, which
-# is how endpoints created before the sidecar existed pick it up, and how an
-# image override or model-port change reaches running pods without rewriting
-# unchanged templates on every pass.
+# Reconcile patches a Deployment in place only when the stamp does not match the
+# rendered sidecar (EndpointTLSProxy.matches_stamp), which is how endpoints
+# created before the sidecar existed pick it up, and how an image override or
+# model-port change reaches running pods without rewriting unchanged templates
+# on every pass.
 ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION = "gco.io/endpoint-tls-proxy-digest"
 
 # Digest of the rendered ``mooncake.json``, stamped on every Mooncake role pod
@@ -563,9 +549,66 @@ _LIFECYCLE_ANNOTATION = "gco.io/lifecycle-id"
 _REGION_GENERATION_ANNOTATION = "gco.io/region-generation"
 _LEADER_EPOCH_ANNOTATION = "gco.io/leader-epoch"
 
+# Reconcile intervals a leader pass may go without finishing an endpoint before
+# the monitor stops renewing its Lease (150 s at the default 15 s interval).
+# Every Kubernetes call is bounded by K8S_API_TIMEOUT (30 s; urllib3 retries a
+# timed-out read up to three times), so one hung call stays within it.
+PASS_STALL_INTERVALS = 10
+
+# Reconcile intervals the leader Lease lasts without a renewal (45 s at the
+# default 15 s interval).
+LEASE_DURATION_INTERVALS = 3
+
+# How long a leader pass pauses between two endpoints so the event loop can run
+# the SIGTERM handler (see InferenceMonitor._stop_requested_at_safe_point).
+_SAFE_POINT_PAUSE_SECONDS = 0.001
+
+# The endpoint an object belongs to, on the metadata of every object the
+# monitor creates (never on a pod template, where adding it would roll pods).
+# Object names are derived from endpoint names without reserved suffixes, so
+# ``llama-canary`` is both the canary of ``llama`` and the primary of an
+# endpoint named ``llama-canary``; the label tells them apart.
+ENDPOINT_NAME_LABEL = "gco.io/endpoint"
+_LABEL_VALUE_PATTERN = re.compile(r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
+
+
+def _legacy_ingress_names(endpoint_name: str) -> tuple[str, str]:
+    """The ALB Ingresses releases up to v4.1.0 created for ``endpoint_name``.
+
+    ``inference-{name}`` routed the endpoint (a canary shared it through
+    weighted actions), and from v3.0.0 ``inference-{name}-proxy`` routed a
+    disaggregated endpoint's prefill-decode proxy. Later releases route every
+    endpoint through the shared ``gco-system/inference-proxy`` and create no
+    Ingress; endpoint cleanup still deletes these two.
+    """
+    return f"inference-{endpoint_name}", f"inference-{endpoint_name}-proxy"
+
 
 class ReconcileFencedError(RuntimeError):
     """The caller no longer owns the endpoint or leader epoch it read."""
+
+
+class ForeignEndpointResourceError(RuntimeError):
+    """An object at one of this endpoint's names belongs to another endpoint.
+
+    Raised for an object labelled for a different endpoint, and for an
+    unlabelled one (created before the label existed) of another lifecycle
+    whose name another endpoint also derives. Such an object is never patched,
+    claimed or deleted: cleanup treats it as absent, and creating this
+    endpoint's own object under the name fails with this error.
+    """
+
+
+class RoleStatusReport(NamedTuple):
+    """The region status :meth:`InferenceMonitor._report_role_status` wrote.
+
+    ``rollout_complete`` is false while a role (or the PD proxy) still has
+    fewer Ready pods of its current template than its floor: the region may
+    serve from the previous template's pods, but the change is not applied.
+    """
+
+    state: str
+    rollout_complete: bool
 
 
 @dataclass(frozen=True)
@@ -599,7 +642,6 @@ class EndpointResourceInventory:
     scaled_objects: tuple[str, ...]
     config_maps: tuple[str, ...]
     legacy_ingresses: tuple[str, ...]
-    legacy_http_routes: tuple[str, ...]
     generated_admin_secret: str
 
 
@@ -941,52 +983,75 @@ def apply_efa_scheduling(mooncake: dict[str, Any], pod_spec: client.V1PodSpec) -
         container.resources.limits.setdefault(EFA_RESOURCE_NAME, "1")
 
 
-def build_pd_proxy_config(mooncake: dict[str, Any]) -> dict[str, str]:
-    """Return the environment the prefill-decode proxy runs with.
+def build_pd_proxy_config(
+    mooncake: Mapping[str, Any], *, released_layout: bool = False
+) -> dict[str, str]:
+    """Return the settings the prefill-decode proxy runs with.
 
-    The proxy fronts a disaggregated endpoint and decides, per request, whether
-    to consult the shared store and which backends to dispatch to. Its behavior
-    is fixed by the values returned here so every disaggregated endpoint front
-    behaves identically:
+    A proxy gets the settings its program (``gco/services/mooncake_pd_proxy.py``)
+    reads: the stable status and message it answers with, instead of streaming
+    any partial output, when it cannot reach a decode backend. The rest of its
+    environment (listen address, role Service URLs, CA bundle, admin key) is
+    added by :meth:`InferenceMonitor._create_pd_proxy`.
 
-    - It looks up whether the prompt's KV blocks already reside in the store
-      before sending the prompt to prefill, and that lookup is bounded to
-      ``PD_PROXY_RESIDENCY_TIMEOUT_SECONDS`` seconds.
-    - A miss, or a lookup that does not finish in time, is treated as "not
-      resident": the prompt is sent to a prefill pod and the request is never
-      held waiting on the store.
-    - Decode-phase requests are routed only to decode pods reporting Ready, so a
-      pod that is still starting is skipped.
-    - When no decode pod reports Ready, the proxy refuses the request with a
-      stable status and message rather than streaming any partial output.
-
-    The residency bound is held constant rather than read from the spec so the
-    responsiveness guarantee cannot be weakened per endpoint. The store address
-    points at the shared in-region master, and the same-role dispatch strategy
-    falls back to round-robin when the spec names none.
+    Releases up to v8.23.0 also rendered seven settings the program never acted
+    on: a bounded, non-blocking store residency lookup it never made (three
+    settings), Ready-only decode routing, a reject action for an unreachable
+    decode backend, a same-role scheduling strategy, and the store address. The
+    role Services already route only to Ready pods and kube-proxy spreads
+    requests across them. With ``released_layout`` the result is that
+    environment exactly: names, values and order. A proxy those releases
+    created keeps it, because dropping a variable changes the pod template, and
+    the Deployment would then restart every proxy pod and cut the streams they
+    serve.
 
     Args:
-        mooncake: The ``spec["mooncake"]`` block; its optional ``proxy`` section
-            supplies the same-role scheduling strategy.
+        mooncake: The ``spec["mooncake"]`` block; the released layout reads the
+            scheduling strategy of its optional ``proxy`` section.
+        released_layout: Render the environment of releases up to v8.23.0.
 
     Returns:
         A mapping of environment variable name to value, ready to attach to the
         proxy container.
     """
+    if not released_layout:
+        return {
+            PD_PROXY_NO_DECODE_BACKEND_STATUS_ENV: PD_PROXY_NO_DECODE_BACKEND_STATUS,
+            PD_PROXY_NO_DECODE_BACKEND_MESSAGE_ENV: PD_PROXY_NO_DECODE_BACKEND_MESSAGE,
+        }
     proxy = mooncake.get("proxy", {}) or {}
-    scheduling = proxy.get("scheduling") or PD_PROXY_DEFAULT_SCHEDULING
-    store_address = f"{MOONCAKE_MASTER_SERVICE}:{MOONCAKE_MASTER_RPC_PORT}"
     return {
-        PD_PROXY_RESIDENCY_TIMEOUT_ENV: str(PD_PROXY_RESIDENCY_TIMEOUT_SECONDS),
-        PD_PROXY_RESIDENCY_BLOCKING_ENV: PD_PROXY_RESIDENCY_BLOCKING,
-        PD_PROXY_RESIDENCY_MISS_TARGET_ENV: PD_PROXY_RESIDENCY_MISS_TARGET,
-        PD_PROXY_DECODE_ROUTING_ENV: PD_PROXY_DECODE_ROUTING_READY_ONLY,
-        PD_PROXY_NO_DECODE_BACKEND_ACTION_ENV: PD_PROXY_NO_DECODE_BACKEND_ACTION_REJECT,
+        PD_PROXY_RELEASED_ENV_MARKER: "2",
+        "PD_PROXY_RESIDENCY_CHECK_BLOCKING": "false",
+        "PD_PROXY_RESIDENCY_MISS_TARGET": "prefill",
+        "PD_PROXY_DECODE_ROUTING": "ready_only",
+        "PD_PROXY_NO_DECODE_BACKEND_ACTION": "reject",
         PD_PROXY_NO_DECODE_BACKEND_STATUS_ENV: PD_PROXY_NO_DECODE_BACKEND_STATUS,
         PD_PROXY_NO_DECODE_BACKEND_MESSAGE_ENV: PD_PROXY_NO_DECODE_BACKEND_MESSAGE,
-        PD_PROXY_SCHEDULING_ENV: scheduling,
-        PD_PROXY_STORE_ADDRESS_ENV: store_address,
+        "PD_PROXY_SCHEDULING": proxy.get("scheduling") or "round_robin",
+        "PD_PROXY_STORE_ADDRESS": f"{MOONCAKE_MASTER_SERVICE}:{MOONCAKE_MASTER_RPC_PORT}",
     }
+
+
+def _carries_released_pd_proxy_env(deployment: Any) -> bool:
+    """Whether a live PD proxy Deployment still has the environment of v8.23.0 or earlier."""
+    template = getattr(getattr(deployment, "spec", None), "template", None)
+    containers = getattr(getattr(template, "spec", None), "containers", None) or []
+    return any(
+        getattr(variable, "name", None) == PD_PROXY_RELEASED_ENV_MARKER
+        for container in containers
+        if getattr(container, "name", None) == PD_PROXY_CONTAINER
+        for variable in getattr(container, "env", None) or []
+    )
+
+
+def _pd_proxy_replicas(mooncake: Mapping[str, Any]) -> int:
+    """The prefill-decode proxy's replica count: ``mooncake.proxy.replicas``, at least one."""
+    proxy = mooncake.get("proxy")
+    replicas = proxy.get("replicas", 1) if isinstance(proxy, dict) else 1
+    if not isinstance(replicas, int) or isinstance(replicas, bool) or replicas < 1:
+        return 1
+    return replicas
 
 
 def _role_service_url(name: str, ns: str, role: str) -> str:
@@ -1071,6 +1136,122 @@ def _reject_bootstrap_window_collision(base_port: int) -> None:
         )
 
 
+# Every field kubernetes client 37.0.1's ``to_dict()`` emits for each model the
+# sidecar renders, ``None`` when unset. GCO v8.23.0 and earlier hashed that form
+# (v8.22.x under client 36.0.3, which lacks the fields in
+# _CLIENT_37_ADDED_SIDECAR_FIELDS), so the shape of their digest followed the
+# client's model schema. Frozen here, the stamps they wrote stay recognizable
+# whatever client this monitor runs (see _released_tls_proxy_digests).
+_CLIENT_37_SIDECAR_FIELDS: dict[str, tuple[str, ...]] = {
+    model: tuple(fields.split())
+    for model, fields in {
+        "V1Container": (
+            "args command env env_from image image_pull_policy lifecycle liveness_probe name"
+            " ports readiness_probe resize_policy resources restart_policy restart_policy_rules"
+            " security_context startup_probe stdin stdin_once termination_message_path"
+            " termination_message_policy tty volume_devices volume_mounts working_dir"
+        ),
+        "V1EnvVar": "name value value_from",
+        "V1Probe": (
+            "_exec failure_threshold grpc http_get initial_delay_seconds period_seconds"
+            " success_threshold tcp_socket termination_grace_period_seconds timeout_seconds"
+        ),
+        "V1TCPSocketAction": "host port",
+        "V1ContainerPort": "container_port host_ip host_port name protocol",
+        "V1ResourceRequirements": "claims limits requests",
+        "V1SecurityContext": (
+            "allow_privilege_escalation app_armor_profile capabilities privileged proc_mount"
+            " read_only_root_filesystem run_as_group run_as_non_root run_as_user"
+            " se_linux_options seccomp_profile windows_options"
+        ),
+        "V1Capabilities": "add drop",
+        "V1SeccompProfile": "localhost_profile type",
+        "V1VolumeMount": (
+            "bind_mount_options mount_path mount_propagation name read_only recursive_read_only"
+            " sub_path sub_path_expr"
+        ),
+        "V1Volume": (
+            "aws_elastic_block_store azure_disk azure_file cephfs cinder config_map csi"
+            " downward_api empty_dir ephemeral fc flex_volume flocker gce_persistent_disk"
+            " git_repo glusterfs host_path image iscsi name nfs persistent_volume_claim"
+            " photon_persistent_disk portworx_volume projected quobyte rbd scale_io secret"
+            " storageos vsphere_volume"
+        ),
+        "V1SecretVolumeSource": "default_mode default_user items optional secret_name",
+        "V1ConfigMapVolumeSource": "default_mode default_user items name optional",
+    }.items()
+}
+
+# The fields above that client 37.0.1 added over 36.0.3.
+_CLIENT_37_ADDED_SIDECAR_FIELDS = frozenset(
+    {
+        ("V1VolumeMount", "bind_mount_options"),
+        ("V1SecretVolumeSource", "default_user"),
+        ("V1ConfigMapVolumeSource", "default_user"),
+    }
+)
+
+_CLIENT_36_SIDECAR_FIELDS: dict[str, tuple[str, ...]] = {
+    model: tuple(name for name in fields if (model, name) not in _CLIENT_37_ADDED_SIDECAR_FIELDS)
+    for model, fields in _CLIENT_37_SIDECAR_FIELDS.items()
+}
+
+
+@cache
+def _wire_serializer() -> client.ApiClient:
+    """A client used only for its serializer; it never sends a request."""
+    return client.ApiClient()
+
+
+def _sidecar_digest(rendered: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(rendered, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _released_to_dict(value: Any, fields: Mapping[str, tuple[str, ...]]) -> Any:
+    """``value`` as a client's ``to_dict()`` rendered it, with ``fields`` per model.
+
+    Raises:
+        KeyError: For a model ``fields`` does not describe.
+    """
+    if isinstance(value, list | tuple):
+        return [_released_to_dict(item, fields) for item in value]
+    if isinstance(value, dict):
+        return {key: _released_to_dict(item, fields) for key, item in value.items()}
+    if value is None or isinstance(value, str | int | float):
+        return value
+    return {
+        name: _released_to_dict(getattr(value, name, None), fields)
+        for name in fields[type(value).__name__]
+    }
+
+
+def _released_tls_proxy_digests(
+    container: client.V1Container, volumes: tuple[client.V1Volume, ...]
+) -> frozenset[str]:
+    """The digests GCO v8.22.x and v8.23.0 stamped for this same sidecar.
+
+    Those releases hashed the client's ``to_dict()``, which lists every field
+    the client declares, so one sidecar hashed differently under client 36.0.3
+    (v8.22.x) and 37.0.1 (v8.23.0). Both forms are rebuilt from the frozen
+    field lists; a sidecar holding a model those releases never rendered has no
+    released digest.
+    """
+    digests = set()
+    for fields in (_CLIENT_36_SIDECAR_FIELDS, _CLIENT_37_SIDECAR_FIELDS):
+        try:
+            rendered = {
+                "container": _released_to_dict(container, fields),
+                "volumes": _released_to_dict(volumes, fields),
+                "termination_grace_period_seconds": MODEL_POD_TERMINATION_GRACE_SECONDS,
+            }
+        except KeyError:
+            return frozenset()
+        digests.add(_sidecar_digest(rendered))
+    return frozenset(digests)
+
+
 @dataclass(frozen=True)
 class EndpointTLSProxy:
     """The TLS sidecar a managed model pod carries, with its volumes and digest."""
@@ -1078,6 +1259,17 @@ class EndpointTLSProxy:
     container: client.V1Container
     volumes: tuple[client.V1Volume, ...]
     digest: str
+
+    def matches_stamp(self, stamp: str | None) -> bool:
+        """Whether a pod template stamped ``stamp`` already runs this sidecar.
+
+        True for :attr:`digest`, and for the digest GCO v8.22.x or v8.23.0
+        stamped for the same rendering: their digest followed the kubernetes
+        client's model schema, and restamping would roll the pod for nothing.
+        """
+        return stamp == self.digest or stamp in _released_tls_proxy_digests(
+            self.container, self.volumes
+        )
 
 
 def build_endpoint_tls_proxy(upstream_port: int, config_map_name: str) -> EndpointTLSProxy:
@@ -1097,7 +1289,9 @@ def build_endpoint_tls_proxy(upstream_port: int, config_map_name: str) -> Endpoi
     The digest covers everything rendered here plus the pod grace period, so a
     changed image, upstream port, or sidecar shape is detected on existing
     Deployments; the program's source is deliberately excluded (see
-    :meth:`InferenceMonitor._ensure_tls_proxy_configmap`).
+    :meth:`InferenceMonitor._ensure_tls_proxy_configmap`). It hashes the wire
+    form, the JSON the API server receives with unset fields omitted, so a
+    kubernetes client that declares new fields renders the same digest.
     """
     container = client.V1Container(
         name=ENDPOINT_TLS_PROXY_CONTAINER,
@@ -1180,15 +1374,48 @@ def build_endpoint_tls_proxy(upstream_port: int, config_map_name: str) -> Endpoi
             ),
         ),
     )
-    rendered = {
-        "container": container.to_dict(),
-        "volumes": [volume.to_dict() for volume in volumes],
-        "termination_grace_period_seconds": MODEL_POD_TERMINATION_GRACE_SECONDS,
-    }
-    digest = hashlib.sha256(
-        json.dumps(rendered, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    serializer = _wire_serializer()
+    digest = _sidecar_digest(
+        {
+            "container": serializer.sanitize_for_serialization(container),
+            "volumes": serializer.sanitize_for_serialization(list(volumes)),
+            "terminationGracePeriodSeconds": MODEL_POD_TERMINATION_GRACE_SECONDS,
+        }
+    )
     return EndpointTLSProxy(container=container, volumes=volumes, digest=digest)
+
+
+def _rolled_out_ready_replicas(deployment: Any) -> int:
+    """Ready replicas known to run ``deployment``'s current pod template.
+
+    ``readyReplicas`` also counts the previous template's pods while a rollout
+    replaces them. Until the Deployment controller has observed the current
+    generation every pod counts as old; after that the pods not yet updated
+    (``replicas - updatedReplicas``) are subtracted as if all were Ready. The
+    result is a lower bound, exact once the old pods are gone. The API omits
+    zero counts, so a missing ``updatedReplicas`` is zero; a status without a
+    ``replicas`` count has no pods to tell apart.
+    """
+    status = getattr(deployment, "status", None)
+    ready = getattr(status, "ready_replicas", None)
+    ready_count = ready if isinstance(ready, int) else 0
+    generation = getattr(getattr(deployment, "metadata", None), "generation", None)
+    observed = getattr(status, "observed_generation", None)
+    if isinstance(generation, int) and not (isinstance(observed, int) and observed >= generation):
+        return 0
+    total = getattr(status, "replicas", None)
+    if not isinstance(total, int):
+        return ready_count
+    updated = getattr(status, "updated_replicas", None)
+    updated_count = updated if isinstance(updated, int) else 0
+    return max(0, min(ready_count - (total - updated_count), updated_count))
+
+
+def _pod_template_annotations(deployment: Any) -> dict[str, str]:
+    """A copy of a live Deployment's pod-template annotations (empty when it has none)."""
+    template = getattr(getattr(deployment, "spec", None), "template", None)
+    annotations = getattr(getattr(template, "metadata", None), "annotations", None)
+    return dict(annotations) if isinstance(annotations, dict) else {}
 
 
 def _endpoint_tls_pod_annotations(
@@ -1323,13 +1550,17 @@ class InferenceMonitor:
                 logger.error("Failed to load Kubernetes configuration: %s", e)
                 raise
 
-        self.apps_v1 = client.AppsV1Api()
-        self.core_v1 = client.CoreV1Api()
-        self.networking_v1 = client.NetworkingV1Api()
-        self.discovery_v1 = client.DiscoveryV1Api()
-
-        # Timeout for Kubernetes API calls (seconds)
-        self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
+        # Every typed API shares this process's one bounded client. A typed
+        # API class built without one creates its own ApiClient, a new
+        # connection pool and so a new TLS handshake with the API server, on
+        # every call. The typed classes themselves are thin wrappers, built
+        # where they are used.
+        self._k8s_timeout = k8s_api_timeout_from_env()
+        self.api_client = BoundedApiClient(default_request_timeout=self._k8s_timeout)
+        self.apps_v1 = client.AppsV1Api(self.api_client)
+        self.core_v1 = client.CoreV1Api(self.api_client)
+        self.networking_v1 = client.NetworkingV1Api(self.api_client)
+        self.discovery_v1 = client.DiscoveryV1Api(self.api_client)
 
         # Health watchdog: tracks when each endpoint first became unready.
         # Inference traffic enters through the shared ``gco-system/gco-gateway``
@@ -1358,16 +1589,40 @@ class InferenceMonitor:
         self._leader_epoch: str | None = None
         self._leadership_lost = threading.Event()
         self._active_authority: ReconcileAuthority | None = None
+        # Every endpoint record's name in the current pass's snapshot, used to
+        # tell whether an unlabelled object's name is another endpoint's too.
+        self._endpoint_names: frozenset[str] = frozenset()
+
+        # A leader pass that finishes no endpoint for this long is wedged (a
+        # call that never returns, say). The renewal thread then stops renewing
+        # the Lease, so it expires and a standby takes over instead of this
+        # process holding leadership for as long as the pass hangs.
+        self._pass_stall_seconds = PASS_STALL_INTERVALS * max(1.0, float(reconcile_interval))
+        # A process whose loop has shown no progress (a finished iteration,
+        # leader or standby, or a step of a running pass) for longer than this
+        # is wedged, and its liveness probe fails. It is the stall deadline
+        # plus one Lease duration, so a wedged leader's standby has taken over
+        # before the kubelet restarts it (195 s at the default 15 s interval).
+        self._liveness_window_seconds = self._pass_stall_seconds + (
+            LEASE_DURATION_INTERVALS * max(1.0, float(reconcile_interval))
+        )
 
         # Metrics
         self._reconcile_count = 0
         self._errors_count = 0
         # Monotonic stamp of the last completed loop iteration (leader pass or
-        # standby lease check). Exported as seconds_since_last_pass so a loop
-        # that is wedged — not crashed, which the probes would catch — is
-        # visible; initialised at construction so the gauge exists before the
-        # first iteration and grows if the loop never starts.
+        # standby lease check). Exported as seconds_since_last_pass, and with
+        # the last pass step as seconds_since_last_progress, which the liveness
+        # probe reads, so a loop that is wedged rather than crashed restarts;
+        # initialised at construction so the gauges exist before the first
+        # iteration and grow if the loop never starts.
         self._last_loop_completed_at = time.monotonic()
+        # Last progress of the running leader pass (see _pass_stall_seconds).
+        self._pass_progress_at = self._last_loop_completed_at
+
+        # Set by stop(): the running pass starts no further endpoint and the
+        # pause between passes ends at once. start() makes a fresh one.
+        self._stopping = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Reconciliation loop
@@ -1379,6 +1634,7 @@ class InferenceMonitor:
             logger.warning("Inference monitor already running")
             return
         self._running = True
+        self._stopping = asyncio.Event()
         logger.info(
             "Starting inference monitor for %s in %s (interval=%ds)",
             self.cluster_id,
@@ -1391,24 +1647,47 @@ class InferenceMonitor:
         self._lease_name = lease_name
         self._lease_holder = pod_name
 
-        while self._running:
-            try:
-                if self._try_acquire_lease(lease_name, pod_name):
-                    with self._renewing_leadership():
-                        await self.reconcile()
-                else:
-                    logger.debug("Not the leader, waiting...")
-            except ReconcileFencedError as error:
-                logger.warning("Reconciliation stopped after authority loss: %s", error)
-            except Exception as error:
-                logger.error("Reconciliation error: %s", error, exc_info=True)
-                self._errors_count += 1
-            self._last_loop_completed_at = time.monotonic()
-            try:
-                await asyncio.sleep(self.reconcile_interval)
-            except Exception as error:
-                logger.error("Sleep interrupted: %s", error)
-                break
+        try:
+            while self._running:
+                try:
+                    if self._try_acquire_lease(lease_name, pod_name):
+                        with self._renewing_leadership():
+                            await self.reconcile()
+                    else:
+                        logger.debug("Not the leader, waiting...")
+                except ReconcileFencedError as error:
+                    logger.warning("Reconciliation stopped after authority loss: %s", error)
+                except Exception as error:
+                    logger.error("Reconciliation error: %s", error, exc_info=True)
+                    self._errors_count += 1
+                self._last_loop_completed_at = time.monotonic()
+                try:
+                    await self._pause_between_passes()
+                except Exception as error:
+                    logger.error("Sleep interrupted: %s", error)
+                    break
+        finally:
+            # No pass is running any more: hand the Lease over now instead of
+            # leaving the standby to wait for it to expire.
+            self._release_lease()
+
+    async def _pause_between_passes(self) -> None:
+        """Wait one reconcile interval, or only until stop() is called."""
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._stopping.wait(), timeout=self.reconcile_interval)
+
+    async def _stop_requested_at_safe_point(self) -> bool:
+        """Let the event loop run, then report whether stop() has been called.
+
+        A pass makes its Kubernetes and DynamoDB calls synchronously, so the
+        SIGTERM handler, which the event loop runs as a callback, can run only
+        where the pass yields: here, between two endpoints. The pause is above
+        zero so the loop handles a signal that arrived during the previous
+        endpoint before the pass resumes; once it has, the pass starts no
+        further endpoint.
+        """
+        await asyncio.sleep(_SAFE_POINT_PAUSE_SECONDS)
+        return self._stopping.is_set()
 
     @staticmethod
     def _lease_annotations(lease: Any) -> dict[str, str]:
@@ -1424,7 +1703,7 @@ class InferenceMonitor:
             renew_time = renew_time.replace(tzinfo=UTC)
         duration = getattr(lease.spec, "lease_duration_seconds", None)
         if not isinstance(duration, int) or isinstance(duration, bool) or duration <= 0:
-            duration = self.reconcile_interval * 3
+            duration = self.reconcile_interval * LEASE_DURATION_INTERVALS
         return bool((now - renew_time).total_seconds() >= int(duration))
 
     def _stamp_lease_epoch(self, lease: Any, epoch: str) -> None:
@@ -1438,11 +1717,13 @@ class InferenceMonitor:
 
     def _try_acquire_lease(self, lease_name: str, holder: str) -> bool:
         """Acquire/renew a Lease and establish one stable acquisition epoch."""
-        coordination_v1 = client.CoordinationV1Api()
+        coordination_v1 = client.CoordinationV1Api(self.api_client)
         now = datetime.now(UTC)
-        lease_duration = self.reconcile_interval * 3
+        lease_duration = self.reconcile_interval * LEASE_DURATION_INTERVALS
         try:
-            lease = coordination_v1.read_namespaced_lease(lease_name, self.namespace)
+            lease = coordination_v1.read_namespaced_lease(
+                lease_name, self.namespace, _request_timeout=self._k8s_timeout
+            )
             spec = present(lease.spec, "lease.spec")
             current_holder = spec.holder_identity
             expired = self._lease_is_expired(lease, now)
@@ -1473,7 +1754,9 @@ class InferenceMonitor:
             spec.renew_time = now
             spec.lease_duration_seconds = lease_duration
             self._stamp_lease_epoch(lease, epoch)
-            coordination_v1.replace_namespaced_lease(lease_name, self.namespace, lease)
+            coordination_v1.replace_namespaced_lease(
+                lease_name, self.namespace, lease, _request_timeout=self._k8s_timeout
+            )
             self._lease_name = lease_name
             self._lease_holder = holder
             self._leadership_lost.clear()
@@ -1496,7 +1779,9 @@ class InferenceMonitor:
                     ),
                 )
                 try:
-                    coordination_v1.create_namespaced_lease(self.namespace, lease)
+                    coordination_v1.create_namespaced_lease(
+                        self.namespace, lease, _request_timeout=self._k8s_timeout
+                    )
                 except ApiException:
                     return False
                 self._leader_epoch = epoch
@@ -1520,10 +1805,12 @@ class InferenceMonitor:
         epoch = self._leader_epoch
         if not (lease_name and holder and epoch):
             return False
-        coordination_v1 = client.CoordinationV1Api()
+        coordination_v1 = client.CoordinationV1Api(self.api_client)
         now = datetime.now(UTC)
         try:
-            lease = coordination_v1.read_namespaced_lease(lease_name, self.namespace)
+            lease = coordination_v1.read_namespaced_lease(
+                lease_name, self.namespace, _request_timeout=self._k8s_timeout
+            )
             spec = present(lease.spec, "lease.spec")
             if (
                 spec.holder_identity != holder
@@ -1532,15 +1819,37 @@ class InferenceMonitor:
             ):
                 return False
             spec.renew_time = now
-            coordination_v1.replace_namespaced_lease(lease_name, self.namespace, lease)
+            coordination_v1.replace_namespaced_lease(
+                lease_name, self.namespace, lease, _request_timeout=self._k8s_timeout
+            )
             return True
         except Exception:
             logger.warning("Leader Lease renewal failed", exc_info=True)
             return False
 
+    def _mark_pass_progress(self) -> None:
+        """Record that the running leader pass is still making progress."""
+        self._pass_progress_at = time.monotonic()
+
     def _lease_renewal_loop(self, stop_event: threading.Event) -> None:
+        """Renew the Lease each interval while the pass progresses.
+
+        Once the pass has made no progress for ``_pass_stall_seconds`` the
+        loop stops renewing and marks leadership lost: the Lease expires and a
+        standby takes over, and a pass that later resumes is fenced at its next
+        mutation.
+        """
         interval = max(1.0, float(self.reconcile_interval))
         while not stop_event.wait(interval):
+            stalled_for = time.monotonic() - self._pass_progress_at
+            if stalled_for > self._pass_stall_seconds:
+                logger.error(
+                    "Reconcile pass made no progress for %.0fs; no longer renewing the "
+                    "leader Lease so a standby can take over",
+                    stalled_for,
+                )
+                self._leadership_lost.set()
+                return
             if not self._renew_current_lease():
                 self._leadership_lost.set()
                 return
@@ -1548,6 +1857,7 @@ class InferenceMonitor:
     @contextlib.contextmanager
     def _renewing_leadership(self) -> Iterator[None]:
         """Renew the Lease outside the asyncio loop while one pass is running."""
+        self._mark_pass_progress()
         stop_event = threading.Event()
         renewal = threading.Thread(
             target=self._lease_renewal_loop,
@@ -1569,9 +1879,11 @@ class InferenceMonitor:
         # Direct method-level unit tests do not enter start(); production does.
         if self._lease_name is None or self._lease_holder is None or self._leader_epoch is None:
             return
-        coordination_v1 = client.CoordinationV1Api()
+        coordination_v1 = client.CoordinationV1Api(self.api_client)
         try:
-            lease = coordination_v1.read_namespaced_lease(self._lease_name, self.namespace)
+            lease = coordination_v1.read_namespaced_lease(
+                self._lease_name, self.namespace, _request_timeout=self._k8s_timeout
+            )
         except Exception as error:
             self._leadership_lost.set()
             raise ReconcileFencedError("leader Lease could not be verified") from error
@@ -1583,10 +1895,52 @@ class InferenceMonitor:
             self._leadership_lost.set()
             raise ReconcileFencedError("leader Lease holder or epoch changed")
 
+    def _release_lease(self) -> None:
+        """Give up the leader Lease this process holds, so the standby takes over at once.
+
+        Called with no pass running. Only the holder and epoch this process
+        owns are released, by clearing the holder in a compare-and-swap replace
+        of the Lease as read (as client-go's ``ReleaseOnCancel`` and
+        :meth:`gco.services.leader_lease.LeaseElector.release` do). A Lease
+        another replica holds is left alone, and any failure only means the
+        Lease expires on its own. No mutation follows a release: leadership
+        counts as lost until the next acquisition.
+        """
+        lease_name, holder, epoch = self._lease_name, self._lease_holder, self._leader_epoch
+        if not (lease_name and holder and epoch):
+            return
+        self._leadership_lost.set()
+        self._leader_epoch = None
+        coordination_v1 = client.CoordinationV1Api(self.api_client)
+        try:
+            lease = coordination_v1.read_namespaced_lease(
+                lease_name, self.namespace, _request_timeout=LEASE_REQUEST_TIMEOUT
+            )
+            spec = present(lease.spec, "lease.spec")
+            if (
+                spec.holder_identity != holder
+                or self._lease_annotations(lease).get(_LEADER_EPOCH_ANNOTATION) != epoch
+            ):
+                return
+            spec.holder_identity = None
+            spec.renew_time = datetime.now(UTC)
+            coordination_v1.replace_namespaced_lease(
+                lease_name, self.namespace, lease, _request_timeout=LEASE_REQUEST_TIMEOUT
+            )
+        except Exception as error:
+            logger.warning("Could not release the leader Lease (it will expire): %s", error)
+            return
+        logger.info("Released leader Lease %s held by %s", lease_name, holder)
+
     def stop(self) -> None:
-        """Stop the reconciliation loop and prevent additional mutations."""
+        """Stop the reconciliation loop and prevent additional mutations.
+
+        A running pass starts no further endpoint, the pause between passes
+        ends, and start() then releases the leader Lease and returns.
+        """
         self._running = False
         self._leadership_lost.set()
+        self._stopping.set()
         logger.info("Inference monitor stopped")
 
     @staticmethod
@@ -1728,6 +2082,40 @@ class InferenceMonitor:
         labels = cls._object_labels(resource)
         return labels.get("project") == "gco" and labels.get("gco.io/type") == "inference"
 
+    def _name_derived_by_another_endpoint(
+        self, resource_name: str, endpoint_name: str, kind: str
+    ) -> bool:
+        """Whether another endpoint record also derives ``resource_name`` for ``kind``.
+
+        A legacy Ingress name is compared with the other endpoints' legacy
+        Ingress names only: ``inference-llama`` is the Ingress of ``llama`` and
+        the Deployment of an endpoint named ``inference-llama``, which are
+        different objects.
+        """
+        for other in getattr(self, "_endpoint_names", ()):
+            if other == endpoint_name:
+                continue
+            derived = (
+                frozenset(_legacy_ingress_names(other))
+                if kind == "ingress"
+                else endpoint_object_names(other)
+            )
+            if resource_name in derived:
+                return True
+        return False
+
+    def _owned_labels(self, labels: Mapping[str, str]) -> dict[str, str]:
+        """``labels`` plus :data:`ENDPOINT_NAME_LABEL` for the endpoint being reconciled.
+
+        For object metadata only, never a pod template: an existing
+        Deployment's pods would roll if its template gained the label.
+        """
+        owned = dict(labels)
+        authority = getattr(self, "_active_authority", None)
+        if authority is not None and _LABEL_VALUE_PATTERN.fullmatch(authority.endpoint_name):
+            owned[ENDPOINT_NAME_LABEL] = authority.endpoint_name
+        return owned
+
     def _handoff_stale_resource(
         self,
         resource: Any,
@@ -1784,6 +2172,24 @@ class InferenceMonitor:
             # Production reconciliation always has a Lease and real metadata.
             return resource
         observed_lifecycle = annotations.get(_LIFECYCLE_ANNOTATION)
+        owner = self._object_labels(resource).get(ENDPOINT_NAME_LABEL)
+        if owner is not None and owner != authority.endpoint_name:
+            raise ForeignEndpointResourceError(
+                f"{kind} {resource_name} belongs to endpoint {owner}, not {authority.endpoint_name}"
+            )
+        if (
+            owner is None
+            and observed_lifecycle != authority.lifecycle_id
+            and self._name_derived_by_another_endpoint(resource_name, authority.endpoint_name, kind)
+        ):
+            # Created before the label existed by another lifecycle: a stale
+            # incarnation of this endpoint, or the object of the other endpoint
+            # that derives the same name. Only the label could tell, so it is
+            # neither claimed nor handed off.
+            raise ForeignEndpointResourceError(
+                f"{kind} {resource_name} has no {ENDPOINT_NAME_LABEL} label and another "
+                "endpoint derives the same name; it is left untouched"
+            )
         if observed_lifecycle is None and not self._has_monitor_provenance(resource):
             raise ReconcileFencedError(f"{kind} {resource_name} has ambiguous legacy ownership")
         if observed_lifecycle not in (None, authority.lifecycle_id):
@@ -1817,15 +2223,18 @@ class InferenceMonitor:
         self._assert_current_leadership()
         merged = dict(annotations)
         merged.update(expected)
+        claim: dict[str, Any] = {"resourceVersion": resource_version, "annotations": merged}
+        # Object metadata only: a Deployment's pod template is untouched. The
+        # generated admin Secret keeps its exact ownership labels (its
+        # lifecycle annotation identifies it; no other endpoint derives it).
+        if (
+            owner is None
+            and kind != "secret"
+            and _LABEL_VALUE_PATTERN.fullmatch(authority.endpoint_name)
+        ):
+            claim["labels"] = {ENDPOINT_NAME_LABEL: authority.endpoint_name}
         try:
-            patch_metadata(
-                body={
-                    "metadata": {
-                        "resourceVersion": resource_version,
-                        "annotations": merged,
-                    }
-                }
-            )
+            patch_metadata(body={"metadata": claim})
         except Exception as error:
             raise ReconcileFencedError(
                 f"{kind} {resource_name} changed during authority claim"
@@ -1851,6 +2260,28 @@ class InferenceMonitor:
         self._assert_current_leadership()
         if not self._strong_authority_matches(authority):
             raise ReconcileFencedError("endpoint authority changed before Kubernetes mutation")
+
+    def _read_or_create(self, read: Callable[[], Any], create: Callable[[], object]) -> Any | None:
+        """Return the live object, or create it and return ``None``.
+
+        In the steady state the object exists and this costs one read, without
+        the Lease and DynamoDB reads that authorize a mutation. A missing object
+        is created under :meth:`_assert_mutation_authority`; a create that loses
+        a race to another writer (409) returns the object that writer created.
+        """
+        try:
+            return read()
+        except ApiException as error:
+            if error.status != 404:
+                raise
+        self._assert_mutation_authority()
+        try:
+            create()
+        except ApiException as error:
+            if error.status != 409:
+                raise
+            return read()
+        return None
 
     def _confirm_created_resource(
         self,
@@ -1932,6 +2363,9 @@ class InferenceMonitor:
         except Exception as e:
             logger.error("Failed to list endpoints from DynamoDB: %s", e)
             return actions
+        self._endpoint_names = frozenset(
+            name for endpoint in endpoints if isinstance(name := endpoint.get("endpoint_name"), str)
+        )
 
         # Records written before lifecycle fencing are upgraded from their
         # DynamoDB snapshot before any Kubernetes mutation. The update is
@@ -1959,6 +2393,10 @@ class InferenceMonitor:
 
         for endpoint in endpoints:
             name = endpoint.get("endpoint_name", "unknown")
+            if await self._stop_requested_at_safe_point():
+                logger.info("Shutting down: pass ends before endpoint %s", name)
+                return actions
+            self._mark_pass_progress()
             try:
                 action = await self._reconcile_endpoint(endpoint)
                 if action:
@@ -1992,6 +2430,10 @@ class InferenceMonitor:
         for endpoint in endpoints:
             if endpoint.get("desired_state") != "deleted":
                 continue
+            if await self._stop_requested_at_safe_point():
+                logger.info("Shutting down: pass ends before the remaining purges")
+                return actions
+            self._mark_pass_progress()
             ep_name = endpoint.get("endpoint_name")
             if not isinstance(ep_name, str):
                 continue
@@ -2425,32 +2867,55 @@ class InferenceMonitor:
         # endpoint flap back to "creating". Keep reporting that live target so
         # status and watchdog diagnostics remain truthful.
         state = "running" if ready_replicas >= readiness_floor else "creating"
+        # Pods of the previous template keep the region serving through a
+        # rolling update, but the update is done only once pods of the current
+        # template meet the floor; until then the endpoint is not promoted.
+        rollout_complete = _rolled_out_ready_replicas(deployment) >= readiness_floor
+        extra: dict[str, Any] = {}
+        if canary_status is not None:
+            extra["canary"] = canary_status
+        if state == "running" and not rollout_complete:
+            extra["rollout_complete"] = False
         self.store.update_region_status(
             name,
             self.region,
             state,
             replicas_ready=ready_replicas,
             replicas_desired=status_desired_replicas,
-            extra={"canary": canary_status} if canary_status is not None else None,
+            extra=extra or None,
             **status_conditions,
         )
 
-        self._promote_deploying_endpoint(name, endpoint, state)
+        self._promote_deploying_endpoint(name, endpoint, state, rollout_complete=rollout_complete)
 
         return None
 
     def _promote_deploying_endpoint(
-        self, name: str, endpoint: dict[str, Any], local_state: str
+        self,
+        name: str,
+        endpoint: dict[str, Any],
+        local_state: str,
+        *,
+        rollout_complete: bool = True,
     ) -> bool:
         """Promote ``desired_state`` from ``deploying`` to ``running`` once every region is up.
 
-        The inference proxy serves an endpoint only while its ``desired_state``
-        is ``running``, so a deploying endpoint that never promotes is
-        unreachable even when every pod is Ready. Promotion is decided from live
-        local readiness (``local_state``, the state this pass just wrote) plus
-        explicit ``running`` observations for every *other* target region. The
-        endpoint object may contain a stale local region_status from before this
-        pass, which is why the local region is never read back from it.
+        ``deploying`` is the endpoint-wide summary while any target region is
+        still converging; ``running`` says the last change is applied in every
+        region, and is what ``gco inference status`` and ``list`` report and
+        what a caller waits for. Serving does not wait for it: the inference
+        proxy serves a region whose own status is ``running`` under either
+        state.
+
+        Promotion is decided from live local readiness (``local_state``, the
+        state this pass just wrote) plus explicit ``running`` observations for
+        every *other* target region. A region whose rolling update is still
+        under way (``rollout_complete`` is false here, or
+        ``rollout_complete: false`` in its stored status) serves from the
+        previous template's pods but has not applied the change, so it holds the
+        promotion back. The endpoint object may contain a stale local
+        region_status from before this pass, which is why the local region is
+        never read back from it.
 
         The write is fenced on the lifecycle id and the ``deploying`` state so a
         concurrent delete or replacement cannot be resurrected. Both the classic
@@ -2459,7 +2924,11 @@ class InferenceMonitor:
         Returns:
             ``True`` when a promotion write was issued, ``False`` otherwise.
         """
-        if local_state != "running" or endpoint.get("desired_state") != "deploying":
+        if (
+            local_state != "running"
+            or not rollout_complete
+            or endpoint.get("desired_state") != "deploying"
+        ):
             return False
         stored_statuses = endpoint.get("region_status", {})
         target_regions = endpoint.get("target_regions", [])
@@ -2471,7 +2940,11 @@ class InferenceMonitor:
             target_status = (
                 stored_statuses.get(target_region, {}) if isinstance(stored_statuses, dict) else {}
             )
-            if not isinstance(target_status, dict) or target_status.get("state") != "running":
+            if (
+                not isinstance(target_status, dict)
+                or target_status.get("state") != "running"
+                or target_status.get("rollout_complete") is False
+            ):
                 return False
         lifecycle_id = endpoint.get("lifecycle_id")
         if not isinstance(lifecycle_id, str) or not lifecycle_id:
@@ -2530,66 +3003,61 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=cm_name,
                 namespace=ns,
-                labels={"app": name, "project": "gco", "gco.io/type": "inference"},
+                labels=self._owned_labels(
+                    {"app": name, "project": "gco", "gco.io/type": "inference"}
+                ),
                 annotations=self._provenance_annotations(),
             ),
             data={"mooncake.json": json.dumps(cfg, sort_keys=True)},
         )
-        self._assert_mutation_authority()
-        try:
+        read_config_map = partial(
+            self.core_v1.read_namespaced_config_map,
+            cm_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+        delete_config_map = partial(
+            self.core_v1.delete_namespaced_config_map,
+            cm_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
             self.core_v1.create_namespaced_config_map(
                 ns, config_map, _request_timeout=self._k8s_timeout
             )
             self._confirm_created_resource(
                 kind="configmap",
                 resource_name=cm_name,
-                read_resource=partial(
-                    self.core_v1.read_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    self.core_v1.delete_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_config_map,
+                delete_resource=delete_config_map,
             )
+
+        existing = self._read_or_create(read_config_map, create)
+        if existing is None:
             logger.info("Created mooncake config map %s/%s", ns, cm_name)
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = self.core_v1.read_namespaced_config_map(
-                cm_name, ns, _request_timeout=self._k8s_timeout
-            )
-            existing = self._authorize_resource(
-                existing,
-                kind="configmap",
-                resource_name=cm_name,
-                patch_metadata=partial(
-                    self.core_v1.patch_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                read_resource=lambda: self.core_v1.read_namespaced_config_map(
-                    cm_name, ns, _request_timeout=self._k8s_timeout
-                ),
-                delete_resource=partial(
-                    self.core_v1.delete_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-            )
-            _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            present(config_map.metadata, "config_map.metadata").resource_version = resource_version
-            self._assert_mutation_authority()
-            self.core_v1.patch_namespaced_config_map(
-                cm_name, ns, config_map, _request_timeout=self._k8s_timeout
-            )
-            logger.info("Updated mooncake config map %s/%s", ns, cm_name)
+            return
+        existing = self._authorize_resource(
+            existing,
+            kind="configmap",
+            resource_name=cm_name,
+            patch_metadata=partial(
+                self.core_v1.patch_namespaced_config_map,
+                cm_name,
+                ns,
+                _request_timeout=self._k8s_timeout,
+            ),
+            read_resource=read_config_map,
+            delete_resource=delete_config_map,
+        )
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
+        present(config_map.metadata, "config_map.metadata").resource_version = resource_version
+        self._assert_mutation_authority()
+        self.core_v1.patch_namespaced_config_map(
+            cm_name, ns, config_map, _request_timeout=self._k8s_timeout
+        )
+        logger.info("Updated mooncake config map %s/%s", ns, cm_name)
 
     def _ensure_role_deployment(
         self,
@@ -2605,6 +3073,10 @@ class InferenceMonitor:
         Existing autoscaled targets normally retain controller ownership, but a
         manually stopped zero target is seeded to the role minimum before its
         autoscaler is reapplied. Static roles always converge to topology.
+
+        An existing role whose model container runs another image than the
+        spec's (``gco inference update-image``) is patched onto it with the
+        same compare-and-swap the classic Deployment uses.
 
         Args:
             config_digest: Digest of the ``mooncake.json`` the role must run
@@ -2631,10 +3103,30 @@ class InferenceMonitor:
             config_map_name=_tls_proxy_config_map_name(name),
             fallback_port=spec.get("port", 8000),
         )
-        # One compare-and-swap per pass: the sidecar patch above already moved
-        # the resourceVersion, so a config digest change waits for the next pass.
-        if config_digest is not None and not sidecar_patched:
-            self._converge_mooncake_config_digest(deploy_name, ns, deployment, config_digest)
+        # One pod-template change per pass: the sidecar patch above already
+        # moved the resourceVersion, so a config digest change waits for the
+        # next pass, and an image change waits for both.
+        template_patched = sidecar_patched
+        if config_digest is not None and not template_patched:
+            template_patched = self._converge_mooncake_config_digest(
+                deploy_name, ns, deployment, config_digest
+            )
+        current_image = self._get_deployment_image(deployment)
+        desired_image = self._resolve_image_for_region(spec) if spec.get("image") else ""
+        if (
+            not template_patched
+            and current_image
+            and desired_image
+            and current_image != desired_image
+        ):
+            logger.info(
+                "Updating role deployment %s/%s image: %s → %s",
+                ns,
+                deploy_name,
+                current_image,
+                desired_image,
+            )
+            self._update_deployment_image(deploy_name, ns, desired_image)
 
         autoscaling = mooncake.get("autoscaling") or {}
         role_autoscaling = autoscaling.get(role)
@@ -2659,6 +3151,15 @@ class InferenceMonitor:
         ready = int(getattr(status, "ready_replicas", 0) or 0) if status else 0
         return ready, desired, restarted
 
+    @staticmethod
+    def _deployment_replicas(deployment: Any, configured: int) -> tuple[int, int]:
+        """Ready and desired replicas of ``deployment`` (``configured`` without a spec count)."""
+        status = getattr(deployment, "status", None) if deployment else None
+        ready = int(getattr(status, "ready_replicas", 0) or 0) if status else 0
+        deployment_spec = getattr(deployment, "spec", None) if deployment else None
+        observed_desired = getattr(deployment_spec, "replicas", None)
+        return ready, int(observed_desired) if observed_desired is not None else configured
+
     def _report_role_status(
         self,
         name: str,
@@ -2668,11 +3169,13 @@ class InferenceMonitor:
         endpoint: dict[str, Any] | None = None,
         *,
         cold_tier_error: str | None = None,
-    ) -> str:
+    ) -> RoleStatusReport:
         """Write the role-keyed region status for a Mooncake endpoint.
 
         For split topologies the status carries a ``roles`` map of observed and
-        desired replica counts per role; for store-bearing endpoints it carries
+        desired replica counts per role and a ``proxy`` entry with the same
+        counts for the prefill-decode proxy, the only way requests reach the
+        roles; for store-bearing endpoints it carries
         a ``store`` sub-status with the master's readiness and address. The flat
         ``replicas_ready`` / ``replicas_desired`` fields are also populated with
         the totals so consumers that only read the flat shape still see motion.
@@ -2684,14 +3187,22 @@ class InferenceMonitor:
         ``gco inference status`` shows that the hot-path store is serving
         without its S3 tier instead of hiding the downgrade.
 
+        Readiness counts every Ready pod, so a region keeps serving from the
+        previous template's pods through a rolling update (after
+        ``update-image`` or a ``configure-store`` roll). Whether the update is
+        done counts only pods of each Deployment's current template, as for a
+        classic endpoint: until they meet the floor, a running region reports
+        ``rollout_complete: false`` and the endpoint is not promoted.
+
         Args:
             cold_tier_error: Why the cold tier was dropped this pass, or
                 ``None`` when it resolved (or was not requested).
 
         Returns:
-            The reported endpoint state: ``"running"`` once every desired role
-            replica (and, when applicable, the master) is Ready, otherwise
-            ``"creating"``.
+            The reported state, ``"running"`` once every desired role replica
+            (and, when applicable, the proxy's configured replicas and the
+            master) is Ready, otherwise ``"creating"``, and whether pods of the
+            current templates meet the same floors.
         """
         mode = mooncake.get("mode")
         roles = self._desired_roles(mode)
@@ -2699,41 +3210,45 @@ class InferenceMonitor:
         total_ready = 0
         total_desired = 0
         all_ready = True
+        rollout_complete = True
 
         if mode in ("disaggregated", "both"):
             roles_block: dict[str, Any] = {}
             for role in ("prefill", "decode"):
                 if role not in roles:
                     continue
-                deploy_name = f"{name}-{role}"
                 configured_floor = self._replica_count_for_role(mooncake, role)
-                dep = self._get_deployment(deploy_name, ns)
-                status = getattr(dep, "status", None) if dep else None
-                ready = int(getattr(status, "ready_replicas", 0) or 0) if status else 0
-                deployment_spec = getattr(dep, "spec", None) if dep else None
-                observed_desired = getattr(deployment_spec, "replicas", None)
-                desired = (
-                    int(observed_desired) if observed_desired is not None else configured_floor
-                )
+                role_deployment = self._get_deployment(f"{name}-{role}", ns)
+                ready, desired = self._deployment_replicas(role_deployment, configured_floor)
                 roles_block[role] = {"ready": ready, "desired": desired}
                 total_ready += ready
                 total_desired += desired
                 if ready < configured_floor:
                     all_ready = False
+                if _rolled_out_ready_replicas(role_deployment) < configured_floor:
+                    rollout_complete = False
             extra["roles"] = roles_block
+            # Requests reach a split endpoint only through its prefill-decode
+            # proxy, so Ready roles alone do not make it serve.
+            proxy_floor = _pd_proxy_replicas(mooncake)
+            proxy_deployment = self._get_deployment(f"{name}-proxy", ns)
+            proxy_ready, proxy_desired = self._deployment_replicas(proxy_deployment, proxy_floor)
+            extra["proxy"] = {"ready": proxy_ready, "desired": proxy_desired}
+            if proxy_ready < proxy_floor:
+                all_ready = False
+            if _rolled_out_ready_replicas(proxy_deployment) < proxy_floor:
+                rollout_complete = False
         else:
             # Store mode runs a single kv_both Deployment under the endpoint name.
             configured_floor = self._replica_count_for_role(mooncake, "single")
-            dep = self._get_deployment(name, ns)
-            status = getattr(dep, "status", None) if dep else None
-            ready = int(getattr(status, "ready_replicas", 0) or 0) if status else 0
-            deployment_spec = getattr(dep, "spec", None) if dep else None
-            observed_desired = getattr(deployment_spec, "replicas", None)
-            desired = int(observed_desired) if observed_desired is not None else configured_floor
+            single_deployment = self._get_deployment(name, ns)
+            ready, desired = self._deployment_replicas(single_deployment, configured_floor)
             total_ready += ready
             total_desired += desired
             if ready < configured_floor:
                 all_ready = False
+            if _rolled_out_ready_replicas(single_deployment) < configured_floor:
+                rollout_complete = False
 
         store = mooncake.get("store") or {}
         if store.get("enabled"):
@@ -2756,6 +3271,8 @@ class InferenceMonitor:
                 all_ready = False
 
         state = "running" if all_ready and total_desired > 0 else "creating"
+        if state == "running" and not rollout_complete:
+            extra["rollout_complete"] = False
         status_conditions = self._status_write_conditions(endpoint or {})
         self.store.update_region_status(
             name,
@@ -2766,7 +3283,7 @@ class InferenceMonitor:
             extra=extra or None,
             **status_conditions,
         )
-        return state
+        return RoleStatusReport(state, rollout_complete)
 
     async def _reconcile_mooncake(
         self,
@@ -3020,9 +3537,9 @@ class InferenceMonitor:
 
         # Step 8: role-keyed status, then the same deploying -> running
         # promotion the classic path performs. Without it a Mooncake endpoint
-        # would sit in ``deploying`` forever and the proxy would refuse every
-        # request with "not ready in this region" despite Ready role pods.
-        state = self._report_role_status(
+        # would report ``deploying`` forever despite Ready role pods (the
+        # inference proxy still serves a region whose own status is running).
+        report = self._report_role_status(
             name,
             ns,
             mooncake,
@@ -3030,8 +3547,10 @@ class InferenceMonitor:
             endpoint,
             cold_tier_error=services.error if services.cold_tier_unresolved else None,
         )
-        self._promote_deploying_endpoint(name, endpoint, state)
-        return {"action": "reconcile_mooncake", "endpoint": name, "state": state}
+        self._promote_deploying_endpoint(
+            name, endpoint, report.state, rollout_complete=report.rollout_complete
+        )
+        return {"action": "reconcile_mooncake", "endpoint": name, "state": report.state}
 
     def _reconcile_stopped(
         self,
@@ -3040,7 +3559,12 @@ class InferenceMonitor:
         spec: dict[str, Any] | None = None,
         endpoint: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Remove every possible autoscaler owner before scaling all roles to zero."""
+        """Remove every possible autoscaler owner before scaling all roles to zero.
+
+        The roles are the Mooncake role Deployments and PD proxy, or a classic
+        endpoint's Deployment and its ``{name}-canary``; another endpoint's
+        Deployment at one of those names is left alone.
+        """
         mooncake_endpoint = isinstance(spec, dict) and isinstance(spec.get("mooncake"), dict)
         self._unready_since.pop(name, None)
         self._master_deferral_since.pop(name, None)
@@ -3058,9 +3582,13 @@ class InferenceMonitor:
             ),
             namespace,
         )
-        deployment_names = (*role_names, f"{name}-proxy") if mooncake_endpoint else (name,)
+        # A classic endpoint's canary serves the same model on its own GPU
+        # replicas, so a stop scales it too and counts it in the totals.
+        deployment_names = (
+            (*role_names, f"{name}-proxy") if mooncake_endpoint else (name, f"{name}-canary")
+        )
         deployments = {
-            deployment_name: self._get_deployment(deployment_name, namespace)
+            deployment_name: self._get_owned_deployment(deployment_name, namespace)
             for deployment_name in deployment_names
         }
         ready_replicas = sum(
@@ -3144,6 +3672,13 @@ class InferenceMonitor:
 
     def _deployment_exists(self, name: str, namespace: str) -> bool:
         return self._get_deployment(name, namespace) is not None
+
+    def _get_owned_deployment(self, name: str, namespace: str) -> V1Deployment | None:
+        """:meth:`_get_deployment`, reading another endpoint's Deployment as absent."""
+        try:
+            return self._get_deployment(name, namespace)
+        except ForeignEndpointResourceError:
+            return None
 
     def _get_deployment(self, name: str, namespace: str) -> V1Deployment | None:
         try:
@@ -3332,9 +3867,11 @@ class InferenceMonitor:
     def _region_of_address(self, address: str) -> str:
         """Return the address's explicit AWS region or safe local classification.
 
-        AWS region tokens embedded in the host are authoritative. Bare Service
-        names and Kubernetes ``.svc`` names are local by construction. Any
-        other host without a region token is external and ambiguous, so it is
+        Bare Service names and Kubernetes ``.svc`` names are local by
+        construction, whatever words the endpoint or namespace name contains
+        (``my-llama-3-prefill.gco-inference.svc.cluster.local`` is this
+        cluster's). For any other host an embedded AWS region token is
+        authoritative; a host without one is external and ambiguous, so it is
         classified as ``"unknown"`` and rejected by regional-scope checks.
         """
         candidate = (address or "").strip()
@@ -3349,11 +3886,11 @@ class InferenceMonitor:
         if not host:
             return "unknown"
 
+        if "." not in host or host.endswith((".svc", ".svc.cluster.local")):
+            return self.region
         match = _REGION_TOKEN_PATTERN.search(host)
         if match:
             return match.group(0)
-        if "." not in host or host.endswith((".svc", ".svc.cluster.local")):
-            return self.region
         return "unknown"
 
     def _resolve_regional_scope(
@@ -3472,8 +4009,9 @@ class InferenceMonitor:
         headless Service that fronts its RPC and metadata ports. This method
         uses create-if-absent semantics, so any number of calls within a region
         converge on exactly one StatefulSet with a single replica and one
-        Service. An already-existing master is left untouched — a conflicting
-        create is treated as success and never overwrites the running master.
+        Service. Each object is read first; an existing master is left
+        untouched, and a create that loses a race to another writer (409) is
+        treated as success, so the running master is never overwritten.
 
         The StatefulSet runs the master daemon with its built-in HTTP metadata
         server, exposing RPC on :data:`MOONCAKE_MASTER_RPC_PORT` and the
@@ -3624,29 +4162,40 @@ class InferenceMonitor:
             ),
         )
 
-        # Create-if-absent: a 409 means the shared master already exists, which
-        # is the steady state. Leave it untouched and treat it as success.
-        self._assert_mutation_authority()
-        try:
-            self.core_v1.create_namespaced_service(ns, service, _request_timeout=self._k8s_timeout)
+        # Create-if-absent: an existing shared master is the steady state and
+        # is left untouched.
+        created_service = self._read_or_create(
+            partial(
+                self.core_v1.read_namespaced_service,
+                MOONCAKE_MASTER_SERVICE,
+                ns,
+                _request_timeout=self._k8s_timeout,
+            ),
+            partial(
+                self.core_v1.create_namespaced_service,
+                ns,
+                service,
+                _request_timeout=self._k8s_timeout,
+            ),
+        )
+        if created_service is None:
             logger.info("Created shared mooncake master service in %s", ns)
-        except ApiException as e:
-            if e.status == 409:
-                logger.info("Shared mooncake master service already exists in %s", ns)
-            else:
-                raise
-
-        self._assert_mutation_authority()
-        try:
-            self.apps_v1.create_namespaced_stateful_set(
-                ns, stateful_set, _request_timeout=self._k8s_timeout
-            )
+        created_stateful_set = self._read_or_create(
+            partial(
+                self.apps_v1.read_namespaced_stateful_set,
+                MOONCAKE_MASTER_SERVICE,
+                ns,
+                _request_timeout=self._k8s_timeout,
+            ),
+            partial(
+                self.apps_v1.create_namespaced_stateful_set,
+                ns,
+                stateful_set,
+                _request_timeout=self._k8s_timeout,
+            ),
+        )
+        if created_stateful_set is None:
             logger.info("Created shared mooncake master statefulset in %s", ns)
-        except ApiException as e:
-            if e.status == 409:
-                logger.info("Shared mooncake master statefulset already exists in %s", ns)
-            else:
-                raise
 
     def _mooncake_master_ready_replicas(self, ns: str) -> int:
         """Return the shared master's Ready replica count, 0 when absent.
@@ -3802,10 +4351,10 @@ class InferenceMonitor:
           ``mooncake.transfer.bootstrap_base_port`` (default
           :data:`MOONCAKE_BOOTSTRAP_BASE_PORT`).
 
-        Each rule is created independently; an already-present rule (409) is the
-        steady state and counts as success. No other policy is ever read,
-        modified, or deleted, so the namespace's isolation holds regardless of
-        outcome.
+        Each rule is read and, when absent, created independently; a present
+        rule (or one another writer creates first, a 409) is the steady state
+        and counts as success. No other policy is ever read, modified, or
+        deleted, so the namespace's isolation holds regardless of outcome.
 
         Args:
             ns: The inference namespace the rules apply to.
@@ -3940,17 +4489,23 @@ class InferenceMonitor:
         ]
 
         for rule_name, policy in policies:
-            self._assert_mutation_authority()
             try:
-                self.networking_v1.create_namespaced_network_policy(
-                    ns, policy, _request_timeout=self._k8s_timeout
+                # An existing policy is the steady state and is left untouched.
+                existing = self._read_or_create(
+                    partial(
+                        self.networking_v1.read_namespaced_network_policy,
+                        rule_name,
+                        ns,
+                        _request_timeout=self._k8s_timeout,
+                    ),
+                    partial(
+                        self.networking_v1.create_namespaced_network_policy,
+                        ns,
+                        policy,
+                        _request_timeout=self._k8s_timeout,
+                    ),
                 )
-                logger.info("Applied network policy %s in %s", rule_name, ns)
             except ApiException as e:
-                if e.status == 409:
-                    # Already present — the steady state. Leave it untouched.
-                    logger.info("Network policy %s already present in %s", rule_name, ns)
-                    continue
                 logger.error(
                     "Could not apply network policy %s in %s: %s",
                     rule_name,
@@ -3958,6 +4513,8 @@ class InferenceMonitor:
                     e,
                 )
                 raise NetworkPolicyApplyError(rule_name, e.reason or str(e)) from e
+            if existing is None:
+                logger.info("Applied network policy %s in %s", rule_name, ns)
 
     def _create_deployment(
         self,
@@ -4373,7 +4930,7 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=deploy_name,
                 namespace=namespace,
-                labels=dict(labels),
+                labels=self._owned_labels(labels),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1DeploymentSpec(
@@ -4762,13 +5319,12 @@ class InferenceMonitor:
         """Materialize the prefill-decode proxy front for a disaggregated endpoint.
 
         Disaggregated and ``both`` modes are fronted by a lightweight proxy that
-        runs the residency check and dispatches each request to the prefill and
-        decode pods. It materializes a ConfigMap, a proxy Deployment with at
+        primes a prefill pod with each request and streams the answer from a
+        decode pod. It materializes a ConfigMap, a proxy Deployment with at
         least one replica, and a Service whose selector matches only the proxy
         pods. The shared HTTPRoute attached to ``gco-system/gco-gateway`` sends
         ``/inference`` to ``gco-system/inference-proxy``; that authenticated
         platform proxy then reaches this internal ClusterIP Service.
-        Endpoint-specific Ingresses are removed as an unsafe legacy path.
 
         Every hop is verified HTTPS: the router binds pod loopback behind the
         pod's ``endpoint-tls-proxy`` sidecar (the Service publishes only that
@@ -4786,9 +5342,10 @@ class InferenceMonitor:
 
         Creation is idempotent at the API boundary: an already-present
         Deployment is merge-patched to the desired shape and an already-present
-        ClusterIP Service is moved to the TLS port if it predates it, while
-        historical direct Ingresses are deleted if present. No endpoint Gateway
-        or HTTPRoute is created.
+        ClusterIP Service is moved to the TLS port if it predates it. No
+        endpoint Ingress, Gateway or HTTPRoute is created; the Ingresses older
+        releases created are deleted with the endpoint (see
+        :func:`_legacy_ingress_names`).
 
         Args:
             name: The endpoint name.
@@ -4826,7 +5383,13 @@ class InferenceMonitor:
             lifecycle_id,
         )
 
-        proxy_env = build_pd_proxy_config(mooncake)
+        # Read first: in the steady state the proxy exists and is converged by
+        # the merge patch below, with no create attempt. A proxy an earlier
+        # release created keeps the environment that release gave it.
+        existing = self._get_deployment(proxy_name, ns)
+        proxy_env = build_pd_proxy_config(
+            mooncake, released_layout=_carries_released_pd_proxy_env(existing)
+        )
         container_env = [client.V1EnvVar(name=k, value=v) for k, v in proxy_env.items()]
         # Deliver the admin key by Secret reference only — its value is never
         # placed on the spec or a command argument.
@@ -4843,9 +5406,7 @@ class InferenceMonitor:
         )
 
         # The proxy fronts at least one replica; a spec may ask for more.
-        replicas = proxy.get("replicas", 1)
-        if not isinstance(replicas, int) or isinstance(replicas, bool) or replicas < 1:
-            replicas = 1
+        replicas = _pd_proxy_replicas(mooncake)
 
         labels = {
             "app": proxy_name,
@@ -4878,7 +5439,7 @@ class InferenceMonitor:
         proxy_volume_name = "pd-proxy-script"
 
         container = client.V1Container(
-            name="proxy",
+            name=PD_PROXY_CONTAINER,
             image=proxy.get("image"),
             command=["python3", PD_PROXY_SCRIPT_PATH],
             ports=[client.V1ContainerPort(container_port=PD_PROXY_PORT)],
@@ -4903,12 +5464,19 @@ class InferenceMonitor:
             liveness_probe=_pd_proxy_health_probe(liveness=True),
         )
         sidecar = build_endpoint_tls_proxy(PD_PROXY_PORT, _tls_proxy_config_map_name(name))
+        # Provenance (lifecycle, Region generation, leader epoch) lives on the
+        # Deployment's own metadata only. This Deployment is merge-patched on
+        # every pass, so a leader epoch on the pod template would roll every
+        # proxy, cutting long streams, each time leadership moves. The merge
+        # patch leaves the template annotations it does not name untouched,
+        # so a proxy an earlier release stamped keeps its own.
+        template_annotations = _endpoint_tls_pod_annotations(None, sidecar)
 
         deployment = client.V1Deployment(
             metadata=client.V1ObjectMeta(
                 name=proxy_name,
                 namespace=ns,
-                labels=dict(labels),
+                labels=self._owned_labels(labels),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1DeploymentSpec(
@@ -4916,10 +5484,7 @@ class InferenceMonitor:
                 selector=client.V1LabelSelector(match_labels={"app": proxy_name}),
                 template=client.V1PodTemplateSpec(
                     metadata=client.V1ObjectMeta(
-                        labels=dict(labels),
-                        annotations=_endpoint_tls_pod_annotations(
-                            self._provenance_annotations(), sidecar
-                        ),
+                        labels=dict(labels), annotations=template_annotations
                     ),
                     spec=client.V1PodSpec(
                         service_account_name="gco-service-account",
@@ -4956,38 +5521,50 @@ class InferenceMonitor:
             ),
         )
 
-        self._assert_mutation_authority()
-        try:
-            self.apps_v1.create_namespaced_deployment(
-                ns, deployment, _request_timeout=self._k8s_timeout
-            )
-            self._confirm_created_resource(
-                kind="deployment",
-                resource_name=proxy_name,
-                read_resource=partial(
-                    self.apps_v1.read_namespaced_deployment,
-                    proxy_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    self.apps_v1.delete_namespaced_deployment,
-                    proxy_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-            )
-            logger.info("Created proxy deployment %s/%s", ns, proxy_name)
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = self._get_deployment(proxy_name, ns)
-            if existing is None:
-                raise ReconcileFencedError(
-                    "proxy deployment disappeared during reconciliation"
-                ) from error
+        if existing is None:
+            self._assert_mutation_authority()
+            try:
+                self.apps_v1.create_namespaced_deployment(
+                    ns, deployment, _request_timeout=self._k8s_timeout
+                )
+                self._confirm_created_resource(
+                    kind="deployment",
+                    resource_name=proxy_name,
+                    read_resource=partial(
+                        self.apps_v1.read_namespaced_deployment,
+                        proxy_name,
+                        ns,
+                        _request_timeout=self._k8s_timeout,
+                    ),
+                    delete_resource=partial(
+                        self.apps_v1.delete_namespaced_deployment,
+                        proxy_name,
+                        ns,
+                        _request_timeout=self._k8s_timeout,
+                    ),
+                )
+                logger.info("Created proxy deployment %s/%s", ns, proxy_name)
+            except ApiException as error:
+                if error.status != 409:
+                    raise
+                existing = self._get_deployment(proxy_name, ns)
+                if existing is None:
+                    raise ReconcileFencedError(
+                        "proxy deployment disappeared during reconciliation"
+                    ) from error
+        if existing is not None:
             _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
             present(deployment.metadata, "deployment.metadata").resource_version = resource_version
+            live_stamp = _pod_template_annotations(existing).get(
+                ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION
+            )
+            if live_stamp is not None and sidecar.matches_stamp(live_stamp):
+                # Keep the stamp an earlier release wrote for this same sidecar:
+                # rewriting it would change the pod template and roll the proxy.
+                template_annotations[ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION] = live_stamp
+                present(deployment.spec, "deployment.spec").template.metadata = client.V1ObjectMeta(
+                    labels=dict(labels), annotations=template_annotations
+                )
             self._assert_mutation_authority()
             # A JSON merge patch replaces the containers and volumes lists
             # wholesale (a strategic merge would key them by name and merge each
@@ -5005,10 +5582,14 @@ class InferenceMonitor:
 
         self._create_proxy_service(proxy_name, ns)
 
-    def _authorize_existing_service(self, name: str, namespace: str) -> Any:
-        service = self.core_v1.read_namespaced_service(
-            name, namespace, _request_timeout=self._k8s_timeout
-        )
+    def _authorize_existing_service(
+        self, name: str, namespace: str, service: Any | None = None
+    ) -> Any:
+        """Authorize the live Service ``name``, read here unless ``service`` is given."""
+        if service is None:
+            service = self.core_v1.read_namespaced_service(
+                name, namespace, _request_timeout=self._k8s_timeout
+            )
         return self._authorize_resource(
             service,
             kind="service",
@@ -5085,12 +5666,14 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=deploy_name,
                 namespace=ns,
-                labels={
-                    "app": deploy_name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                    "gco.io/role": role,
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": deploy_name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                        "gco.io/role": role,
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
@@ -5099,18 +5682,19 @@ class InferenceMonitor:
                 type="ClusterIP",
             ),
         )
-        self._assert_mutation_authority()
-        try:
+        read_service = partial(
+            self.core_v1.read_namespaced_service,
+            deploy_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
             self.core_v1.create_namespaced_service(ns, service, _request_timeout=self._k8s_timeout)
             self._confirm_created_resource(
                 kind="service",
                 resource_name=deploy_name,
-                read_resource=partial(
-                    self.core_v1.read_namespaced_service,
-                    deploy_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_service,
                 delete_resource=partial(
                     self.core_v1.delete_namespaced_service,
                     deploy_name,
@@ -5118,13 +5702,14 @@ class InferenceMonitor:
                     _request_timeout=self._k8s_timeout,
                 ),
             )
+
+        existing = self._read_or_create(read_service, create)
+        if existing is None:
             logger.info("Created role service %s/%s", ns, deploy_name)
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = self._authorize_existing_service(deploy_name, ns)
-            self._converge_service_ports(deploy_name, ns, existing)
-            logger.info("Role service %s/%s already exists", ns, deploy_name)
+            return
+        existing = self._authorize_existing_service(deploy_name, ns, existing)
+        self._converge_service_ports(deploy_name, ns, existing)
+        logger.info("Role service %s/%s already exists", ns, deploy_name)
 
     def _ensure_pd_proxy_configmap(self, name: str, ns: str) -> None:
         """Publish the PD proxy program to the pod as a ConfigMap.
@@ -5132,7 +5717,7 @@ class InferenceMonitor:
         The proxy program (``mooncake_pd_proxy.py``) ships in this image
         alongside the monitor; its source is read here and mounted into the
         ``{name}-proxy`` pod, which runs it with ``python3`` from
-        ``PD_PROXY_SCRIPT_PATH``. The ConfigMap is patched on conflict so the
+        ``PD_PROXY_SCRIPT_PATH``. An existing ConfigMap is patched so the
         program tracks the running monitor build.
         """
         script = (Path(__file__).resolve().parent / PD_PROXY_SCRIPT_FILENAME).read_text(
@@ -5143,69 +5728,64 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=cm_name,
                 namespace=ns,
-                labels={
-                    "app": f"{name}-proxy",
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                    "gco.io/role": PD_PROXY_ROLE_LABEL,
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": f"{name}-proxy",
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                        "gco.io/role": PD_PROXY_ROLE_LABEL,
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             data={PD_PROXY_SCRIPT_FILENAME: script},
         )
-        self._assert_mutation_authority()
-        try:
+        read_config_map = partial(
+            self.core_v1.read_namespaced_config_map,
+            cm_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+        delete_config_map = partial(
+            self.core_v1.delete_namespaced_config_map,
+            cm_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
             self.core_v1.create_namespaced_config_map(ns, body, _request_timeout=self._k8s_timeout)
             self._confirm_created_resource(
                 kind="configmap",
                 resource_name=cm_name,
-                read_resource=partial(
-                    self.core_v1.read_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    self.core_v1.delete_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_config_map,
+                delete_resource=delete_config_map,
             )
+
+        existing = self._read_or_create(read_config_map, create)
+        if existing is None:
             logger.info("Created PD proxy ConfigMap %s/%s", ns, cm_name)
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = self.core_v1.read_namespaced_config_map(
-                cm_name, ns, _request_timeout=self._k8s_timeout
-            )
-            existing = self._authorize_resource(
-                existing,
-                kind="configmap",
-                resource_name=cm_name,
-                patch_metadata=partial(
-                    self.core_v1.patch_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                read_resource=lambda: self.core_v1.read_namespaced_config_map(
-                    cm_name, ns, _request_timeout=self._k8s_timeout
-                ),
-                delete_resource=partial(
-                    self.core_v1.delete_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-            )
-            _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            present(body.metadata, "config_map.metadata").resource_version = resource_version
-            self._assert_mutation_authority()
-            self.core_v1.patch_namespaced_config_map(
-                cm_name, ns, body, _request_timeout=self._k8s_timeout
-            )
-            logger.info("Updated PD proxy ConfigMap %s/%s", ns, cm_name)
+            return
+        existing = self._authorize_resource(
+            existing,
+            kind="configmap",
+            resource_name=cm_name,
+            patch_metadata=partial(
+                self.core_v1.patch_namespaced_config_map,
+                cm_name,
+                ns,
+                _request_timeout=self._k8s_timeout,
+            ),
+            read_resource=read_config_map,
+            delete_resource=delete_config_map,
+        )
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
+        present(body.metadata, "config_map.metadata").resource_version = resource_version
+        self._assert_mutation_authority()
+        self.core_v1.patch_namespaced_config_map(
+            cm_name, ns, body, _request_timeout=self._k8s_timeout
+        )
+        logger.info("Updated PD proxy ConfigMap %s/%s", ns, cm_name)
 
     def _ensure_tls_proxy_configmap(self, name: str, ns: str) -> None:
         """Publish the TLS sidecar program for every pod of one endpoint.
@@ -5230,7 +5810,9 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=cm_name,
                 namespace=ns,
-                labels={"app": name, "project": "gco", "gco.io/type": "inference"},
+                labels=self._owned_labels(
+                    {"app": name, "project": "gco", "gco.io/type": "inference"}
+                ),
                 annotations=self._provenance_annotations(),
             ),
             data={ENDPOINT_TLS_PROXY_SCRIPT_FILENAME: script},
@@ -5309,13 +5891,15 @@ class InferenceMonitor:
 
         Deployments created before the sidecar existed (or rendered with a
         different sidecar image or upstream port) are patched when the live pod
-        template lacks the sidecar or carries a different
-        ``ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION``. A strategic merge adds the
-        sidecar container and its volumes by name, merges the annotations, and
-        leaves the model container untouched: its image, port, and probes stay
-        exactly as reconciled. The observed resourceVersion makes the patch a
-        compare-and-swap; the resulting rollout replaces pods like any other
-        template change.
+        template lacks the sidecar or carries an
+        ``ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION`` that does not match it (see
+        :meth:`EndpointTLSProxy.matches_stamp`: the stamp an earlier release
+        wrote for the same sidecar matches, and is left in place). A strategic
+        merge adds the sidecar container and its volumes by name, merges the
+        annotations, and leaves the model container untouched: its image, port,
+        and probes stay exactly as reconciled. The observed resourceVersion
+        makes the patch a compare-and-swap; the resulting rollout replaces pods
+        like any other template change.
 
         Args:
             deploy_name: The Deployment to converge.
@@ -5344,7 +5928,9 @@ class InferenceMonitor:
             getattr(container, "name", None) == ENDPOINT_TLS_PROXY_CONTAINER
             for container in containers
         )
-        if has_sidecar and annotations.get(ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION) == sidecar.digest:
+        if has_sidecar and sidecar.matches_stamp(
+            annotations.get(ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION)
+        ):
             return False
 
         _metadata, _annotations, _uid, resource_version = self._object_metadata(deployment)
@@ -5442,12 +6028,14 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=proxy_name,
                 namespace=namespace,
-                labels={
-                    "app": proxy_name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                    "gco.io/role": PD_PROXY_ROLE_LABEL,
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": proxy_name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                        "gco.io/role": PD_PROXY_ROLE_LABEL,
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
@@ -5459,20 +6047,21 @@ class InferenceMonitor:
             ),
         )
 
-        self._assert_mutation_authority()
-        try:
+        read_service = partial(
+            self.core_v1.read_namespaced_service,
+            proxy_name,
+            namespace,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
             self.core_v1.create_namespaced_service(
                 namespace, service, _request_timeout=self._k8s_timeout
             )
             self._confirm_created_resource(
                 kind="service",
                 resource_name=proxy_name,
-                read_resource=partial(
-                    self.core_v1.read_namespaced_service,
-                    proxy_name,
-                    namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_service,
                 delete_resource=partial(
                     self.core_v1.delete_namespaced_service,
                     proxy_name,
@@ -5480,13 +6069,14 @@ class InferenceMonitor:
                     _request_timeout=self._k8s_timeout,
                 ),
             )
+
+        existing = self._read_or_create(read_service, create)
+        if existing is None:
             logger.info("Created proxy service %s/%s", namespace, proxy_name)
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = self._authorize_existing_service(proxy_name, namespace)
-            self._converge_service_ports(proxy_name, namespace, existing)
-            logger.info("Proxy service %s/%s already exists", namespace, proxy_name)
+            return
+        existing = self._authorize_existing_service(proxy_name, namespace, existing)
+        self._converge_service_ports(proxy_name, namespace, existing)
+        logger.info("Proxy service %s/%s already exists", namespace, proxy_name)
 
     def _create_service(self, name: str, namespace: str, spec: dict[str, Any]) -> None:
         """Create the internal ClusterIP Service for an inference endpoint.
@@ -5501,11 +6091,13 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=name,
                 namespace=namespace,
-                labels={
-                    "app": name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
@@ -5707,8 +6299,14 @@ class InferenceMonitor:
                 fallback_port=canary_spec.get("port", 8000),
             )
             current_image = self._get_deployment_image(deployment)
-            current_replicas = deployment.spec.replicas or 1
-            ready_replicas = present(deployment.status, "deployment.status").ready_replicas or 0
+            # A stopped endpoint's canary sits at 0 replicas; only an unset
+            # count means Kubernetes' default of 1.
+            live_replicas = deployment.spec.replicas
+            current_replicas = 1 if live_replicas is None else live_replicas
+            # Routing trusts this count to mean "Ready on canary_image": pods of
+            # an earlier canary template do not count.
+            present(deployment.status, "deployment.status")
+            ready_replicas = _rolled_out_ready_replicas(deployment)
             if current_image != canary_image:
                 self._update_deployment_image(canary_name, namespace, canary_image)
                 ready_replicas = 0
@@ -5733,9 +6331,14 @@ class InferenceMonitor:
         }
 
     def _cleanup_canary(self, name: str, namespace: str) -> None:
-        """Remove only canary objects carrying this reconciliation authority."""
+        """Remove only canary objects carrying this reconciliation authority.
+
+        An object at the canary's name that belongs to another endpoint (one
+        named ``{name}-canary``, say) is not this endpoint's canary and is left
+        alone.
+        """
         canary_name = f"{name}-canary"
-        deployment = self._get_deployment(canary_name, namespace)
+        deployment = self._get_owned_deployment(canary_name, namespace)
         if deployment is not None:
             self._assert_mutation_authority()
             try:
@@ -5753,6 +6356,8 @@ class InferenceMonitor:
                     logger.error("Failed to delete canary deployment %s: %s", canary_name, error)
         try:
             service = self._authorize_existing_service(canary_name, namespace)
+        except ForeignEndpointResourceError:
+            pass
         except ApiException as error:
             if error.status != 404:
                 logger.error("Failed to read canary service %s: %s", canary_name, error)
@@ -5812,8 +6417,7 @@ class InferenceMonitor:
                 f"{name}-pd-proxy",
                 _tls_proxy_config_map_name(name),
             ),
-            legacy_ingresses=(name, f"{name}-canary", f"{name}-proxy"),
-            legacy_http_routes=(name, f"{name}-canary", f"{name}-proxy"),
+            legacy_ingresses=_legacy_ingress_names(name),
             generated_admin_secret=f"{name}-admin",
         )
 
@@ -5840,8 +6444,14 @@ class InferenceMonitor:
         pending: list[str],
         errors: list[str],
         observed_resource: Any | None = None,
+        foreign: set[str] | None = None,
     ) -> bool:
-        """Read-authorize-delete one exact UID/resourceVersion, then re-observe."""
+        """Read-authorize-delete one exact UID/resourceVersion, then re-observe.
+
+        An object that belongs to another endpoint (see
+        :class:`ForeignEndpointResourceError`) is neither deleted nor waited
+        for: it counts as absent, and its ``kind/name`` is added to ``foreign``.
+        """
         resource_id = f"{kind}/{resource_name}"
         if observed_resource is not None:
             observed = observed_resource
@@ -5857,17 +6467,23 @@ class InferenceMonitor:
                 errors.append(self._cleanup_error("read", kind, resource_name, error))
                 return False
 
-        observed = self._authorize_resource(
-            observed,
-            kind=kind,
-            resource_name=resource_name,
-            patch_metadata=patch_metadata,
-            read_resource=read_call,
-            delete_resource=delete_call,
-            allow_region_mismatch=bool(
-                self._active_authority and self._active_authority.region_removed
-            ),
-        )
+        try:
+            observed = self._authorize_resource(
+                observed,
+                kind=kind,
+                resource_name=resource_name,
+                patch_metadata=patch_metadata,
+                read_resource=read_call,
+                delete_resource=delete_call,
+                allow_region_mismatch=bool(
+                    self._active_authority and self._active_authority.region_removed
+                ),
+            )
+        except ForeignEndpointResourceError as error:
+            logger.info("Left %s alone during cleanup: %s", resource_id, error)
+            if foreign is not None:
+                foreign.add(resource_id)
+            return False
         _metadata, _annotations, observed_uid, _resource_version = self._object_metadata(observed)
         self._assert_mutation_authority()
         try:
@@ -5920,7 +6536,7 @@ class InferenceMonitor:
         pending: list[str] = []
         errors: list[str] = []
         resources_found = False
-        custom_objects = client.CustomObjectsApi()
+        custom_objects = client.CustomObjectsApi(self.api_client)
         for autoscaler_name in names:
             resources_found |= self._delete_and_confirm(
                 kind="scaledobject",
@@ -5970,7 +6586,7 @@ class InferenceMonitor:
         pending: list[str] = []
         errors: list[str] = []
         resources_found = False
-        autoscaling_v2 = client.AutoscalingV2Api()
+        autoscaling_v2 = client.AutoscalingV2Api(self.api_client)
         for autoscaler_name in names:
             resources_found |= self._delete_and_confirm(
                 kind="hpa",
@@ -6271,6 +6887,9 @@ class InferenceMonitor:
         pending = list(autoscaler_cleanup.pending)
         errors = list(autoscaler_cleanup.errors)
         resources_found = autoscaler_cleanup.resources_found
+        # Parents at this endpoint's names that belong to another endpoint;
+        # their pods and endpoint slices are that endpoint's too.
+        foreign: set[str] = set()
 
         for deployment_name in inventory.deployments:
             resources_found |= self._delete_and_confirm(
@@ -6296,6 +6915,7 @@ class InferenceMonitor:
                 ),
                 pending=pending,
                 errors=errors,
+                foreign=foreign,
             )
 
         for service_name in inventory.services:
@@ -6322,6 +6942,7 @@ class InferenceMonitor:
                 ),
                 pending=pending,
                 errors=errors,
+                foreign=foreign,
             )
 
         for config_map_name in inventory.config_maps:
@@ -6376,46 +6997,22 @@ class InferenceMonitor:
                 errors=errors,
             )
 
-        custom_objects = client.CustomObjectsApi()
-        for route_name in inventory.legacy_http_routes:
-            resources_found |= self._delete_and_confirm(
-                kind="httproute",
-                resource_name=route_name,
-                delete_call=partial(
-                    custom_objects.delete_namespaced_custom_object,
-                    group="gateway.networking.k8s.io",
-                    version="v1",
-                    namespace=namespace,
-                    plural="httproutes",
-                    name=route_name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                read_call=partial(
-                    custom_objects.get_namespaced_custom_object,
-                    group="gateway.networking.k8s.io",
-                    version="v1",
-                    namespace=namespace,
-                    plural="httproutes",
-                    name=route_name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                patch_metadata=partial(
-                    custom_objects.patch_namespaced_custom_object,
-                    group="gateway.networking.k8s.io",
-                    version="v1",
-                    namespace=namespace,
-                    plural="httproutes",
-                    name=route_name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                pending=pending,
-                errors=errors,
-            )
-
         resources_found |= self._observe_generated_children(
             name,
             namespace,
-            inventory,
+            replace(
+                inventory,
+                deployments=tuple(
+                    deployment_name
+                    for deployment_name in inventory.deployments
+                    if f"deployment/{deployment_name}" not in foreign
+                ),
+                services=tuple(
+                    service_name
+                    for service_name in inventory.services
+                    if f"service/{service_name}" not in foreign
+                ),
+            ),
             pending,
             errors,
         )
@@ -6641,11 +7238,13 @@ class InferenceMonitor:
             "metadata": {
                 "name": name,
                 "namespace": namespace,
-                "labels": {
-                    "app": name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                },
+                "labels": self._owned_labels(
+                    {
+                        "app": name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                    }
+                ),
                 "annotations": self._provenance_annotations() or {},
             },
             "spec": {
@@ -6656,39 +7255,39 @@ class InferenceMonitor:
             },
         }
 
-        custom = client.CustomObjectsApi()
-        self._assert_mutation_authority()
-        try:
+        custom = client.CustomObjectsApi(self.api_client)
+        scaled_object: dict[str, Any] = {
+            "group": KEDA_API_GROUP,
+            "version": KEDA_API_VERSION,
+            "namespace": namespace,
+            "plural": KEDA_SCALEDOBJECT_PLURAL,
+        }
+        read_scaled_object = partial(
+            custom.get_namespaced_custom_object,
+            name=name,
+            **scaled_object,
+            _request_timeout=self._k8s_timeout,
+        )
+        delete_scaled_object = partial(
+            custom.delete_namespaced_custom_object,
+            name=name,
+            **scaled_object,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
             custom.create_namespaced_custom_object(
-                group=KEDA_API_GROUP,
-                version=KEDA_API_VERSION,
-                namespace=namespace,
-                plural=KEDA_SCALEDOBJECT_PLURAL,
-                body=body,
-                _request_timeout=self._k8s_timeout,
+                body=body, **scaled_object, _request_timeout=self._k8s_timeout
             )
             self._confirm_created_resource(
                 kind="scaledobject",
                 resource_name=name,
-                read_resource=partial(
-                    custom.get_namespaced_custom_object,
-                    group=KEDA_API_GROUP,
-                    version=KEDA_API_VERSION,
-                    namespace=namespace,
-                    plural=KEDA_SCALEDOBJECT_PLURAL,
-                    name=name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    custom.delete_namespaced_custom_object,
-                    group=KEDA_API_GROUP,
-                    version=KEDA_API_VERSION,
-                    namespace=namespace,
-                    plural=KEDA_SCALEDOBJECT_PLURAL,
-                    name=name,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_scaled_object,
+                delete_resource=delete_scaled_object,
             )
+
+        existing = self._read_or_create(read_scaled_object, create)
+        if existing is None:
             logger.info(
                 "Created KEDA ScaledObject %s targeting %s (min=%d, max=%d)",
                 name,
@@ -6696,61 +7295,27 @@ class InferenceMonitor:
                 min_replicas,
                 max_replicas,
             )
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = custom.get_namespaced_custom_object(
-                group=KEDA_API_GROUP,
-                version=KEDA_API_VERSION,
-                namespace=namespace,
-                plural=KEDA_SCALEDOBJECT_PLURAL,
+            return
+        existing = self._authorize_resource(
+            existing,
+            kind="scaledobject",
+            resource_name=name,
+            patch_metadata=partial(
+                custom.patch_namespaced_custom_object,
                 name=name,
+                **scaled_object,
                 _request_timeout=self._k8s_timeout,
-            )
-            existing = self._authorize_resource(
-                existing,
-                kind="scaledobject",
-                resource_name=name,
-                patch_metadata=partial(
-                    custom.patch_namespaced_custom_object,
-                    group=KEDA_API_GROUP,
-                    version=KEDA_API_VERSION,
-                    namespace=namespace,
-                    plural=KEDA_SCALEDOBJECT_PLURAL,
-                    name=name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                read_resource=lambda: custom.get_namespaced_custom_object(
-                    group=KEDA_API_GROUP,
-                    version=KEDA_API_VERSION,
-                    namespace=namespace,
-                    plural=KEDA_SCALEDOBJECT_PLURAL,
-                    name=name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    custom.delete_namespaced_custom_object,
-                    group=KEDA_API_GROUP,
-                    version=KEDA_API_VERSION,
-                    namespace=namespace,
-                    plural=KEDA_SCALEDOBJECT_PLURAL,
-                    name=name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-            )
-            _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            body["metadata"]["resourceVersion"] = resource_version
-            self._assert_mutation_authority()
-            custom.patch_namespaced_custom_object(
-                group=KEDA_API_GROUP,
-                version=KEDA_API_VERSION,
-                namespace=namespace,
-                plural=KEDA_SCALEDOBJECT_PLURAL,
-                name=name,
-                body=body,
-                _request_timeout=self._k8s_timeout,
-            )
-            logger.info("Updated KEDA ScaledObject %s", name)
+            ),
+            read_resource=read_scaled_object,
+            delete_resource=delete_scaled_object,
+        )
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
+        body["metadata"]["resourceVersion"] = resource_version
+        self._assert_mutation_authority()
+        custom.patch_namespaced_custom_object(
+            name=name, body=body, **scaled_object, _request_timeout=self._k8s_timeout
+        )
+        logger.info("Updated KEDA ScaledObject %s", name)
 
     def _apply_hpa(
         self,
@@ -6785,11 +7350,13 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=hpa_name,
                 namespace=namespace,
-                labels={
-                    "app": hpa_name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": hpa_name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V2HorizontalPodAutoscalerSpec(
@@ -6804,26 +7371,33 @@ class InferenceMonitor:
             ),
         )
 
-        autoscaling_v2 = client.AutoscalingV2Api()
-        self._assert_mutation_authority()
-        try:
-            autoscaling_v2.create_namespaced_horizontal_pod_autoscaler(namespace, hpa)
+        autoscaling_v2 = client.AutoscalingV2Api(self.api_client)
+        read_hpa = partial(
+            autoscaling_v2.read_namespaced_horizontal_pod_autoscaler,
+            hpa_name,
+            namespace,
+            _request_timeout=self._k8s_timeout,
+        )
+        delete_hpa = partial(
+            autoscaling_v2.delete_namespaced_horizontal_pod_autoscaler,
+            hpa_name,
+            namespace,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
+            autoscaling_v2.create_namespaced_horizontal_pod_autoscaler(
+                namespace, hpa, _request_timeout=self._k8s_timeout
+            )
             self._confirm_created_resource(
                 kind="hpa",
                 resource_name=hpa_name,
-                read_resource=partial(
-                    autoscaling_v2.read_namespaced_horizontal_pod_autoscaler,
-                    hpa_name,
-                    namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    autoscaling_v2.delete_namespaced_horizontal_pod_autoscaler,
-                    hpa_name,
-                    namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_hpa,
+                delete_resource=delete_hpa,
             )
+
+        existing = self._read_or_create(read_hpa, create)
+        if existing is None:
             logger.info(
                 "Created HPA %s targeting %s (min=%d, max=%d)",
                 hpa_name,
@@ -6831,42 +7405,30 @@ class InferenceMonitor:
                 min_replicas,
                 max_replicas,
             )
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = autoscaling_v2.read_namespaced_horizontal_pod_autoscaler(
-                hpa_name, namespace, _request_timeout=self._k8s_timeout
-            )
-            existing = self._authorize_resource(
-                existing,
-                kind="hpa",
-                resource_name=hpa_name,
-                patch_metadata=partial(
-                    autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler,
-                    hpa_name,
-                    namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                read_resource=lambda: autoscaling_v2.read_namespaced_horizontal_pod_autoscaler(
-                    hpa_name, namespace, _request_timeout=self._k8s_timeout
-                ),
-                delete_resource=partial(
-                    autoscaling_v2.delete_namespaced_horizontal_pod_autoscaler,
-                    hpa_name,
-                    namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
-            )
-            _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            present(hpa.metadata, "hpa.metadata").resource_version = resource_version
-            self._assert_mutation_authority()
-            autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler(
+            return
+        existing = self._authorize_resource(
+            existing,
+            kind="hpa",
+            resource_name=hpa_name,
+            patch_metadata=partial(
+                autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler,
                 hpa_name,
                 namespace,
-                hpa,
                 _request_timeout=self._k8s_timeout,
-            )
-            logger.info("Updated HPA %s", hpa_name)
+            ),
+            read_resource=read_hpa,
+            delete_resource=delete_hpa,
+        )
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
+        present(hpa.metadata, "hpa.metadata").resource_version = resource_version
+        self._assert_mutation_authority()
+        autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler(
+            hpa_name,
+            namespace,
+            hpa,
+            _request_timeout=self._k8s_timeout,
+        )
+        logger.info("Updated HPA %s", hpa_name)
 
     def _verify_hpa_owner(
         self,
@@ -6875,11 +7437,12 @@ class InferenceMonitor:
         target_name: str,
     ) -> ResourceCleanupResult:
         """Verify that the exact native/KEDA HPA owns the expected Deployment."""
-        autoscaling_v2 = client.AutoscalingV2Api()
+        autoscaling_v2 = client.AutoscalingV2Api(self.api_client)
         try:
             hpa = autoscaling_v2.read_namespaced_horizontal_pod_autoscaler(
                 hpa_name,
                 namespace,
+                _request_timeout=self._k8s_timeout,
             )
         except ApiException as error:
             if error.status == 404:
@@ -7077,13 +7640,25 @@ class InferenceMonitor:
     # ------------------------------------------------------------------
 
     def get_metrics(self) -> dict[str, Any]:
+        """The monitor's counters, exported as gauges at every scrape.
+
+        ``seconds_since_last_progress`` counts from the later of the last
+        finished loop iteration and the last step of a running pass, so a
+        standby (whose iterations keep finishing) and a long pass that keeps
+        progressing both stay below ``liveness_window_seconds``; the liveness
+        probe in ``32-inference-monitor.yaml`` fails once it is above.
+        """
+        now = time.monotonic()
         return {
             "cluster_id": self.cluster_id,
             "region": self.region,
             "running": self._running,
             "reconcile_count": self._reconcile_count,
             "errors_count": self._errors_count,
-            "seconds_since_last_pass": time.monotonic() - self._last_loop_completed_at,
+            "seconds_since_last_pass": now - self._last_loop_completed_at,
+            "seconds_since_last_progress": now
+            - max(self._last_loop_completed_at, self._pass_progress_at),
+            "liveness_window_seconds": self._liveness_window_seconds,
         }
 
 
@@ -7132,9 +7707,10 @@ async def main() -> None:
     # container, and PID 1 receives no kernel-default signal handling — so
     # without an explicit handler SIGTERM was silently ignored, every pod
     # rotation burned the full terminationGracePeriodSeconds, and the kubelet
-    # SIGKILLed the monitor mid-reconcile (exit 137). The handler flips the
-    # same stop flag the reconcile loop already honors, so shutdown waits for
-    # the in-flight cycle and exits 0 within one reconcile interval.
+    # SIGKILLed the monitor mid-reconcile (exit 137). The handler stops the
+    # monitor: a pass in progress finishes the endpoint it is reconciling and
+    # starts no other, the monitor releases its leader Lease so the standby
+    # takes over on its next attempt, and the process exits 0.
     shutdown_requested = asyncio.Event()
     loop = asyncio.get_running_loop()
 

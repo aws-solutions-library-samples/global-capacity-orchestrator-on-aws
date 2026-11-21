@@ -33,16 +33,17 @@ from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
-from gco.config.config_loader import ConfigLoader
+from gco.config.config_loader import ConfigLoader, read_block_flag
 from gco.stacks.constants import (
     LAMBDA_PYTHON_RUNTIME,
     cluster_shared_ssm_parameter_prefix,
 )
+from gco.stacks.control_plane_alarms import add_jobs_table_alarms, create_alert_topic
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-16T16:57:50Z
-# Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad
+# Generated at (UTC): 2026-11-19T06:05:34Z
+# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
 # Flowchart(s) generated from this file:
 #   * ``GCOGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack___init__.png``)
@@ -52,64 +53,44 @@ from gco.stacks.lambda_assets import lambda_source_code
 # <pyflowchart-code-diagram> END
 
 
-# Default values for the ``images`` cdk.json block. The defaults match the
-# documented retention posture: repos survive a stack destroy by default
-# (``retain``), non-empty repos block destroy unless the operator explicitly
-# flips ``empty_on_delete`` to true, lifecycle keeps the latest 20 tagged
-# images and expires untagged ones after 7 days, and replication is enabled
-# by default to every deployed region.
-_IMAGES_DEFAULT_REMOVAL_POLICY = "retain"
-_IMAGES_DEFAULT_EMPTY_ON_DELETE = False
-_IMAGES_DEFAULT_KEEP_TAGGED = 20
-_IMAGES_DEFAULT_EXPIRE_UNTAGGED_DAYS = 7
+# Default values for the ``images`` cdk.json block: the global stack
+# replicates the project's ``<project_name>/*`` ECR repositories to every
+# deployed region. The block's ``removal_policy``, ``empty_on_delete`` and
+# ``lifecycle`` keys are deprecated and ignored (see DEPRECATED_BLOCK_KEYS in
+# gco/config/config_loader.py): no stack creates or deletes the repositories,
+# which the gco CLI creates through the ECR API.
 _IMAGES_DEFAULT_REPLICATION_ENABLED = True
 _IMAGES_DEFAULT_REPLICATION_DESTINATIONS = "all_deployed_regions"
-
-_IMAGES_VALID_REMOVAL_POLICIES = ("retain", "destroy")
 
 
 def _parse_images_config(cdk_context: dict[str, Any] | None) -> dict[str, Any]:
     """Parse the ``images`` block from cdk.json with defaults applied.
 
     Returns a normalized dict shape that the rest of the global stack
-    can consume without re-parsing. Validates ``removal_policy`` against
-    the set ``{"retain", "destroy"}`` and ``replication.destinations``
+    can consume without re-parsing. Validates ``replication.destinations``
     against either the literal string ``"all_deployed_regions"`` or a
-    ``list[str]``.
+    ``list[str]``. The deprecated keys are not read.
 
     Args:
         cdk_context: The dict returned by ``self.node.try_get_context("images")``.
             ``None`` (the key being absent) is equivalent to an empty dict.
 
     Returns:
-        A dict with keys ``removal_policy``, ``empty_on_delete``,
-        ``lifecycle`` (with ``keep_tagged`` and ``expire_untagged_days``),
-        and ``replication`` (with ``enabled`` and ``destinations``).
+        A dict with the key ``replication`` (with ``enabled`` and
+        ``destinations``).
     """
     raw = cdk_context or {}
-
-    removal_policy = raw.get("removal_policy", _IMAGES_DEFAULT_REMOVAL_POLICY)
-    if not isinstance(removal_policy, str) or removal_policy not in _IMAGES_VALID_REMOVAL_POLICIES:
-        raise ValueError(
-            f"images.removal_policy must be 'retain' or 'destroy', got {removal_policy!r}"
-        )
-
-    empty_on_delete = bool(raw.get("empty_on_delete", _IMAGES_DEFAULT_EMPTY_ON_DELETE))
-
-    lifecycle_raw = raw.get("lifecycle") or {}
-    if not isinstance(lifecycle_raw, dict):
-        raise ValueError(f"images.lifecycle must be a mapping, got {type(lifecycle_raw).__name__}")
-    keep_tagged = int(lifecycle_raw.get("keep_tagged", _IMAGES_DEFAULT_KEEP_TAGGED))
-    expire_untagged_days = int(
-        lifecycle_raw.get("expire_untagged_days", _IMAGES_DEFAULT_EXPIRE_UNTAGGED_DAYS)
-    )
 
     replication_raw = raw.get("replication") or {}
     if not isinstance(replication_raw, dict):
         raise ValueError(
             f"images.replication must be a mapping, got {type(replication_raw).__name__}"
         )
-    replication_enabled = bool(replication_raw.get("enabled", _IMAGES_DEFAULT_REPLICATION_ENABLED))
+    # Strict, like every enabled flag: bool("false") is True, and earlier
+    # releases read a quoted "false" here as on (see parse_block_flag).
+    replication_enabled = read_block_flag(
+        replication_raw, "images.replication.enabled", default=_IMAGES_DEFAULT_REPLICATION_ENABLED
+    )
     destinations = replication_raw.get("destinations", _IMAGES_DEFAULT_REPLICATION_DESTINATIONS)
     if isinstance(destinations, str):
         if destinations != _IMAGES_DEFAULT_REPLICATION_DESTINATIONS:
@@ -131,12 +112,6 @@ def _parse_images_config(cdk_context: dict[str, Any] | None) -> dict[str, Any]:
         )
 
     return {
-        "removal_policy": removal_policy,
-        "empty_on_delete": empty_on_delete,
-        "lifecycle": {
-            "keep_tagged": keep_tagged,
-            "expire_untagged_days": expire_untagged_days,
-        },
         "replication": {
             "enabled": replication_enabled,
             "destinations": destinations,
@@ -185,6 +160,12 @@ class GCOGlobalStack(Stack):
         # Create DynamoDB tables for templates and webhooks
         self._create_dynamodb_tables()
 
+        # CloudWatch evaluates an alarm only in its own Region. When the
+        # monitoring stack is in another Region, the jobs table's alarms live
+        # here, with an alert topic of their own.
+        if config.get_global_region() != config.get_monitoring_region():
+            self._create_jobs_table_alarms()
+
         # Create S3 bucket for model weights
         self._create_model_bucket()
 
@@ -198,12 +179,12 @@ class GCOGlobalStack(Stack):
         # Create AWS Backup plan for DynamoDB tables
         self._create_backup_plan()
 
-        # Container image registry — parses the cdk.json ``images`` block,
-        # provisions the optional ECR replication rule for ``gco/*`` repos,
-        # and creates the lookup-or-create custom resource Lambda that
-        # ``cli images init`` will invoke per-repo on demand. The Lambda
-        # construct is created here regardless of replication settings so
-        # the function ARN is available for downstream invocations.
+        # Container image registry — parses the cdk.json ``images`` block and
+        # provisions the optional ECR replication rule for the project's
+        # ``<project_name>/*`` repos. The repositories themselves are not stack
+        # resources: the gco CLI creates them through the ECR API, and they
+        # survive a destroy. The lookup-or-create Lambda is provisioned too, but
+        # no custom resource and no CLI command invokes it.
         self.images_config = _parse_images_config(self.node.try_get_context("images"))
         self._create_image_replication_rule()
         self._create_image_lookup_lambda()
@@ -324,7 +305,7 @@ class GCOGlobalStack(Stack):
 
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        if self.listener is None:
+        if self.listener is None or self.accelerator is None:
             raise RuntimeError("Traffic-dial controller requires the Global Accelerator listener")
 
         project_name = self.config.get_project_name()
@@ -347,22 +328,37 @@ class GCOGlobalStack(Stack):
             ],
         )
 
-        # Global Accelerator APIs do not support resource-level IAM scoping.
-        # UpdateEndpointGroup — the only mutating action — is granted solely
-        # in enforce mode; monitor mode stays read-only against GA.
-        ga_actions = [
-            "globalaccelerator:DescribeAccelerator",
-            "globalaccelerator:ListEndpointGroups",
-        ]
-        if mode == "enforce":
-            ga_actions.append("globalaccelerator:UpdateEndpointGroup")
+        # Each Global Accelerator action takes the resource it acts on (Service
+        # Authorization Reference): DescribeAccelerator the accelerator,
+        # ListEndpointGroups the listener, UpdateEndpointGroup an endpoint
+        # group. UpdateEndpointGroup, the only mutating action, is granted
+        # solely in enforce mode and only on this stack's endpoint groups;
+        # monitor mode stays read-only against GA.
         controller_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=sorted(ga_actions),
-                resources=["*"],
+                actions=["globalaccelerator:DescribeAccelerator"],
+                resources=[self.accelerator.accelerator_arn],
             )
         )
+        controller_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["globalaccelerator:ListEndpointGroups"],
+                resources=[self.listener.listener_arn],
+            )
+        )
+        if mode == "enforce" and self.endpoint_groups:
+            controller_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["globalaccelerator:UpdateEndpointGroup"],
+                    resources=[
+                        group.endpoint_group_arn
+                        for _, group in sorted(self.endpoint_groups.items())
+                    ],
+                )
+            )
         # Cross-region read of each cluster's ClusterHealthy metric.
         # GetMetricData does not support resource-level permissions.
         controller_role.add_to_policy(
@@ -458,11 +454,13 @@ class GCOGlobalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The Global Accelerator Describe/List/Update APIs and CloudWatch "
-                        "GetMetricData do not support resource-level permissions and "
-                        "require a wildcard resource; PutMetricData is namespace-"
-                        "conditioned and the SSM wildcard is scoped to this project's "
-                        "traffic-dial parameter tree."
+                        "CloudWatch GetMetricData and PutMetricData and the X-Ray tracing "
+                        "actions support no resource-level permissions, so they take a "
+                        "wildcard resource; PutMetricData is conditioned on the "
+                        "GCO/TrafficDial namespace. The Global Accelerator actions name "
+                        "the accelerator, its listener and this stack's endpoint groups, "
+                        "and the SSM wildcard is scoped to this project's traffic-dial "
+                        "parameter tree."
                     ),
                     "appliesTo": [
                         "Resource::*",
@@ -1520,6 +1518,26 @@ class GCOGlobalStack(Stack):
             return str(self.endpoint_groups[region].endpoint_group_arn)
         raise ValueError(f"No endpoint group found for region: {region}")
 
+    def _create_jobs_table_alarms(self) -> None:
+        """Create the jobs table's alarms and their alert topic in this Region.
+
+        Used when ``deployment_regions.global`` is not the monitoring Region;
+        otherwise the monitoring stack creates the same alarms and they notify
+        its topic (``gco/stacks/control_plane_alarms.py``).
+        """
+        topic = create_alert_topic(
+            self,
+            "AlertTopic",
+            display_name="GCO (Global Capacity Orchestrator on AWS) Global Stack Alerts",
+            output_id="GlobalAlertTopicArn",
+        )
+        add_jobs_table_alarms(
+            self,
+            table_name=self.jobs_table.table_name,
+            region=self.config.get_global_region(),
+            topic=topic,
+        )
+
     def _create_dynamodb_tables(self) -> None:
         """Create DynamoDB tables for templates, webhooks, jobs, inference endpoints, and missions."""
         project_name = self.config.get_project_name()
@@ -1975,6 +1993,11 @@ class GCOGlobalStack(Stack):
         - Daily backups retained for 35 days
         - Weekly backups retained for 90 days
         - All DynamoDB tables added to the backup selection
+
+        Point-in-time recovery for the tables comes from each table's own
+        ``point_in_time_recovery_specification``, not from this plan: AWS
+        Backup's continuous backup covers S3, RDS/Aurora and SAP HANA, not
+        DynamoDB, so both rules take snapshot backups of the tables.
         """
         # Create backup vault for storing backups
         self.backup_vault = backup.BackupVault(
@@ -1997,7 +2020,9 @@ class GCOGlobalStack(Stack):
                         minute="0",
                     ),
                     delete_after=Duration.days(35),
-                    enable_continuous_backup=True,  # Enable PITR for DynamoDB
+                    # No effect on DynamoDB, the only type in the selection
+                    # (see the docstring); the tables enable their own PITR.
+                    enable_continuous_backup=True,
                 ),
                 # Weekly backup - retained for 90 days
                 backup.BackupPlanRule(
@@ -2053,10 +2078,11 @@ class GCOGlobalStack(Stack):
           feature while still providing a safety net against accidental deletion.
         - Uses ``RemovalPolicy.DESTROY`` so a ``cdk destroy gco-global`` cleans up
           the key without operator intervention (iteration-loop posture).
-        - Grants encrypt/decrypt to the ``s3.amazonaws.com`` and
-          ``logs.<region>.amazonaws.com`` service principals via the key policy
-          so S3 server-side encryption and CloudWatch access-log delivery can use
-          the key without role-side grants.
+        - Keeps CDK's default key policy (the account statement that lets IAM
+          policies grant use of the key) and names no service principal: S3
+          calls KMS for SSE-KMS with the permissions of the principal that
+          reads or writes an object, the access-logs bucket is SSE-S3, and no
+          CloudWatch log group, trail or other service encrypts with this key.
 
         The key is exposed as ``self.cluster_shared_kms_key`` for tests and for
         ``_create_cluster_shared_bucket`` to reference. Role-side usage grants
@@ -2078,38 +2104,6 @@ class GCOGlobalStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # Key-policy grants for service principals that need to encrypt/decrypt
-        # on behalf of the bucket (S3 server-side encryption) and the access-logs
-        # bucket (CloudWatch Logs delivery). The actions match the standard
-        # service-principal pattern used by cdk's default key policies.
-        kms_actions = [
-            "kms:Encrypt",
-            "kms:Decrypt",
-            "kms:ReEncrypt*",
-            "kms:GenerateDataKey*",
-            "kms:DescribeKey",
-        ]
-
-        self.cluster_shared_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowS3ServiceEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
-        self.cluster_shared_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowCloudWatchLogsEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("logs.amazonaws.com", region=self.region)],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
     def _create_cluster_shared_bucket(self) -> None:
         """Create the always-on ``Cluster_Shared_Bucket`` and its access-logs bucket.
 
@@ -2118,7 +2112,8 @@ class GCOGlobalStack(Stack):
         1. ``cluster_shared_access_logs_bucket`` — dedicated S3 access-logs bucket
            used as ``server_access_logs_bucket`` for the primary bucket. Separate
            from ``model_bucket_access_logs`` so cluster-shared-bucket access logs
-           are not commingled with model-bucket logs.
+           are not commingled with model-bucket logs. SSE-S3, because S3 server
+           access logging requires an SSE-S3 destination bucket.
         2. ``cluster_shared_bucket`` — the primary bucket. Its physical name
            is CloudFormation-generated (``<stack>-clustersharedbucket…``): S3
            bucket names are a global namespace and a deleted name is not
@@ -2145,17 +2140,16 @@ class GCOGlobalStack(Stack):
         s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
         access_logs_retention_days = int(s3_access_logs_ctx.get("retention_days", 90))
 
-        # Dedicated access-logs bucket for Cluster_Shared_Bucket. Encrypted with
-        # the cluster-shared KMS key (the key policy grants the logs service
-        # principal encrypt/decrypt). Kept separate from model_bucket_access_logs
-        # so operators can reason about each bucket's logs independently. Matches
-        # the LifecycleRule used on `model_bucket_access_logs` so retention is
-        # consistent across the two log sinks.
+        # Dedicated access-logs bucket for Cluster_Shared_Bucket. Kept separate
+        # from model_bucket_access_logs so operators can reason about each
+        # bucket's logs independently. Matches the LifecycleRule used on
+        # `model_bucket_access_logs` so retention is consistent across the two
+        # log sinks. SSE-S3 like that bucket: S3 server access logging requires
+        # an SSE-S3 destination (ACCESS_LOG_DESTINATION_SSE_S3_REASON).
         self.cluster_shared_access_logs_bucket = s3.Bucket(
             self,
             "ClusterSharedAccessLogsBucket",
-            encryption=s3.BucketEncryption.KMS,
-            encryption_key=self.cluster_shared_kms_key,
+            encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
             versioned=True,
@@ -2215,7 +2209,10 @@ class GCOGlobalStack(Stack):
         # co-located with the construct it applies to, so the reason survives
         # refactors). Every suppression carries an explicit reason
         # string; no blanket ``Resource::*`` bypasses.
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+        from gco.stacks.nag_suppressions import (
+            acknowledge_access_log_destination_encryption,
+            acknowledge_nag_findings,
+        )
 
         shared_replication_reason = (
             "Cluster_Shared_Bucket is a regional scratch sink; cluster jobs "
@@ -2278,6 +2275,7 @@ class GCOGlobalStack(Stack):
                 },
             ],
         )
+        acknowledge_access_log_destination_encryption(self.cluster_shared_access_logs_bucket)
 
     def _publish_cluster_shared_bucket_ssm_params(self) -> None:
         """Publish the three ``/gco/cluster-shared-bucket/*`` SSM parameters.
@@ -2386,6 +2384,17 @@ class GCOGlobalStack(Stack):
         region. When replication is disabled or the destination list is
         empty (e.g. single-region deploy), no replication resource is
         provisioned and the method becomes a no-op.
+
+        The resource is the registry's single replication configuration for
+        this Region, not just GCO's rule: its update writes this rule over
+        every rule in the registry and its delete clears all of them. It is
+        therefore retained (``DeletionPolicy`` and ``UpdateReplacePolicy``),
+        so removing it or deleting the stack never deletes rules GCO did not
+        create, and the CLI (``cli/ecr_replication.py``) refuses deploys that
+        would overwrite such rules and removes only GCO's rule after the stack
+        is destroyed. Keep the logical id: a stack last deployed without the
+        retain policy deletes the configuration if the resource is removed or
+        replaced.
         """
         if not self.images_config["replication"]["enabled"]:
             return
@@ -2396,7 +2405,7 @@ class GCOGlobalStack(Stack):
         if not destinations:
             return
 
-        ecr.CfnReplicationConfiguration(
+        replication = ecr.CfnReplicationConfiguration(
             self,
             "GcoImageReplicationConfig",
             replication_configuration=ecr.CfnReplicationConfiguration.ReplicationConfigurationProperty(
@@ -2422,15 +2431,16 @@ class GCOGlobalStack(Stack):
                 ]
             ),
         )
+        replication.apply_removal_policy(RemovalPolicy.RETAIN)
 
     def _create_image_lookup_lambda(self) -> None:
         """Create the lookup-or-create custom resource Lambda for image repos.
 
         The Lambda implements the adopt-or-create pattern for ECR repos
-        under the project's ``gco/*`` prefix. It is invoked at the time
-        ``cli images init`` registers a new repo with the global stack via
-        a ``CustomResource``; the function itself is provisioned here so
-        the ARN is stable across deploys.
+        under the project's ``gco/*`` prefix. Nothing invokes it: no stack
+        declares a ``CustomResource`` backed by it, and ``gco images init``
+        creates repositories through the ECR API itself. Only its ARN is
+        exported.
 
         The Lambda's IAM role grants read/write access to ECR repository
         APIs scoped to the project's prefix, plus the standard basic
@@ -2451,6 +2461,7 @@ class GCOGlobalStack(Stack):
             handler="handler.lambda_handler",
             code=lambda_source_code("lambda/image-lookup"),
             timeout=Duration.minutes(5),
+            memory_size=128,
             description=(
                 "Lookup-or-create custom resource handler for ECR "
                 "repositories under the project's gco/* prefix."

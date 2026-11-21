@@ -1,5 +1,6 @@
 """DAG pipeline commands."""
 
+import dataclasses
 import sys
 from typing import Any
 
@@ -9,6 +10,42 @@ from ..config import GCOConfig
 from ..output import get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
+
+
+def _execution_order(dag_def: Any) -> list[Any]:
+    """The DAG's steps in dependency order (each step after its dependencies).
+
+    Only called on a validated DAG, which has no cycles or unknown
+    dependencies, so every pass places at least one step.
+    """
+    completed: set[str] = set()
+    ordered: list[Any] = []
+    remaining = list(dag_def.steps)
+    while remaining:
+        batch = [s for s in remaining if all(d in completed for d in s.depends_on)]
+        for step in batch:
+            ordered.append(step)
+            completed.add(step.name)
+            remaining.remove(step)
+    return ordered
+
+
+def _definition_document(dag_def: Any, errors: list[str]) -> dict[str, Any]:
+    """The machine-readable answer of ``dag validate`` and ``dag run --dry-run``."""
+    document: dict[str, Any] = {
+        "name": dag_def.name,
+        "valid": not errors,
+        "errors": list(errors),
+        "region": dag_def.region,
+        "namespace": dag_def.namespace,
+        "steps": [
+            {"name": step.name, "manifest": step.manifest, "depends_on": list(step.depends_on)}
+            for step in dag_def.steps
+        ],
+    }
+    if not errors:
+        document["execution_order"] = [step.name for step in _execution_order(dag_def)]
+    return document
 
 
 @click.group()
@@ -29,7 +66,11 @@ def dag_run(config: Any, dag_file: Any, region: Any, timeout: Any, dry_run: Any)
     """Run a DAG pipeline from a YAML definition.
 
     The DAG file defines steps with dependencies. Steps run in order,
-    and downstream steps are skipped if a dependency fails.
+    and downstream steps are skipped if a dependency fails. With -o
+    json/yaml the command prints one document: the steps with their final
+    status and a top-level status of succeeded or failed (exit 1 when a step
+    failed), or for --dry-run and an invalid DAG the same document as
+    `gco dag validate`.
 
     Examples:
         gco dag run pipeline.yaml
@@ -39,6 +80,7 @@ def dag_run(config: Any, dag_file: Any, region: Any, timeout: Any, dry_run: Any)
     from ..dag import get_dag_runner, load_dag
 
     formatter = get_output_formatter(config)
+    machine = config.output_format != "table"
 
     try:
         dag_def = load_dag(dag_file)
@@ -47,23 +89,19 @@ def dag_run(config: Any, dag_file: Any, region: Any, timeout: Any, dry_run: Any)
         if errors:
             for err in errors:
                 formatter.print_error(err)
+            if machine:
+                formatter.print(_definition_document(dag_def, errors))
             sys.exit(1)
 
         if dry_run:
+            if machine:
+                formatter.print(_definition_document(dag_def, []))
+                return
             formatter.print_success(f"DAG '{dag_def.name}' is valid ({len(dag_def.steps)} steps)")
             print("\n  Execution order:")
-            # Show topological order
-            completed: set[str] = set()
-            order = 1
-            remaining = list(dag_def.steps)
-            while remaining:
-                batch = [s for s in remaining if all(d in completed for d in s.depends_on)]
-                for step in batch:
-                    deps = f" (after: {', '.join(step.depends_on)})" if step.depends_on else ""
-                    print(f"  {order}. {step.name} → {step.manifest}{deps}")
-                    completed.add(step.name)
-                    remaining.remove(step)
-                    order += 1
+            for order, step in enumerate(_execution_order(dag_def), start=1):
+                deps = f" (after: {', '.join(step.depends_on)})" if step.depends_on else ""
+                print(f"  {order}. {step.name} → {step.manifest}{deps}")
             print()
             return
 
@@ -81,7 +119,8 @@ def dag_run(config: Any, dag_file: Any, region: Any, timeout: Any, dry_run: Any)
             elif status == "skipped":
                 formatter.print_info(f"  [{step_name}] ⊘ {msg}")
             elif "completed" in status:
-                print()
+                if not machine:
+                    print()
                 formatter.print_info(msg)
 
         result = runner.run(
@@ -91,6 +130,13 @@ def dag_run(config: Any, dag_file: Any, region: Any, timeout: Any, dry_run: Any)
             progress_callback=on_progress,
         )
 
+        if machine:
+            formatter.print(
+                {
+                    **dataclasses.asdict(result),
+                    "status": "failed" if result.has_failures() else "succeeded",
+                }
+            )
         if result.has_failures():
             sys.exit(1)
 
@@ -104,6 +150,9 @@ def dag_run(config: Any, dag_file: Any, region: Any, timeout: Any, dry_run: Any)
 @pass_config
 def dag_validate(config: Any, dag_file: Any) -> None:
     """Validate a DAG definition without running it.
+
+    With -o json/yaml it prints one document: name, valid, errors, region,
+    namespace, steps and (when valid) execution_order; exit 1 when invalid.
 
     Examples:
         gco dag validate pipeline.yaml
@@ -120,7 +169,13 @@ def dag_validate(config: Any, dag_file: Any) -> None:
             formatter.print_error(f"DAG '{dag_def.name}' has {len(errors)} error(s):")
             for err in errors:
                 formatter.print_error(f"  - {err}")
+            if config.output_format != "table":
+                formatter.print(_definition_document(dag_def, errors))
             sys.exit(1)
+
+        if config.output_format != "table":
+            formatter.print(_definition_document(dag_def, []))
+            return
 
         formatter.print_success(f"DAG '{dag_def.name}' is valid")
         print(f"  Steps: {len(dag_def.steps)}")

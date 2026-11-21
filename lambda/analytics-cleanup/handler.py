@@ -2,8 +2,11 @@
 
 Runs as a CloudFormation custom resource on stack deletion. Removes all
 SageMaker apps, spaces and user profiles from the Studio domain (waiting
-for each to fully drain) and all EFS access points from the Studio file
-system so CloudFormation can delete the domain and EFS cleanly.
+for each to fully drain), the EFS resource policies, every access point on
+the Studio file system (the presigned-URL Lambda creates one per user, and
+EFS requires them gone before DeleteFileSystem), the SageMaker-managed home
+EFS with its mount targets, and the SageMaker-managed NFS security groups,
+so CloudFormation can delete the domain, the EFS and the VPC cleanly.
 
 If draining apps/spaces/user-profiles fails, the handler raises — this
 fails the custom resource and stops CloudFormation before it tries (and
@@ -27,8 +30,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-11-18T16:59:04Z
+# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
 # Flowchart(s) generated from this file:
 #   * ``handler`` -> ``diagrams/code_diagrams/lambda/analytics-cleanup/handler.handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/analytics-cleanup/handler.handler.png``)
@@ -147,6 +150,12 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # managed EFS have resource policies that block DescribeMountTargets.
     if efs_id:
         _delete_efs_resource_policy(region, efs_id)
+        # The per-user access points the presigned-URL Lambda created: EFS
+        # requires a file system's access points gone before DeleteFileSystem
+        # (https://docs.aws.amazon.com/efs/latest/ug/delete-efs-fs.html), which
+        # CloudFormation calls on the Studio EFS after this resource. Listing
+        # them needs the resource policy removed first.
+        errors.extend(_delete_access_points(region, efs_id))
     sm_efs_id = _get_sagemaker_home_efs_id(region, domain_id)
     if sm_efs_id:
         _delete_efs_resource_policy(region, sm_efs_id)

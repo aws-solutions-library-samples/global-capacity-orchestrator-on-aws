@@ -116,9 +116,10 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # install left in this image, it pinned nothing beyond the major, and a
 # NodeSource CDN 403 outage (2026-07-27) broke every dev-container CI
 # job while the official dist endpoint stayed up. The tarball install
-# matches how every other tool below is provisioned: a pinned direct
-# download from the vendor's canonical distribution point — plus a
-# checksum, which the NodeSource path could never offer.
+# matches how every binary tool below is provisioned: a pinned direct
+# download from the vendor's canonical distribution point, verified
+# against a committed SHA-256, which the NodeSource path could never offer.
+# (npm and the CDK CLI come from the npm registry at exact versions.)
 #
 # Bump procedure (keep the three ARGs in lockstep):
 #   1. Pick the release from https://nodejs.org/dist/index.json
@@ -171,23 +172,49 @@ RUN npm install -g "aws-cdk@${CDK_VERSION}" \
 # allows ±1 minor, so this pin can lag or lead the cluster by one.
 # kubectl publishes both linux/amd64 and linux/arm64 binaries, so we
 # pass ${TARGETARCH} straight through.
+#
+# The per-architecture checksums are literal, non-overridable trust anchors
+# copied from the release's published
+# https://dl.k8s.io/release/<version>/bin/linux/<arch>/kubectl.sha256 files.
+# Overriding KUBECTL_VERSION alone fails closed until they are updated too.
 ARG KUBECTL_VERSION=v1.37.2
 ARG TARGETARCH
-RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
-    && chmod +x kubectl \
-    && mv kubectl /usr/local/bin/ \
+RUN case "${TARGETARCH}" in \
+        amd64) KUBECTL_SHA256="c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4" ;; \
+        arm64) KUBECTL_SHA256="fcc16f63186659d9722014b7e02d5fdd2d4e669cb8c0ab66365d7d3b8ba03509" ;; \
+        *)     echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
+      -o /tmp/kubectl \
+    && echo "${KUBECTL_SHA256}  /tmp/kubectl" | sha256sum -c - \
+    && install -m 0755 /tmp/kubectl /usr/local/bin/kubectl \
+    && rm -f /tmp/kubectl \
     && kubectl version --client=true
 
 # Install AWS CLI v2 — pinned to a specific release so reproducibility is
 # preserved across rebuilds. Bump when a new feature or bugfix is needed
 # (see https://github.com/aws/aws-cli/blob/v2/CHANGELOG.rst).
 # AWS CLI v2 uses GNU arch tags (x86_64 / aarch64) in the install URL.
+#
+# The per-architecture checksums are literal, non-overridable trust anchors,
+# recorded after each zip's PGP signature (<zip>.sig) verified against the
+# AWS CLI Team key, fingerprint FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC
+# 4672 475C, published in the AWS CLI install guide. To bump: download both
+# zips and their .sig files, `gpg --verify` each, then copy each zip's
+# SHA-256 here. Overriding AWSCLI_VERSION alone fails closed.
 ARG AWSCLI_VERSION=2.39.3
-RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
-    && curl "https://awscli.amazonaws.com/awscli-exe-linux-${GNU_ARCH}-${AWSCLI_VERSION}.zip" -o "awscliv2.zip" \
-    && unzip awscliv2.zip \
-    && ./aws/install \
-    && rm -rf awscliv2.zip aws \
+RUN case "${TARGETARCH}" in \
+        amd64) AWSCLI_SHA256="14cb35809ad7547dd3c69fa9899a3975fbd850b6a6791f3fe264856490cd9a63" ;; \
+        arm64) AWSCLI_SHA256="f6eb845fbacb11bee87de3f5fbe8043773cbe89d0414607b44b71e216eb9226b" ;; \
+        *)     echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && GNU_ARCH=$(cat /tmp/gnu_arch) \
+    && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${GNU_ARCH}-${AWSCLI_VERSION}.zip" \
+      -o /tmp/awscliv2.zip \
+    && echo "${AWSCLI_SHA256}  /tmp/awscliv2.zip" | sha256sum -c - \
+    && unzip /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/awscliv2.zip /tmp/aws \
     && aws --version
 
 # Install the AWS Session Manager plugin. `gco cluster tunnel --via-ssm`,
@@ -223,10 +250,22 @@ RUN case "${TARGETARCH}" in \
 # Latest stable at pin time:
 #   https://download.docker.com/linux/static/stable/x86_64/
 #   https://download.docker.com/linux/static/stable/aarch64/
+#
+# download.docker.com publishes no checksums for these archives, so the
+# per-architecture SHA-256s were computed from the downloaded archives at
+# pin time (each archive's MD5 matched its object ETag) and are literal,
+# non-overridable trust anchors: overriding DOCKER_VERSION alone fails
+# closed until they are updated too.
 ARG DOCKER_VERSION=29.9.2
-RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
+RUN case "${TARGETARCH}" in \
+        amd64) DOCKER_SHA256="9ac225999fd5e863f7694c728ef23d480616b1e5639328fa309befd4243d69eb" ;; \
+        arm64) DOCKER_SHA256="873b3e0207857c3b2f28392fb922f3ea6efe37620c16d4d4aaf2fef409c90b73" ;; \
+        *)     echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && GNU_ARCH=$(cat /tmp/gnu_arch) \
     && curl -fsSL "https://download.docker.com/linux/static/stable/${GNU_ARCH}/docker-${DOCKER_VERSION}.tgz" \
       -o /tmp/docker.tgz \
+    && echo "${DOCKER_SHA256}  /tmp/docker.tgz" | sha256sum -c - \
     && tar -xzf /tmp/docker.tgz -C /tmp \
     && mv /tmp/docker/docker /usr/local/bin/ \
     && rm -rf /tmp/docker /tmp/docker.tgz /tmp/gnu_arch \
@@ -254,11 +293,13 @@ RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
 # Keep the per-architecture checksums as literal, non-overridable trust
 # anchors from the release's checksums.txt. Overriding BUILDX_VERSION alone
 # must fail closed until these reviewed hashes are updated too.
-# https://github.com/docker/buildx/releases/tag/v0.38.1
-ARG BUILDX_VERSION=v0.38.1
+# v0.38.2 links containerd v2.4.2, the fix for CVE-2026-95839 (v0.38.1
+# linked v2.4.1).
+# https://github.com/docker/buildx/releases/tag/v0.38.2
+ARG BUILDX_VERSION=v0.38.2
 RUN case "${TARGETARCH}" in \
-        amd64) BUILDX_SHA256="e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4" ;; \
-        arm64) BUILDX_SHA256="3b83b3731916ba433feccaaa689fe5bcdc81c641d92c8e6c2ea865dfa141c97a" ;; \
+        amd64) BUILDX_SHA256="7992ec09413b80ff57ba4e081f56fc833d7bac1d5e71143c6c809e7e6065f6d6" ;; \
+        arm64) BUILDX_SHA256="46c0f334772de3cb0b341cc415caf7339fb5cfc8b8438ebcb5a10e7f23800d36" ;; \
         *)     echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac \
     && mkdir -p /usr/local/lib/docker/cli-plugins \
@@ -275,7 +316,7 @@ RUN case "${TARGETARCH}" in \
 # `gco autopilot` launches several companion MCP servers through `uvx`
 # (aws-docs, aws-pricing, eks, ddg-search, shell), so a dev-container
 # autopilot session needs uv on PATH. Same provisioning discipline as every
-# other tool above: pinned direct vendor download + checksum. Bump procedure
+# binary tool above: pinned direct vendor download + checksum. Bump procedure
 # (keep the three ARGs in lockstep, hashes from the per-artifact *.sha256
 # files on https://github.com/astral-sh/uv/releases):
 ARG UV_VERSION=0.13.6
@@ -320,10 +361,12 @@ ENV GCO_DEV_CONTAINER=1
 WORKDIR /workspace
 
 # Copy project metadata first for better caching
-COPY pyproject.toml ./
+COPY pyproject.toml requirements-lock.txt ./
 COPY gco/_version.py ./gco/_version.py
 
-# Install Python dependencies.
+# Install Python dependencies, the transitive graph constrained by the
+# committed lock (as the service images and CI do), so two builds of one
+# commit get the same packages instead of whatever PyPI serves that day.
 #
 # PyPI / CDN connections occasionally drop mid-download — most often
 # during large wheels like ``pydantic-monty`` or ``aws-cdk-lib`` — and
@@ -340,7 +383,7 @@ COPY gco/_version.py ./gco/_version.py
 RUN for attempt in 1 2 3; do \
         if pip install --no-cache-dir \
             --retries 10 --timeout 120 --resume-retries 5 \
-            -e ".[dev,mcp]"; then \
+            -c requirements-lock.txt -e ".[dev,mcp]"; then \
             break; \
         fi; \
         if [ "${attempt}" -eq 3 ]; then \
@@ -355,7 +398,7 @@ RUN for attempt in 1 2 3; do \
 COPY . .
 
 # Install the CLI in editable mode
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -c requirements-lock.txt -e .
 
 # Default command
 CMD ["/bin/bash"]

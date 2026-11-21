@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-28T07:34:51Z">
-        <meta name="gco-source-commit" content="95213a3dfe214f41ea8e3977b79711b1be061ac0">
-        <meta name="gco-flow-digest" content="15ce085adc9023ce">
+        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
+        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
+        <meta name="gco-flow-digest" content="b4ffa88ff4790d0b">
         <title>Mooncake prefill/decode dispatch (admin gate, KV handoff, streaming decode)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,51 +208,51 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1690=>operation: 'Disaggregate one serving request: prime prefill, then stream decode.'
-op1692=>operation: path = request.url.path
-cond1695=>condition: if path.endswith(ADMIN_PATH)
-io1702=>inputoutput: output: await _admin_add(request)
-e1700=>end: end function return
-op1708=>operation: raw = await request.body()
-op1713=>operation: decoded = json.loads(raw or b'{}')
-cond1710=>condition: exception raised?
-cond1715=>condition: except ValueError
-io1722=>inputoutput: output: JSONResponse({'error': 'invalid JSON body'}, status_code=400)
-e1720=>end: end function return
-cond1729=>condition: if not isinstance(decoded, dict)
-io1736=>inputoutput: output: JSONResponse({'error': 'JSON body must be an object'}, status_code=400)
-e1734=>end: end function return
-op1742=>operation: request_headers = _request_headers(request)
-op1744=>operation: target = _request_target(request)
-cond1747=>condition: if not _is_serving_path(path)
-io1754=>inputoutput: output: await _stream_decode('POST', target, decoded, request_headers)
-e1752=>end: end function return
-op1760=>operation: prefill_kv_params = await _prime_prefill(path, decoded)
-io1765=>inputoutput: output: await _stream_decode('POST', target, _decode_body(decoded, prefill_kv_params), request_headers)
-e1763=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op6004=>operation: 'Disaggregate one serving request: prime prefill, then stream decode.'
+op6006=>operation: path = request.url.path
+cond6009=>condition: if path.endswith(ADMIN_PATH)
+io6016=>inputoutput: output: await _admin_add(request)
+e6014=>end: end function return
+op6022=>operation: raw = await request.body()
+op6027=>operation: decoded = json.loads(raw or b'{}')
+cond6024=>condition: exception raised?
+cond6029=>condition: except ValueError
+io6036=>inputoutput: output: JSONResponse({'error': 'invalid JSON body'}, status_code=400)
+e6034=>end: end function return
+cond6043=>condition: if not isinstance(decoded, dict)
+io6050=>inputoutput: output: JSONResponse({'error': 'JSON body must be an object'}, status_code=400)
+e6048=>end: end function return
+op6056=>operation: request_headers = _request_headers(request)
+op6058=>operation: target = _request_target(request)
+cond6061=>condition: if not _is_serving_path(path)
+io6068=>inputoutput: output: await _stream_decode('POST', target, decoded, request_headers)
+e6066=>end: end function return
+op6074=>operation: prefill_kv_params = await _prime_prefill(path, decoded)
+io6079=>inputoutput: output: await _stream_decode('POST', target, _decode_body(decoded, prefill_kv_params), request_headers)
+e6077=>end: end function return
 
-op1690->op1692
-op1692->cond1695
-cond1695(yes)->io1702
-io1702->e1700
-cond1695(no)->op1708
-op1708->op1713
-op1713->cond1710
-cond1710(yes)->cond1715
-cond1715(yes)->io1722
-io1722->e1720
-cond1715(no)->cond1729
-cond1729(yes)->io1736
-io1736->e1734
-cond1729(no)->op1742
-op1742->op1744
-op1744->cond1747
-cond1747(yes)->io1754
-io1754->e1752
-cond1747(no)->op1760
-op1760->io1765
-io1765->e1763
-cond1710(no)->cond1729
+op6004->op6006
+op6006->cond6009
+cond6009(yes)->io6016
+io6016->e6014
+cond6009(no)->op6022
+op6022->op6027
+op6027->cond6024
+cond6024(yes)->cond6029
+cond6029(yes)->io6036
+io6036->e6034
+cond6029(no)->cond6043
+cond6043(yes)->io6050
+io6050->e6048
+cond6043(no)->op6056
+op6056->op6058
+op6058->cond6061
+cond6061(yes)->io6068
+io6068->e6066
+cond6061(no)->op6074
+op6074->io6079
+io6079->e6077
+cond6024(no)->cond6043
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -262,17 +262,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-28T07:34:51Z -->
-        <!-- Generated from Git commit: 95213a3dfe214f41ea8e3977b79711b1be061ac0 -->
+        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-28T07:34:51Z">2026-09-28T07:34:51Z</time>
+            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>95213a3dfe214f41ea8e3977b79711b1be061ac0</code>
+            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>15ce085adc9023ce</code>
+            Flow content SHA-256: <code>b4ffa88ff4790d0b</code>
           </p>
           <div id="canvas"></div>
         </div>

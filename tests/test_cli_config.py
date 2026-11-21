@@ -238,16 +238,44 @@ class TestGCOConfigSave:
         assert data["verbose"] is True
 
     def test_save_creates_directory(self, tmp_path):
-        """Should create parent directory if it doesn't exist."""
+        """save() created ~/.gco only when no path was passed, so an explicit
+        path in a missing directory raised FileNotFoundError."""
         config = GCOConfig()
-        config_path = str(tmp_path / "subdir" / "config.yaml")
+        config_path = tmp_path / "subdir" / "config.yaml"
 
-        # save() only creates ~/.gco when config_path is None
-        # When explicit path is given, parent must exist
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        config.save(config_path)
+        config.save(str(config_path))
 
-        assert os.path.exists(config_path)
+        assert config_path.is_file()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_save_writes_an_owner_only_file(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("old: value\n")
+        config_path.chmod(0o644)
+
+        GCOConfig().save(str(config_path))
+
+        assert config_path.stat().st_mode & 0o777 == 0o600
+        assert "old" not in config_path.read_text()
+
+    def test_config_init_on_a_fresh_home(self, tmp_path, monkeypatch):
+        """`gco config-cmd init` is often the first command a new user runs; it
+        crashed with FileNotFoundError when ~/.gco did not exist yet."""
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(cli, ["config-cmd", "init"])
+
+        assert result.exit_code == 0, result.output
+        config_path = home / ".gco" / "config.yaml"
+        assert config_path.is_file()
+        assert f"Configuration saved to {config_path}" in result.output
 
     def test_round_trip(self, tmp_path):
         """Config should survive save/load round-trip."""
@@ -265,6 +293,124 @@ class TestGCOConfigSave:
         assert loaded.project_name == "test-gco"
         assert loaded.output_format == "json"
         assert loaded.verbose is True
+
+
+def _checkout(root: Path, project: str, regional: list[str], global_region: str) -> Path:
+    root.mkdir(parents=True)
+    (root / "cdk.json").write_text(
+        json.dumps(
+            {
+                "context": {
+                    "project_name": project,
+                    "deployment_regions": {
+                        "global": global_region,
+                        "api_gateway": global_region,
+                        "monitoring": global_region,
+                        "regional": regional,
+                    },
+                }
+            }
+        )
+    )
+    return root
+
+
+class TestConfigInitWritesOnlyWhatTheUserSet:
+    """`config-cmd init` wrote the fully merged config, including project_name
+    and every Region read from the cdk.json where it ran. A config-file value
+    counts as explicitly set, so that snapshot then overrode the cdk.json of
+    every other checkout."""
+
+    @pytest.fixture
+    def home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        for variable in (
+            "GCO_PROJECT_NAME",
+            "GCO_DEFAULT_REGION",
+            "GCO_API_GATEWAY_REGION",
+            "GCO_GLOBAL_REGION",
+            "GCO_MONITORING_REGION",
+            "GCO_DEFAULT_NAMESPACE",
+            "GCO_OUTPUT_FORMAT",
+            "GCO_VERBOSE",
+            "GCO_CACHE_DIR",
+            "GCO_REGIONAL_API",
+        ):
+            monkeypatch.delenv(variable, raising=False)
+        return home
+
+    @staticmethod
+    def _init(*args):
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        result = CliRunner().invoke(cli, [*args, "config-cmd", "init", "--force"])
+        assert result.exit_code == 0, result.output
+        return result
+
+    def test_another_checkout_keeps_its_own_project_and_regions(self, home, tmp_path, monkeypatch):
+        monkeypatch.chdir(_checkout(tmp_path / "alpha", "alpha", ["eu-west-1"], "eu-west-2"))
+        self._init()
+
+        monkeypatch.chdir(_checkout(tmp_path / "beta", "beta", ["ap-south-1"], "ap-southeast-1"))
+        config = get_config()
+
+        assert config.project_name == "beta"
+        assert config.default_region == "ap-south-1"
+        assert config.global_region == "ap-southeast-1"
+        assert config.global_stack_name == "beta-global"
+
+    def test_with_nothing_given_the_file_sets_nothing(self, home, tmp_path, monkeypatch):
+        monkeypatch.chdir(_checkout(tmp_path / "alpha", "alpha", ["eu-west-1"], "eu-west-2"))
+        self._init()
+
+        text = (home / ".gco" / "config.yaml").read_text()
+        assert yaml.safe_load(text) is None
+        # A commented template of the per-machine settings, without the project.
+        assert "# output_format: table\n" in text
+        assert "# default_namespace: gco-jobs\n" in text
+        assert "project_name" not in text.split("Uncomment", 1)[1]
+        assert "alpha" not in text and "eu-west-2" not in text
+        assert "GCO_* environment variables" in text
+
+    def test_settings_given_to_the_invocation_are_written(self, home, tmp_path, monkeypatch):
+        monkeypatch.chdir(_checkout(tmp_path / "alpha", "alpha", ["eu-west-1"], "eu-west-2"))
+        monkeypatch.setenv("GCO_DEFAULT_NAMESPACE", "ml-jobs")
+        # Project-level settings stay out of the file even when given.
+        monkeypatch.setenv("GCO_PROJECT_NAME", "gamma")
+        monkeypatch.setenv("GCO_GLOBAL_REGION", "us-west-1")
+
+        self._init("-r", "eu-west-3", "--regional-api")
+
+        settings = yaml.safe_load((home / ".gco" / "config.yaml").read_text())
+        assert settings == {
+            "default_region": "eu-west-3",
+            "default_namespace": "ml-jobs",
+            "use_regional_api": True,
+        }
+
+    def test_force_replaces_an_old_snapshot(self, home, tmp_path, monkeypatch):
+        config_dir = home / ".gco"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            yaml.safe_dump({"project_name": "alpha", "global_region": "eu-west-2"})
+        )
+        monkeypatch.chdir(_checkout(tmp_path / "beta", "beta", ["ap-south-1"], "ap-southeast-1"))
+        assert get_config().project_name == "alpha"
+
+        self._init()
+
+        assert get_config().project_name == "beta"
+
+    def test_save_without_keys_still_writes_every_setting(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        GCOConfig(project_name="saved").save(str(config_path))
+
+        data = yaml.safe_load(config_path.read_text())
+        assert data == GCOConfig(project_name="saved").to_dict()
 
 
 class TestGCOConfigToDict:
@@ -440,3 +586,60 @@ class TestProjectScopedNames:
         assert config.project_name == "acme"
         assert config.global_stack_name == "acme-global"
         assert config.api_gateway_stack_name == "acme-api-gateway"
+
+
+class TestSetProjectRoot:
+    """``set_project_root`` points cdk.json and project config discovery elsewhere.
+
+    The MCP server's in-process tools build this configuration in a process
+    whose working directory is not the project; without the setter they read
+    project ``gco`` and the default Regions.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        from cli import config as config_module
+
+        yield
+        config_module.set_project_root(None)
+
+    def test_cdk_json_and_project_file_come_from_the_configured_root(self, tmp_path):
+        from cli import config as config_module
+
+        project = tmp_path / "acme-checkout"
+        project.mkdir()
+        (project / "cdk.json").write_text(
+            json.dumps(
+                {
+                    "context": {
+                        "project_name": "acme",
+                        "deployment_regions": {"global": "eu-west-1", "regional": ["eu-west-1"]},
+                    }
+                }
+            )
+        )
+        (project / ".gco.yaml").write_text("default_namespace: acme-jobs\n")
+        elsewhere = tmp_path / "server-cwd"
+        elsewhere.mkdir()
+
+        with (
+            patch("cli.config.Path.cwd", return_value=elsewhere),
+            patch("cli.config.Path.home", return_value=tmp_path / "home"),
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            for name in ("GCO_PROJECT_NAME", "GCO_GLOBAL_REGION", "GCO_DEFAULT_NAMESPACE"):
+                os.environ.pop(name, None)
+            assert get_config().project_name == "gco"
+
+            config_module.set_project_root(project)
+            config = get_config()
+            assert (config.project_name, config.global_region) == ("acme", "eu-west-1")
+            assert config.default_region == "eu-west-1"
+            assert config.default_namespace == "acme-jobs"
+            assert config.global_stack_name == "acme-global"
+            assert _load_cdk_json()["regional"] == ["eu-west-1"]
+            assert _load_cdk_project_name() == "acme"
+
+            config_module.set_project_root(None)
+            assert get_config().project_name == "gco"
+            assert _load_cdk_json() == {}

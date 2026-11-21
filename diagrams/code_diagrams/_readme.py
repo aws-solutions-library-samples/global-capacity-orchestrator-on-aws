@@ -9,6 +9,7 @@ parent directory within that, mirroring the project layout.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
 from diagrams.code_diagrams._renderer import RenderedTarget
@@ -113,6 +114,19 @@ has multiple charted entry points.
 """
 
 
+def newest_stamp(stamps: Iterable[tuple[str, str]]) -> tuple[str, str] | None:
+    """Return the newest ``(generated_at, source_commit)`` stamp, or ``None`` if empty.
+
+    The README writer and the repository contract both pick their stamp here.
+    Two sources can share the newest ``generated_at`` with different commits
+    (two commits in one committer second under ``SOURCE_DATE_EPOCH``), and the
+    writer iterates in ``TARGETS`` order while the contract iterates the
+    manifest in path order; comparing whole stamps breaks that tie on the
+    commit, so both sides land on the same one.
+    """
+    return max(stamps, default=None)
+
+
 def render_readme(
     results: list[RenderedTarget],
     *,
@@ -125,9 +139,8 @@ def render_readme(
     # the sources that changed. The index header therefore reports the most
     # recent generation; each source's own stamp lives in its marker block and
     # in the manifest.
-    newest = max(results, key=lambda result: result.generated_at, default=None)
-    generated_at = newest.generated_at if newest is not None else "unknown"
-    source_commit = newest.source_commit if newest is not None else "unknown"
+    newest = newest_stamp((result.generated_at, result.source_commit) for result in results)
+    generated_at, source_commit = newest if newest is not None else ("unknown", "unknown")
     header = _HEADER.replace("__GENERATED_AT__", generated_at).replace(
         "__SOURCE_COMMIT__", source_commit
     )

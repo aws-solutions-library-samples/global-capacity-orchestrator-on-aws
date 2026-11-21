@@ -43,7 +43,7 @@ class TestUpdateKubeconfig:
     def test_update_kubeconfig_success(self):
         """Test successful kubeconfig update."""
         with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             update_kubeconfig("my-cluster", "us-east-1")
 
             mock_run.assert_called_once()
@@ -94,16 +94,14 @@ class TestTunnelPreservation:
         cluster: dict = {"server": server}
         if tls_server_name:
             cluster["tls-server-name"] = tls_server_name
+        name = "arn:aws:eks:us-east-1:123456789012:cluster/my-cluster"
         path = tmp_path / "config"
         path.write_text(
             yaml.safe_dump(
                 {
-                    "clusters": [
-                        {
-                            "name": "arn:aws:eks:us-east-1:123456789012:cluster/my-cluster",
-                            "cluster": cluster,
-                        }
-                    ]
+                    "clusters": [{"name": name, "cluster": cluster}],
+                    "contexts": [{"name": name, "context": {"cluster": name, "user": name}}],
+                    "current-context": name,
                 }
             ),
             encoding="utf-8",
@@ -120,8 +118,9 @@ class TestTunnelPreservation:
             ),
         )
         with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
-            update_kubeconfig("my-cluster", "us-east-1")
+            context = update_kubeconfig("my-cluster", "us-east-1")
         mock_run.assert_not_called()
+        assert context == "arn:aws:eks:us-east-1:123456789012:cluster/my-cluster"
 
     def test_real_endpoint_entry_is_refreshed(self, tmp_path, monkeypatch):
         monkeypatch.setenv(
@@ -133,7 +132,7 @@ class TestTunnelPreservation:
             ),
         )
         with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             update_kubeconfig("my-cluster", "us-east-1")
         mock_run.assert_called_once()
 
@@ -145,7 +144,7 @@ class TestTunnelPreservation:
             self._write_kubeconfig(tmp_path, "https://localhost:8443", tls_server_name=None),
         )
         with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             update_kubeconfig("my-cluster", "us-east-1")
         mock_run.assert_called_once()
 
@@ -159,14 +158,14 @@ class TestTunnelPreservation:
             ),
         )
         with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             update_kubeconfig("other-cluster", "us-east-1")
         mock_run.assert_called_once()
 
     def test_missing_kubeconfig_is_refreshed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KUBECONFIG", str(tmp_path / "does-not-exist"))
         with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             update_kubeconfig("my-cluster", "us-east-1")
         mock_run.assert_called_once()
 
@@ -179,7 +178,7 @@ class TestTunnelPreservation:
         monkeypatch.setenv("KUBECONFIG", f"{os.pathsep}{tmp_path / 'other'}")
         monkeypatch.setenv("HOME", str(tmp_path))
         with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             update_kubeconfig("my-cluster", "us-east-1")
         mock_run.assert_called_once()
 
@@ -192,3 +191,121 @@ class TestTunnelPreservation:
         monkeypatch.delenv("KUBECONFIG", raising=False)
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
         assert _kubeconfig_file() == tmp_path / ".kube" / "config"
+
+
+class TestKubeconfigContext:
+    """update_kubeconfig names the context every later kubectl call must use.
+
+    With a tunnel-pinned entry the refresh is skipped, so the current context
+    is whatever the operator (or a refresh of another cluster) last selected.
+    kubectl calls without ``--context`` then reached that other cluster.
+    """
+
+    _ARN = "arn:aws:eks:us-east-1:123456789012:cluster/my-cluster"
+    _OTHER_ARN = "arn:aws:eks:us-west-2:123456789012:cluster/other-cluster"
+
+    @classmethod
+    def _write(cls, tmp_path, monkeypatch, *, contexts, current) -> None:
+        import yaml
+
+        path = tmp_path / "config"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "clusters": [
+                        {
+                            "name": cls._OTHER_ARN,
+                            "cluster": {"server": "https://other.example.com"},
+                        },
+                        {
+                            "name": cls._ARN,
+                            "cluster": {
+                                "server": "https://127.0.0.1:8443",
+                                "tls-server-name": "abc123.gr7.us-east-1.eks.amazonaws.com",
+                            },
+                        },
+                    ],
+                    "contexts": contexts,
+                    "current-context": current,
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("KUBECONFIG", str(path))
+
+    def test_pinned_entry_returns_its_context_not_the_current_one(self, tmp_path, monkeypatch):
+        self._write(
+            tmp_path,
+            monkeypatch,
+            contexts=[
+                {"name": self._OTHER_ARN, "context": {"cluster": self._OTHER_ARN}},
+                {"name": self._ARN, "context": {"cluster": self._ARN, "user": self._ARN}},
+            ],
+            current=self._OTHER_ARN,
+        )
+        with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
+            assert update_kubeconfig("my-cluster", "us-east-1") == self._ARN
+        mock_run.assert_not_called()
+
+    def test_pinned_entry_prefers_the_current_context_among_its_own(self, tmp_path, monkeypatch):
+        self._write(
+            tmp_path,
+            monkeypatch,
+            contexts=[
+                {"name": self._ARN, "context": {"cluster": self._ARN}},
+                {"name": "my-alias", "context": {"cluster": self._ARN}},
+            ],
+            current="my-alias",
+        )
+        assert update_kubeconfig("my-cluster", "us-east-1") == "my-alias"
+
+    def test_pinned_entry_without_a_context_is_an_error(self, tmp_path, monkeypatch):
+        self._write(
+            tmp_path,
+            monkeypatch,
+            contexts=[
+                "not-a-mapping",
+                {"name": self._OTHER_ARN, "context": {"cluster": self._OTHER_ARN}},
+                {"name": "", "context": {"cluster": self._ARN}},
+                {"name": "no-body"},
+            ],
+            current=self._OTHER_ARN,
+        )
+        with (
+            patch("cli.kubectl_helpers.subprocess.run") as mock_run,
+            pytest.raises(RuntimeError, match="no kubeconfig context uses it"),
+        ):
+            update_kubeconfig("my-cluster", "us-east-1")
+        mock_run.assert_not_called()
+
+    def test_refresh_returns_the_context_the_aws_cli_wrote(self):
+        with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=f"Added new context {self._ARN} to /home/user/.kube/my config\n",
+                stderr="",
+            )
+            assert update_kubeconfig("my-cluster", "us-east-1") == self._ARN
+            mock_run.return_value.stdout = f"Updated context {self._ARN} in /tmp/kube\n"
+            assert update_kubeconfig("my-cluster", "us-east-1") == self._ARN
+
+    def test_refresh_without_a_reported_context_leaves_kubectl_on_the_current_one(self):
+        with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            assert update_kubeconfig("my-cluster", "us-east-1") is None
+
+    def test_malformed_kubeconfig_documents_are_not_pins(self, tmp_path, monkeypatch):
+        path = tmp_path / "config"
+        monkeypatch.setenv("KUBECONFIG", str(path))
+        for document in ("- just\n- a list\n", "clusters:\n  - not-a-mapping\n"):
+            path.write_text(document, encoding="utf-8")
+            with patch("cli.kubectl_helpers.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                assert update_kubeconfig("my-cluster", "us-east-1") is None
+            mock_run.assert_called_once()
+
+    def test_context_flags(self):
+        from cli.kubectl_helpers import kubectl_context_flags
+
+        assert kubectl_context_flags(None) == []
+        assert kubectl_context_flags(self._ARN) == [f"--context={self._ARN}"]

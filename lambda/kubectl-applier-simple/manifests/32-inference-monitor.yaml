@@ -58,8 +58,9 @@ spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
       # One reconcile pass may be mid-flight when SIGTERM arrives; the handler
-      # in main() finishes the cycle before exiting, and a pass is bounded by
-      # the Kubernetes/DynamoDB request timeouts (30s each).
+      # in main() lets it finish the endpoint it is reconciling (each
+      # Kubernetes/DynamoDB call is bounded at 30s) and start no other, then
+      # releases the leader Lease so the standby takes over at once.
       terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true
@@ -113,7 +114,7 @@ spec:
             - name: REGION
               value: "{{REGION}}"
             - name: AWS_ROLE_ARN
-              value: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+              value: "{{INFERENCE_MONITOR_ROLE_ARN}}"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
               value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
             - name: INFERENCE_ENDPOINTS_TABLE_NAME
@@ -156,11 +157,19 @@ spec:
               memory: 512Mi
           # The controller has no request path; the Prometheus endpoint that
           # start_metrics_server serves on 127.0.0.1:9090 is the process's one
-          # listener, so it is the honest liveness signal. A stuck reconcile
-          # loop is visible in the exported seconds_since_last_pass gauge. The
-          # kubelet cannot reach pod loopback, so these are exec probes built
-          # like 30-health-monitor.yaml's: a lean interpreter and a bare-socket
-          # request, with the same timeouts and the one-minute liveness window.
+          # listener. Startup and readiness need it to answer. Liveness also
+          # needs the loop to have shown progress (a finished iteration, leader
+          # or standby, or a step of a running pass) within the window the
+          # monitor exports: seconds_since_last_progress must not exceed
+          # liveness_window_seconds. The window is the stall deadline after
+          # which a leader stops renewing its Lease (PASS_STALL_INTERVALS = 10
+          # reconcile intervals) plus one Lease duration (3 intervals), 195s at
+          # RECONCILE_INTERVAL_SECONDS=15, so the standby has taken over before
+          # the kubelet restarts a wedged leader; a healthy standby never comes
+          # near it. The kubelet cannot reach pod loopback, so these are exec
+          # probes built like 30-health-monitor.yaml's: a lean interpreter and a
+          # bare-socket request, with the same timeouts and the one-minute
+          # liveness restart window.
           startupProbe:
             exec:
               command:
@@ -190,7 +199,9 @@ spec:
                   s=socket.create_connection(('127.0.0.1',9090),3);
                   s.settimeout(3);
                   s.sendall(b'GET /metrics HTTP/1.0\r\n\r\n');
-                  sys.exit(0 if s.makefile('rb').readline().split(b' ')[1:2]==[b'200'] else 1)
+                  r=s.makefile('rb').read();
+                  m={l.split(b'"')[1]:float(l.split()[-1]) for l in r.splitlines() if l.startswith(b'gco_inference_monitor_metric{name="')};
+                  sys.exit(0 if r.split(b' ')[1:2]==[b'200'] and m[b'seconds_since_last_progress']<=m[b'liveness_window_seconds'] else 1)
             periodSeconds: 15
             timeoutSeconds: 10
             failureThreshold: 4

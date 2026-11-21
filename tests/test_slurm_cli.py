@@ -36,6 +36,7 @@ from cli.slurm import SlurmCliError
 
 _SERVER = "https://127.0.0.1:8443"
 _SNI = "abc.gr7.us-east-1.eks.amazonaws.com"
+_CONTEXT = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
 SCRIPT = "#!/bin/bash\n#SBATCH --job-name=train\n#SBATCH -p gpu\nsrun hostname\n"
 
 
@@ -171,10 +172,40 @@ class TestSbatchDirectives:
 
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [("4000", 4000), ("4G", 4096), ("512M", 512), ("1T", 1048576), ("2048K", 2), ("1k", 1)],
+        [
+            ("4000", 4000),
+            ("4G", 4096),
+            ("512M", 512),
+            ("1T", 1048576),
+            ("2048K", 2),
+            ("1k", 1),
+            # sbatch rounds a K size up to whole MiB (str_to_mbytes: ROUNDUP).
+            ("512K", 1),
+            ("1536K", 2),
+        ],
     )
     def test_memory_units(self, value, expected):
         assert slurm_lib.memory_mb(value) == expected
+
+    @pytest.mark.parametrize("value", ["0", "0G", "0K", "0m"])
+    def test_zero_memory_stays_zero(self, value):
+        """--mem=0 is Slurm's "all of each node's memory"; it used to become a
+        1 MiB limit."""
+        assert slurm_lib.memory_mb(value) == 0
+
+    @pytest.mark.parametrize("directive", ["--mem=0", "--mem 0G"])
+    def test_a_script_asking_for_all_memory_is_refused(self, directive):
+        script = f"#!/bin/bash\n#SBATCH {directive}\nhostname\n"
+
+        with pytest.raises(SlurmCliError, match="all of each node's memory"):
+            slurm_lib.submission_body(script, flags={})
+
+    def test_an_explicit_size_overrides_a_whole_node_directive(self):
+        script = "#!/bin/bash\n#SBATCH --mem=0\nhostname\n"
+
+        body = slurm_lib.submission_body(script, flags={"memory_mb": 65536})
+
+        assert body["memory_mb"] == 65536
 
     def test_bad_memory(self):
         with pytest.raises(SlurmCliError, match="invalid memory"):
@@ -418,9 +449,14 @@ class TestLoginPodCommands:
             "/x",
         ]
         assert slurm_lib.login_exec_command(
-            ["bash", "-l"], interactive=True, server=_SERVER, tls_server_name=_SNI
+            ["bash", "-l"],
+            interactive=True,
+            server=_SERVER,
+            tls_server_name=_SNI,
+            context=_CONTEXT,
         ) == [
             "kubectl",
+            f"--context={_CONTEXT}",
             "exec",
             "-it",
             "deploy/slinky-slurm-login-gco",
@@ -750,6 +786,30 @@ class TestSubmit:
         assert json.loads(result.stdout)["job_id"] == 7
         assert _request(api)["body"] == {"script": "#!/bin/bash\nhostname\n"}
 
+    @pytest.mark.parametrize(
+        ("script_text", "flags"),
+        [
+            ("#!/bin/bash\nhostname\n", ["--mem", "0"]),
+            ("#!/bin/bash\n#SBATCH --mem=0\nhostname\n", []),
+        ],
+        ids=["flag", "directive"],
+    )
+    def test_whole_node_memory_fails_before_the_api(
+        self, runner, api, tmp_path, script_text, flags
+    ):
+        """The API can only send an explicit memory_per_node size, so --mem=0
+        is refused instead of being sent as a 1 MiB limit."""
+        script = tmp_path / "train.sbatch"
+        script.write_text(script_text)
+
+        result = runner.invoke(cli, ["slurm", "submit", str(script), "-r", "us-east-1", *flags])
+
+        assert result.exit_code == 1, result.output
+        assert "Failed to prepare train.sbatch" in result.output
+        assert "--mem=0" in result.output
+        assert "explicit size" in result.output
+        api.call_api.assert_not_called()
+
     def test_bad_script_fails_before_the_api(self, runner, api, tmp_path):
         script = tmp_path / "bad.sh"
         script.write_text("echo no shebang\n")
@@ -888,6 +948,7 @@ def cluster(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "kubeconfig": [],
         "session": (_SERVER, _SNI),
         "runs": [],
+        "context": None,
     }
 
     @contextmanager
@@ -896,11 +957,12 @@ def cluster(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         server, sni = state["session"]
         yield types.SimpleNamespace(server=server, tls_server_name=sni)
 
+    def fake_update_kubeconfig(cluster: str, region: str) -> str | None:
+        state["kubeconfig"].append((cluster, region))
+        return state["context"]
+
     monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", fake_tunnel)
-    monkeypatch.setattr(
-        "cli.kubectl_helpers.update_kubeconfig",
-        lambda cluster, region: state["kubeconfig"].append((cluster, region)),
-    )
+    monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", fake_update_kubeconfig)
     return state
 
 
@@ -1095,6 +1157,7 @@ class TestShell:
     def test_execs_an_interactive_shell_through_the_tunnel(
         self, runner, login_api, cluster, monkeypatch
     ):
+        cluster["context"] = _CONTEXT
         monkeypatch.setattr(
             slurm_lib, "run_foreground", lambda cmd: cluster["runs"].append(list(cmd)) or 0
         )
@@ -1109,6 +1172,7 @@ class TestShell:
         assert cluster["runs"] == [
             [
                 "kubectl",
+                f"--context={_CONTEXT}",
                 "exec",
                 "-it",
                 "deploy/slinky-slurm-login-gco",
@@ -1268,6 +1332,7 @@ class TestPcsShell:
 
 class TestOutput:
     def test_cats_the_stdout_file_from_the_login_pod(self, runner, login_api, cluster, monkeypatch):
+        cluster["context"] = _CONTEXT
         monkeypatch.setattr(
             slurm_lib, "run_capture", lambda cmd: cluster["runs"].append(list(cmd)) or "hello world"
         )
@@ -1288,6 +1353,7 @@ class TestOutput:
         assert cluster["runs"] == [
             [
                 "kubectl",
+                f"--context={_CONTEXT}",
                 "exec",
                 "deploy/slinky-slurm-login-gco",
                 "-n",

@@ -63,6 +63,7 @@ from typing import Any
 
 from gco.bedrock import get_default_embedding_model_id
 
+from . import deployment
 from .embeddings import embed_text
 
 logger = logging.getLogger(__name__)
@@ -86,9 +87,11 @@ DEFAULT_DIMENSIONS = 1024
 DEFAULT_TOP_K = 3
 DEFAULT_RETENTION_DAYS = 365
 
-#: Region resolution order — the convention shared by every DynamoDB
-#: store in the tree (see ``gco/services/template_store.py``).
-_REGION_ENV_ORDER = ("DYNAMODB_REGION", "GLOBAL_REGION", "AWS_REGION")
+#: Region variables read first — the convention shared by every DynamoDB
+#: store in the tree (see ``gco/services/template_store.py``). After them
+#: comes the global stack's Region (:func:`mission.deployment.global_region`),
+#: then ``AWS_REGION``.
+_REGION_ENV_ORDER = ("DYNAMODB_REGION", "GLOBAL_REGION")
 
 _TABLE_NAME_PARAM_SUFFIX = "mission-memory-table-name"
 _INDEX_NAME_PARAM_SUFFIX = "mission-memory-index-name"
@@ -116,16 +119,20 @@ class MissionMemoryUnavailableError(MissionMemoryError):
 
 
 def _resolve_region() -> str | None:
-    """Return the first configured region env var, else ``None``.
+    """Return the Region of the mission-memory table and its SSM parameters.
 
-    ``None`` lets boto3 fall through to its own default chain, matching
-    how the sibling stores behave on hosts with a configured profile.
+    ``DYNAMODB_REGION``, then ``GLOBAL_REGION``, then the global stack's
+    Region (the CLI's configuration, ``GCO_GLOBAL_REGION``, cdk.json
+    ``deployment_regions.global``), then ``AWS_REGION``. ``None`` lets boto3
+    fall through to its own default chain. The global Region used to be
+    skipped, so an operator whose default Region was not the global one
+    could not reach the table.
     """
     for env_var in _REGION_ENV_ORDER:
         value = os.environ.get(env_var)
         if value:
             return value
-    return None
+    return deployment.global_region() or os.environ.get("AWS_REGION") or None
 
 
 def _plain(value: Any) -> Any:
@@ -162,9 +169,11 @@ class MissionMemoryStore:
     Args:
         table_name: Table name override; ``None`` resolves from SSM.
         index_name: Vector-index name override; ``None`` resolves from SSM.
-        region: Region override; ``None`` follows the
-            ``DYNAMODB_REGION`` → ``GLOBAL_REGION`` → ``AWS_REGION``
-            convention, then the SDK default chain.
+        project_name: Project override for the SSM parameter names;
+            ``None`` follows :func:`mission.deployment.project_name`.
+        region: Region override; ``None`` follows ``DYNAMODB_REGION`` →
+            ``GLOBAL_REGION`` → the global stack's Region →
+            ``AWS_REGION``, then the SDK default chain.
         embedding_model_id: Embedding model override; ``None`` resolves
             the checked-in default lazily on first embed.
         dimensions: Requested embedding width. Must match the deployed
@@ -179,6 +188,7 @@ class MissionMemoryStore:
         table_name: str | None = None,
         index_name: str | None = None,
         *,
+        project_name: str | None = None,
         region: str | None = None,
         embedding_model_id: str | None = None,
         dimensions: int = DEFAULT_DIMENSIONS,
@@ -186,6 +196,7 @@ class MissionMemoryStore:
     ) -> None:
         self._table_name = table_name
         self._index_name = index_name
+        self._project_name = project_name
         self._region = region
         self._embedding_model_id = embedding_model_id
         self._dimensions = int(dimensions)
@@ -202,8 +213,7 @@ class MissionMemoryStore:
 
         from gco.services.aws_ssm import get_ssm_parameter
 
-        project_name = os.environ.get("GCO_PROJECT_NAME", "gco")
-        param_name = f"/{project_name}/{suffix}"
+        param_name = f"/{deployment.project_name(self._project_name)}/{suffix}"
         try:
             return get_ssm_parameter(param_name, region=self._region or _resolve_region())
         except ClientError as err:

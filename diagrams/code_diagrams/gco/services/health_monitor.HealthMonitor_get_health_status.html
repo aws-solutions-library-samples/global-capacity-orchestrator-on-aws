@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-16T21:53:25Z">
-        <meta name="gco-source-commit" content="e87c6c2875ea52716c5fb87a7843816a863f6298">
-        <meta name="gco-flow-digest" content="d2cbdbfa5a1145ba">
+        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
+        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
+        <meta name="gco-flow-digest" content="a7e9770ab196d674">
         <title>Health status policy (thresholds, violations, collection failure)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,57 +208,21 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op598=>operation: '\n        Get current health status of the cluster\n        '
-op601=>operation: resource_utilization, active_jobs, pending_pods, pending_requested = await self.get_cluster_metrics()
-is_healthy = True
-if not self.thresholds.is_disabled('cpu_threshold'):
-    is_healthy = is_healthy and resource_utilization.cpu <= self.thresholds.cpu_threshold
-if not self.thresholds.is_disabled('memory_threshold'):
-    is_healthy = is_healthy and resource_utilization.memory <= self.thresholds.memory_threshold
-if not self.thresholds.is_disabled('gpu_threshold'):
-    is_healthy = is_healthy and resource_utilization.gpu <= self.thresholds.gpu_threshold
-if not self.thresholds.is_disabled('pending_pods_threshold'):
-    is_healthy = is_healthy and pending_pods <= self.thresholds.pending_pods_threshold
-if not self.thresholds.is_disabled('pending_requested_cpu_vcpus'):
-    is_healthy = is_healthy and pending_requested.cpu_vcpus <= self.thresholds.pending_requested_cpu_vcpus
-if not self.thresholds.is_disabled('pending_requested_memory_gb'):
-    is_healthy = is_healthy and pending_requested.memory_gb <= self.thresholds.pending_requested_memory_gb
-if not self.thresholds.is_disabled('pending_requested_gpus'):
-    is_healthy = is_healthy and pending_requested.gpus <= self.thresholds.pending_requested_gpus
-status: Literal['healthy', 'unhealthy'] = 'healthy' if is_healthy else 'unhealthy'
-message = None
-if not is_healthy:
-    violations = []
-    if not self.thresholds.is_disabled('cpu_threshold') and resource_utilization.cpu > self.thresholds.cpu_threshold:
-        violations.append(f'CPU: {resource_utilization.cpu:.1f}% > {self.thresholds.cpu_threshold}%')
-    if not self.thresholds.is_disabled('memory_threshold') and resource_utilization.memory > self.thresholds.memory_threshold:
-        violations.append(f'Memory: {resource_utilization.memory:.1f}% > {self.thresholds.memory_threshold}%')
-    if not self.thresholds.is_disabled('gpu_threshold') and resource_utilization.gpu > self.thresholds.gpu_threshold:
-        violations.append(f'GPU: {resource_utilization.gpu:.1f}% > {self.thresholds.gpu_threshold}%')
-    if not self.thresholds.is_disabled('pending_pods_threshold') and pending_pods > self.thresholds.pending_pods_threshold:
-        violations.append(f'Pending Pods: {pending_pods} > {self.thresholds.pending_pods_threshold}')
-    if not self.thresholds.is_disabled('pending_requested_cpu_vcpus') and pending_requested.cpu_vcpus > self.thresholds.pending_requested_cpu_vcpus:
-        violations.append(f'Pending CPU: {pending_requested.cpu_vcpus:.1f} vCPUs > {self.thresholds.pending_requested_cpu_vcpus} vCPUs')
-    if not self.thresholds.is_disabled('pending_requested_memory_gb') and pending_requested.memory_gb > self.thresholds.pending_requested_memory_gb:
-        violations.append(f'Pending Memory: {pending_requested.memory_gb:.1f} GB > {self.thresholds.pending_requested_memory_gb} GB')
-    if not self.thresholds.is_disabled('pending_requested_gpus') and pending_requested.gpus > self.thresholds.pending_requested_gpus:
-        violations.append(f'Pending GPUs: {pending_requested.gpus} > {self.thresholds.pending_requested_gpus}')
-    message = f"Threshold violations: {', '.join(violations)}"
-health_status = HealthStatus(cluster_id=self.cluster_id, region=self.region, timestamp=datetime.now(UTC), status=status, resource_utilization=resource_utilization, thresholds=self.thresholds, active_jobs=active_jobs, pending_pods=pending_pods, pending_requested=pending_requested, message=message)
-logger.info(f"Health status: {status} - {message or 'All thresholds within limits'}")
-return health_status
-cond600=>condition: exception raised?
-cond603=>condition: except Exception as e
-sub607=>subroutine: logger.error(f'Error getting health status: {e}')
-io612=>inputoutput: output: HealthStatus(cluster_id=self.cluster_id, region=self.region, timestamp=datetime.now(UTC), status='unhealthy', resource_utilization=ResourceUtilization(cpu=0.0, memory=0.0, gpu=0.0), thresholds=self.thresholds, active_jobs=0, pending_pods=0, pending_requested=RequestedResources(cpu_vcpus=0.0, memory_gb=0.0, gpus=0), message=f'Health check error: {e!s}')
-e610=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op6084=>operation: 'Get current health status of the cluster.\n\n        Single-flight: a caller that arrives while a refresh runs (the\n        background loop and an API request, say) shares that refresh instead\n        of starting its own set of reads. A cancelled caller does not cancel\n        the shared refresh.\n        '
+op6086=>operation: refresh = self._refresh
+cond6089=>condition: if refresh is None or refresh.done()
+op6093=>operation: refresh = asyncio.create_task(self._refresh_health_status())
+op6095=>operation: self._refresh = refresh
+io6103=>inputoutput: output: await asyncio.shield(refresh)
+e6101=>end: end function return
 
-op598->op601
-op601->cond600
-cond600(yes)->cond603
-cond603(yes)->sub607
-sub607->io612
-io612->e610
+op6084->op6086
+op6086->cond6089
+cond6089(yes)->op6093
+op6093->op6095
+op6095->io6103
+io6103->e6101
+cond6089(no)->io6103
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -268,17 +232,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-16T21:53:25Z -->
-        <!-- Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298 -->
+        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-16T21:53:25Z">2026-11-16T21:53:25Z</time>
+            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>e87c6c2875ea52716c5fb87a7843816a863f6298</code>
+            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>d2cbdbfa5a1145ba</code>
+            Flow content SHA-256: <code>a7e9770ab196d674</code>
           </p>
           <div id="canvas"></div>
         </div>

@@ -1,8 +1,10 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  # The network-posture action re-names and re-namespaces this Job per probe
-  # and sets PROBE_URL; the file fixes the pod shape and the verdict script.
+  # The network-posture action re-names and re-namespaces this Job per probe,
+  # sets PROBE_URL, and adds the pod labels a probe's policy selects by (the
+  # gco-inference positive control); the file fixes the pod shape and the
+  # verdict script.
   name: gco-live-netpol-probe-__RUN_TOKEN__
   namespace: gco-jobs
   annotations:

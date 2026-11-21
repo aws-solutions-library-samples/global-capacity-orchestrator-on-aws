@@ -21,7 +21,6 @@ from ..constants import (
     _HEALTHY_STACK_STATUSES,
 )
 from ..context import (
-    _direct_regional_access_enabled,
     _resolve_branch,
     _run_git,
     _topology_regions,
@@ -253,17 +252,6 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
             "--confirm-kms-key-deletion to explicitly authorize scheduling only "
             "this run's exact keys for deletion during cleanup."
         )
-    direct_regional_access = _direct_regional_access_enabled(ctx)
-    if (
-        len(ctx.deployment_regions) > 1
-        and selected.intersection({"api", "sqs", "central-queue"})
-        and not direct_regional_access
-    ):
-        raise RuntimeError(
-            "Multi-Region Job actions require api_gateway.regional_api_enabled=true; "
-            "the global API cannot prove which same-named regional Job it observed"
-        )
-
     enabled_regions = discover_enabled_regions(ctx.session, ctx.config.global_region)
     target_stacks = ctx.stack_manager.list_stacks()
     if not target_stacks:
@@ -343,7 +331,6 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
             "topology_regions": list(_topology_regions(ctx)),
             "bootstrap_stacks": bootstrap_stacks,
             "expected_ecr_images": expected_ecr_images,
-            "direct_regional_access": direct_regional_access,
             "preexisting_project_stacks": existing
             if not ctx.checkpoint.deployment_attempted
             else ctx.checkpoint.state.get("preexisting_project_stacks", {}),
@@ -365,7 +352,6 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
         "target_stack_regions": target_stack_regions,
         "bootstrap_stacks": bootstrap_stacks,
         "expected_ecr_images": expected_ecr_images,
-        "direct_regional_access": direct_regional_access,
         "session_manager_plugin": session_manager_plugin or "not-required",
         "min_free_disk_gib": settings.min_free_disk_gib,
         "free_disk_gib": free_disk_gib if free_disk_gib is not None else "not-required",

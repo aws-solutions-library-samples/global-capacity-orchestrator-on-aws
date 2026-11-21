@@ -162,8 +162,12 @@ def _encoded(value: str) -> str:
 
 class _CoreV1Stub:
     calls: list[tuple[str, str]] = []
+    api_clients: list[Any] = []
     secret: Any = None
     error: Exception | None = None
+
+    def __init__(self, api_client: Any = None) -> None:
+        type(self).api_clients.append(api_client)
 
     def read_namespaced_secret(self, name: str, namespace: str) -> Any:
         type(self).calls.append((name, namespace))
@@ -177,6 +181,7 @@ def core_v1(monkeypatch: pytest.MonkeyPatch) -> type[_CoreV1Stub]:
     import kubernetes.client
 
     _CoreV1Stub.calls = []
+    _CoreV1Stub.api_clients = []
     _CoreV1Stub.secret = _secret({"auth-token": _encoded(TOKEN)})
     _CoreV1Stub.error = None
     monkeypatch.setattr(kubernetes.client, "CoreV1Api", _CoreV1Stub)
@@ -184,6 +189,16 @@ def core_v1(monkeypatch: pytest.MonkeyPatch) -> type[_CoreV1Stub]:
 
 
 class TestSecretTokenProvider:
+    def test_the_secret_read_carries_a_request_timeout(self, core_v1, monkeypatch):
+        from gco.services.k8s_client import BoundedApiClient
+
+        monkeypatch.setenv("K8S_API_TIMEOUT", "12")
+        _run(SecretTokenProvider().token())
+
+        (api_client,) = core_v1.api_clients
+        assert isinstance(api_client, BoundedApiClient)
+        assert api_client.default_request_timeout == 12
+
     def test_reads_the_named_key_from_the_named_secret_once(self, core_v1):
         provider = SecretTokenProvider()
 

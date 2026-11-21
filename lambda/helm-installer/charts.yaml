@@ -226,12 +226,15 @@ charts:
         controller_image_name: volcanosh/vc-controller-manager
         scheduler_image_name: volcanosh/vc-scheduler
         admission_image_name: volcanosh/vc-webhook-manager
-        # Pin the image tag explicitly (matches the chart's v1.15.0 appVersion)
-        # rather than relying on the chart default. This is the tag
-        # `gco images mirror` mirrors into ECR and the tag helm
-        # requests, so the two can never drift. Bump in lockstep with the chart
-        # `version` above, then re-run the mirror (or just redeploy).
-        image_tag_version: "v1.15.2"
+        # Pin the image tag explicitly rather than relying on the chart
+        # default. This is the tag `gco images mirror` mirrors into ECR and
+        # the tag helm requests, so the two can never drift. It must be
+        # v<chart version>: the chart's templates are written for its own
+        # release's components (chart 1.16.0 registers the PodGroup webhook
+        # for UPDATE, which a v1.15 webhook manager rejects, so no Volcano Job
+        # got its pods). .github/scripts/validate_helm_charts.py fails CI when
+        # they differ. Bump both together; the next deploy mirrors the new tag.
+        image_tag_version: "v1.16.0"
         controller_podAnnotations:
           karpenter.sh/do-not-disrupt: "true"
         scheduler_podAnnotations:
@@ -1295,8 +1298,9 @@ charts:
       crds:
         install: true
         # Upstream default: helm uninstall leaves the CRDs, so disabling Argo
-        # CD can never cascade-delete a CRD out from under the cluster. The
-        # installer deletes every argoproj.io object before it uninstalls.
+        # CD can never cascade-delete a CRD out from under the cluster. Before
+        # it uninstalls GCO's release, the installer deletes every
+        # argoproj.io object in this namespace.
         keep: true
       global:
         # The chart's per-component NetworkPolicies admit only pod sources on
@@ -1554,3 +1558,10 @@ charts:
           # creates elsewhere in the cluster are rejected.
           podAnnotations:
             karpenter.sh/do-not-disrupt: "true"
+          # For the same reason no pod those webhooks admit may preempt it.
+          # At the default priority (0) the gco-platform-critical pods did:
+          # on full nodes the SQS queue processor preempted the controller,
+          # and the creates the queue processor then made were rejected. The
+          # AWS Load Balancer Controller and Volcano's admission webhook run
+          # at this class too.
+          priorityClassName: system-cluster-critical

@@ -1,6 +1,6 @@
 """CloudFormation custom resources that look up AWS PCS facts the SDK cannot shape.
 
-One ``cr.Provider`` (``gco/stacks/pcs_cluster.py`` ``PcsLookup``) serves two
+One ``cr.Provider`` (``gco/stacks/pcs_cluster.py`` ``PcsLookup``) serves three
 resource types, told apart by the event's ``ResourceType``:
 
 * ``Custom::PcsAmiLookup`` resolves the AMI a compute node group launches

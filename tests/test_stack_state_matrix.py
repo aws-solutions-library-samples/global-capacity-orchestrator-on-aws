@@ -480,6 +480,36 @@ class TestDeleteConvergence:
         with patch.object(manager, "_describe_stack_target", return_value=target):
             assert manager._cloudformation_delete_stack(STACK_NAME) is False
 
+    @pytest.mark.parametrize(
+        ("error", "reason"),
+        [
+            (
+                _error(
+                    "ValidationError",
+                    "Stack cannot be deleted while TerminationProtection is enabled",
+                    "DeleteStack",
+                ),
+                "ValidationError: Stack cannot be deleted while TerminationProtection is enabled",
+            ),
+            (RuntimeError("connection reset"), "RuntimeError: connection reset"),
+        ],
+    )
+    def test_refused_direct_delete_tells_the_operator_why(
+        self,
+        manager: StackManager,
+        capsys: pytest.CaptureFixture[str],
+        error: BaseException,
+        reason: str,
+    ) -> None:
+        """A teardown barrier that stops on a refused delete must say what CloudFormation said."""
+        cfn = MagicMock()
+        cfn.delete_stack.side_effect = error
+        target = (REGION, cfn, _stack("UPDATE_COMPLETE"))
+        with patch.object(manager, "_describe_stack_target", return_value=target):
+            assert manager._cloudformation_delete_stack(STACK_NAME) is False
+
+        assert f"CloudFormation did not delete {STACK_NAME}: {reason}" in capsys.readouterr().out
+
 
 class TestStrictChangeSetPreflight:
     def test_missing_region_and_non_missing_error_fail_closed(self, manager: StackManager) -> None:
@@ -1000,7 +1030,6 @@ class TestOrchestrationStateMachines:
         with (
             patch.object(manager, "list_stacks", return_value=[STACK_NAME]),
             patch.object(manager, "_resolve_strict_teardown_resources", return_value={}),
-            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(manager, "cleanup_orphaned_bastions", return_value=0),
             patch.object(
                 manager,

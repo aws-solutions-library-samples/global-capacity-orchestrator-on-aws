@@ -11,13 +11,14 @@ tag the launch templates stamp (``gco:project``) together with the tag PCS
 itself puts on every node (``aws:pcs:compute-node-group-id``).
 
 The nodes' root volumes lag further: the launch templates tag them like
-the instances (``gco:project``, ``gco:pcs-node-group``), EBS deletes a
-``DeleteOnTermination`` volume only after its instance is ``terminated``,
-and the tagging API still lists the volume while it is ``deleting``. The
-first full run on this harness ended with exactly one residual resource,
+the instances (``gco:project``, ``gco:pcs-node-group``) and EBS deletes a
+``DeleteOnTermination`` volume only after its instance is ``terminated``.
+The first full run on this harness ended with exactly one residual resource,
 the login node's root volume, gone a minute later. So the wait covers the
-volumes too; anything still present at the deadline is reported, and the
-final inventory then decides.
+volumes too, until each is in a state the final inventory accepts as gone
+(``deleting`` or ``deleted``, the one set ``inventory/_shared.py`` defines);
+anything still present at the deadline is reported, and the final inventory
+then decides.
 """
 
 from __future__ import annotations
@@ -27,14 +28,18 @@ from typing import Any
 
 from gco.pcs_config import PCS_NODE_GROUP_INSTANCE_TAG
 
+from ..inventory._shared import _EBS_VOLUME_STATES, _TERMINAL_VOLUME_STATES
 from ..models import RunContext, utc_now
 
 #: How long PCS-launched instances may take to leave ``shutting-down``.
 PCS_NODE_TERMINATION_WAIT_SECONDS = 600
 PCS_NODE_TERMINATION_POLL_SECONDS = 15
 _LIVE_STATES = ("pending", "running", "stopping", "stopped", "shutting-down")
-#: Every volume status short of gone (``deleted`` volumes are not listed at all).
-_VOLUME_STATES = ("creating", "available", "in-use", "deleting", "error")
+#: The volume states the wait waits out: every state but those the final
+#: inventory accepts as gone.
+_VOLUME_STATES = tuple(
+    state for state in _EBS_VOLUME_STATES if state not in _TERMINAL_VOLUME_STATES
+)
 #: The tag GCO's launch templates stamp on the nodes' volumes (``gco/stacks/pcs_cluster.py``).
 PCS_NODE_GROUP_VOLUME_TAG = "gco:pcs-node-group"
 

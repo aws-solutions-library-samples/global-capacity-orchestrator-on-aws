@@ -10,6 +10,9 @@ validation without contacting live services.
 
 ## Fixture Sets
 
+- [`cdk_json/`](cdk_json/README.md) contains the `cdk.json` files earlier
+  releases shipped, which the current configuration validation must still
+  accept.
 - [`scaffold_responses/`](scaffold_responses/README.md) contains captured model
   responses replayed through the Mission scaffolder pipeline.
 

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,6 +32,84 @@ def _utc_now_iso() -> str:
 def _new_lifecycle_token() -> str:
     """Return a cryptographically random immutable lifecycle token."""
     return secrets.token_hex(32)
+
+
+# The suffixes the inference monitor appends to an endpoint name to name the
+# endpoint's Kubernetes objects (canary, Mooncake roles and proxy, the generated
+# admin Secret, the ConfigMaps), and the prefix KEDA gives the HPAs it creates.
+_ENDPOINT_OBJECT_SUFFIXES = (
+    "-canary",
+    "-prefill",
+    "-decode",
+    "-proxy",
+    "-admin",
+    "-mooncake",
+    "-pd-proxy",
+    "-tls-proxy",
+)
+_KEDA_HPA_PREFIX = "keda-hpa-"
+
+# Services and pod ``app`` labels carry the role names, so ``<name>-prefill``,
+# the longest of them, must fit in a 63-character DNS-1035 label.
+ENDPOINT_NAME_MAX_LENGTH = 63 - len("-prefill")
+_ENDPOINT_NAME_PATTERN = re.compile(r"[a-z](?:[-a-z0-9]*[a-z0-9])?")
+
+
+def endpoint_object_names(endpoint_name: str) -> frozenset[str]:
+    """Every Kubernetes object name the inference monitor derives from ``endpoint_name``."""
+    return frozenset(
+        {
+            endpoint_name,
+            *(endpoint_name + suffix for suffix in _ENDPOINT_OBJECT_SUFFIXES),
+            *(
+                f"{_KEDA_HPA_PREFIX}{endpoint_name}{suffix}"
+                for suffix in ("", "-prefill", "-decode")
+            ),
+        }
+    )
+
+
+def validate_endpoint_name(endpoint_name: str) -> None:
+    """Refuse a name the endpoint's Kubernetes objects cannot carry.
+
+    Raises:
+        ValueError: Unless the name is a DNS-1035 label (lowercase letters,
+            digits and ``-``, starting with a letter, ending with a letter or
+            digit) of at most :data:`ENDPOINT_NAME_MAX_LENGTH` characters.
+    """
+    if len(endpoint_name) > ENDPOINT_NAME_MAX_LENGTH or not _ENDPOINT_NAME_PATTERN.fullmatch(
+        endpoint_name
+    ):
+        raise ValueError(
+            f"Invalid endpoint name {endpoint_name!r}: use lowercase letters, digits and '-', "
+            "starting with a letter and ending with a letter or digit, at most "
+            f"{ENDPOINT_NAME_MAX_LENGTH} characters (so '<name>-prefill' fits a "
+            "63-character Kubernetes name)"
+        )
+
+
+def check_endpoint_name_collisions(endpoint_name: str, existing_names: Iterable[str]) -> None:
+    """Refuse a name whose Kubernetes objects would share a name with another endpoint's.
+
+    ``llama-canary`` beside ``llama`` would both own the Deployment
+    ``llama-canary``, and so would ``foo-proxy`` beside a Mooncake ``foo``; the
+    check runs in both directions over every derived name. An existing record
+    of the same name is left to :meth:`InferenceEndpointStore.create_endpoint`,
+    which reports it as already existing.
+
+    Raises:
+        ValueError: Naming the other endpoint and one shared object name.
+    """
+    owned = endpoint_object_names(endpoint_name)
+    for other in sorted(set(existing_names) - {endpoint_name}):
+        shared = owned & endpoint_object_names(other)
+        if shared:
+            raise ValueError(
+                f"Endpoint name {endpoint_name!r} collides with endpoint {other!r}: both would "
+                f"own the Kubernetes object {min(shared)!r}. Pick a name that is not another "
+                "endpoint's name plus one of the suffixes "
+                f"{', '.join(_ENDPOINT_OBJECT_SUFFIXES)} (or the reverse)"
+            )
 
 
 def _validate_endpoint_spec(spec: dict[str, Any]) -> None:
@@ -120,9 +200,18 @@ class InferenceEndpointStore:
         desired_state: str | None = None,
         target_region: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List all endpoints, optionally filtered."""
+        """List all endpoints, optionally filtered.
+
+        A scan returns at most 1 MB of items per call, so this follows
+        ``LastEvaluatedKey`` until the table is exhausted: the reconcile loop
+        and the deploy-time name-collision check both need every record.
+        """
         response = self._table.scan()
-        items = [_deserialize_from_dynamo(i) for i in response.get("Items", [])]
+        raw_items = list(response.get("Items", []))
+        while "LastEvaluatedKey" in response:
+            response = self._table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+            raw_items.extend(response.get("Items", []))
+        items = [_deserialize_from_dynamo(i) for i in raw_items]
         if desired_state:
             items = [i for i in items if i.get("desired_state") == desired_state]
         if target_region:
@@ -331,37 +420,54 @@ class InferenceEndpointStore:
         expected_lifecycle_id: str,
         expected_updated_at: str | None = None,
     ) -> dict[str, Any] | None:
-        """Conditionally update a live lifecycle's spec and trigger reconciliation."""
+        """Conditionally update a live lifecycle's spec and trigger reconciliation.
+
+        A running or deploying endpoint re-enters ``deploying``, so the
+        monitors roll the change out and promote the endpoint again. A stopped
+        endpoint stays stopped and runs the new spec once it is started. Each
+        case is one conditional write; the second runs only when the first
+        found the endpoint stopped (or found no endpoint to update).
+
+        Returns:
+            The updated record, or ``None`` when no live record matches the
+            lifecycle (and ``expected_updated_at``, when given).
+        """
         _validate_endpoint_spec(spec)
         if not expected_lifecycle_id:
             raise ValueError("Spec updates require an expected lifecycle id")
-        condition = (
-            "attribute_exists(endpoint_name) AND lifecycle_id = :expected_lifecycle_id "
-            "AND desired_state <> :deleted"
-        )
+        condition = "attribute_exists(endpoint_name) AND lifecycle_id = :expected_lifecycle_id"
         values: dict[str, Any] = {
             ":s": _serialize_for_dynamo(spec),
             ":u": _utc_now_iso(),
-            ":ds": "deploying",
-            ":deleted": "deleted",
+            ":stopped": "stopped",
             ":expected_lifecycle_id": expected_lifecycle_id,
         }
         if expected_updated_at is not None:
             condition += " AND updated_at = :expected_updated_at"
             values[":expected_updated_at"] = expected_updated_at
-        try:
-            response = self._table.update_item(
-                Key={"endpoint_name": endpoint_name},
-                UpdateExpression="SET spec = :s, updated_at = :u, desired_state = :ds",
-                ExpressionAttributeValues=values,
-                ConditionExpression=condition,
-                ReturnValues="ALL_NEW",
-            )
+        attempts: tuple[tuple[str, str, dict[str, Any]], ...] = (
+            (
+                "SET spec = :s, updated_at = :u, desired_state = :ds",
+                " AND desired_state <> :deleted AND desired_state <> :stopped",
+                {":ds": "deploying", ":deleted": "deleted"},
+            ),
+            ("SET spec = :s, updated_at = :u", " AND desired_state = :stopped", {}),
+        )
+        for update_expression, state_condition, state_values in attempts:
+            try:
+                response = self._table.update_item(
+                    Key={"endpoint_name": endpoint_name},
+                    UpdateExpression=update_expression,
+                    ExpressionAttributeValues={**values, **state_values},
+                    ConditionExpression=condition + state_condition,
+                    ReturnValues="ALL_NEW",
+                )
+            except ClientError as e:
+                if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                    raise
+                continue
             return _deserialize_from_dynamo(response.get("Attributes", {}))
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                return None
-            raise
+        return None
 
     def update_target_regions(
         self,
@@ -473,11 +579,17 @@ class InferenceEndpointStore:
             condition += " AND region_generations.#r = :expected_region_generation"
             values[":expected_region_generation"] = expected_region_generation
         if expected_deletion_generation is not None:
+            # Only this generation's own terminal acknowledgement is final. A
+            # Region removed before the delete holds a terminal acknowledgement
+            # of its removal (state "deleted", no deletion generation) and
+            # still has to acknowledge the deletion, or the purge never runs.
             condition += (
                 " AND desired_state = :deleted "
                 "AND deletion_generation = :expected_deletion_generation "
                 "AND (attribute_not_exists(region_status.#r.#state) "
-                "OR region_status.#r.#state <> :terminal_deleted)"
+                "OR region_status.#r.#state <> :terminal_deleted "
+                "OR attribute_not_exists(region_status.#r.deletion_generation) "
+                "OR region_status.#r.deletion_generation <> :expected_deletion_generation)"
             )
             names["#state"] = "state"
             values[":deleted"] = "deleted"

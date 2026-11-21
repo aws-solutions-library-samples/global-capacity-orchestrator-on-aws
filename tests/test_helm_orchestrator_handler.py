@@ -2,14 +2,19 @@
 
 The handler starts fire-and-forget Step Functions convergence on Create/Update,
 persists the exact input and execution identity for topology consumers, and
-keeps Delete as a no-op.
+keeps Delete as a no-op. An input whose zlib+base64 encoding exceeds one 8 KiB
+SSM value is stored in parts written before their ``_input`` header, the parts
+of a replaced header are deleted best-effort, and only Step Functions' 256 KiB
+input limit refuses a deployment.
 """
 
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
+import logging
 import random
 import re
 import zlib
@@ -25,6 +30,117 @@ _STATE_MACHINE_ARN = "arn:aws:states:us-east-1:123456789012:stateMachine:HelmIns
 _EXECUTION_ARN = "arn:aws:states:us-east-1:123456789012:execution:HelmInstall:abc-123"
 _DEPLOYMENT_TIMESTAMP = "2026-07-18T01:02:03Z"
 _START_DATE = datetime(2026, 7, 18, 1, 2, 4, tzinfo=UTC)
+_INPUT_NAME = "/gco/addons/us-east-1/_input"
+_EXECUTION_RECORD_NAME = "/gco/addons/us-east-1/_execution"
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _encoded(execution_input_json):
+    return base64.b64encode(zlib.compress(execution_input_json.encode("utf-8"), 9)).decode("ascii")
+
+
+def _execution_input(props):
+    """The execution input ``on_event`` builds from ``props`` (object Charts)."""
+    return {
+        "ClusterName": props["ClusterName"],
+        "Region": props["Region"],
+        "RegistryRegion": props["RegistryRegion"],
+        "ProjectName": props["ProjectName"],
+        "EnabledCharts": props.get("EnabledCharts", []),
+        "Charts": props.get("Charts", {}),
+        "KedaOperatorRoleArn": props.get("KedaOperatorRoleArn"),
+        "ImageReplacements": props.get("ImageReplacements", {}),
+        "DeploymentToken": props["DeploymentTimestamp"],
+    }
+
+
+def _image_replacements(count):
+    """Image replacements shaped like a full deployment's: ECR image URIs
+    pinned by 64-hex digests, which zlib can barely shrink."""
+    return {
+        f"{{{{IMAGE_{index:03d}}}}}": (
+            f"123456789012.dkr.ecr.us-east-1.amazonaws.com/gco/component-{index:03d}@sha256:"
+            + hashlib.sha256(f"image-{index}".encode()).hexdigest()
+        )
+        for index in range(count)
+    }
+
+
+def _props_with_raw_size(props, size):
+    """``props`` padded so the canonical execution input is exactly ``size`` bytes."""
+    padded = {**props, "ImageReplacements": {"{{PAD}}": ""}}
+    missing = size - len(_canonical(_execution_input(padded)).encode("utf-8"))
+    padded["ImageReplacements"] = {
+        "{{PAD}}": random.Random(size).randbytes(missing // 2 + 1).hex()[:missing]
+    }
+    assert len(_canonical(_execution_input(padded)).encode("utf-8")) == size
+    return padded
+
+
+def _reassemble(parameters, input_name):
+    """Independent reader of the stored replay input: header, parts, digest, decode."""
+    stored = parameters[input_name]
+    match = re.fullmatch(r"chunked:v1:([1-9][0-9]*):([0-9a-f]{64})", stored)
+    if match is not None:
+        count, digest = int(match[1]), match[2]
+        stored = "".join(
+            parameters[f"{input_name}.{digest[:16]}.{index}"] for index in range(1, count + 1)
+        )
+        assert hashlib.sha256(stored.encode("ascii")).hexdigest() == digest
+    return zlib.decompress(base64.b64decode(stored, validate=True)).decode("utf-8")
+
+
+def _stored_parameters(ssm):
+    """The final value of every parameter a MagicMock SSM client was asked to write."""
+    return {call.kwargs["Name"]: call.kwargs["Value"] for call in ssm.put_parameter.call_args_list}
+
+
+def _client_error(code, operation):
+    return ClientError({"Error": {"Code": code, "Message": code}}, operation)
+
+
+class _FakeSsm:
+    """Dict-backed SSM client that keeps every call in ``events``, in order.
+
+    ``read_error`` fails every GetParameter; ``delete_errors`` fails the
+    DeleteParameter of the names it maps; ``put_errors`` fails the
+    PutParameter of the names it maps.
+    """
+
+    def __init__(self, events=None, parameters=None):
+        self.events = events if events is not None else []
+        self.parameters = dict(parameters or {})
+        self.writes = []
+        self.read_error = None
+        self.delete_errors = {}
+        self.put_errors = {}
+
+    def get_parameter(self, *, Name):
+        self.events.append(("get", Name))
+        if self.read_error is not None:
+            raise self.read_error
+        if Name not in self.parameters:
+            raise _client_error("ParameterNotFound", "GetParameter")
+        return {"Parameter": {"Name": Name, "Type": "String", "Value": self.parameters[Name]}}
+
+    def put_parameter(self, **kwargs):
+        name = kwargs["Name"]
+        self.events.append(("put", name))
+        if name in self.put_errors:
+            raise self.put_errors[name]
+        self.writes.append(kwargs)
+        self.parameters[name] = kwargs["Value"]
+
+    def delete_parameter(self, *, Name):
+        self.events.append(("delete", Name))
+        if Name in self.delete_errors:
+            raise self.delete_errors[Name]
+        if Name not in self.parameters:
+            raise _client_error("ParameterNotFound", "DeleteParameter")
+        del self.parameters[Name]
 
 
 @pytest.fixture
@@ -439,22 +555,39 @@ class TestOnEvent:
         sfn.stop_execution.assert_called_once_with(executionArn=_EXECUTION_ARN)
         assert ssm.put_parameter.call_count == 2
 
-    def test_encoded_replay_input_over_advanced_parameter_limit_fails_before_writes(
+    def test_raw_input_over_the_step_functions_limit_fails_before_anything_is_written(
         self, orchestrator
     ):
+        """StartExecution's 256 KiB is the input's real bound; the SSM copy is
+        stored in parts, so its encoded size no longer refuses a deployment."""
         handler, sfn = orchestrator
         ssm = MagicMock()
-        # Only the ENCODED (zlib+base64) size is bounded — that is what SSM
-        # stores. An incompressible payload keeps the encoding over the limit.
-        incompressible = random.Random(241).randbytes(24 * 1024).hex()
-        props = self._props(ImageReplacements={"oversized": incompressible})
+        props = _props_with_raw_size(self._props(), 256 * 1024 + 1)
         with (
             patch.object(handler, "_ssm", return_value=ssm),
-            pytest.raises(ValueError, match="SSM Parameter Store supports at most 8192 bytes"),
+            pytest.raises(
+                ValueError,
+                match=r"is 262145 bytes; Step Functions accepts at most 262144 bytes",
+            ),
         ):
             handler.on_event({"RequestType": "Update", "ResourceProperties": props})
-        ssm.put_parameter.assert_not_called()
+        handler._prepare_teardown_fence.assert_not_called()
+        assert ssm.mock_calls == []
         sfn.start_execution.assert_not_called()
+
+    def test_raw_input_at_the_step_functions_limit_is_started(self, orchestrator):
+        handler, sfn = orchestrator
+        ssm = MagicMock()
+        sfn.start_execution.return_value = {"executionArn": _EXECUTION_ARN}
+        props = _props_with_raw_size(self._props(), 256 * 1024)
+
+        with patch.object(handler, "_ssm", return_value=ssm):
+            handler.on_event({"RequestType": "Update", "ResourceProperties": props})
+
+        sent = sfn.start_execution.call_args.kwargs["input"]
+        assert len(sent.encode("utf-8")) == 256 * 1024
+        stored = _stored_parameters(ssm)
+        assert _reassemble(stored, "/gco/addons/us-east-1/_input") == sent
 
     def test_large_but_compressible_replay_input_is_accepted(self, orchestrator):
         # Regression (live: example-job validation run ex241-edf33111-r2):
@@ -549,6 +682,256 @@ class TestOnEvent:
             handler.on_event({"RequestType": "Update", "ResourceProperties": self._props()})
 
         assert isinstance(info.value.__cause__, ClientError)
+
+
+class TestReplayInputParts:
+    """The SSM replay copy of an input whose encoding exceeds one 8 KiB value."""
+
+    _PARTS_NAME = re.compile(r"/gco/addons/us-east-1/_input\.[0-9a-f]{16}\.[1-9][0-9]*")
+
+    def _props(self, **overrides):
+        return TestOnEvent()._props(**overrides)
+
+    def _run(self, orchestrator, ssm, props, *, request_id="request-123", events=None):
+        handler, sfn = orchestrator
+
+        def start_execution(**kwargs):
+            if events is not None:
+                events.append(("start", kwargs["stateMachineArn"]))
+            return {"executionArn": _EXECUTION_ARN, "startDate": _START_DATE}
+
+        sfn.start_execution.side_effect = start_execution
+        with patch.object(handler, "_ssm", return_value=ssm):
+            result = handler.on_event(
+                {"RequestType": "Update", "RequestId": request_id, "ResourceProperties": props}
+            )
+        assert result["Data"]["ExecutionArn"] == _EXECUTION_ARN
+        return sfn.start_execution.call_args.kwargs["input"]
+
+    def _part_names(self, ssm):
+        return sorted(name for name in ssm.parameters if self._PARTS_NAME.fullmatch(name))
+
+    def test_an_input_too_large_for_one_parameter_is_stored_in_parts(self, orchestrator):
+        """Regression: a live deploy (default charts plus Slurm and YuniKorn, PCS,
+        HyperPod, EKS capabilities) rolled back with "Encoded convergence replay
+        input is 8232 bytes; SSM Parameter Store supports at most 8192 bytes".
+        Its 143 image replacements carry 64-hex digests that zlib can barely
+        shrink. The input is now stored as parts written before their header,
+        and the execution starts with the exact canonical JSON."""
+        events = []
+        ssm = _FakeSsm(events)
+        props = self._props(ImageReplacements=_image_replacements(143))
+        expected_json = _canonical(_execution_input(props))
+        encoded = _encoded(expected_json)
+        assert len(encoded) > 8192, "the fixture must reproduce the live over-limit shape"
+
+        sent = self._run(orchestrator, ssm, props, events=events)
+
+        assert sent == expected_json
+        digest = hashlib.sha256(encoded.encode("ascii")).hexdigest()
+        part_names = [f"{_INPUT_NAME}.{digest[:16]}.{index}" for index in (1, 2)]
+        header = f"chunked:v1:2:{digest}"
+        assert ssm.writes[:3] == [
+            {
+                "Name": name,
+                "Value": value,
+                "Type": "String",
+                "Tier": "Intelligent-Tiering",
+                "Overwrite": True,
+            }
+            for name, value in (
+                (part_names[0], encoded[:8192]),
+                (part_names[1], encoded[8192:]),
+                (_INPUT_NAME, header),
+            )
+        ]
+        # The previous value is read first; the parts precede their header,
+        # which precedes the execution and its record.
+        assert events == [
+            ("get", _INPUT_NAME),
+            ("put", part_names[0]),
+            ("put", part_names[1]),
+            ("put", _INPUT_NAME),
+            ("start", _STATE_MACHINE_ARN),
+            ("put", _EXECUTION_RECORD_NAME),
+        ]
+        # The header cannot be read as either older form.
+        assert not header.startswith("{")
+        with pytest.raises(binascii.Error):
+            base64.b64decode(header, validate=True)
+        assert _reassemble(ssm.parameters, _INPUT_NAME) == expected_json
+        record = json.loads(ssm.parameters[_EXECUTION_RECORD_NAME])
+        assert record["input_sha256"] == hashlib.sha256(expected_json.encode()).hexdigest()
+
+    def test_an_input_that_fits_one_parameter_keeps_the_single_value_byte_for_byte(
+        self, orchestrator
+    ):
+        events = []
+        ssm = _FakeSsm(events)
+        props = self._props(ImageReplacements=_image_replacements(20))
+
+        sent = self._run(orchestrator, ssm, props)
+
+        assert sorted(ssm.parameters) == [_EXECUTION_RECORD_NAME, _INPUT_NAME]
+        assert ssm.parameters[_INPUT_NAME] == _encoded(sent)
+        assert events == [
+            ("get", _INPUT_NAME),
+            ("put", _INPUT_NAME),
+            ("put", _EXECUTION_RECORD_NAME),
+        ]
+
+    def test_an_encoding_of_exactly_one_value_is_not_split(self, orchestrator):
+        handler, _ = orchestrator
+        assert handler._replay_input_writes("/p/_input", "A" * 8192) == [("/p/_input", "A" * 8192)]
+
+        encoded = "A" * 8192 + "B"
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        assert handler._replay_input_writes("/p/_input", encoded) == [
+            (f"/p/_input.{digest[:16]}.1", "A" * 8192),
+            (f"/p/_input.{digest[:16]}.2", "B"),
+            ("/p/_input", f"chunked:v1:2:{digest}"),
+        ]
+
+    def test_a_new_input_replaces_the_previous_parts_after_its_execution_is_recorded(
+        self, orchestrator
+    ):
+        events = []
+        ssm = _FakeSsm(events)
+        self._run(orchestrator, ssm, self._props(ImageReplacements=_image_replacements(300)))
+        previous_parts = self._part_names(ssm)
+        assert len(previous_parts) == 3
+        events.clear()
+
+        newer = self._props(
+            ImageReplacements=_image_replacements(143), DeploymentTimestamp="2026-07-19T00:00:00Z"
+        )
+        sent = self._run(orchestrator, ssm, newer, request_id="request-456", events=events)
+
+        assert _reassemble(ssm.parameters, _INPUT_NAME) == sent
+        current_parts = self._part_names(ssm)
+        assert len(current_parts) == 2
+        assert not set(current_parts) & set(previous_parts)
+        record = events.index(("put", _EXECUTION_RECORD_NAME))
+        assert events[record + 1 :] == [("delete", name) for name in previous_parts]
+
+    def test_parts_are_deleted_when_the_new_input_fits_one_parameter(self, orchestrator):
+        ssm = _FakeSsm()
+        self._run(orchestrator, ssm, self._props(ImageReplacements=_image_replacements(143)))
+        assert len(self._part_names(ssm)) == 2
+
+        sent = self._run(orchestrator, ssm, self._props(), request_id="request-456")
+
+        assert sorted(ssm.parameters) == [_EXECUTION_RECORD_NAME, _INPUT_NAME]
+        assert ssm.parameters[_INPUT_NAME] == _encoded(sent)
+
+    def test_a_retry_with_the_same_input_keeps_its_parts(self, orchestrator):
+        events = []
+        ssm = _FakeSsm(events)
+        props = self._props(ImageReplacements=_image_replacements(143))
+        first = self._run(orchestrator, ssm, props)
+        parts = self._part_names(ssm)
+
+        second = self._run(orchestrator, ssm, props)
+
+        assert second == first
+        assert self._part_names(ssm) == parts
+        assert not [event for event in events if event[0] == "delete"]
+        assert _reassemble(ssm.parameters, _INPUT_NAME) == first
+
+    @pytest.mark.parametrize(
+        "error",
+        [_client_error("AccessDeniedException", "GetParameter"), RuntimeError("network down")],
+    )
+    def test_a_failed_read_of_the_previous_input_is_logged_and_skips_the_cleanup(
+        self, orchestrator, caplog, error
+    ):
+        ssm = _FakeSsm()
+        ssm.parameters[f"{_INPUT_NAME}.{'a' * 16}.1"] = "stale"
+        ssm.parameters[_INPUT_NAME] = f"chunked:v1:1:{'a' * 64}"
+        ssm.read_error = error
+
+        with caplog.at_level(logging.WARNING):
+            sent = self._run(orchestrator, ssm, self._props())
+
+        assert f"Could not read the previous replay input {_INPUT_NAME}" in caplog.text
+        assert ssm.parameters[_INPUT_NAME] == _encoded(sent)
+        # Unknown previous value: nothing is deleted; teardown sweeps the part.
+        assert f"{_INPUT_NAME}.{'a' * 16}.1" in ssm.parameters
+
+    def test_a_missing_previous_input_is_not_logged(self, orchestrator, caplog):
+        with caplog.at_level(logging.WARNING):
+            self._run(orchestrator, _FakeSsm(), self._props())
+        assert "previous replay input" not in caplog.text
+
+    def test_stale_part_delete_failures_are_logged_and_never_fail_the_deployment(
+        self, orchestrator, caplog
+    ):
+        ssm = _FakeSsm()
+        stale = [f"{_INPUT_NAME}.{'b' * 16}.{index}" for index in (1, 2, 3)]
+        # Part 1 is already gone; part 2 cannot be deleted; part 3 can.
+        ssm.parameters.update({stale[1]: "x", stale[2]: "y"})
+        ssm.parameters[_INPUT_NAME] = f"chunked:v1:3:{'b' * 64}"
+        ssm.delete_errors[stale[1]] = _client_error("AccessDeniedException", "DeleteParameter")
+
+        with caplog.at_level(logging.WARNING):
+            self._run(orchestrator, ssm, self._props())
+
+        assert [event[1] for event in ssm.events if event[0] == "delete"] == stale
+        assert f"Could not delete the stale replay-input part {stale[1]}" in caplog.text
+        assert stale[0] not in caplog.text
+        assert stale[1] in ssm.parameters
+        assert stale[2] not in ssm.parameters
+
+    def test_a_write_that_fails_part_way_keeps_the_previous_input_whole(self, orchestrator):
+        handler, sfn = orchestrator
+        ssm = _FakeSsm()
+        self._run(orchestrator, ssm, self._props(ImageReplacements=_image_replacements(143)))
+        previous = dict(ssm.parameters)
+        newer = self._props(
+            ImageReplacements=_image_replacements(300), DeploymentTimestamp="2026-07-19T00:00:00Z"
+        )
+        encoded = _encoded(_canonical(_execution_input(newer)))
+        digest = hashlib.sha256(encoded.encode("ascii")).hexdigest()
+        ssm.put_errors[f"{_INPUT_NAME}.{digest[:16]}.2"] = RuntimeError("throttled")
+        sfn.reset_mock()
+
+        with (
+            patch.object(handler, "_ssm", return_value=ssm),
+            pytest.raises(RuntimeError, match="Could not persist the convergence replay input"),
+        ):
+            handler.on_event({"RequestType": "Update", "ResourceProperties": newer})
+
+        sfn.start_execution.assert_not_called()
+        assert ssm.parameters[_INPUT_NAME] == previous[_INPUT_NAME]
+        assert {name: ssm.parameters[name] for name in previous} == previous
+        assert _reassemble(ssm.parameters, _INPUT_NAME) == _reassemble(previous, _INPUT_NAME)
+        assert not [event for event in ssm.events if event[0] == "delete"]
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            "",
+            '{"raw":true}',
+            "eJwrSS0uAQAEXQH+",
+            "chunked:v1:0:" + "a" * 64,
+            "chunked:v1:02:" + "a" * 64,
+            "chunked:v1:2:" + "a" * 63,
+            "chunked:v1:2:" + "A" * 64,
+            "chunked:v2:2:" + "a" * 64,
+            " chunked:v1:2:" + "a" * 64,
+        ],
+    )
+    def test_only_a_well_formed_header_names_parts_to_delete(self, orchestrator, value):
+        handler, _ = orchestrator
+        assert handler._replay_input_part_names("/p/_input", value) == []
+
+    def test_a_header_names_its_parts_in_order(self, orchestrator):
+        handler, _ = orchestrator
+        assert handler._replay_input_part_names("/p/_input", "chunked:v1:2:" + "c" * 64) == [
+            "/p/_input.cccccccccccccccc.1",
+            "/p/_input.cccccccccccccccc.2",
+        ]
 
 
 class TestClients:

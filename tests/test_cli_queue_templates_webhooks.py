@@ -13,6 +13,7 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 
@@ -213,6 +214,29 @@ class TestQueueCommands:
             assert call_kwargs["params"]["status"] == "queued"
             assert call_kwargs["params"]["namespace"] == "gco-jobs"
 
+    def test_queue_list_status_choices_are_every_queue_record_status(self):
+        """Every status a queue record can hold is filterable (QUEUE-STATUS-CHOICES)."""
+        from cli.commands.queue_cmd import queue_list
+        from gco.services.template_store import JobStatus
+
+        status_option = next(param for param in queue_list.params if param.name == "status")
+        assert list(status_option.type.choices) == [status.value for status in JobStatus]
+
+    @pytest.mark.parametrize("status", ["applying", "pending"])
+    def test_queue_list_filters_on_the_dispatch_states(self, status):
+        """A claimed job passes through applying and pending before it runs."""
+        from cli.main import cli
+
+        with patch("cli.aws_client.get_aws_client") as mock_client:
+            mock_aws = MagicMock()
+            mock_aws.call_api.return_value = {"count": 0, "jobs": []}
+            mock_client.return_value = mock_aws
+
+            result = CliRunner().invoke(cli, ["queue", "list", "--status", status])
+
+        assert result.exit_code == 0, result.output
+        assert mock_aws.call_api.call_args.kwargs["params"]["status"] == status
+
     def test_queue_list_empty(self):
         """Test queue list when no jobs found."""
         from cli.main import cli
@@ -338,6 +362,16 @@ class TestQueueCommands:
             result = runner.invoke(cli, ["queue", "cancel", "abc123", "-y"])
             assert result.exit_code == 1
             assert "failed" in result.output.lower()
+
+    def test_queue_cancel_help_says_only_unclaimed_jobs_can_be_cancelled(self):
+        """The API cancels `queued` only; claimed-but-not-running jobs are refused (DOC-2)."""
+        from cli.main import cli
+
+        result = CliRunner().invoke(cli, ["queue", "cancel", "--help"])
+
+        assert result.exit_code == 0
+        assert "before a region claims it" in result.output
+        assert "not yet running" not in result.output
 
     def test_queue_stats_success(self):
         """Test queue stats command success."""
@@ -849,31 +883,32 @@ class TestTemplatesCommands:
             call_kwargs = mock_aws.call_api.call_args.kwargs
             assert call_kwargs["body"]["parameters"] == {"image": "custom:v1", "gpus": "8"}
 
-    def test_templates_run_failure(self):
-        """Test templates run when job creation fails."""
+    def test_templates_run_failure_reports_the_validation_errors(self):
+        """A rejected manifest (HTTP 400 with ``errors``) exits 1 and names each error."""
+        from cli.aws_client import GCOAWSClient
         from cli.main import cli
 
-        runner = CliRunner()
-
-        with patch("cli.aws_client.get_aws_client") as mock_client:
-            mock_aws = MagicMock()
-            mock_aws.call_api.return_value = {"success": False, "errors": ["Validation failed"]}
-            mock_client.return_value = mock_aws
-
-            result = runner.invoke(
+        response = MagicMock(ok=False, status_code=400, reason="Bad Request")
+        response.json.return_value = {
+            "success": False,
+            "template": "gpu-template",
+            "errors": ["Image registry not trusted: example.com/x", "Namespace not allowed"],
+        }
+        with (
+            patch.object(GCOAWSClient, "__init__", lambda self, *a, **k: None),
+            patch.object(GCOAWSClient, "make_authenticated_request", return_value=response),
+        ):
+            result = CliRunner().invoke(
                 cli,
-                [
-                    "templates",
-                    "run",
-                    "gpu-template",
-                    "--name",
-                    "my-job",
-                    "--region",
-                    "us-east-1",
-                ],
+                ["templates", "run", "gpu-template", "--name", "my-job", "--region", "us-east-1"],
             )
-            assert result.exit_code == 0  # Command succeeds but reports failure
-            assert "failed" in result.output.lower()
+
+        assert result.exit_code == 1
+        assert (
+            "Failed to run template: API request failed: "
+            "Image registry not trusted: example.com/x; Namespace not allowed"
+        ) in result.stderr
+        assert "created from template" not in result.output
 
     def test_templates_run_error(self):
         """Test templates run with error."""
@@ -1079,6 +1114,102 @@ class TestWebhooksCommands:
             assert result.exit_code == 0
             call_kwargs = mock_aws.call_api.call_args.kwargs
             assert call_kwargs["body"]["secret"] == "my-secret-key"
+
+    @staticmethod
+    def _create_webhook(*, interactive, input=None, env=None, extra=()):
+        """Run `webhooks create` with stdin's terminal check pinned."""
+        from cli.main import cli
+
+        runner = CliRunner()
+        with (
+            patch("cli.aws_client.get_aws_client") as mock_client,
+            patch(
+                "cli.commands.webhooks_cmd._stdin_is_interactive",
+                return_value=interactive,
+            ),
+        ):
+            mock_aws = MagicMock()
+            mock_aws.call_api.return_value = {"webhook": {"id": "abc123"}}
+            mock_client.return_value = mock_aws
+            result = runner.invoke(
+                cli,
+                [
+                    "webhooks",
+                    "create",
+                    "--url",
+                    "https://example.com/webhook",
+                    "-e",
+                    "job.completed",
+                    *extra,
+                ],
+                input=input,
+                env=env or {"GCO_WEBHOOK_SECRET": None},
+            )
+        return result, mock_aws
+
+    def test_webhooks_create_prompts_for_a_hidden_secret_on_a_terminal(self):
+        """No --secret and no $GCO_WEBHOOK_SECRET on a terminal: ask, hidden."""
+        result, mock_aws = self._create_webhook(interactive=True, input="hmac-key\nhmac-key\n")
+
+        assert result.exit_code == 0, result.output
+        assert mock_aws.call_api.call_args.kwargs["body"]["secret"] == "hmac-key"
+        # The prompt goes to stderr so stdout stays the command's own output,
+        # and hidden input is never echoed.
+        assert "Webhook secret" in result.stderr
+        assert "Webhook secret" not in result.stdout
+        assert "hmac-key" not in result.output
+
+    def test_webhooks_create_empty_prompt_answer_registers_without_a_secret(self):
+        result, mock_aws = self._create_webhook(interactive=True, input="\n\n")
+
+        assert result.exit_code == 0, result.output
+        assert mock_aws.call_api.call_args.kwargs["body"]["secret"] is None
+
+    def test_webhooks_create_does_not_prompt_without_a_terminal(self):
+        """Scripts and the MCP server (stdin not a TTY) never block on a prompt."""
+        result, mock_aws = self._create_webhook(interactive=False)
+
+        assert result.exit_code == 0, result.output
+        assert "Webhook secret" not in result.output
+        assert mock_aws.call_api.call_args.kwargs["body"]["secret"] is None
+
+    @pytest.mark.parametrize(
+        ("env", "extra"),
+        [
+            ({"GCO_WEBHOOK_SECRET": "from-env"}, ()),
+            ({"GCO_WEBHOOK_SECRET": None}, ("--secret", "from-flag")),
+        ],
+    )
+    def test_webhooks_create_given_secret_skips_the_prompt(self, env, extra):
+        result, mock_aws = self._create_webhook(interactive=True, env=env, extra=extra)
+
+        assert result.exit_code == 0, result.output
+        assert "Webhook secret" not in result.output
+        assert mock_aws.call_api.call_args.kwargs["body"]["secret"] in {"from-env", "from-flag"}
+
+    def test_webhooks_create_explicit_empty_secret_skips_the_prompt(self):
+        """`--secret ''` is how a script on a terminal registers without one."""
+        result, mock_aws = self._create_webhook(interactive=True, extra=("--secret", ""))
+
+        assert result.exit_code == 0, result.output
+        assert "Webhook secret" not in result.output
+        assert mock_aws.call_api.call_args.kwargs["body"]["secret"] is None
+
+    @pytest.mark.parametrize(
+        ("stdin", "expected"),
+        [(None, False), (MagicMock(isatty=lambda: False), False)],
+    )
+    def test_stdin_is_interactive_needs_a_terminal(self, stdin, expected):
+        from cli.commands import webhooks_cmd
+
+        with patch.object(webhooks_cmd.sys, "stdin", stdin):
+            assert webhooks_cmd._stdin_is_interactive() is expected
+
+    def test_stdin_is_interactive_on_a_terminal(self):
+        from cli.commands import webhooks_cmd
+
+        with patch.object(webhooks_cmd.sys, "stdin", MagicMock(isatty=lambda: True)):
+            assert webhooks_cmd._stdin_is_interactive() is True
 
     def test_webhooks_create_error(self):
         """Test webhooks create with error."""
@@ -1369,23 +1500,24 @@ class TestJobsRetryCommand:
             assert "retry" in result.output.lower()
 
     def test_jobs_retry_failure(self):
-        """Test jobs retry when retry fails."""
+        """A refused retry reports the server's validation errors and exits 1."""
+        from cli.aws_client import APIRequestError
         from cli.main import cli
 
         runner = CliRunner()
 
         with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
             mock_jm = MagicMock()
-            mock_jm.retry_job.return_value = {
-                "success": False,
-                "message": "Job is still running",
-            }
+            mock_jm.retry_job.side_effect = APIRequestError(
+                400, "Failed to create retry job: namespace 'other' is not allowed"
+            )
             mock_manager.return_value = mock_jm
 
             result = runner.invoke(
                 cli, ["jobs", "retry", "test-job", "--region", "us-east-1", "-y"]
             )
             assert result.exit_code == 1
+            assert "namespace 'other' is not allowed" in result.output
 
     def test_jobs_retry_error(self):
         """Test jobs retry with error."""

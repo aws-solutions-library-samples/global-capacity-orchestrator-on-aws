@@ -9,11 +9,13 @@ and the lightweight {{ var }} template parameter substitution used by
 the manifest submission path.
 """
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
+from kubernetes.client import V1Pod
 
 from gco.services.api_shared import (
     _apply_template_parameters,
@@ -451,6 +453,234 @@ class TestParsePodToDict:
             "since": None,
         }
 
+    def test_partially_populated_status_stays_serializable(self):
+        """Fields of the wrong type become ``None`` instead of leaking into the JSON."""
+        cs = MagicMock()
+        cs.name = "train"
+        cs.ready = False
+        cs.restart_count = 0
+        cs.image = "trainer:v1"
+        cs.state.running = None
+        cs.state.waiting = None
+        cs.state.terminated.exit_code = 0
+        cs.state.terminated.reason = "Completed"
+        cs.state.terminated.signal = True  # a bool is not a signal number
+        pod = self._make_pod(container_statuses=[cs])
+
+        status = _parse_pod_to_dict(pod)["status"]["containerStatuses"][0]
+
+        assert status["signal"] is None
+        assert status["message"] is None
+        assert status["startedAt"] is None
+        assert status["finishedAt"] is None
+        assert status["lastState"] is None
+        json.dumps(status)
+
+    def test_status_without_a_state_reports_no_state_fields(self):
+        cs = MagicMock()
+        cs.name = "train"
+        cs.ready = False
+        cs.restart_count = 0
+        cs.image = "trainer:v1"
+        cs.state = None
+        cs.last_state = None
+        pod = self._make_pod(container_statuses=[cs])
+
+        status = _parse_pod_to_dict(pod)["status"]["containerStatuses"][0]
+
+        assert status == {
+            "name": "train",
+            "ready": False,
+            "restartCount": 0,
+            "image": "trainer:v1",
+            "lastState": None,
+        }
+
+    def test_state_with_no_known_variant_reports_no_state_fields(self):
+        cs = MagicMock()
+        cs.name = "train"
+        cs.ready = False
+        cs.restart_count = 0
+        cs.image = "trainer:v1"
+        cs.state.running = None
+        cs.state.waiting = None
+        cs.state.terminated = None
+        pod = self._make_pod(container_statuses=[cs])
+
+        status = _parse_pod_to_dict(pod)["status"]["containerStatuses"][0]
+
+        assert "state" not in status
+
+
+class TestParsePodContainerStates:
+    """Container state fields, read from real client models.
+
+    Each pod is built with ``V1Pod.from_dict`` from the JSON the API server
+    returns (what ``kubectl get pod -o json`` prints), so the timestamps go
+    through the client's own parsing exactly as they do in production.
+    """
+
+    @staticmethod
+    def _pod(container_statuses, init_container_statuses=None):
+        return V1Pod.from_dict(
+            {
+                "metadata": {"name": "train-abc12", "namespace": "gco-jobs", "uid": "u-1"},
+                "spec": {"containers": [{"name": "train", "image": "trainer:v1"}]},
+                "status": {
+                    "phase": "Running",
+                    "containerStatuses": container_statuses,
+                    "initContainerStatuses": init_container_statuses or [],
+                },
+            }
+        )
+
+    @staticmethod
+    def _status(state, *, restart_count=0, last_state=None, name="train"):
+        status = {
+            "name": name,
+            "ready": False,
+            "restartCount": restart_count,
+            "image": "trainer:v1",
+            "imageID": "trainer@sha256:0",
+            "state": state,
+        }
+        if last_state is not None:
+            status["lastState"] = last_state
+        return status
+
+    def test_terminated_container_reports_its_start_and_finish_times(self):
+        """``startedAt``/``finishedAt`` are the same instants the API server reports.
+
+        The container's exit time is what orders its exit against the Node
+        and NodeClaim events of the same attempt: a node that is disrupted
+        after the container exited did not cause the exit.
+        """
+        terminated = {
+            "exitCode": 1,
+            "reason": "Error",
+            "startedAt": "2026-11-17T20:21:02Z",
+            "finishedAt": "2026-11-17T20:25:46Z",
+            "containerID": "containerd://0",
+        }
+        pod = self._pod([self._status({"terminated": terminated})])
+
+        status = _parse_pod_to_dict(pod)["status"]["containerStatuses"][0]
+
+        assert status == {
+            "name": "train",
+            "ready": False,
+            "restartCount": 0,
+            "image": "trainer:v1",
+            "state": "terminated",
+            "exitCode": 1,
+            "reason": "Error",
+            "signal": None,
+            "message": None,
+            "startedAt": "2026-11-17T20:21:02+00:00",
+            "finishedAt": "2026-11-17T20:25:46+00:00",
+            "lastState": None,
+        }
+        assert datetime.fromisoformat(status["finishedAt"]) == datetime.fromisoformat(
+            terminated["finishedAt"]
+        )
+        assert datetime.fromisoformat(status["startedAt"]) == datetime.fromisoformat(
+            terminated["startedAt"]
+        )
+
+    def test_terminated_container_reports_signal_and_message(self):
+        terminated = {
+            "exitCode": 137,
+            "reason": "OOMKilled",
+            "signal": 9,
+            "message": "out of memory in step 412",
+            "startedAt": "2026-11-17T20:21:02Z",
+            "finishedAt": "2026-11-17T20:25:46Z",
+        }
+        pod = self._pod([self._status({"terminated": terminated})])
+
+        status = _parse_pod_to_dict(pod)["status"]["containerStatuses"][0]
+
+        assert status["signal"] == 9
+        assert status["message"] == "out of memory in step 412"
+        assert status["exitCode"] == 137
+        assert status["reason"] == "OOMKilled"
+
+    def test_running_container_reports_only_its_start_time(self):
+        pod = self._pod([self._status({"running": {"startedAt": "2026-11-17T20:21:02Z"}})])
+
+        status = _parse_pod_to_dict(pod)["status"]["containerStatuses"][0]
+
+        assert status["state"] == "running"
+        assert status["startedAt"] == "2026-11-17T20:21:02+00:00"
+        assert "finishedAt" not in status
+        assert "exitCode" not in status
+
+    def test_waiting_container_reports_neither_time(self):
+        waiting = {"reason": "ImagePullBackOff", "message": 'Back-off pulling image "trainer:v1"'}
+        pod = self._pod([self._status({"waiting": waiting})])
+
+        status = _parse_pod_to_dict(pod)["status"]["containerStatuses"][0]
+
+        assert status["state"] == "waiting"
+        assert status["reason"] == "ImagePullBackOff"
+        assert status["message"] == 'Back-off pulling image "trainer:v1"'
+        assert "startedAt" not in status
+        assert "finishedAt" not in status
+
+    def test_restarted_container_reports_its_previous_termination(self):
+        """``lastState`` keeps the exit that an in-place restart replaced."""
+        previous = {
+            "exitCode": 1,
+            "reason": "Error",
+            "startedAt": "2026-11-17T20:21:02Z",
+            "finishedAt": "2026-11-17T20:23:40Z",
+        }
+        pod = self._pod(
+            [
+                self._status(
+                    {"running": {"startedAt": "2026-11-17T20:23:55Z"}},
+                    restart_count=1,
+                    last_state={"terminated": previous},
+                )
+            ]
+        )
+
+        status = _parse_pod_to_dict(pod)["status"]["containerStatuses"][0]
+
+        assert status["state"] == "running"
+        assert status["startedAt"] == "2026-11-17T20:23:55+00:00"
+        assert status["lastState"] == {
+            "state": "terminated",
+            "exitCode": 1,
+            "reason": "Error",
+            "signal": None,
+            "message": None,
+            "startedAt": "2026-11-17T20:21:02+00:00",
+            "finishedAt": "2026-11-17T20:23:40+00:00",
+        }
+
+    def test_init_containers_report_the_same_state_fields(self):
+        init = self._status(
+            {
+                "terminated": {
+                    "exitCode": 0,
+                    "reason": "Completed",
+                    "startedAt": "2026-11-17T20:20:06Z",
+                    "finishedAt": "2026-11-17T20:20:09Z",
+                }
+            },
+            name="fetch-data",
+        )
+        pod = self._pod([], init_container_statuses=[init])
+
+        (status,) = _parse_pod_to_dict(pod)["status"]["initContainerStatuses"]
+
+        assert status["name"] == "fetch-data"
+        assert status["state"] == "terminated"
+        assert status["exitCode"] == 0
+        assert status["finishedAt"] == "2026-11-17T20:20:09+00:00"
+        assert status["lastState"] is None
+
 
 # ---------------------------------------------------------------------------
 # _parse_event_to_dict
@@ -574,3 +804,33 @@ class TestApplyTemplateParameters:
         manifest = {"metadata": {"name": "static"}}
         result = _apply_template_parameters(manifest, {})
         assert result["metadata"]["name"] == "static"
+        assert result is not manifest
+
+    @pytest.mark.parametrize(
+        "value",
+        ['say "hi"', "C:\\path\\to", "\\1 and \\g<0>", "line\nbreak"],
+        ids=["quotes", "backslashes", "regex-group-syntax", "newline"],
+    )
+    def test_a_value_is_inserted_verbatim(self, value):
+        """Substitution used to run re.sub over the manifest's JSON text, so a
+        quote broke the JSON and a backslash broke the regex replacement (a
+        500 from create-job-from-template either way)."""
+        manifest = {"spec": {"args": ["--message={{ msg }}"]}}
+        result = _apply_template_parameters(manifest, {"msg": value})
+        assert result["spec"]["args"] == [f"--message={value}"]
+
+    def test_a_value_cannot_add_structure_to_the_manifest(self):
+        """A parameter is text inside its string, never JSON spliced into the manifest."""
+        manifest = {"spec": {"containers": [{"name": "main", "image": "{{ image }}"}]}}
+        injected = 'busybox", "securityContext": {"privileged": true}, "x": "'
+        result = _apply_template_parameters(manifest, {"image": injected})
+        assert result["spec"]["containers"] == [{"name": "main", "image": injected}]
+
+    def test_placeholders_in_keys_are_substituted_and_values_are_not_re_expanded(self):
+        manifest = {"metadata": {"labels": {"{{ key }}": "{{ first }}"}}, "spec": {"replicas": 2}}
+        result = _apply_template_parameters(
+            manifest, {"key": "team", "first": "{{ second }}", "second": "never"}
+        )
+        assert result == {"metadata": {"labels": {"team": "{{ second }}"}}, "spec": {"replicas": 2}}
+        # The template itself is left as it was.
+        assert manifest["metadata"]["labels"] == {"{{ key }}": "{{ first }}"}

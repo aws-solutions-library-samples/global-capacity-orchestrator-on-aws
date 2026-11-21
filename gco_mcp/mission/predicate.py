@@ -28,7 +28,8 @@ the four type coercions ``str``, ``int``, ``float``, ``bool``.
 
 Operators: arithmetic (``+ - * / // % ** @``), unary (``+ - not ~``),
 comparisons (``< <= > >= == != is is_not in not_in``), boolean
-(``and or``), and the ternary ``a if b else c``.
+(``and or``), and the ternary ``a if b else c``. Three of them are bounded
+(see *Size bounds* below): ``**``, ``*`` and ``%``.
 
 Containers and collections: ``List``, ``Tuple``, ``Dict``, ``Set``, plus
 ``ListComp``, ``SetComp``, ``DictComp``, ``GeneratorExp`` (their iteration
@@ -45,12 +46,15 @@ method call is accepted. Method calls outside the allowlist (``.update``,
 ``.pop``, ``.count``, ``.append``, ...) are rejected with
 ``call_target_method_not_allowed``.
 
-Attribute access: a bare attribute read is allowed only as ``obs.<attr>``
-(one level), and the attribute name itself must not start with ``__``.
-Bare chained walks and bare attributes on calls or subscripts are rejected.
-This restriction does not prohibit an allowlisted read-only method call: its
+Attribute access: a bare (uncalled) attribute read is allowed only as
+``obs.<method>`` where ``<method>`` is one of the read-only methods above,
+for example ``sorted(xs, key=obs.get)``. ``obs`` is a dict, so any other
+attribute is either missing or a mutating method (``key=obs.update`` used to
+pass and then call ``obs.update`` on the shared observation). Bare chained
+walks and bare attributes on calls or subscripts are rejected. This
+restriction does not prohibit an allowlisted read-only method call: its
 receiver is validated as an ordinary allowed expression by ``visit_Call``.
-Predicates that need nested data should otherwise use subscripting.
+Predicates that read data use subscripting (``obs['events']``).
 
 Subscripts: any ``value[...]`` chain whose ultimate base is an allowlisted
 name. Rejection happens automatically because every nested ``Name`` lookup
@@ -59,18 +63,46 @@ is validated.
 f-strings: ``JoinedStr`` and ``FormattedValue`` recurse normally so any
 embedded name lookup re-enters this same allowlist check.
 
+Size bounds
+-----------
+The evaluator runs inside the MCP server process with no time or memory
+limit, so the validator rejects operators that turn a few characters into
+an unbounded amount of work:
+
+* the source is at most 4096 characters (``source_too_long``) and its
+  syntax tree at most 100 levels deep (``expression_too_deep``);
+* ``**`` needs a numeric constant exponent of at most 64 in absolute value,
+  and its base may not contain ``**`` or a ``*`` repetition
+  (``exponent_not_bounded``: ``10 ** 10 ** 8``, ``int('9' * 1000) ** 64``);
+* ``*`` with an operand that may be a sequence needs a float literal, or an
+  int literal from 0 to 1000 whose other operand contains no repetition
+  (``repetition_not_bounded``: ``'x' * 10 ** 12``, ``[[0] * 1000] * 1000``).
+  Two numbers (constants, ``len``, ``abs``, ``int``, ``float``, ``bool``,
+  one-argument ``sum``, and arithmetic on those) multiply freely;
+* ``%`` is modulo only, so its left operand must be such a number
+  (``string_formatting_not_allowed``: ``'%0999999999d' % 1``);
+* an f-string format specification must be literal text whose numbers are
+  at most 1000 (``format_spec_not_bounded``: ``f"{1:>999999999}"``).
+
+These rules bound what one operator can produce. They do not bound
+everything: the cost of nested comprehensions, or of an expression over a
+very large observation, still grows with the nesting and the data, because
+evaluation is not isolated in a separate process.
+
 Rejected outright
 -----------------
 ``Import`` / ``ImportFrom`` (also unreachable in ``eval`` mode), ``Lambda``
 (it would let a predicate ship hidden code), the walrus ``NamedExpr``,
 ``Yield`` / ``YieldFrom`` / ``Await`` and other async constructs, any
-identifier or string constant that starts with ``__``, and every
-``Name``/``Attribute``/``Call`` whose target is not on the allowlist.
+identifier or string constant that starts with ``__``, every
+``Name``/``Attribute``/``Call`` whose target is not on the allowlist, and
+every expression outside the size bounds above.
 """
 
 from __future__ import annotations
 
 import ast
+import re
 from typing import Any, Final, NoReturn
 
 # ---------------------------------------------------------------------------
@@ -179,6 +211,26 @@ _ALLOWED_COMPARE_OPS: Final[tuple[type[ast.cmpop], ...]] = (
 
 _ALLOWED_BOOL_OPS: Final[tuple[type[ast.boolop], ...]] = (ast.And, ast.Or)
 
+# Size bounds. The evaluator runs in the MCP server process with no time or
+# memory limit, so an operator that turns a few characters of source into an
+# unbounded amount of work is rejected before it runs: ``10 ** 10 ** 8``,
+# ``'x' * 10 ** 12``, ``'%0999999999d' % 1`` and ``f"{1:>999999999}"`` all
+# validated before these bounds existed.
+_MAX_SOURCE_CHARS: Final[int] = 4096
+"""Longest predicate source accepted."""
+_MAX_DEPTH: Final[int] = 100
+"""Deepest syntax tree accepted. The validator recurses once per level, so a
+deeper tree (``1 + 1 + ... + 1`` with 500 terms fits in the source cap)
+raised ``RecursionError`` instead of a structured rejection."""
+_MAX_EXPONENT: Final[int] = 64
+"""Largest absolute exponent for ``**``, which must be a numeric constant."""
+_MAX_REPEAT: Final[int] = 1000
+"""Largest constant count for ``*`` when the other operand may be a sequence."""
+_MAX_FORMAT_NUMBER: Final[int] = 1000
+"""Largest width or precision in an f-string format specification."""
+_NUMERIC_CALLABLES: Final[frozenset[str]] = frozenset({"len", "abs", "int", "float", "bool"})
+"""Allowed callables that always return a number."""
+
 
 # ---------------------------------------------------------------------------
 # Exception
@@ -218,6 +270,68 @@ class PredicateRejected(Exception):
 # ---------------------------------------------------------------------------
 # Validator
 # ---------------------------------------------------------------------------
+
+
+def _numeric_constant(node: ast.AST) -> int | float | None:
+    """Return the value of a (possibly signed) int or float literal, else ``None``."""
+    sign = 1
+    while isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        if isinstance(node.op, ast.USub):
+            sign = -sign
+        node = node.operand
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+    ):
+        return sign * node.value
+    return None
+
+
+def _is_numeric(node: ast.AST) -> bool:
+    """Return whether ``node`` always evaluates to a number."""
+    if _numeric_constant(node) is not None:
+        return True
+    if isinstance(node, ast.UnaryOp):
+        return _is_numeric(node.operand)
+    if isinstance(node, ast.BinOp):
+        return _is_numeric(node.left) and _is_numeric(node.right)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        if node.func.id in _NUMERIC_CALLABLES:
+            return True
+        return node.func.id == "sum" and len(node.args) == 1 and not node.keywords
+    return False
+
+
+def _exceeds_depth(tree: ast.AST, limit: int) -> bool:
+    """Return whether any path from ``tree`` to a leaf is longer than ``limit``.
+
+    Iterative, so it is safe on trees too deep for the recursive validator.
+    """
+    pending: list[tuple[ast.AST, int]] = [(tree, 1)]
+    while pending:
+        node, depth = pending.pop()
+        if depth > limit:
+            return True
+        pending.extend((child, depth + 1) for child in ast.iter_child_nodes(node))
+    return False
+
+
+def _is_repetition(node: ast.AST) -> bool:
+    """Return whether ``node`` is a ``*`` that may repeat a sequence."""
+    return (
+        isinstance(node, ast.BinOp)
+        and isinstance(node.op, ast.Mult)
+        and not (_is_numeric(node.left) and _is_numeric(node.right))
+    )
+
+
+def _is_power(node: ast.AST) -> bool:
+    return isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow)
+
+
+def _contains_repetition(node: ast.AST) -> bool:
+    return any(_is_repetition(child) for child in ast.walk(node))
 
 
 class _PredicateValidator(ast.NodeVisitor):
@@ -373,8 +487,69 @@ class _PredicateValidator(ast.NodeVisitor):
                 node,
                 f"binary operator {type(node.op).__name__} is not allowed",
             )
+        if isinstance(node.op, ast.Pow):
+            self._check_power(node)
+        elif isinstance(node.op, ast.Mult):
+            self._check_repetition(node)
+        elif isinstance(node.op, ast.Mod) and not _is_numeric(node.left):
+            # ``'%0999999999d' % 1`` builds a gigabyte string. A string can
+            # reach the left side in many ways (``('%09' + '99d') % 1``, a
+            # comprehension name, an observation value), so ``%`` is
+            # modulo only: its left side must be a number.
+            self._reject(
+                "string_formatting_not_allowed",
+                node,
+                "'%' needs a number on its left (wrap the value in int() or float()); "
+                "'%' string formatting is not allowed",
+            )
         self.visit(node.left)
         self.visit(node.right)
+
+    def _check_power(self, node: ast.BinOp) -> None:
+        # ``10 ** 10 ** 8`` and ``(10 ** 64) ** 64`` grow without bound, and
+        # ``int('9' * 1000) ** 64`` turns 18 characters into 64,000 digits.
+        exponent = _numeric_constant(node.right)
+        if (
+            exponent is None
+            or abs(exponent) > _MAX_EXPONENT
+            or any(_is_power(child) or _is_repetition(child) for child in ast.walk(node.left))
+        ):
+            self._reject(
+                "exponent_not_bounded",
+                node,
+                "'**' needs a numeric constant exponent of at most "
+                f"{_MAX_EXPONENT} in absolute value, and its base may not contain "
+                "'**' or a '*' repetition",
+            )
+
+    def _check_repetition(self, node: ast.BinOp) -> None:
+        # ``a * b`` repeats a sequence when either side is one. A side is
+        # known to be a number only when it is built from numeric constants
+        # and the numeric callables; anything else (``obs[...]`` included)
+        # may be a list or a string. Unless both sides are numbers, one side
+        # must be a float literal (which cannot repeat anything) or an int
+        # literal of at most ``_MAX_REPEAT``, and the other side must not
+        # contain another repetition: ``'x' * 1000 * 1000`` and
+        # ``[['x'] * 1000] * 1000`` (whose ``str()`` is a million times
+        # longer than its source) are rejected.
+        if not _is_repetition(node):
+            return
+        for count_node, other in ((node.left, node.right), (node.right, node.left)):
+            count = _numeric_constant(count_node)
+            if isinstance(count, float):
+                return
+            if (
+                isinstance(count, int)
+                and 0 <= count <= _MAX_REPEAT
+                and not _contains_repetition(other)
+            ):
+                return
+        self._reject(
+            "repetition_not_bounded",
+            node,
+            f"'*' may repeat a sequence: multiply by an int literal of at most {_MAX_REPEAT}, "
+            "or make both sides numbers with float() or int()",
+        )
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> None:
         if not isinstance(node.op, _ALLOWED_UNARY_OPS):
@@ -417,7 +592,8 @@ class _PredicateValidator(ast.NodeVisitor):
     def visit_Attribute(self, node: ast.Attribute) -> None:
         # Three shapes are allowed:
         #
-        # 1. ``obs.<attr>`` — single-level read off the data dict.
+        # 1. ``obs.<method>`` for a read-only method, uncalled (a callback
+        #    such as ``key=obs.get``).
         # 2. ``<inner>.<method>`` *only when* visited from
         #    ``visit_Call`` and ``<method>`` is in
         #    ``_ALLOWED_METHOD_CALLS``. ``visit_Call`` handles that
@@ -440,6 +616,17 @@ class _PredicateValidator(ast.NodeVisitor):
                 "attribute access is only allowed on 'obs' "
                 "(or as an allowlisted read-only method call on an otherwise "
                 "allowed expression)",
+            )
+        # ``obs`` is a dict, so ``obs.<attr>`` is missing or one of its
+        # methods. Passing a mutating one as a callback
+        # (``sorted(xs, key=obs.update)``, ``min(xs, key=obs.pop)``) called
+        # it on the observation that later criteria read.
+        if node.attr not in _ALLOWED_METHOD_CALLS:
+            self._reject(
+                "attribute_not_allowed",
+                node,
+                f"'obs.{node.attr}' is not allowed; only the read-only methods "
+                f"{sorted(_ALLOWED_METHOD_CALLS)} may be referenced",
             )
         # The base Name is in _ALLOWED_DATA_NAMES, so we know it passes
         # the visit_Name check; visit it anyway to stay regular.
@@ -532,9 +719,27 @@ class _PredicateValidator(ast.NodeVisitor):
             self.visit(value)
 
     def visit_FormattedValue(self, node: ast.FormattedValue) -> None:
+        if node.format_spec is not None:
+            self._check_format_spec(node, node.format_spec)
         self.visit(node.value)
         if node.format_spec is not None:
             self.visit(node.format_spec)
+
+    def _check_format_spec(self, node: ast.FormattedValue, spec: ast.expr) -> None:
+        # ``f"{1:>999999999}"`` pads to a gigabyte, and a computed spec
+        # (``f"{x:{width}}"``) could do the same, so the spec must be literal
+        # text whose numbers (width, precision) are all small.
+        parts = spec.values if isinstance(spec, ast.JoinedStr) else [spec]
+        for part in parts:
+            if not (isinstance(part, ast.Constant) and isinstance(part.value, str)) or any(
+                int(number) > _MAX_FORMAT_NUMBER for number in re.findall(r"\d+", part.value)
+            ):
+                self._reject(
+                    "format_spec_not_bounded",
+                    node,
+                    "an f-string format specification must be literal text whose width "
+                    f"and precision are at most {_MAX_FORMAT_NUMBER}",
+                )
 
     # ---- comprehensions -----------------------------------------------
 
@@ -630,6 +835,11 @@ def parse_predicate(src: str) -> ast.Expression:
             "not_a_string",
             message="predicate source must be a str",
         )
+    if len(src) > _MAX_SOURCE_CHARS:
+        raise PredicateRejected(
+            "source_too_long",
+            message=f"predicate source is longer than {_MAX_SOURCE_CHARS} characters",
+        )
     try:
         parsed = ast.parse(src, mode="eval")
     except SyntaxError as exc:
@@ -640,6 +850,11 @@ def parse_predicate(src: str) -> ast.Expression:
         rejection.lineno = exc.lineno
         rejection.col_offset = exc.offset
         raise rejection from exc
+    if _exceeds_depth(parsed, _MAX_DEPTH):
+        raise PredicateRejected(
+            "expression_too_deep",
+            message=f"predicate nests more than {_MAX_DEPTH} levels deep",
+        )
     _PredicateValidator().visit(parsed)
     return parsed
 

@@ -41,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from gco.gateway_health_check_config import render_gateway_health_check_defaults  # noqa: E402
 from scripts.generate_openapi import SERVICE_NAMES  # noqa: E402
 
 OUTPUT_DIR = REPO_ROOT / "docs" / "openapi"
@@ -151,7 +152,10 @@ def _one(documents: list[dict[str, Any]], kind: str, name: str | None = None) ->
 
 def load_gateway(project_root: Path) -> GatewaySpec:
     """The Gateway, its ALB configuration and the HTTPRoute rules, as data."""
-    text = (project_root / GATEWAY_MANIFEST).read_text(encoding="utf-8")
+    # The health-check numbers are cdk.json tokens; document the defaults.
+    text = render_gateway_health_check_defaults(
+        (project_root / GATEWAY_MANIFEST).read_text(encoding="utf-8")
+    )
     documents = [document for document in yaml.safe_load_all(text) if isinstance(document, dict)]
     gateway = _one(documents, "Gateway")
     gateway_class = _one(documents, "GatewayClass")

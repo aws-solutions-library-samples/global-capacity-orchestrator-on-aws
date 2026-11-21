@@ -117,16 +117,20 @@ async def files_get(region: str, fs_type: str = "efs") -> str:
 
 @mcp.tool(tags={"safe", "files"})
 @audit_logged
-async def files_access_points(region: str | None = None) -> str:
-    """`gco files access-points` — list EFS access points.
+async def files_access_points(file_system_id: str, region: str) -> str:
+    """`gco files access-points` — list the access points of one EFS file system.
+
+    ``files_get`` returns the file system ID for a region. A file system that
+    does not exist has none (``[]``); any other read failure (access denied,
+    throttling) is returned as an error.
 
     Args:
-        region: AWS region.
+        file_system_id: EFS file system ID (e.g. ``fs-0123456789abcdef0``).
+        region: AWS region the file system lives in.
     """
-    args = ["files", "access-points"]
-    if region:
-        args += ["-r", region]
-    return await asyncio.to_thread(cli_runner._run_cli, *args)
+    return await asyncio.to_thread(
+        cli_runner._run_cli, "files", "access-points", file_system_id, "-r", region
+    )
 
 
 # =============================================================================
@@ -146,8 +150,9 @@ if is_enabled(FLAG_MODEL_UPLOAD):
         The source must resolve beneath ``GCO_STORAGE_LOCAL_ROOT``. Relative
         paths such as ``model.bin`` and ``./datasets`` are interpreted relative
         to that root, never relative to the MCP process working directory. The
-        CLI receives a private descriptor-backed snapshot; descendant links,
-        special files, hard links, and filesystem crossings fail closed.
+        CLI receives a private hard-link snapshot built with descriptor-relative
+        no-follow opens; descendant links, special files, hard links, and
+        filesystem crossings fail closed. The upload may run for up to an hour.
 
         Args:
             local_path: Root-relative local file or directory to upload.
@@ -169,6 +174,7 @@ if is_enabled(FLAG_MODEL_UPLOAD):
                     region,
                     "--prefix",
                     prefix,
+                    timeout_seconds=cli_runner.TRANSFER_TIMEOUT_SECONDS,
                     pass_fds=(staged.directory_fd,),
                 )
 
@@ -276,6 +282,6 @@ if is_enabled(FLAG_LOCAL_STORAGE_SYNC):
         args += ["--", bucket_alias, local_contract.local_argument]
         return await cli_runner._run_cli_async(
             *args,
-            timeout_seconds=3600,
+            timeout_seconds=cli_runner.TRANSFER_TIMEOUT_SECONDS,
             terminate_grace_seconds=30,
         )

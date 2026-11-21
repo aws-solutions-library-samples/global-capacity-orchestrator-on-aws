@@ -156,3 +156,77 @@ class TestProjectEcrAugmentation:
         )
         # Caller's list must be untouched.
         assert base == ["docker.io"]
+
+
+class TestTrustedRegistriesBase:
+    """What the stack starts from before it adds the project's ECR registries."""
+
+    def test_unset_or_null_starts_from_the_service_defaults(self) -> None:
+        from gco.job_admission import DEFAULT_TRUSTED_REGISTRIES
+        from gco.stacks.regional_stack import _trusted_registries_base
+
+        assert _trusted_registries_base({}) == list(DEFAULT_TRUSTED_REGISTRIES)
+        assert _trusted_registries_base({"trusted_registries": None}) == list(
+            DEFAULT_TRUSTED_REGISTRIES
+        )
+
+    def test_a_written_list_is_kept_as_written(self) -> None:
+        from gco.stacks.regional_stack import _trusted_registries_base
+
+        assert _trusted_registries_base({"trusted_registries": ["ghcr.io/acme"]}) == [
+            "ghcr.io/acme"
+        ]
+        assert _trusted_registries_base({"trusted_registries": []}) == []
+
+    def test_policy_without_the_key_renders_the_defaults_on_both_paths(self) -> None:
+        """A synthesized stack: REST and SQS trust lists start from the defaults.
+
+        Before, an unset ``trusted_registries`` rendered the project's ECR
+        hosts alone; that value is not empty, so neither service fell back to
+        its defaults and every docker.io, gcr.io, quay.io ... image was
+        refused.
+        """
+        import json
+
+        import aws_cdk as cdk
+        from aws_cdk import assertions
+
+        from cli.stacks import cdk_asset_consumer
+        from gco.config.config_loader import ConfigLoader
+        from gco.job_admission import DEFAULT_TRUSTED_REGISTRIES
+        from gco.stacks.regional_stack import GCORegionalStack
+        from tests._cdk_app_builder import PROJECT_ROOT, load_context, offline_image_assets
+
+        context = load_context()
+        policy = dict(context["job_validation_policy"])
+        policy.pop("trusted_registries", None)
+        context["job_validation_policy"] = policy
+        app = cdk.App(context=context)
+        with cdk_asset_consumer(PROJECT_ROOT), offline_image_assets():
+            stack = GCORegionalStack(
+                app,
+                "gco-us-east-1",
+                config=ConfigLoader(app),
+                region="us-east-1",
+                auth_secret_arn=(
+                    "arn:aws:secretsmanager:us-east-2:123456789012:secret:gco/api-gateway-auth-token"  # nosec B106  # test fixture ARN
+                ),
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+            resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        [replacements] = [
+            r["Properties"]["ImageReplacements"]
+            for r in resources.values()
+            if "ImageReplacements" in r.get("Properties", {})
+        ]
+        tokens = [
+            t
+            for t in ("{{MP_TRUSTED_REGISTRIES}}", "{{QP_TRUSTED_REGISTRIES}}")
+            if t in replacements
+        ]
+        assert "{{MP_TRUSTED_REGISTRIES}}" in tokens
+        for token in tokens:
+            rendered = json.dumps(replacements[token])
+            for registry in DEFAULT_TRUSTED_REGISTRIES:
+                assert registry in rendered, (token, registry)
+            assert "123456789012.dkr.ecr.us-east-1." in rendered

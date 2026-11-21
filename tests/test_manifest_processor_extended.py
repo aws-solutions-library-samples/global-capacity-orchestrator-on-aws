@@ -2332,6 +2332,94 @@ class TestTrainJobValidation:
         assert not is_valid
         assert "hostPath" in error
 
+    def test_hostpath_in_a_runtime_patch_without_containers_rejected(self, manifest_processor):
+        """A patch may set pod-level fields alone: a hostPath volume in one
+        patch and its mount in another must still be refused."""
+        manifest = _trainjob_manifest(
+            runtime_patches=[
+                {
+                    "manager": "volume",
+                    **_runtime_patch_with_pod_spec(
+                        {
+                            "volumes": [
+                                {"name": "scratch", "emptyDir": {}},
+                                {"name": "host", "hostPath": {"path": "/"}},
+                            ]
+                        }
+                    ),
+                },
+                {
+                    "manager": "mount",
+                    **_runtime_patch_with_pod_spec(
+                        {
+                            "containers": [
+                                {
+                                    "name": "node",
+                                    "volumeMounts": [{"name": "host", "mountPath": "/host"}],
+                                }
+                            ]
+                        }
+                    ),
+                },
+            ],
+        )
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert not is_valid
+        assert "hostPath" in error
+
+    def test_run_as_root_in_a_runtime_patch_without_containers_rejected(
+        self, mock_k8s_config, manifest_processor
+    ):
+        """A patch may set only the pod-level securityContext; the trainer
+        merges it into the one pod template, so every container would run as
+        root and block_run_as_root must refuse it."""
+        from gco.services.manifest_processor import ManifestProcessor
+
+        with patch("gco.services.manifest_processor.client"):
+            processor = ManifestProcessor(
+                cluster_id="test-cluster",
+                region="us-east-1",
+                config_dict={
+                    "allowed_namespaces": ["gco-jobs"],
+                    "validation_enabled": True,
+                    "manifest_security_policy": {"block_run_as_root": True},
+                },
+            )
+        manifest = _trainjob_manifest(
+            runtime_patches=[
+                {
+                    "manager": "root",
+                    **_runtime_patch_with_pod_spec({"securityContext": {"runAsUser": 0}}),
+                }
+            ],
+        )
+        assert processor.validate_manifest(manifest) == (
+            False,
+            "Security context validation failed: running as root (runAsUser: 0) is not permitted",
+        )
+        # The toggle stays opt-in: the default policy admits the same patch.
+        assert manifest_processor.validate_manifest(manifest) == (True, None)
+
+    def test_container_security_context_is_not_a_pod_spec_view(self, manifest_processor):
+        """A container's own securityContext marks the container, not a pod
+        spec: the patch pod spec is the only view."""
+        from gco.job_admission import extract_trainjob_pod_specs
+
+        pod_spec = {
+            "containers": [
+                {
+                    "name": "worker",
+                    "image": "python:3.14-slim",
+                    "securityContext": {"runAsUser": 1000},
+                }
+            ],
+            "initContainers": [
+                {"name": "setup", "image": "python:3.14-slim", "securityContext": {}}
+            ],
+        }
+        manifest = _trainjob_manifest(runtime_patches=[_runtime_patch_with_pod_spec(pod_spec)])
+        assert extract_trainjob_pod_specs(manifest).embedded == [pod_spec]
+
     def test_privileged_container_in_runtime_patch_rejected(self, manifest_processor):
         manifest = _trainjob_manifest(
             runtime_patches=[
@@ -2421,19 +2509,50 @@ class TestTrainJobValidation:
         is_valid, error = manifest_processor.validate_manifest(manifest)
         assert is_valid, error
 
-    def test_inject_security_defaults_reaches_embedded_pod_specs(self, manifest_processor):
-        """automountServiceAccountToken: false lands in every runtimePatches
-        pod spec (by mutation) without inventing fields elsewhere in the spec."""
+    def test_toleration_in_a_runtime_patch_without_containers_satisfies_gpu_request(
+        self, manifest_processor
+    ):
+        """The documented GPU variant: the patch sets scheduling fields only."""
+        manifest = _trainjob_manifest(
+            num_nodes=1,
+            resources_per_node={"limits": {"nvidia.com/gpu": "1"}},
+            runtime_patches=[
+                {
+                    "manager": "gco-example",
+                    **_runtime_patch_with_pod_spec(
+                        {
+                            "nodeSelector": {"kubernetes.io/arch": "amd64"},
+                            "tolerations": [
+                                {
+                                    "key": "nvidia.com/gpu",
+                                    "operator": "Exists",
+                                    "effect": "NoSchedule",
+                                }
+                            ],
+                        }
+                    ),
+                }
+            ],
+        )
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert is_valid, error
+
+    def test_inject_security_defaults_leaves_a_trainjob_alone(self, manifest_processor):
+        """No ``automountServiceAccountToken`` is injected into a runtime patch.
+
+        Kubeflow Trainer 2.3.0's runtime-patch pod spec has no such field, so
+        the API server dropped the injected ``false`` and the TrainJob kept
+        whatever its runtime's pod template sets (the shipped
+        ``torch-distributed`` runtime sets ``false``).
+        """
+        import copy
+
         pod_spec = {"containers": [{"name": "worker", "image": "python:3.14-slim"}]}
         manifest = _trainjob_manifest(runtime_patches=[_runtime_patch_with_pod_spec(pod_spec)])
+        before = copy.deepcopy(manifest)
 
-        manifest_processor._inject_security_defaults(manifest)
-
-        embedded = manifest["spec"]["runtimePatches"][0]["trainingRuntimeSpec"]["template"]["spec"][
-            "replicatedJobs"
-        ][0]["template"]["spec"]["template"]["spec"]
-        assert embedded["automountServiceAccountToken"] is False
-        assert "automountServiceAccountToken" not in manifest["spec"]["trainer"]
+        assert manifest_processor._inject_security_defaults(manifest) is manifest
+        assert manifest == before
 
     def test_inject_security_defaults_respects_explicit_user_choice(self, manifest_processor):
         manifest = _trainjob_manifest(

@@ -92,6 +92,9 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [Customizing Suppressions](#customizing-suppressions)
   - [Adding New Suppressions](#adding-new-suppressions)
   - [Disabling Compliance Checks](#disabling-compliance-checks)
+- [How cdk.json Is Validated](#how-cdkjson-is-validated)
+  - [Blocks and keys](#blocks-and-keys)
+  - [Boolean flags](#boolean-flags)
 - [Configuration Best Practices](#configuration-best-practices)
   - [1. Use Configuration Files](#1-use-configuration-files)
   - [2. Environment-Specific Configuration](#2-environment-specific-configuration)
@@ -112,7 +115,7 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [Image Build Failures](#image-build-failures)
   - [Manifest Application Failures](#manifest-application-failures)
 - [Regional API Gateway (Aggregation Bridge and Direct Regional Access)](#regional-api-gateway-aggregation-bridge-and-direct-regional-access)
-  - [Enable Direct Regional Access in the aws Partition](#enable-direct-regional-access-in-the-aws-partition)
+  - [Who May Call a Bridge](#who-may-call-a-bridge)
   - [How It Works](#how-it-works-1)
   - [Using Regional APIs](#using-regional-apis)
   - [Security Considerations](#security-considerations)
@@ -137,8 +140,8 @@ GCO deploys multiple stacks to configurable AWS Regions. Every configured Region
 |-------|---------------|---------|
 | `gco-global` | us-east-2 | Partition-wide state and SSM coordination; [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) in commercial `aws` only |
 | `gco-api-gateway` | us-east-2 | Edge-optimized workload + aggregate API in `aws`; regional aggregate-only API elsewhere |
-| `gco-regional-api-{region}` | workload Region | Aggregator bridge; optional direct access in `aws`, required workload ingress elsewhere |
-| `gco-monitoring` | us-east-2 | Cross-region CloudWatch dashboards and alarms |
+| `gco-regional-api-{region}` | workload Region | Aggregator bridge and region-pinned access; required workload ingress outside `aws` |
+| `gco-monitoring` | us-east-2 | Cross-region CloudWatch dashboard and the control-plane alarms whose metrics are in its Region (each regional stack has its own, and so does a global or API Gateway stack in another Region) |
 | `gco-analytics` | API Gateway region | Optional SageMaker Studio and [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html) environment |
 | `gco-{region}` | (configurable) | Regional EKS clusters, internal ALBs, and workload infrastructure |
 
@@ -279,16 +282,21 @@ two produce disjoint resource names and tear down independently
 > project-scoped and coexists cleanly, but the ECR image-replication
 > configuration created by the global stack is a per-account, per-region
 > **singleton**: AWS allows only one `AWS::ECR::ReplicationConfiguration` per
-> registry per region. So if two deployments place their **global** stack in the
-> same region and both leave image replication on (`images.replication.enabled`,
-> the default), the second stack fails to create it
-> (`...ReplicationConfiguration...already exists`). Resolution: set
-> `images.replication.enabled: false` on all but one same-region deployment (the
-> others still get their own project-scoped `<project>/*` ECR repos — they just
-> don't own that region's cross-region replication), **or** give each deployment
-> a different global region. Deployments in different regions never conflict:
-> each region has its own replication configuration with a project-scoped
-> `<project>/` filter.
+> registry per region, and that resource owns every rule in it. Its create fails
+> when the registry already has a rule, and an update writes GCO's rule over all
+> of them. So `gco stacks deploy` refuses, with instructions, to deploy a global
+> stack that would create the configuration over replication rules GCO did not
+> create (another deployment's or your own), or change GCO's rule while such
+> rules exist. Resolution: set `images.replication.enabled: false` on all but
+> one same-region deployment (the others still get their own project-scoped
+> `<project>/*` ECR repos — they just don't own that region's cross-region
+> replication, and you can add a `<project>/` rule to the registry yourself),
+> **or** give each deployment a different global region. Deployments in
+> different regions never conflict: each region has its own replication
+> configuration with a project-scoped `<project>/` filter. The configuration is
+> retained when the global stack is deleted; `gco stacks destroy` and
+> `destroy-all` then remove only this project's rule and keep every other rule.
+> A plain `cdk deploy` skips these checks.
 
 ### What `project_name` scopes
 
@@ -307,7 +315,7 @@ Changing `project_name` re-scopes all of the following (shown for
 | WAF WebACL + log groups | `acme-api-gateway-waf`, `/aws/apigateway/acme-global`, `aws-waf-logs-acme-api-gateway` |
 | CloudFormation exports | `acme-global-api-endpoint`, `acme-auth-secret-arn`, `acme-waf-webacl-arn`, … |
 | ECR image namespace | repos under `acme/*` (e.g. `acme/dockerhub/…`), ECR replication filter `acme/`, `gco images` / mirror namespace |
-| Global Accelerator (`aws` only) | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`) |
+| Global Accelerator (`aws` only) | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`; a set name must be 1–64 letters, digits, periods or hyphens, not starting or ending with a period or hyphen) |
 | API Gateway names | REST API `acme-global-api`, Studio Cognito authorizer `acme-studio-cognito-authorizer`, request validator `acme-studio-request-validator` |
 | [Valkey](https://valkey.io/) cache (opt-in) | ElastiCache serverless cache `acme-<region>` |
 | Analytics (opt-in) | Studio bucket `acme-analytics-studioonlybucket…` (CloudFormation-generated), SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
@@ -317,20 +325,36 @@ names (namespaces such as `gco-jobs` / `gco-system`, service accounts,
 ConfigMaps): each deployment gets its own EKS cluster, so those live in
 separate Kubernetes API servers and never collide across deployments.
 
+Cost Explorer attribution is not scoped by `project_name` either:
+`gco costs summary|regions|trend|forecast` filter on the `Project` tag from
+`context.tags` (`GCO` in the committed `cdk.json`), so deployments that keep
+the same value report each other's spend. Give each deployment its own
+value, for example `"tags": {"Project": "GCO-staging"}`.
+
 ### `project_name` format
 
-Because the value flows into S3 bucket names and the Cognito domain prefix
-(both lowercase-only, length-limited), it is validated at synth time and must
-match:
+Because the value flows into S3 bucket names, the Cognito domain prefix and
+the ECR repository namespace (all lowercase-only, length-limited), it is
+validated at synth time and must match:
 
 ```text
-^[a-z][a-z0-9-]{1,30}$
+^(?=.{2,31}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$
 ```
 
-That is: start with a lowercase letter, then 2–31 total characters of lowercase
-letters, digits, or hyphens (e.g. `gco`, `gco-staging`, `acme`, `team-b-prod`).
-Uppercase, underscores, dots, a leading digit, or a leading/trailing hyphen are
-rejected up front with a clear error rather than failing mid-deploy.
+That is: 2–31 characters, starting with a lowercase letter, then lowercase
+letters and digits with single hyphens between them (e.g. `gco`, `gco-staging`,
+`acme`, `team-b-prod`). Uppercase, underscores, dots, a leading digit, a
+trailing hyphen, or two hyphens in a row are rejected up front with a clear
+error rather than failing mid-deploy. Earlier releases accepted a trailing
+hyphen and two hyphens in a row, but ECR refuses them in a repository path
+(`gco-/...`, `a--b/...`): the global stack's `<project_name>/` image
+replication rule, which exists whenever a workload Region differs from the
+global Region, failed to deploy, and so did `gco images` and the Volcano image
+mirror.
+
+Leaving `project_name` out of `cdk.json` selects the default `gco`; the rest of
+the file is validated the same way either way. An explicit value, including an
+empty string, must match the pattern.
 
 ### Backward compatibility
 
@@ -481,7 +505,10 @@ Edit `cdk.json` to change the endpoint access mode:
 }
 ```
 
-`public_access_cidrs` restricts who can reach the public endpoint. Leaving it
+`public_access_cidrs` restricts who can reach the public endpoint. It is a
+list of IPv4 CIDRs with an explicit prefix (`203.0.113.7/32`), even for one
+entry; anything else fails `cdk synth`, and EKS takes no IPv6 entries on the
+IPv4 clusters GCO creates. Leaving it
 empty means `0.0.0.0/0` — synthesis prints a loud warning naming that exposure
 rather than choosing it silently. Prefer the CLI, which refuses to widen
 access without an explicit allowlist and records the change atomically:
@@ -584,6 +611,15 @@ For direct kubectl access with private endpoints, you need network connectivity 
 - **Bastion Host**: EC2 instance in the VPC with kubectl configured
 - **AWS Cloud9**: IDE in the VPC with kubectl access
 
+Being in the VPC is not enough on its own: the EKS cluster security group admits
+HTTPS to the private endpoint only from itself, from GCO's own Lambdas and, with
+HyperPod on, from its nodes; no rule admits the VPC CIDR. Attach the cluster
+security group (the regional stack's `ClusterSecurityGroupId` output) to a bastion
+or Cloud9 instance, or add the security group of your instance or Client VPN
+endpoint to the cluster security group as an ingress source on 443. See
+[ARCHITECTURE.md → Network Security](ARCHITECTURE.md#network-security) for every
+client GCO itself runs.
+
 The `gco cluster tunnel` command automates the SSM path end-to-end — it opens an
 `AWS-StartPortForwardingSessionToRemoteHost` tunnel to the private API endpoint
 and prints the `kubectl` flags to use with it. `--via-ssm auto` even provisions a
@@ -618,9 +654,10 @@ reference.
 ### Network Policy Enforcement
 
 GCO ships Kubernetes NetworkPolicies for every namespace it owns (default-deny
-ingress in `gco-system` and `gco-jobs`, per-service allow rules, DNS + HTTPS
-egress; see [Network Security](ARCHITECTURE.md#network-security)). On EKS Auto
-Mode those objects are only enforced once the cluster's network policy
+ingress in `gco-system`, `gco-jobs` and `gco-inference`, per-service allow
+rules, DNS + HTTPS egress; see
+[Network Security](ARCHITECTURE.md#network-security)). On EKS Auto Mode those
+objects are only enforced once the cluster's network policy
 controller is switched on, which the regional stack does through the
 `kube-system/amazon-vpc-cni` ConfigMap it applies
 (`06-network-policy-controller.yaml`):
@@ -837,17 +874,34 @@ The health monitor compares cluster utilization against configurable thresholds 
 }
 ```
 
-| Threshold | Default | Description |
-|-----------|---------|-------------|
-| `cpu_threshold` | 80 | CPU utilization % (0-100, or -1 to disable) |
-| `memory_threshold` | 80 | Memory utilization % (0-100, or -1 to disable) |
-| `gpu_threshold` | -1 | GPU utilization % (0-100, or -1 to disable) |
-| `pending_pods_threshold` | 10 | Max pending pods before unhealthy (-1 to disable) |
-| `pending_requested_cpu_vcpus` | 100 | Max vCPUs requested by pending pods (-1 to disable) |
-| `pending_requested_memory_gb` | 200 | Max GB memory requested by pending pods (-1 to disable) |
-| `pending_requested_gpus` | -1 | Max GPUs requested by pending pods (-1 to disable) |
+| Threshold | Shipped value | If omitted | Description |
+|-----------|---------------|------------|-------------|
+| `cpu_threshold` | 80 | required | CPU utilization % (0-100, or -1 to disable) |
+| `memory_threshold` | 80 | required | Memory utilization % (0-100, or -1 to disable) |
+| `gpu_threshold` | -1 | required | GPU utilization % (0-100, or -1 to disable) |
+| `pending_pods_threshold` | 10 | 10 | Max pending pods before unhealthy (-1 to disable) |
+| `pending_requested_cpu_vcpus` | 100 | 100 | Max vCPUs requested by pending pods (-1 to disable) |
+| `pending_requested_memory_gb` | 200 | 200 | Max GB memory requested by pending pods (-1 to disable) |
+| `pending_requested_gpus` | -1 | 8 | Max GPUs requested by pending pods (-1 to disable) |
+
+The shipped value is what the committed `cdk.json` sets. A file that leaves a
+`pending_*` key out gets the value in the "If omitted" column, which is also
+what the health monitor uses without its environment variable; keep
+`pending_requested_gpus` at `-1` to leave the pending-GPU check off.
 
 Set a threshold to `-1` to disable that check entirely. GPU thresholds are disabled by default because inference endpoints naturally saturate GPU resources and should not trigger unhealthy status.
+
+Utilization is measured against what the nodes report as allocatable, so it can
+read above 100%: CPU and memory usage include the system-reserved share that
+allocatable leaves out, and running pods can briefly hold more GPUs than the
+nodes report while a device plugin restarts. A value above 100% is compared with
+the threshold like any other. Active jobs are the Jobs in the job namespaces
+(`allowed_namespaces`) with at least one pending or running pod.
+
+If a read fails (metrics-server, the node list, or the pod list), the health
+monitor keeps judging the last complete reading for up to 60 seconds and says so
+in the status message. After that it reports the cluster unhealthy, naming the
+read that failed; a failed read is never reported as healthy.
 
 After changing thresholds, redeploy the regional stack:
 
@@ -889,20 +943,20 @@ Global Accelerator uses HTTP health checks to determine if a region is healthy. 
 
 | Setting | Default | Description |
 |---|---|---|
-| `health_check_path` | `/api/v1/health` | HTTPS path GA uses to check ALB health. Must be in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` |
+| `health_check_path` | `/api/v1/health` | HTTPS path GA uses to check ALB health. Must be one of the paths the services answer without authentication (`UNAUTHENTICATED_PATHS` in `gco/unauthenticated_paths.py`: `/api/v1/health`, `/healthz`, `/readyz`, `/metrics`), optionally with a query string; any other path fails at synth |
 | `health_check_interval` | `30` | Seconds between health checks. The Global Accelerator API accepts only `10` or `30`; anything else fails at synth |
 | `health_check_threshold` | `3` | Consecutive health checks (1-10) before an endpoint flips healthy/unhealthy |
 | `client_affinity` | `NONE` | Listener client affinity. `NONE` spreads connections across endpoints for even load distribution; `SOURCE_IP` pins each client IP to the same endpoint for session stickiness |
 
 The block merges over the shipped defaults, so a partial block keeps every
 unspecified default. The legacy `health_check_grace_period` and
-`health_check_timeout` keys are tolerated and ignored — Global Accelerator
-endpoint groups have no such settings (the keys were never consumed); remove
-them from existing configs at your convenience.
+`health_check_timeout` keys are ignored, with a deprecation warning at synth:
+Global Accelerator endpoint groups have no such settings (the keys were never
+consumed). Remove them from existing configs.
 
 The `/api/v1/health` endpoint returns 200 when the cluster is within resource thresholds and 503 when overloaded. This enables intelligent routing — GA automatically routes traffic away from overloaded regions.
 
-The health check path must be listed in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` so Global Accelerator can probe it without a per-request HMAC envelope. A CI test (`tests/test_health_check_coverage.py`) validates this automatically.
+The health check path must be listed in `UNAUTHENTICATED_PATHS` in `gco/unauthenticated_paths.py` (which the auth middleware in `gco/services/auth_middleware.py` applies) so Global Accelerator can probe it without a per-request HMAC envelope. Every other path answers the probe with an authentication error, which would mark every Region unhealthy, so the synth rejects it. A CI test (`tests/test_health_check_coverage.py`) also checks the ALB target-group paths.
 
 #### Client Affinity
 
@@ -1162,6 +1216,15 @@ If you need users to submit NetworkPolicy resources:
 "allowed_kinds": ["Job", "CronJob", "Deployment", "StatefulSet", "DaemonSet", "Service", "ConfigMap", "Pod", "TrainJob", "NetworkPolicy"]
 ```
 
+The list only decides what the processors accept. Creating the object also
+needs a Kubernetes grant: `gco-manifest-processor-sa` holds create, get,
+patch and delete in `gco-jobs` for the default kinds only
+(`gco-manifest-processor-role` in
+`lambda/kubectl-applier-simple/manifests/02-rbac.yaml`). For an added kind,
+bind it to a Role of your own in each allowed namespace, for example one
+granting `networking.k8s.io` `networkpolicies` the same verbs; without it the
+create is refused with 403.
+
 After changing any security policy or allowed_kinds settings, redeploy the regional stack:
 
 > **Note:** These settings apply to the **manifest processor** and **queue processor** validation layers. They do not affect containers or resources created outside the job submission APIs (e.g., by platform operators via kubectl directly or by Helm charts).
@@ -1186,7 +1249,7 @@ post-helm-name.yaml     # Post-Helm pass (applied after Helm installs CRDs)
 - `20-29` — Storage (EFS, FSx, Valkey)
 - `30-39` — System services (health-monitor, manifest-processor, inference-monitor)
 - `40-49` — NodePools (GPU, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html), Neuron, CPU)
-- `50-59` — Device plugins (NVIDIA)
+- `50-59` — GPU observability and node health (DCGM exporter, the SageMaker HyperPod health-monitoring agent). No manifest installs an NVIDIA device plugin: EKS Auto Mode nodes ship one
 - `post-helm-*` — Resources requiring Helm CRDs (Gateway API entrypoint, [KEDA](https://keda.sh/) ScaledJob, etc.)
 
 **Optional features:** Files with unresolved uppercase `{{PLACEHOLDER}}` feature gates are skipped. For shipped optional features, the applier also prunes an exact, audited list of resources previously owned by that feature. It does not use broad label deletion, so unrelated resources are left untouched. When adding a new optional platform feature, add its exact owned-resource inventory to the applier so disable-time convergence is explicit.
@@ -1356,16 +1419,18 @@ spec:
 
 ### Lambda Configuration
 
-Edit `gco/stacks/regional_stack.py`:
+The kubectl-applier Lambda (`KubectlApplierFunction` in
+`gco/stacks/regional_stack.py`) already runs with Lambda's maximum timeout of
+15 minutes, so its timeout cannot be raised. Its memory (512 MB) can, which also
+gives it more CPU:
 
 ```python
-kubectl_lambda = lambda_.Function(
-    self, "KubectlApplierFunction",
-    runtime=lambda_.Runtime.PYTHON_3_14,
-    handler="handler.lambda_handler",
-    code=lambda_.Code.from_asset("lambda/kubectl-applier-simple-build"),
-    timeout=Duration.minutes(10),  # Increase from 5
-    memory_size=1024,              # Increase from 512
+self.kubectl_lambda = lambda_.Function(
+    self,
+    "KubectlApplierFunction",
+    ...
+    timeout=Duration.minutes(15),  # already Lambda's maximum
+    memory_size=1024,              # raised from 512
     ...
 )
 ```
@@ -1487,14 +1552,14 @@ See [Schedulers & Orchestrators](SCHEDULERS.md) for detailed guidance on each to
 
 Volcano's images live on Docker Hub, whose anonymous pull limit can fail a cold
 cluster's chart install. The regional stack can mirror them into the project's
-ECR and point the chart at the copy. It is on by default:
+ECR and point the chart at the copy. It is on by default, mirroring into
+`<project_name>/dockerhub` (`gco/dockerhub` for the stock project):
 
 ```json
 {
   "context": {
     "volcano_image_mirror": {
-      "enabled": true,
-      "ecr_namespace": "gco/dockerhub"
+      "enabled": true
     }
   }
 }
@@ -1510,8 +1575,9 @@ gco stacks addons install -r <region>
 gco stacks addons status -r <region>
 ```
 
-`ecr_namespace` must start with `gco/` so the copies inherit the project's
-node-pull access, ECR replication and trusted-registry allow-list. For why a
+An `ecr_namespace` of your own must start with `<project_name>/` so the copies
+inherit the project's node-pull access, ECR replication and trusted-registry
+allow-list. For why a
 mirror rather than a pull-through cache, manual `gco images mirror` runs, the
 multi-arch copy strategy, the MCP tools and troubleshooting, see
 [Image Mirror](IMAGE_MIRROR.md).
@@ -1520,33 +1586,52 @@ multi-arch copy strategy, the MCP tools and troubleshooting, see
 
 ### Enable EKS Logging
 
-Edit `gco/stacks/regional_stack.py`:
-
-```python
-self.cluster = eks.Cluster(
-    self,
-    "GCOEksCluster",
-    cluster_name=cluster_config.cluster_name,
-    version=eks.KubernetesVersion.V1_35,
-    vpc=self.vpc,
-    compute=eks.ComputeConfig(node_pools=["system", "general-purpose"]),
-    endpoint_access=eks.EndpointAccess.PUBLIC_AND_PRIVATE,
-    role=cluster_admin_role,
-    vpc_subnets=[ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)],
-    logging=eks.ClusterLoggingTypes.all(),  # Enable all logging
-)
-```
+EKS control-plane logging is already on. The regional stack creates every
+cluster with all five log types (API server, audit, authenticator, controller
+manager and scheduler; `cluster_logging` in `gco/stacks/regional_stack.py`), so
+there is nothing to enable. EKS writes them to the CloudWatch Logs group
+`/aws/eks/<project>-<region>/cluster`.
 
 ### Add CloudWatch Container Insights
 
-```bash
-# Apply Container Insights DaemonSet
-kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/quickstart/cwagent-fluentd-quickstart.yaml
-```
+Container Insights is already on as well. Each regional stack installs the
+`amazon-cloudwatch-observability` EKS add-on, which publishes the Container
+Insights metrics and sends container logs to
+`/aws/containerinsights/<project>-<region>/application`. Do not also apply the
+standalone Container Insights DaemonSet: it would run a second agent that
+collects the same data.
 
 ### Load Balancer Configuration
 
-GCO installs the AWS Load Balancer Controller with Gateway API support and intentionally creates one internal ALB from the `gco-system/gco-gateway` Gateway (see `lambda/kubectl-applier-simple/manifests/post-helm-gateway.yaml`). If you add another operator-owned Gateway, keep its exposure explicit and do not create endpoint-specific inference routes that bypass the authenticated proxy:
+GCO installs the AWS Load Balancer Controller with Gateway API support and intentionally creates one internal ALB from the `gco-system/gco-gateway` Gateway (see `lambda/kubectl-applier-simple/manifests/post-helm-gateway.yaml`).
+
+#### Platform ALB health check
+
+The ALB probes `/healthz` over HTTPS on every target of the health-monitor, manifest-processor and inference-proxy target groups. The probe's timing comes from the `gateway_health_check` block in `cdk.json`:
+
+```json
+"gateway_health_check": {
+  "interval_seconds": 15,
+  "timeout_seconds": 5,
+  "healthy_threshold": 2,
+  "unhealthy_threshold": 2
+}
+```
+
+| Key | Default | Range | Meaning |
+|-----|---------|-------|---------|
+| `interval_seconds` | `15` | 5-300 | Seconds between probes of one target |
+| `timeout_seconds` | `5` | 2-120, less than `interval_seconds` | Seconds without an answer that fail a probe |
+| `healthy_threshold` | `2` | 2-10 | Consecutive passing probes that mark a target healthy |
+| `unhealthy_threshold` | `2` | 2-10 | Consecutive failing probes that mark a target unhealthy |
+
+The ranges are the ones Elastic Load Balancing accepts for an Application Load Balancer target group ([Health checks for Application Load Balancer target groups](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html)); a value outside them, a non-integer, or an unknown key fails `cdk synth`. Every key is optional and an omitted one keeps its default. The regional stack renders the values into the default `TargetGroupConfiguration` of `post-helm-gateway.yaml`; redeploy the regional stacks to apply a change.
+
+`gateway_health_check` replaces the `alb_config` block of earlier releases. `alb_config` was required and validated, but nothing read it, and its 30-second interval was never what ran. A `cdk.json` that still has `alb_config` synthesizes with a deprecation warning and its values have no effect; delete the block and set `gateway_health_check` if you want a different probe.
+
+#### Additional Gateways
+
+If you add another operator-owned Gateway, keep its exposure explicit and do not create endpoint-specific inference routes that bypass the authenticated proxy:
 
 ```yaml
 apiVersion: gateway.k8s.aws/v1
@@ -1560,13 +1645,18 @@ spec:
 
 ### Add Prometheus Monitoring
 
-```bash
-# Install Prometheus using Helm
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm install prometheus prometheus-community/kube-prometheus-stack \
-  --namespace monitoring \
-  --create-namespace
-```
+GCO already runs Prometheus. With `cluster_observability.enabled` (the
+default), every regional cluster gets kube-prometheus-stack, with Prometheus,
+Alertmanager and Grafana, in the `monitoring` namespace; see
+[MONITORING.md](MONITORING.md). Do not `helm install` a second copy: it would
+add a second Prometheus Operator over the same CRDs.
+
+That Prometheus discovers `ServiceMonitor` and `PodMonitor` objects in every
+namespace, so to scrape a workload of your own, create one next to it. Pods in
+`gco-jobs` and `gco-inference` accept connections only from the sources their
+NetworkPolicies name, so also add a NetworkPolicy that admits the Prometheus
+pods of the `monitoring` namespace on the metrics port. Browse the result with
+`gco monitoring open --service prometheus` or `--service grafana`.
 
 ## Cost Tracking Setup
 
@@ -1713,12 +1803,28 @@ Edit `cdk.json` to customize FSx storage settings:
       "storage_capacity_gib": 1200,
       "deployment_type": "SCRATCH_2",
       "file_system_type_version": "2.15",
-      "data_compression_type": "LZ4",
-      "per_unit_storage_throughput": 200
+      "data_compression_type": "LZ4"
     }
   }
 }
 ```
+
+Every key is optional, an omitted key keeps its default, and every value is
+validated at synth, so a value FSx for Lustre would reject fails `cdk synth`
+with the key's full path instead of failing the deploy.
+
+| Key | Default | Accepted values |
+|-----|---------|-----------------|
+| `enabled` | `false` | `true` / `false` ([JSON booleans](#boolean-flags)) |
+| `storage_capacity_gib` | `1200` | 1200, 2400, then multiples of 2400 GiB (multiples of 3600 for `SCRATCH_1`) |
+| `deployment_type` | `SCRATCH_2` | `SCRATCH_1`, `SCRATCH_2`, `PERSISTENT_1`, `PERSISTENT_2` |
+| `file_system_type_version` | `2.15` | `2.10`, `2.12`, `2.15` (`PERSISTENT_2` does not support `2.10`) |
+| `per_unit_storage_throughput` | `200` for `PERSISTENT_1`, `250` for `PERSISTENT_2` | `PERSISTENT_1`: 50, 100, 200; `PERSISTENT_2`: 125, 250, 500, 1000 (MB/s per TiB). The `SCRATCH` types take no throughput setting; a value set for them is ignored |
+| `data_compression_type` | `LZ4` | `LZ4`, `NONE` |
+| `import_path` / `export_path` | `null` | `s3://bucket[/prefix]`; an export path needs an import path in the same bucket |
+| `auto_import_policy` | `NEW_CHANGED_DELETED` | `NONE`, `NEW`, `NEW_CHANGED`, `NEW_CHANGED_DELETED` (used only with an import path) |
+
+The values follow the [`AWS::FSx::FileSystem` `LustreConfiguration` reference](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-fsx-filesystem-lustreconfiguration.html) for the SSD storage GCO creates.
 
 **Deployment Types:**
 
@@ -1727,15 +1833,17 @@ Edit `cdk.json` to customize FSx storage settings:
 - `PERSISTENT_1`: Persistent storage with data replication
 - `PERSISTENT_2`: Latest persistent storage with higher throughput
 
-**File System Type Version:**
+**Per-Region settings:** `fsx_lustre_regions` holds an object per Region whose
+keys override the global block for that Region only, for example
+`"fsx_lustre_regions": {"us-west-2": {"enabled": true}}`. `gco stacks fsx enable
+-r <region>` writes such an entry. `gco stacks fsx enable` writes the settings
+it shows and removes the ones you leave out (an earlier import path, export
+path or throughput, and the deprecated `node_group`) from the block it writes.
 
-- `2.15`: Latest version, recommended (default)
-- `2.12`: Compatible with kernel 6.x
-
-**Storage Capacity:**
-
-- Minimum: 1200 GiB for SCRATCH_2
-- Must be in increments of 2400 GiB for SCRATCH_2
+**Removed setting:** earlier releases documented an `fsx_lustre.node_group`
+block, but nothing ever read it: FSx workloads run on the EKS Auto Mode node
+pools. A `node_group` key still validates, with a deprecation warning, and has
+no effect; delete it (`gco stacks fsx enable` removes it).
 
 ### Using FSx in Jobs
 
@@ -1817,10 +1925,13 @@ Or edit `cdk.json` directly:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `false` | Enable/disable Valkey cache |
-| `max_data_storage_gb` | 5 | Maximum data storage in GB (auto-scales from 1 GB) |
-| `max_ecpu_per_second` | 5000 | Maximum ElastiCache Processing Units per second |
-| `snapshot_retention_limit` | 1 | Number of daily snapshots to retain |
+| `enabled` | `false` | Enable/disable Valkey cache (`true` / `false`, [JSON booleans](#boolean-flags)) |
+| `max_data_storage_gb` | 5 | Maximum data storage in GB, an integer of at least 1 (auto-scales from 1 GB) |
+| `max_ecpu_per_second` | 5000 | Maximum ElastiCache Processing Units per second, an integer of at least 1000 (the cache's floor) |
+| `snapshot_retention_limit` | 1 | Number of daily snapshots to retain, an integer of at least 0 |
+
+Values of the wrong type, below their floor, and unknown keys fail `cdk synth`
+with the key's full path.
 
 After enabling, redeploy the regional stack:
 
@@ -1830,7 +1941,7 @@ gco stacks deploy gco-us-east-1 -y
 
 ### Using Valkey in Jobs
 
-When Valkey is enabled, GCO creates a `gco-valkey` ConfigMap in each namespace with the endpoint and port. Reference it in your pod spec — no need to look up or hardcode endpoint URLs:
+When Valkey is enabled, GCO creates a `gco-valkey` ConfigMap in `gco-jobs` with the endpoint and port. Reference it in your pod spec — no need to look up or hardcode endpoint URLs:
 
 ```yaml
 env:
@@ -1846,7 +1957,7 @@ env:
       key: port
 ```
 
-The same manifest works in any region — the ConfigMap resolves to the local Valkey endpoint automatically.
+The same manifest works in any region — the ConfigMap resolves to the local Valkey endpoint automatically. The ConfigMap lives in `gco-jobs` only because that namespace's in-VPC egress rule (`allow-vpc-egress`) is the one path to the cache: `gco-system` and `gco-inference` pods can reach DNS, HTTPS and the Pod Identity Agent and nothing else (see [Network Security](ARCHITECTURE.md#network-security)). To use Valkey from `gco-inference`, add a NetworkPolicy that admits egress to the cache's port and create your own ConfigMap there.
 
 For use outside the cluster (scripts, Lambda functions), the endpoint is also stored in SSM at `/{project}/valkey-endpoint-{region}`.
 
@@ -1895,11 +2006,14 @@ Or edit `cdk.json` directly:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `false` | Enable/disable Aurora pgvector |
-| `min_acu` | 0 | Minimum Aurora Capacity Units (0 = scale to zero / auto-pause) |
-| `max_acu` | 16 | Maximum Aurora Capacity Units |
-| `backup_retention_days` | 7 | Number of days to retain automated backups |
-| `deletion_protection` | `false` | Enable deletion protection (recommended for production) |
+| `enabled` | `false` | Enable/disable Aurora pgvector (`true` / `false`, [JSON booleans](#boolean-flags)) |
+| `min_acu` | 0 | Minimum Aurora Capacity Units, 0-256 in steps of 0.5 (0 = scale to zero / auto-pause) |
+| `max_acu` | 16 | Maximum Aurora Capacity Units, 1-256 in steps of 0.5 and at least `min_acu` |
+| `backup_retention_days` | 7 | Number of days to retain automated backups, 1-35 |
+| `deletion_protection` | `false` | Enable deletion protection (recommended for production; `true` / `false`, [JSON booleans](#boolean-flags)) |
+
+Values outside these ranges, of the wrong type, and unknown keys fail `cdk
+synth` with the key's full path.
 
 Set `min_acu` to `0.5` or higher to disable auto-pause and keep the cluster always warm.
 
@@ -1911,7 +2025,7 @@ gco stacks deploy gco-us-east-1 -y
 
 ### Using Aurora pgvector in Jobs
 
-When Aurora pgvector is enabled, GCO creates a `gco-aurora-pgvector` ConfigMap in each namespace with the endpoint, port, secret ARN, and database name. Reference it in your pod spec:
+When Aurora pgvector is enabled, GCO creates a `gco-aurora-pgvector` ConfigMap in `gco-jobs` with the endpoint, port, secret ARN, and database name (only there, for the same reason as `gco-valkey`: `gco-jobs` is the one namespace whose egress reaches in-VPC endpoints). Reference it in your pod spec:
 
 ```yaml
 env:
@@ -2034,9 +2148,25 @@ searches answer a "still building" hint until it is ACTIVE.
 | `enabled` | `false` | Provision the table, index, ingest pipeline, and regional wiring |
 | `dimensions` | `1024` | Embedding width. **One-way door**: immutable after index creation and must match the embedding model's output width |
 | `distance_function` | `COSINE` | Similarity metric (`COSINE` or `EUCLIDEAN`); immutable after index creation |
-| `embedding_model_id` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for ingest and queries. Deliberately independent of mission memory's `bedrock.embedding_model_id` |
+| `embedding_model_id` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for ingest and queries, as a foundation-model id (`provider.model[:version]`; the stacks grant `bedrock:InvokeModel` on `foundation-model/<id>`). Deliberately independent of mission memory's `bedrock.embedding_model_id` |
 | `replica_regions` | `[]` | Regions to replicate into. Empty means "follow `deployment_regions.regional`", minus the global region (the primary) |
 | `corpus_prefix` | `vector-corpus/` | S3 key prefix on the cluster-shared bucket watched by the ingest Lambda |
+
+Ingest limits, per object (constants in `lambda/vector-ingest/handler.py`;
+none of them is configurable):
+
+| Limit | Value | What happens past it |
+|-------|-------|----------------------|
+| Object size (`MAX_OBJECT_BYTES`) | 4 MiB (4,194,304 bytes) | Refused as `too_large` before its body is read |
+| Chunks (`MAX_CHUNKS_PER_OBJECT`) | 500 | Refused as `too_large` before any Bedrock call |
+| Chunk size (`MAX_CHUNK_CHARS`) | 2,000 characters | `.txt`/`.md` paragraphs are packed up to it and longer ones split at it; a `.jsonl` record longer than it fails the object |
+| Time left before a chunk (`TIME_RESERVE_MS`) | 30 s of the 5-minute invocation | The object stops as `out_of_time`; its retry starts again from chunk 0 |
+
+500 chunks of up to 2,000 characters is about 1 MB of text, so the chunk
+limit is the one a long document meets first: split it into several
+objects. A refused object writes nothing; the Lambda logs the reason in its
+one-line JSON summary, and after Lambda's own retries the S3 event lands in
+the ingest dead-letter queue (14 days) for replay.
 
 Cost model: the table is on-demand, so a mostly idle corpus costs storage
 plus per-request reads — but **every write is replicated**, so ingesting a
@@ -2258,11 +2388,17 @@ You may need a specific model for **regulatory, data-residency, model-governance
 ```bash
 # Capacity advisor — pass any model or inference-profile id enabled in your account
 gco capacity ai-recommend -w "Fine-tune a 13B model" --model us.anthropic.claude-sonnet-4-6
-gco capacity predict -i p5.48xlarge -r us-east-1 --model eu.amazon.nova-pro-v1:0
+gco capacity predict -i p5.48xlarge -r us-east-1 --model us.amazon.nova-pro-v1:0
 
-# Mission engine
-gco mission start "..." --bedrock-model-id us.meta.llama3-3-70b-instruct-v1:0
+# Mission engine (the mission commands need GCO_ENABLE_MISSION=true)
+gco mission run --directive "Find documentation about inference endpoints." \
+  --tool-allowlist find_docs --bedrock-model-id us.meta.llama3-3-70b-instruct-v1:0
 ```
+
+The capacity advisor calls Bedrock in `AWS_REGION`, else `AWS_DEFAULT_REGION`,
+else the CLI's default Region (`gco -r`), not in the Region `-r` names after the
+subcommand, so a geography-scoped profile such as `eu.amazon.nova-pro-v1:0`
+needs an `AWS_REGION` in that geography.
 
 The `ai_recommend` MCP tool takes the same override as a `model="..."` argument; omit it to use the default.
 
@@ -2434,6 +2570,83 @@ def nag_validation_plugins(scope, *, verbose=True):
 cdk.Validations.of(app).add_plugins(*nag_validation_plugins(app, verbose=True))
 ```
 
+## How cdk.json Is Validated
+
+`cdk synth`, and every `gco stacks` command that synthesizes, validates the
+whole `context` block before it builds a stack, so a value AWS would reject
+fails with the key's full path (`fsx_lustre_regions.us-west-2.enabled`)
+instead of failing halfway through a deploy.
+
+### Blocks and keys
+
+- A block such as `cluster_observability` must be a JSON object. Earlier
+  releases read a scalar such as `"cluster_observability": false` as a
+  missing block, so its defaults applied and observability stayed on; now the
+  synth fails. Write `{"enabled": false}` instead.
+- A key that a block does not define fails the synth with its full path and
+  the keys the block accepts, so a typo such as
+  `cost_monitoring.reports.interval` is caught instead of silently keeping the
+  default. `_comment*` keys are allowed in every block.
+- A key that no longer takes effect still validates, with a warning that
+  names it and says what to do; nothing reads its value. These are
+  `alb_config`, `fsx_lustre.node_group`, `manifest_processor.image` (the
+  stack builds that image itself),
+  `global_accelerator.health_check_grace_period`,
+  `global_accelerator.health_check_timeout`, and `images.removal_policy`,
+  `images.empty_on_delete` and `images.lifecycle` (no stack creates or
+  deletes the `<project_name>/*` ECR repositories: the gco CLI creates them,
+  they survive a destroy, and `gco images init` applies its own lifecycle
+  policy), and `api_gateway.regional_api_enabled` (callers reach the global
+  API and every regional bridge with their own `execute-api:Invoke`
+  permission).
+- The per-Region overlays (`fsx_lustre_regions`, `pcs_regions`,
+  `hyperpod_regions`) are keyed by Region name. A name that is not an AWS
+  Region fails; a real Region that is not in `deployment_regions.regional`
+  draws a warning, because no stack reads it until the Region is added (which
+  is how a Region is staged).
+- A top-level key in GCO's `snake_case` style that GCO does not read draws a
+  warning, because it is most likely a misspelt block. Keys of the CDK itself
+  (`@aws-cdk/...`, `aws:cdk:...`) are not checked.
+- Numbers must be numbers: `true` is not accepted where an integer belongs.
+  `tags` values must be strings, and `kubernetes_version` is a quoted
+  `"<major>.<minor>"` string such as `"1.37"` (a JSON number `1.30` would read
+  as `1.3`).
+
+### Boolean flags
+
+Write flags such as `enabled` as JSON booleans, `true` or `false`, without
+quotes. Earlier releases read the `enabled` flags of `fsx_lustre` (and its
+`fsx_lustre_regions` overlays), `valkey`, `aurora_pgvector`,
+`cluster_observability.mlflow`, `queue_processor`, `drift_detection`,
+`mcp_server`, `volcano_image_mirror`, `images.replication` and the `helm`
+charts by truthiness, so a quoted `"false"`, like every non-empty string,
+turned the feature on. So that an upgrade never turns off a feature that has
+been running:
+
+- `"true"` in any case still reads as `true`, with a deprecation warning.
+- Any other string there, `"false"` included, fails validation with a message
+  that says how earlier releases read it. Write `true` to keep the feature, or
+  `false` to remove it. For the storage features `false` deletes the
+  resource and its data (the file system, the cache, the database cluster,
+  the MLflow run-metadata volume), so back up first (see
+  [UPGRADING.md](UPGRADING.md#2-back-up-regional-data-to-the-cluster-shared-bucket)).
+  For a `helm` chart `false` uninstalls it, and for Kueue and Crossplane the
+  uninstall first deletes their custom resources across the cluster (Kueue's
+  queues and workload objects; Crossplane's composite resources and what they
+  composed). For `drift_detection` it deletes the alert topic and its
+  subscriptions.
+- Numbers, `null` and other types fail validation.
+
+`aurora_pgvector.deletion_protection` follows the same rule; a string there
+always failed the synth, so nothing has been running on one.
+`helm.argocd.enabled` and `helm.slurm.enabled` take only JSON booleans, as
+they always did. The toggles of the mandatory charts
+(`helm.keda`, `helm.aws_load_balancer_controller`) are not read. Top-level
+keys that the CLI or the release harnesses pass as `cdk --context key=value`
+strings, such as `gco:control-plane-only` and
+`gco_live_validation_disable_efs_automatic_backups`, accept both `"true"` and
+`"false"`.
+
 ## Configuration Best Practices
 
 ### 1. Use Configuration Files
@@ -2450,27 +2663,26 @@ Store configuration in `cdk.json` context:
       "monitoring": "us-east-2",
       "regional": ["us-east-1"]
     },
-    "enable_monitoring": true,
-    "enable_gpu": true,
-    "gpu_instance_families": ["g5", "g4dn"],
-    "max_gpu_nodes": 10
+    "cluster_observability": {"enabled": true},
+    "fsx_lustre": {"enabled": false},
+    "tags": {"Project": "gco", "Environment": "dev"}
   }
 }
 ```
 
+Every block is checked at synth, so a misspelt key fails or warns instead of
+being ignored; see [How cdk.json Is Validated](#how-cdkjson-is-validated).
+
 ### 2. Environment-Specific Configuration
 
-```python
-# In your stack
-env = self.node.try_get_context("environment") or "dev"
-
-if env == "prod":
-    replicas = 5
-    instance_types = ["g5.2xlarge"]
-else:
-    replicas = 2
-    instance_types = ["g4dn.xlarge"]
-```
+GCO's stacks read no `environment` setting, and a top-level key they do not
+read only draws a warning (`environment is not a GCO cdk.json key and is
+ignored`), so per-environment settings live in separate `cdk.json` files: one
+checkout per environment, each with its own `cdk.json`. Give each a different
+`project_name`, which names every stack and resource, if two environments
+share an account, or deploy each to its own account with its own credentials,
+as in step 4. For a single run, `gco stacks deploy-all --enable fsx_lustre`
+turns a feature on without editing `cdk.json`.
 
 ### 3. Version Control
 
@@ -2691,39 +2903,27 @@ See `examples/trainium-job.yaml` and `examples/inferentia-job.yaml` for complete
 
 A regional API bridge is always deployed in every workload region. The
 centralized aggregator is not VPC-attached and uses these reachable API Gateway
-endpoints to fan out to each region. In the commercial `aws` partition,
-`api_gateway.regional_api_enabled` controls whether other IAM-authorized
-principals in the deployment account may invoke a bridge directly. In every
-other AWS partition, Global Accelerator is omitted and same-account direct
-regional access is enabled automatically as the supported workload ingress.
+endpoints to fan out to each region. Region-pinned CLI commands and SDK calls
+invoke a bridge directly, and in every AWS partition other than `aws`, where
+Global Accelerator is omitted, the bridges are the supported workload ingress.
 
-### Enable Direct Regional Access in the `aws` Partition
+### Who May Call a Bridge
 
-Edit `cdk.json` to admit direct same-account callers to every regional bridge.
-Outside `aws`, no opt-in is needed and this setting cannot disable the required
-regional ingress:
-
-```json
-{
-  "context": {
-    "api_gateway": {
-      "regional_api_enabled": true
-    }
-  }
-}
-```
-
-Then redeploy:
-
-```bash
-gco stacks deploy-all -y
-```
+The bridge's resource policy names only the aggregator role. Every other
+caller in the deployment account is authorized by its own identity-based
+policy, which must allow `execute-api:Invoke` on the bridge (see
+[CLI.md → Regional API Mode](CLI.md#regional-api-mode) and
+[docs/iam-policies](iam-policies/README.md)); callers in other accounts are
+refused. `api_gateway.regional_api_enabled` is deprecated and no longer changes
+this (the synth warns about it and ignores it; remove it from `cdk.json`): it
+used to add a statement admitting every principal of the account, including
+principals with no `execute-api:Invoke` permission.
 
 ### How It Works
 
 Each bridge uses an IAM-authorized API Gateway and a Lambda in the workload
-VPC. The global aggregator reaches it over AWS-managed TLS with [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html); an
-opted-in user follows the same first hop:
+VPC. The global aggregator reaches it over AWS-managed TLS with [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html); a
+direct caller follows the same first hop:
 
 ```text
 Aggregator or authorized direct user
@@ -2794,7 +2994,7 @@ Queue-processor-specific settings live in `cdk.json` under `queue_processor`. Va
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `true` | Set to `false` to disable the built-in consumer entirely |
+| `enabled` | `true` | Set to `false` to disable the built-in consumer entirely ([JSON boolean](#boolean-flags)) |
 | `polling_interval` | `10` | How often KEDA checks the SQS queue for new messages (seconds) |
 | `max_concurrent_jobs` | `10` | Maximum consumer pods running in parallel |
 | `messages_per_job` | `1` | KEDA target queue messages per active consumer Job (`queueLength`); each built-in worker still receives one message |
@@ -2851,6 +3051,12 @@ container ceiling above its namespace ceiling, or a manifest cap outside the
 `container_max_* <= *_per_manifest <= max_*` ordering all fail the deploy
 with a message naming the offending pair.
 
+With Kueue enabled, the same values size the default `gco-cluster-queue`:
+`max_cpu`, `max_memory` and `max_gpu` are its CPU, memory and GPU quotas,
+`max_gpu` is also its `aws.amazon.com/neuron` quota and, times five, its
+`vpc.amazonaws.com/efa` quota, and `max_pods` bounds Nitro Sandbox slots
+(see [KUEUE.md → Submitting Jobs](KUEUE.md#submitting-jobs)).
+
 ### Disabling the Built-In Consumer
 
 If you want to implement your own SQS consumer (e.g., with custom validation logic, different scaling behavior, or a different processing pipeline), set `enabled` to `false`:
@@ -2890,6 +3096,8 @@ The checks enforced on both paths are:
 - `runAsUser: 0` (`block_run_as_root`, off by default)
 - Image registry allowlist (`trusted_registries`, `trusted_dockerhub_orgs`)
 - Resource caps (CPU, memory, GPU summed across all container kinds)
+- Accelerator tolerations (`require_accelerator_toleration`)
+- Manifest nesting depth (`manifest_processor.yaml_max_depth`, default 50; the queue processor receives the REST Deployment's value)
 
 See [Security Policy Configuration](#security-policy-configuration) for the full reference and JSON examples.
 
@@ -2921,14 +3129,17 @@ FSx is cheaper per GB but you pay for provisioned capacity (minimum 1.2 TB). EFS
 
 ### Scale-to-Zero Savings
 
-Inference endpoints with KEDA can scale to zero when idle, eliminating GPU costs during off-hours:
+Endpoint autoscaling does not scale to zero: `--min-replicas` is at least 1,
+and nothing starts a pod when a request arrives for an endpoint with none, so
+an idle endpoint keeps at least one GPU node. Stop it instead when nobody needs
+it, for example from a scheduled job at the start and end of off-peak hours:
 
-```yaml
-minReplicaCount: 0   # No GPU cost when idle
-cooldownPeriod: 300  # Scale down after 5 min of no traffic
+```bash
+gco inference stop my-llm -y   # every Deployment of the endpoint scales to zero; the configuration is kept
+gco inference start my-llm     # back on the same spec; the pods need a free GPU node and a model load
 ```
 
-A single `g5.xlarge` (1x A10G GPU) costs ~$1.00/hour on-demand. Scale-to-zero during 12 hours of off-peak saves ~$360/month per endpoint.
+A single `g5.xlarge` (1x A10G GPU) costs ~$1.00/hour on-demand. Stopping an endpoint for 12 hours of off-peak a day saves ~$360/month per endpoint, once EKS Auto Mode has removed the idle node.
 
 ### Sample Monthly Costs
 

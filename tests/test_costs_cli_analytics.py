@@ -137,11 +137,14 @@ class TestCannedQueries:
         assert "date >= date_format(date_add('day', -7" in sql
 
     def test_cost_by_namespace_region_filter_is_parameterized(self):
+        """Athena substitutes an execution parameter as SQL text, and a string
+        must be a quoted literal: the bare value ran `region = us-east-1`,
+        which Athena reads as the arithmetic `us - east - 1`."""
         analytics, athena = _analytics()
         analytics.cost_by_namespace(days=7, region="us-east-1")
         kwargs = athena.start_query_execution.call_args.kwargs
         assert "region = ?" in kwargs["QueryString"]
-        assert kwargs["ExecutionParameters"] == ["us-east-1"]
+        assert kwargs["ExecutionParameters"] == ["'us-east-1'"]
 
     def test_cost_by_region_groups_by_region(self):
         analytics, athena = _analytics()
@@ -168,8 +171,16 @@ class TestCannedQueries:
         analytics.cost_over_time(days=14, namespace="gco-jobs'; DROP TABLE x")
         kwargs = athena.start_query_execution.call_args.kwargs
         assert "namespace = ?" in kwargs["QueryString"]
-        assert kwargs["ExecutionParameters"] == ["gco-jobs'; DROP TABLE x"]
+        # One string literal, its quote doubled, so the value cannot end it.
+        assert kwargs["ExecutionParameters"] == ["'gco-jobs''; DROP TABLE x'"]
         assert "DROP TABLE" not in kwargs["QueryString"]
+
+    def test_cost_over_time_plain_namespace_is_a_string_literal(self):
+        analytics, athena = _analytics()
+        analytics.cost_over_time(days=14, namespace="gco-jobs")
+        assert athena.start_query_execution.call_args.kwargs["ExecutionParameters"] == [
+            "'gco-jobs'"
+        ]
 
     def test_cost_over_time_rejects_unknown_granularity(self):
         analytics, _ = _analytics()
@@ -361,11 +372,11 @@ class TestCostApiRegionResolution:
 
 
 class TestCostsDashboardCommand:
-    def _invoke(self, args, monkeypatch, *, public=True, captured=None):
+    def _invoke(self, args, monkeypatch, *, public=True, captured=None, context=None):
         from cli.commands.costs_cmd import costs
 
         captured = captured if captured is not None else {}
-        monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
+        monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: context)
         monkeypatch.setattr(
             "cli.kubectl_helpers.describe_cluster_access",
             lambda c, r: {"public": public, "endpoint": "https://x.eks.amazonaws.com"},
@@ -388,6 +399,14 @@ class TestCostsDashboardCommand:
         assert "/d/gco-cost/" in outcome.output
         assert "svc/kube-prometheus-stack-grafana" in captured["cmd"]
         assert "3000:80" in " ".join(captured["cmd"])
+
+    def test_dashboard_forwards_through_the_clusters_context(self, monkeypatch):
+        context = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
+        outcome, captured = self._invoke(
+            ["dashboard", "--region", "us-east-1"], monkeypatch, context=context
+        )
+        assert outcome.exit_code == 0, outcome.output
+        assert captured["cmd"][-1] == f"--context={context}"
 
     def test_opencost_service_forwards_the_ui_port(self, monkeypatch):
         outcome, captured = self._invoke(
@@ -506,22 +525,49 @@ class TestTableEdgeBranches:
 
 
 class TestMonitoringRegionResolution:
-    def test_reads_the_monitoring_region_from_cdk_json(self):
+    """Athena and Glue live in the monitoring Region. The client used to read
+    cdk.json's deployment_regions.monitoring itself, else the default
+    (workload) Region, so an installed CLI outside a checkout queried
+    us-east-1 and GCO_MONITORING_REGION had no effect."""
+
+    def test_uses_the_configured_monitoring_region(self):
+        with patch("cli.cost_analytics.boto3.client") as mock_client:
+            analytics = CostAnalytics(
+                config=GCOConfig(default_region="us-east-1", monitoring_region="eu-central-1")
+            )
+        assert analytics.region == "eu-central-1"
+        mock_client.assert_called_once_with("athena", region_name="eu-central-1")
+
+    def test_monitoring_region_follows_cdk_json_and_the_environment(self, monkeypatch):
+        from cli.config import get_config
+
+        monkeypatch.delenv("GCO_MONITORING_REGION", raising=False)
         with (
             patch(
                 "cli.config._load_cdk_json",
                 return_value={"monitoring": "eu-central-1", "regional": ["us-east-1"]},
             ),
-            patch("cli.cost_analytics.boto3.client") as mock_client,
+            patch("cli.cost_analytics.boto3.client"),
         ):
-            analytics = CostAnalytics(config=GCOConfig(project_name="gco"))
-        assert analytics.region == "eu-central-1"
-        mock_client.assert_called_once_with("athena", region_name="eu-central-1")
+            assert CostAnalytics(config=get_config()).region == "eu-central-1"
+            monkeypatch.setenv("GCO_MONITORING_REGION", "eu-west-2")
+            assert CostAnalytics(config=get_config()).region == "eu-west-2"
 
-    def test_falls_back_to_the_default_region(self):
+    def test_outside_a_checkout_it_is_not_the_default_workload_region(self, monkeypatch):
+        from cli.config import get_config
+
+        monkeypatch.delenv("GCO_MONITORING_REGION", raising=False)
         with (
             patch("cli.config._load_cdk_json", return_value={}),
             patch("cli.cost_analytics.boto3.client"),
         ):
-            analytics = CostAnalytics(config=GCOConfig(default_region="ap-southeast-2"))
+            analytics = CostAnalytics(config=get_config())
+        # GCOConfig's default, the same Region the monitoring stack defaults to.
+        assert analytics.region == "us-east-2"
+
+    def test_an_explicit_region_still_wins(self):
+        with patch("cli.cost_analytics.boto3.client"):
+            analytics = CostAnalytics(
+                config=GCOConfig(monitoring_region="eu-central-1"), region="ap-southeast-2"
+            )
         assert analytics.region == "ap-southeast-2"
