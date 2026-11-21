@@ -33,7 +33,9 @@
   <a href="docs/README.md"><b>Documentation</b></a> ·
   <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/"><b>Wiki</b></a> ·
   <a href="examples/README.md"><b>Examples</b></a> ·
-  <a href="docs/CLI.md"><b>CLI Reference</b></a> ·
+  <a href="docs/API.md"><b>API</b></a> ·
+  <a href="docs/CLI.md"><b>CLI</b></a> ·
+  <a href="gco_mcp/README.md"><b>MCP</b></a> ·
   <a href="CONTRIBUTING.md"><b>Contributing</b></a>
 </p>
 
@@ -55,6 +57,8 @@ Running accelerated workloads across Regions means finding capacity, standing up
 - **Inference in every Region.** One command deploys [vLLM](https://docs.vllm.ai/en/latest/), [SGLang](https://docs.sglang.ai/) or [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) endpoints everywhere, with automatic failover through [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) in the commercial `aws` partition.
 - **A curated ecosystem.** KEDA, Volcano, Kueue, KubeRay and Kubeflow Trainer are on by default and Slurm (on the EKS cluster with Slinky, or on AWS PCS), SageMaker HyperPod capacity, YuniKorn, Argo CD and Crossplane are opt-in; EFS ships with every cluster, and FSx for Lustre, Valkey and Aurora pgvector are a toggle away; Prometheus, Grafana, OpenCost and MLflow are on by default for observability and cost tracking.
 - **Agent-ready.** `gco autopilot` opens Claude Code, OpenAI Codex or OpenCode on Amazon Bedrock with the GCO MCP server already wired in.
+
+**In production.** Manifold Bio runs its mBER-2 protein design campaigns on GCO, through Regatta, a scheduler its engineers built on GCO's API. Manifold reports campaigns 10 times larger than it could run in one Region, half the compute cost per designed binder from Spot capacity across 10 AWS Regions, and campaigns that finish in about a week instead of a month. The [AWS Startups case study](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws) describes how.
 
 <details>
 <summary><b>How GCO compares with running the clusters yourself</b></summary>

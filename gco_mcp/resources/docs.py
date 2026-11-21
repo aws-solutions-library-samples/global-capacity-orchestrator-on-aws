@@ -1331,7 +1331,7 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         "related": ["ARCHITECTURE", "RUNBOOKS", "CLI", "INFERENCE"],
     },
     "README": {
-        "summary": "Documentation index — the top-level guide map for the rest of the docs/ tree.",
+        "summary": "Documentation index — the top-level guide map for the rest of the docs/ tree, and the case studies of GCO in production (Manifold Bio's protein design campaigns).",
         "topics": ["concepts", "multi-region", "gpu", "capacity", "inference", "quickstart"],
         "keywords": [
             "index",
@@ -1340,6 +1340,8 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
             "documentation",
             "table of contents",
             "getting started",
+            "case study",
+            "production",
         ],
         "related": ["CONCEPTS", "ARCHITECTURE"],
     },

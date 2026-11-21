@@ -147,6 +147,16 @@ def _build_rules(owner: str, repo: str) -> tuple[Rule, ...]:
             why="the AWS Solutions Library guidance page for the upstream project",
         ),
         Rule(
+            name="aws-startups-case-study",
+            # AWS Startups publishes a case study of the project in production
+            # at a startups.aws.com page whose slug also ends in the repository
+            # name. As with the guidance page, AWS owns the address and the page
+            # describes the upstream project, so a rewrite would be a dead link.
+            pattern=re.compile(rf"startups\.aws\.com/learn/[\w-]*{up_repo}(?![\w-])"),
+            replacement=None,
+            why="the AWS Startups case study of the upstream project",
+        ),
+        Rule(
             name="upstream-package-name",
             # ``*`` is accepted so prose referring to a namespace as a glob
             # ("the awslabs.* MCP servers") classifies as a package reference

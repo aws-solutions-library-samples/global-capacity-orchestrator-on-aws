@@ -58,6 +58,11 @@ batch ML, HPC, and everyday CPU jobs — who want:
   `gco autopilot --engine opencode` launches OpenCode), grounded by the GCO
   MCP server and recommended companion MCPs.
 
+Manifold Bio runs its protein design campaigns on GCO in production, through
+a scheduler of its own built on GCO's API; the
+[case study](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws)
+describes how.
+
 The README's
 [Why GCO?](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#why-gco)
 has the side-by-side comparison with running clusters yourself, and
