@@ -1150,6 +1150,19 @@ _FAKE_KUBECONFORM = r'''#!/usr/bin/env python3
 """Stand-in kubeconform: emit v0.8.0-shaped JSON for every rendered manifest."""
 import json, os, sys
 mode = os.environ.get("FAKE_KUBECONFORM_MODE", "valid")
+# FAKE_KUBECONFORM_STATE names a file counting this binary's runs, so a mode
+# can fail the first run only.
+state = os.environ.get("FAKE_KUBECONFORM_STATE")
+attempt = 1
+if state:
+    if os.path.exists(state):
+        attempt = int(open(state, encoding="utf-8").read()) + 1
+    with open(state, "w", encoding="utf-8") as handle:
+        handle.write(str(attempt))
+download_error = (
+    "failed downloading schema at https://raw.githubusercontent.com/catalog/kind_v1.json: "
+    "GET https://raw.githubusercontent.com/catalog/kind_v1.json giving up after 3 attempt(s)"
+)
 directory = sys.argv[-1]
 files = sorted(
     os.path.join(root, name)
@@ -1163,8 +1176,18 @@ if mode == "garbage":
     sys.stdout.write("this is not json")
     sys.exit(0)
 resources = []
+download_fails = mode in ("download-down", "download-and-invalid") or (
+    mode == "download-flake" and attempt == 1
+)
 for path in files:
     if mode == "invalid-first" and path == files[0]:
+        resources.append({"filename": path, "kind": "Pod", "name": "bad", "version": "v1",
+                          "status": "statusInvalid", "msg": "unknown field imageBogusField"})
+    elif download_fails and path == files[0]:
+        resources.append({"filename": path, "kind": "ClusterIssuer", "name": "ca",
+                          "version": "cert-manager.io/v1", "status": "statusError",
+                          "msg": download_error})
+    elif mode == "download-and-invalid" and path == files[1]:
         resources.append({"filename": path, "kind": "Pod", "name": "bad", "version": "v1",
                           "status": "statusInvalid", "msg": "unknown field imageBogusField"})
     else:
@@ -1174,9 +1197,11 @@ if mode == "partial":
     resources = resources[:-1]  # drop one file's record: incomplete accounting
 counts = {"valid": 0, "invalid": 0, "errors": 0, "skipped": 0}
 for r in resources:
-    counts[{"statusValid": "valid", "statusInvalid": "invalid"}[r["status"]]] += 1
+    counts[{"statusValid": "valid", "statusInvalid": "invalid", "statusError": "errors"}[
+        r["status"]
+    ]] += 1
 json.dump({"resources": resources, "summary": counts}, sys.stdout)
-sys.exit(1 if counts["invalid"] else (0 if mode != "nonzero-clean" else 4))
+sys.exit(1 if counts["invalid"] or counts["errors"] else (0 if mode != "nonzero-clean" else 4))
 '''
 
 
@@ -1568,3 +1593,196 @@ def test_collect_target_files_reports_an_unsupported_input_type(
 
     assert files == []
     assert errors == [f"{fifo}: unsupported input type"]
+
+
+# ── schema downloads that fail are retried ────────────────────────────────────
+
+_DOWNLOAD_FAILURE = {
+    "status": "statusError",
+    "msg": "failed downloading schema at https://example.test/x.json: giving up after 3 attempt(s)",
+}
+
+
+class TestSchemaDownloadRetries:
+    """A run whose only failures are schema downloads runs again, from one schema cache.
+
+    kubeconform gives up on a download after three quick attempts, and a
+    raw.githubusercontent.com outage of a minute or two once failed the job on
+    a schema it could not fetch.
+    """
+
+    @staticmethod
+    def _spy(monkeypatch: pytest.MonkeyPatch) -> tuple[list[list[str]], list[float]]:
+        calls: list[list[str]] = []
+        sleeps: list[float] = []
+        real_run = validator.subprocess.run
+
+        def spy(cmd, **kwargs):
+            calls.append(list(cmd))
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr(validator.subprocess, "run", spy)
+        monkeypatch.setattr(validator.time, "sleep", sleeps.append)
+        return calls, sleeps
+
+    def test_a_download_that_recovers_passes_and_reuses_one_cache(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("FAKE_KUBECONFORM_STATE", str(tmp_path / "runs"))
+        calls, sleeps = self._spy(monkeypatch)
+
+        rc = _run_main(
+            fake_kubeconform,
+            "--path",
+            str(manifest_dir),
+            mode="download-flake",
+            monkeypatch=monkeypatch,
+        )
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "OK: 2 manifest(s) are schema-valid" in captured.out
+        assert sleeps == [validator.SCHEMA_DOWNLOAD_RETRY_DELAYS[0]]
+        assert "retrying in 15s (attempt 2 of 3)" in captured.err
+        assert len(calls) == 2
+        caches = {cmd[cmd.index("-cache") + 1] for cmd in calls}
+        assert len(caches) == 1, "every attempt reads the same schema cache"
+        (cache,) = caches
+        # Outside the rendered tree (kubeconform would read it as manifests),
+        # and gone with the run.
+        assert not Path(cache).is_relative_to(Path(calls[0][-1]))
+        assert not Path(cache).exists()
+
+    def test_downloads_that_keep_failing_exit_two_after_every_attempt(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        calls, sleeps = self._spy(monkeypatch)
+
+        rc = _run_main(
+            fake_kubeconform,
+            "--path",
+            str(manifest_dir),
+            mode="download-down",
+            monkeypatch=monkeypatch,
+        )
+
+        out = capsys.readouterr().out
+        assert rc == 2, "a network failure is not a validation failure"
+        assert sleeps == list(validator.SCHEMA_DOWNLOAD_RETRY_DELAYS)
+        assert len(calls) == len(validator.SCHEMA_DOWNLOAD_RETRY_DELAYS) + 1
+        assert "could not download 1 schema(s) in 3 attempts" in out
+        assert "failed downloading schema at" in out
+        assert "No manifest was found invalid" in out
+        assert "Fix the manifest" not in out
+
+    def test_any_other_failure_is_reported_at_once(
+        self,
+        fake_kubeconform: Path,
+        manifest_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        calls, sleeps = self._spy(monkeypatch)
+
+        rc = _run_main(
+            fake_kubeconform,
+            "--path",
+            str(manifest_dir),
+            mode="download-and-invalid",
+            monkeypatch=monkeypatch,
+        )
+
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert (len(calls), sleeps) == (1, [])
+        assert "2 Kubernetes manifest validation problem(s) found" in out
+        assert "Fix the manifest" in out
+
+    def test_no_delays_means_one_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        runs: list[dict[str, object]] = []
+
+        def fake_run(directory: Path, **kwargs: object) -> tuple[int, object]:
+            runs.append(kwargs)
+            return 1, {"resources": [_DOWNLOAD_FAILURE]}
+
+        monkeypatch.setattr(validator, "run_kubeconform", fake_run)
+        rc, result = validator.run_kubeconform_retrying_downloads(
+            Path("rendered"), schema_cache=Path("cache"), retry_delays=(), strict=False
+        )
+        assert (rc, result) == (1, {"resources": [_DOWNLOAD_FAILURE]})
+        assert runs == [{"schema_cache": Path("cache"), "strict": False}]
+
+    @pytest.mark.parametrize(
+        ("result", "expected"),
+        [
+            ({"resources": [_DOWNLOAD_FAILURE]}, True),
+            (
+                {
+                    "resources": [
+                        "not-a-record",
+                        {"status": "statusValid", "msg": ""},
+                        {
+                            "status": "statusError",
+                            "msg": "error while downloading schema at https://example.test/x.json"
+                            " - received HTTP status 503",
+                        },
+                    ]
+                },
+                True,
+            ),
+            ({"resources": [{"status": "statusValid", "msg": ""}]}, False),
+            ({"resources": [_DOWNLOAD_FAILURE, {"status": "statusInvalid", "msg": "bad"}]}, False),
+            ({"resources": [{**_DOWNLOAD_FAILURE, "status": "statusInvalid"}]}, False),
+            (
+                {"resources": [{"status": "statusError", "msg": "could not find schema for Foo"}]},
+                False,
+            ),
+            ({"resources": [{"status": "statusError", "msg": None}]}, False),
+            ({"resources": "not-a-list"}, False),
+            ({}, False),
+            ("not-a-result", False),
+        ],
+        ids=[
+            "download",
+            "http-status",
+            "nothing-failed",
+            "and-invalid",
+            "invalid-wording",
+            "schema-missing",
+            "no-message",
+            "resources-not-a-list",
+            "empty",
+            "not-a-dict",
+        ],
+    )
+    def test_only_schema_download_failures_count(self, result: object, expected: bool) -> None:
+        assert validator.only_schema_downloads_failed(result) is expected
+
+    def test_the_cache_flag_is_passed_only_when_asked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[list[str]] = []
+
+        class _Done:
+            returncode = 0
+            stdout = '{"resources": [], "summary": {}}'
+
+        def fake_run(cmd, **_kwargs):
+            seen.append(list(cmd))
+            return _Done()
+
+        monkeypatch.setattr(validator.subprocess, "run", fake_run)
+        cache = tmp_path / "cache"
+        validator.run_kubeconform(tmp_path, kubernetes_version="1.37.0", schema_cache=cache)
+        validator.run_kubeconform(tmp_path, kubernetes_version="1.37.0")
+        assert seen[0][-3:] == ["-cache", str(cache), str(tmp_path)]
+        assert "-cache" not in seen[1]

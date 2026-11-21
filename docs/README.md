@@ -77,7 +77,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 
 | Case study | Description |
 |------------|-------------|
-| [Manifold Bio accelerates protein design with mBER-2](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws) | GCO's first production deployment. Manifold Bio's protein design campaigns run on GPUs across AWS Regions through GCO's API, behind Regatta, a scheduler Manifold's engineers built on it. Manifold reports campaigns 10 times larger, half the compute cost per designed binder from Spot capacity across 10 Regions, and campaigns that finish in about a week instead of a month (AWS Startups) |
+| [Manifold Bio accelerates protein design with mBER-2](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws) | GCO's first production deployment (AWS Startups). Manifold Bio's protein design campaigns run on GCO through Regatta, a scheduler Manifold's engineers built on GCO's API, and held up to 4,540 GPUs at once across nine AWS Regions. Manifold reports campaigns 10 times larger, finished in about a week instead of a month, at half the compute cost per designed binder. The [README](../README.md#in-production-at-manifold-bio) has the numbers side by side |
 
 ## Reading Order
 

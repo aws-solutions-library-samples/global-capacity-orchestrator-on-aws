@@ -58,16 +58,38 @@ batch ML, HPC, and everyday CPU jobs — who want:
   `gco autopilot --engine opencode` launches OpenCode), grounded by the GCO
   MCP server and recommended companion MCPs.
 
-Manifold Bio runs its protein design campaigns on GCO in production, through
-a scheduler of its own built on GCO's API; the
-[case study](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws)
-describes how.
-
 The README's
 [Why GCO?](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#why-gco)
 has the side-by-side comparison with running clusters yourself, and
 [Core Concepts](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/CONCEPTS.md)
 explains the ideas behind it.
+
+## In production
+
+Manifold Bio runs its protein design campaigns on GCO through Regatta, a
+scheduler its engineers built on GCO's API. At its peak the system held
+**4,540 GPUs at once across nine AWS Regions**:
+
+![World map of the 4,540 GPUs Manifold Bio held at one moment across nine AWS Regions, by Region and GPU type](assets/images/manifold-bio-gpus-across-regions.jpg)
+*Peak GPUs held at one moment, by Region and GPU type. Chart from the AWS
+Startups case study
+[Manifold Bio accelerates protein design with mBER-2 using Global Capacity Orchestrator on AWS](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws),
+reproduced with attribution.*
+
+Compared with its earlier single-Region setup, Manifold reports:
+
+- campaigns approaching 100 million designs, up from about 10 million, on
+  up to 4,540 GPUs instead of about 256;
+- campaigns that finish in about a week instead of a month, and iteration
+  cycles of two days instead of one week;
+- half the compute cost per designed binder, with price-aware Spot use
+  across 10 Regions.
+
+The
+[case study](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws)
+tells the whole story, and the README's
+[In production](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#in-production-at-manifold-bio)
+section has the numbers side by side.
 
 ## What it costs
 

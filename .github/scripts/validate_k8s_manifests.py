@@ -41,7 +41,12 @@ pins, as a second `-schema-location`. Two CRDs used in
 `examples/` aren't in that catalog yet (KubeRay's `RayCluster`, Volcano's
 `Job`) — those are validated for YAML-shape only (via the structural check)
 and explicitly `-skip`ped in the schema pass so kubeconform doesn't report a
-false "no schema found" error for them.
+false "no schema found" error for them. Every schema is downloaded over HTTPS
+from GitHub's raw content host, and kubeconform's own retries are brief, so a
+run whose only failures are schema downloads is repeated after a pause
+(`SCHEMA_DOWNLOAD_RETRY_DELAYS`), with the schemas already fetched kept in a
+`-cache` directory for the run; downloads that still fail exit 2, as a network
+failure rather than a manifest problem.
 
 Usage::
 
@@ -59,7 +64,8 @@ Exit codes::
 
     0  every scanned manifest is schema-valid (or intentionally skipped)
     1  one or more manifests failed validation
-    2  unexpected I/O / argument error (kubeconform missing, directory absent)
+    2  unexpected I/O / argument error (kubeconform missing, directory absent),
+       or schema downloads that still fail after SCHEMA_DOWNLOAD_RETRY_DELAYS
 
 The module is importable from the test suite — call ``render_placeholders()``,
 ``apply_api_server_defaults()``, ``collect_target_files()``, or
@@ -77,6 +83,7 @@ import shutil
 import subprocess  # used only to invoke the pinned `kubeconform` binary with fixed argv
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -214,6 +221,17 @@ CRD_CATALOG_SCHEMA_LOCATION = (
     f"https://raw.githubusercontent.com/{CRD_CATALOG_REPOSITORY}/{CRD_CATALOG_COMMIT}/"
     "{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
 )
+
+# kubeconform fetches each schema over HTTPS and gives up after three quick
+# attempts, so a raw.githubusercontent.com outage of a minute or two failed the
+# job with "failed downloading schema at ..." on a manifest it never read. When
+# every failure of a run is a schema download (a message starting with one of
+# SCHEMA_DOWNLOAD_ERRORS), main() waits each of SCHEMA_DOWNLOAD_RETRY_DELAYS
+# seconds in turn and runs kubeconform again. The run's -cache directory keeps
+# the schemas already fetched, so a retry downloads only the ones that failed.
+# Any other failure is reported at once: repeating a run cannot fix a manifest.
+SCHEMA_DOWNLOAD_ERRORS = ("failed downloading schema at ", "error while downloading schema at ")
+SCHEMA_DOWNLOAD_RETRY_DELAYS = (15, 45)
 
 _PLACEHOLDER_RE = re.compile(r"\{\{[A-Za-z_]+\}\}")
 
@@ -479,12 +497,15 @@ def run_kubeconform(
     extra_schema_locations: tuple[str, ...] = (CRD_CATALOG_SCHEMA_LOCATION,),
     skip_gvks: tuple[str, ...] = SCHEMA_UNAVAILABLE_SKIPS,
     kubernetes_version: str | None = None,
+    schema_cache: Path | None = None,
 ) -> tuple[int, object]:
     """Run kubeconform against every manifest in ``directory``, JSON output.
 
     ``kubernetes_version`` is the ``-kubernetes-version`` the upstream schemas
     are resolved at; ``None`` derives it from cdk.json via
-    :func:`kubernetes_schema_version`.
+    :func:`kubernetes_schema_version`. ``schema_cache`` is a directory, outside
+    ``directory``, where kubeconform keeps the schemas it downloads
+    (``-cache``), so a second run reads them from disk.
 
     Returns ``(returncode, parsed_json)``. ``parsed_json`` is ``{}`` if
     kubeconform produced no parseable JSON (e.g. the binary is missing —
@@ -509,6 +530,8 @@ def run_kubeconform(
         cmd.extend(["-skip", ",".join(skip_gvks)])
     if strict:
         cmd.append("-strict")
+    if schema_cache is not None:
+        cmd.extend(["-cache", str(schema_cache)])
     cmd.append(str(directory))
 
     proc = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - fixed argv, no shell=True
@@ -630,6 +653,51 @@ def validate_kubeconform_output(
     return errors
 
 
+def only_schema_downloads_failed(result: object) -> bool:
+    """Whether every failure kubeconform reported is a schema download.
+
+    ``False`` when nothing failed, when any failure is something else, and for
+    output that is not a kubeconform result: only a download is worth trying
+    again (``SCHEMA_DOWNLOAD_ERRORS``).
+    """
+    resources = result.get("resources") if isinstance(result, dict) else None
+    failed = [
+        resource
+        for resource in (resources if isinstance(resources, list) else [])
+        if isinstance(resource, dict) and resource.get("status") in ("statusInvalid", "statusError")
+    ]
+    return bool(failed) and all(
+        resource.get("status") == "statusError"
+        and str(resource.get("msg") or "").startswith(SCHEMA_DOWNLOAD_ERRORS)
+        for resource in failed
+    )
+
+
+def run_kubeconform_retrying_downloads(
+    directory: Path,
+    *,
+    schema_cache: Path,
+    retry_delays: tuple[int, ...],
+    **options: Any,
+) -> tuple[int, object]:
+    """:func:`run_kubeconform`, run again after each delay while only schema downloads fail.
+
+    Returns the last run's ``(returncode, parsed_json)``.
+    """
+    rc, result = run_kubeconform(directory, schema_cache=schema_cache, **options)
+    for attempt, delay in enumerate(retry_delays, start=2):
+        if not only_schema_downloads_failed(result):
+            break
+        print(
+            f"kubeconform could not download every schema; retrying in {delay}s "
+            f"(attempt {attempt} of {len(retry_delays) + 1}).",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+        rc, result = run_kubeconform(directory, schema_cache=schema_cache, **options)
+    return rc, result
+
+
 def format_failures(result: dict[str, Any]) -> list[str]:
     """Turn kubeconform's per-resource JSON records into readable error lines.
 
@@ -717,13 +785,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: cannot derive the Kubernetes schema version: {exc}", file=sys.stderr)
         return 2
 
-    with tempfile.TemporaryDirectory(prefix="gco-k8s-validate-") as tmp:
+    with (
+        tempfile.TemporaryDirectory(prefix="gco-k8s-validate-") as tmp,
+        tempfile.TemporaryDirectory(prefix="gco-k8s-schemas-") as cache,
+    ):
         rendered_dir = Path(tmp)
         rendered_paths = render_tree(files, rendered_dir)
         expected_filenames = {str(path) for path in rendered_paths}
-
-        rc, result = run_kubeconform(
+        rc, result = run_kubeconform_retrying_downloads(
             rendered_dir,
+            schema_cache=Path(cache),
+            retry_delays=SCHEMA_DOWNLOAD_RETRY_DELAYS,
             kubeconform_binary=args.kubeconform_binary,
             strict=not args.no_strict,
             kubernetes_version=kubernetes_version,
@@ -743,9 +815,22 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"ok    {resource.get('filename')}: {kind} {name}".rstrip())
 
     failures = format_failures(result_dict) if not output_errors else []
+    downloads_failed = not output_errors and only_schema_downloads_failed(result_dict)
     summary = result_dict.get("summary", {})
-
-    if failures:
+    if downloads_failed:
+        print()
+        print(
+            f"ERROR: kubeconform could not download {len(failures)} schema(s) in "
+            f"{len(SCHEMA_DOWNLOAD_RETRY_DELAYS) + 1} attempts:"
+        )
+        for line in failures:
+            print(f"  - {line}")
+        print()
+        print(
+            "No manifest was found invalid. Check that raw.githubusercontent.com "
+            "is reachable, then run the validation again."
+        )
+    elif failures:
         print()
         print(f"ERROR: {len(failures)} Kubernetes manifest validation problem(s) found:")
         for line in failures:
@@ -758,10 +843,8 @@ def main(argv: list[str] | None = None) -> int:
             "catalog marks a field required that the API server defaults, add "
             "it to _API_SERVER_DEFAULTS instead)."
         )
-
     _print_input_errors(input_errors)
-
-    runtime_failure = bool(output_errors) or (rc != 0 and not failures)
+    runtime_failure = bool(output_errors) or downloads_failed or (rc != 0 and not failures)
     if output_errors:
         print("ERROR: kubeconform returned unusable JSON output:", file=sys.stderr)
         for error in output_errors:
