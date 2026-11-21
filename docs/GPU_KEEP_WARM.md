@@ -50,6 +50,7 @@ Add `--keep-warm` to any submit command:
 gco jobs submit trial.yaml --keep-warm
 gco jobs submit-direct trial.yaml -r us-east-1 --keep-warm
 gco jobs submit-sqs trial.yaml -r us-east-1 --keep-warm
+gco jobs submit-queue trial.yaml -r us-east-1 --keep-warm
 gco queue submit trial.yaml -r us-east-1 --keep-warm
 ```
 
