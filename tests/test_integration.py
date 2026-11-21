@@ -1739,9 +1739,32 @@ class TestNewSchedulerChartIntegration:
         values = self._load_charts()["kueue"]["values"]
         assert values == {
             "controllerManager": {
-                "manager": {"podAnnotations": {"karpenter.sh/do-not-disrupt": "true"}}
+                "manager": {
+                    "podAnnotations": {"karpenter.sh/do-not-disrupt": "true"},
+                    "priorityClassName": "system-cluster-critical",
+                }
             }
         }
+
+    def test_kueue_controller_outranks_every_pod_its_webhooks_admit(self):
+        """Nothing Kueue's fail-closed webhooks admit may preempt the controller.
+
+        The controller is the only pod behind kueue-webhook-service, whose Job
+        and Pod webhooks reject creates in every namespace but kube-system and
+        kueue-system while it is gone. At the default priority (0), the
+        gco-platform-critical SQS queue processor preempted it on full nodes
+        during a live example run, and the Job creates that followed failed
+        with ``no endpoints available for service "kueue-webhook-service"``.
+        """
+        manager = self._load_charts()["kueue"]["values"]["controllerManager"]["manager"]
+        platform = yaml.safe_load(
+            (MANIFESTS_DIR / "05-priority-classes.yaml").read_text(encoding="utf-8")
+        )
+
+        assert manager["priorityClassName"] == "system-cluster-critical"
+        # system-cluster-critical is 2000000000, above the platform class.
+        assert platform["metadata"]["name"] == "gco-platform-critical"
+        assert platform["value"] < 2_000_000_000
 
     def test_cdk_json_helm_section_has_all_chart_groups(self):
         """The cdk.json helm section should have entries for all togglable chart groups.

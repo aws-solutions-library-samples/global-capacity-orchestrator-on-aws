@@ -37,7 +37,7 @@ Kueue is installed via Helm chart in the `kueue-system` namespace:
 |-----------|-------------|
 | kueue-controller-manager | Manages ClusterQueue, LocalQueue, and Workload CRDs, and serves Kueue's admission webhooks (`kueue-webhook-service`) |
 
-The chart's default configuration turns on the plain Pod integration alongside batch Jobs, Deployments, StatefulSets and the Ray, JobSet and Kubeflow kinds, so Kueue can also queue standalone pods that carry a `kueue.x-k8s.io/queue-name` label. This is useful for Ray head pods, inference servers, or any long-running workload that isn't wrapped in a Job. Because of that integration, every Pod create outside `kube-system` and `kueue-system` passes through Kueue's webhook, so GCO annotates the controller pod `karpenter.sh/do-not-disrupt` to keep EKS Auto Mode from evicting it during consolidation.
+The chart's default configuration turns on the plain Pod integration alongside batch Jobs, Deployments, StatefulSets and the Ray, JobSet and Kubeflow kinds, so Kueue can also queue standalone pods that carry a `kueue.x-k8s.io/queue-name` label. This is useful for Ray head pods, inference servers, or any long-running workload that isn't wrapped in a Job. Because of that integration, every Pod create outside `kube-system` and `kueue-system` passes through Kueue's webhook, so GCO annotates the controller pod `karpenter.sh/do-not-disrupt` to keep EKS Auto Mode from evicting it during consolidation, and runs it at the `system-cluster-critical` priority so that no pod the webhook admits, GCO's `gco-platform-critical` services included, can preempt it.
 
 ## Key Concepts
 

@@ -44,6 +44,15 @@ spec:
   ttlSecondsAfterFinished: 300
   backoffLimit: 0
   activeDeadlineSeconds: 900
+  # A preempted or evicted pod is not a failure of the check: when nodes are
+  # full, GCO's own gco-platform-critical pods preempt pods at the default
+  # priority. With backoffLimit 0 that first disruption would fail the Job;
+  # this rule has the Job start a new pod instead.
+  podFailurePolicy:
+    rules:
+    - action: Ignore
+      onPodConditions:
+      - type: DisruptionTarget
   template:
     metadata:
       labels:

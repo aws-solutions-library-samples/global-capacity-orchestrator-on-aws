@@ -1558,3 +1558,10 @@ charts:
           # creates elsewhere in the cluster are rejected.
           podAnnotations:
             karpenter.sh/do-not-disrupt: "true"
+          # For the same reason no pod those webhooks admit may preempt it.
+          # At the default priority (0) the gco-platform-critical pods did:
+          # on full nodes the SQS queue processor preempted the controller,
+          # and the creates the queue processor then made were rejected. The
+          # AWS Load Balancer Controller and Volcano's admission webhook run
+          # at this class too.
+          priorityClassName: system-cluster-critical

@@ -48,6 +48,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [`Project` tag on PCS instances](#project-tag-on-pcs-instances)
   - [Add-on replay input in parts](#add-on-replay-input-in-parts)
   - [Volcano Jobs get their pods](#volcano-jobs-get-their-pods)
+  - [Kueue's controller is not preempted](#kueues-controller-is-not-preempted)
   - [CLI exit codes, output and prompts](#cli-exit-codes-output-and-prompts)
   - [MCP server tools](#mcp-server-tools)
   - [Pre-commit hook for contributors](#pre-commit-hook-for-contributors)
@@ -1027,6 +1028,19 @@ whose pods set `schedulerName: volcano` are still scheduled.
 - **Pending Volcano Jobs can start.** A Volcano Job left pending by the old
   images can get its pods once the new scheduler runs. Delete any you no
   longer want before you redeploy.
+
+### Kueue's controller is not preempted
+
+Earlier releases ran the Kueue controller at the default priority (0). Its
+Job and Pod webhooks reject creates in every namespace but `kube-system` and
+`kueue-system` while it is down (`failurePolicy: Fail`), and on full nodes
+GCO's own `gco-platform-critical` pods, such as the SQS queue processor,
+preempted it. Until its replacement started, Job submissions failed with
+`failed calling webhook "mjob.kb.io": ... no endpoints available for service "kueue-webhook-service"`.
+
+- **The controller runs at `system-cluster-critical`**, like the AWS Load
+  Balancer Controller and Volcano's admission webhook. The redeploy rolls it
+  once.
 
 ### CLI exit codes, output and prompts
 

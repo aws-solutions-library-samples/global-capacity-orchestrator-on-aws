@@ -278,7 +278,7 @@ kubectl delete -f examples/crossplane-batch-api.yaml
 
 **Files:** `pipeline-dag.yaml`, `dag-step-preprocess.yaml`, `dag-step-train.yaml`
 
-A multi-step pipeline with dependency ordering. The preprocess step generates training data on shared [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), then the train step reads it and produces model artifacts. Steps only run after their dependencies complete successfully.
+A multi-step pipeline with dependency ordering. The preprocess step generates training data on shared [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), then the train step reads it and produces model artifacts. Steps only run after their dependencies complete successfully. Each step allows no retries (`backoffLimit: 0`) but ignores disruptions, so a step whose pod is preempted gets a new pod instead of failing the pipeline (see [Troubleshooting](../docs/TROUBLESHOOTING.md#job-fails-after-its-pod-was-preempted)).
 
 **Usage:**
 

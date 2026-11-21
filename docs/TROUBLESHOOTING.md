@@ -23,6 +23,7 @@ Common issues and their solutions.
   - [Pods Stuck in Pending](#pods-stuck-in-pending)
   - [Pods Stuck in ContainerCreating](#pods-stuck-in-containercreating)
   - [Pods CrashLoopBackOff](#pods-crashloopbackoff)
+  - [Job Fails After Its Pod Was Preempted](#job-fails-after-its-pod-was-preempted)
   - [Service Account Issues](#service-account-issues)
 - [Inference Issues](#inference-issues)
   - [Invoke Says the Model Does Not Exist](#invoke-says-the-model-does-not-exist)
@@ -512,6 +513,24 @@ kubectl describe pod POD-NAME -n NAMESPACE
 # 2. Missing environment variables - check deployment
 # 3. Liveness probe failing - adjust probe settings
 # 4. OOMKilled - increase memory limits
+```
+
+### Job Fails After Its Pod Was Preempted
+
+**Symptom**: A Job with `backoffLimit: 0` fails with `BackoffLimitExceeded`, and its pod's events show `Preempted by pod ... on node ...`.
+
+**Cause**: GCO's platform services and its SQS queue processor run at the `gco-platform-critical` priority class, which preempts pods at the default priority when no node has room. A preempted pod counts as a failed pod, so a Job that allows no retries fails.
+
+**Solution**: Give the Job a `podFailurePolicy` rule that ignores disruptions, as [`examples/dag-step-preprocess.yaml`](../examples/dag-step-preprocess.yaml) does, or allow retries with a higher `backoffLimit`. The rule needs `restartPolicy: Never` in the pod template:
+
+```yaml
+spec:
+  backoffLimit: 0
+  podFailurePolicy:
+    rules:
+    - action: Ignore
+      onPodConditions:
+      - type: DisruptionTarget
 ```
 
 ### Service Account Issues
