@@ -4,7 +4,7 @@ Confirms that every hand-authored manifest this repo ships — the
 kubectl-applier's own manifests and the `examples/` gallery — is not just
 parseable YAML but a *schema-valid* Kubernetes (or supported CRD) resource.
 `kubeconform` (https://github.com/yannh/kubeconform) does the actual schema
-check; this script exists to bridge three gaps kubeconform can't close on its
+check; this script exists to bridge four gaps kubeconform can't close on its
 own:
 
   Template placeholders: `lambda/kubectl-applier-simple/manifests/*.yaml`
@@ -29,6 +29,12 @@ own:
     `_API_SERVER_DEFAULTS` (kro's `ResourceGraphDefinition`
     `spec.schema.scope`), the rendered copy gets the value the API server
     would fill in.
+  EKS Auto Mode's NodePool budget reasons: Auto Mode serves its own
+    `karpenter.sh/v1` NodePool CRD, which names the node-repair disruption
+    budget reason `NodeNotHealthy`; upstream Karpenter, whose schema the
+    catalog carries, names it `Unhealthy`. The manifests use the Auto Mode
+    name and the rendered copy gets the upstream one
+    (`apply_auto_mode_budget_reasons()`).
 
 Schema resolution: kubeconform's bundled catalog only covers upstream
 Kubernetes, and is resolved at the cluster's minor (`-kubernetes-version
@@ -62,7 +68,8 @@ Exit codes::
     2  unexpected I/O / argument error (kubeconform missing, directory absent)
 
 The module is importable from the test suite — call ``render_placeholders()``,
-``apply_api_server_defaults()``, ``collect_target_files()``, or
+``apply_api_server_defaults()``, ``apply_auto_mode_budget_reasons()``,
+``collect_target_files()``, or
 ``iter_target_files()`` directly to exercise the logic without invoking the
 binary.
 """
@@ -160,6 +167,18 @@ SCHEMA_UNAVAILABLE_SKIPS = (
 _API_SERVER_DEFAULTS: dict[tuple[str, str], tuple[tuple[tuple[str, ...], str], ...]] = {
     ("kro.run/v1alpha1", "ResourceGraphDefinition"): ((("spec", "schema", "scope"), "Namespaced"),),
 }
+
+# EKS Auto Mode serves its own karpenter.sh/v1 NodePool CRD. Its disruption
+# budget reasons differ from upstream Karpenter's, whose schema the catalog
+# carries, in one name: node repair is NodeNotHealthy on Auto Mode and Unhealthy
+# upstream. A live Auto Mode cluster's CRD allows exactly
+# AUTO_MODE_BUDGET_REASONS. The manifests use the Auto Mode name, which the
+# clusters GCO deploys to accept, and apply_auto_mode_budget_reasons() gives the
+# rendered copy the upstream name for it. tests/test_k8s_manifest_validation.py
+# holds every shipped NodePool to AUTO_MODE_BUDGET_REASONS, so the upstream-only
+# name, which kubeconform would pass, fails there instead.
+AUTO_MODE_BUDGET_REASONS = frozenset({"Underutilized", "Empty", "Drifted", "NodeNotHealthy"})
+_UPSTREAM_BUDGET_REASONS = {"NodeNotHealthy": "Unhealthy"}
 
 # kubeconform's own default schema catalog (upstream Kubernetes resources).
 DEFAULT_SCHEMA_LOCATION = "default"
@@ -358,6 +377,53 @@ def apply_api_server_defaults(text: str) -> str:
     return dumped
 
 
+def _nodepool_budgets(document: Any) -> list[Any]:
+    """A ``karpenter.sh/v1`` NodePool's disruption budgets; ``[]`` for anything else."""
+    if not isinstance(document, dict) or (document.get("apiVersion"), document.get("kind")) != (
+        "karpenter.sh/v1",
+        "NodePool",
+    ):
+        return []
+    spec = document.get("spec")
+    disruption = spec.get("disruption") if isinstance(spec, dict) else None
+    budgets = disruption.get("budgets") if isinstance(disruption, dict) else None
+    return budgets if isinstance(budgets, list) else []
+
+
+def apply_auto_mode_budget_reasons(text: str) -> str:
+    """Give NodePool budget reasons upstream Karpenter's names (see ``AUTO_MODE_BUDGET_REASONS``).
+
+    Only the ``reasons`` lists of a ``karpenter.sh/v1`` NodePool's
+    ``spec.disruption.budgets`` change. Text in which none changes is returned
+    unchanged, as is text that is not valid YAML, for kubeconform to report.
+    """
+    if not any(name in text for name in _UPSTREAM_BUDGET_REASONS):
+        return text
+    try:
+        documents = list(yaml.safe_load_all(text))
+    except yaml.YAMLError:
+        return text
+    changed = False
+    for document in documents:
+        for budget in _nodepool_budgets(document):
+            reasons = budget.get("reasons") if isinstance(budget, dict) else None
+            if not isinstance(reasons, list):
+                continue
+            upstream = [
+                _UPSTREAM_BUDGET_REASONS.get(reason, reason) if isinstance(reason, str) else reason
+                for reason in reasons
+            ]
+            if upstream != reasons:
+                budget["reasons"] = upstream
+                changed = True
+    if not changed:
+        return text
+    dumped: str = yaml.safe_dump_all(
+        [document for document in documents if document is not None], sort_keys=False
+    )
+    return dumped
+
+
 def _manifest_files_in_directory(directory: Path) -> list[Path]:
     """Return supported direct-child manifests from one directory."""
     files: list[Path] = []
@@ -467,7 +533,7 @@ def render_tree(files: list[Path], dest: Path) -> list[Path]:
     for path in files:
         text = path.read_text(encoding="utf-8")
         rendered = render_placeholders(text) if "{{" in text else text
-        rendered = apply_api_server_defaults(rendered)
+        rendered = apply_auto_mode_budget_reasons(apply_api_server_defaults(rendered))
         rendered_path = dest / _rendered_relative_path(path)
         rendered_path.parent.mkdir(parents=True, exist_ok=True)
         rendered_path.write_text(rendered, encoding="utf-8")

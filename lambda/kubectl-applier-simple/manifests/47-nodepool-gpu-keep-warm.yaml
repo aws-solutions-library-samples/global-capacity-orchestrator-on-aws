@@ -68,6 +68,7 @@ spec:
       # Every other reason may disrupt a node that is running a pod: keep it
       # as gradual as gpu-x86-pool's single 10% budget. A budget without
       # reasons would also cap Empty, and a reason no budget names is not
-      # limited at all, so each one is listed.
+      # limited at all, so each one is listed. NodeNotHealthy is EKS Auto
+      # Mode's name for node repair (upstream Karpenter calls it Unhealthy).
       - nodes: "10%"
         reasons: ["Underutilized", "Drifted", "NodeNotHealthy"]

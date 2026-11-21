@@ -9,10 +9,12 @@ intervals in table mode.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 from click.testing import CliRunner
 from kubernetes.client import (
     V1Container,
@@ -120,7 +122,7 @@ class TestCliJobInfo:
 
 class TestJobsGetTable:
     @staticmethod
-    def _invoke(keep_warm: Any) -> str:
+    def _invoke(keep_warm: Any, output_format: str | None = None) -> str:
         from cli.jobs import JobInfo
         from cli.main import cli
 
@@ -131,9 +133,10 @@ class TestJobsGetTable:
             status="succeeded",
             keep_warm=keep_warm,
         )
+        root = ["-o", output_format] if output_format else []
         with patch("cli.commands.jobs_cmd.get_job_manager") as get_manager:
             get_manager.return_value.get_job.return_value = job
-            result = CliRunner().invoke(cli, ["jobs", "get", "trial-1", "-r", "us-east-1"])
+            result = CliRunner().invoke(cli, [*root, "jobs", "get", "trial-1", "-r", "us-east-1"])
         assert result.exit_code == 0, result.output
         return result.output
 
@@ -153,3 +156,28 @@ class TestJobsGetTable:
     def test_a_closed_only_summary_has_no_open_note(self) -> None:
         output = self._invoke({"idle": [CLOSED], "idle_seconds": 70, "open": False})
         assert "Closed idle time: 70 s\n" in output
+
+
+class TestJobsGetStructuredOutput:
+    """``-o json`` and ``-o yaml`` carry the records as the ``keep_warm`` block of one document."""
+
+    @pytest.mark.parametrize(
+        ("output_format", "load"), [("json", json.loads), ("yaml", yaml.safe_load)]
+    )
+    def test_the_block_is_in_the_document_and_the_table_is_not_printed(
+        self, output_format: str, load: Any
+    ) -> None:
+        summary = {"idle": [CLOSED, OPEN], "idle_seconds": 70, "open": True}
+
+        output = TestJobsGetTable._invoke(summary, output_format)
+
+        document = load(output)
+        assert document["keep_warm"] == summary
+        assert document["name"] == "trial-1"
+        assert "Keep-warm idle time" not in output
+
+    @pytest.mark.parametrize(
+        ("output_format", "load"), [("json", json.loads), ("yaml", yaml.safe_load)]
+    )
+    def test_a_job_without_records_reports_null(self, output_format: str, load: Any) -> None:
+        assert load(TestJobsGetTable._invoke(None, output_format))["keep_warm"] is None

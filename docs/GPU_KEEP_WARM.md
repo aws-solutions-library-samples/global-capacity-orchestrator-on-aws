@@ -115,6 +115,7 @@ long that node then sat idle. It writes the record onto the Job as the
 ```bash
 gco jobs get trial-007 -r us-east-1          # a "Keep-warm idle time" table
 gco -o json jobs get trial-007 -r us-east-1  # the keep_warm block
+gco -o yaml jobs get trial-007 -r us-east-1  # the same block as YAML
 ```
 
 Each interval starts when that Job's pod finished. It ends in one of two ways:

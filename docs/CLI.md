@@ -3754,12 +3754,31 @@ training without a second `gco jobs events` call:
     message: 0/6 nodes are available: 6 Insufficient nvidia.com/gpu. preemption: 0/6 nodes are available: 6 No preemption victims found for incoming pod.
 ```
 
-`--output json` exposes the same facts as top-level `node_name`,
-`node_instance_type`, `node_capacity_type`, `node_labels` and `nodes` fields,
-plus `pod_phase` (the phase every pod shares; `null` when they disagree),
-`pod_phases` (count per phase), `scheduled_pods`, `unscheduled_pods`,
-`unscheduled` (one entry per unplaced pod with `reason`, `message`, `since`)
-and `node_lookup_error`. They are absent rather than guessed when nothing is
+**Keep-warm idle time:** for a Job whose pods ran on the
+[keep-warm pool](GPU_KEEP_WARM.md), a `Keep-warm idle time` block lists each
+interval a node sat idle after the Job's pod finished on it, how the interval
+ended (`reused` by the next pod, or `reclaimed` with the node), and the total
+of the closed intervals:
+
+```text
+  Keep-warm idle time
+  ------------------------------------------------------------------------------
+  NODE                          INSTANCE TYPE  SINCE                 SECONDS  ENDED BY
+  ------------------------------------------------------------------------------
+  ip-10-0-1-100.ec2.internal    g5.2xlarge     2026-11-21T18:01:40Z  70       reused
+  ip-10-0-1-100.ec2.internal    g5.2xlarge     2026-11-21T18:09:12Z  -        still idle
+  Closed idle time: 70 s (one or more still open)
+```
+
+`--output json` and `--output yaml` expose the same facts as top-level
+`node_name`, `node_instance_type`, `node_capacity_type`, `node_labels` and
+`nodes` fields, plus `pod_phase` (the phase every pod shares; `null` when they
+disagree), `pod_phases` (count per phase), `scheduled_pods`,
+`unscheduled_pods`, `unscheduled` (one entry per unplaced pod with `reason`,
+`message`, `since`), `node_lookup_error` and `keep_warm` (the keep-warm idle
+intervals as `idle`, `idle_seconds` and `open`; `null` when there are none).
+The blocks above are printed only in table mode, so the structured output stays
+one document. The fields are absent rather than guessed when nothing is
 scheduled yet or the pods have already been garbage-collected, and the counts
 are `null`, not `0`, when the region's bridge predates them. See
 [Get Job](API.md#get-job) for the field-by-field reference.
