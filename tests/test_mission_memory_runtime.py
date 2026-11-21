@@ -608,13 +608,20 @@ class TestResolution:
         assert store._resolve_table_name() == "explicit-table"
         assert store._resolve_index_name() == "explicit-index"
 
-    def test_region_resolution_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for env_var in ("DYNAMODB_REGION", "GLOBAL_REGION", "AWS_REGION"):
+    def test_region_resolution_order(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from mission import deployment
+
+        for env_var in ("DYNAMODB_REGION", "GLOBAL_REGION", "AWS_REGION", "GCO_GLOBAL_REGION"):
             monkeypatch.delenv(env_var, raising=False)
+        deployment.configure(project_root=tmp_path)  # no cdk.json
         assert memory_module._resolve_region() is None
 
         monkeypatch.setenv("AWS_REGION", "eu-west-1")
         assert memory_module._resolve_region() == "eu-west-1"
+
+        # The global stack's Region comes before AWS_REGION.
+        monkeypatch.setenv("GCO_GLOBAL_REGION", "ap-south-1")
+        assert memory_module._resolve_region() == "ap-south-1"
 
         monkeypatch.setenv("GLOBAL_REGION", "us-east-2")
         assert memory_module._resolve_region() == "us-east-2"

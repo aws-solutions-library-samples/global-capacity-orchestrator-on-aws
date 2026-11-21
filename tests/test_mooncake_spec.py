@@ -17,7 +17,6 @@ from cli.inference import (
     MOONCAKE_BYTE_SIZE_MIN,
     MOONCAKE_MODES,
     MOONCAKE_OFFLOAD_TIERS,
-    MOONCAKE_PROXY_SCHEDULING,
     MOONCAKE_TRANSFER_PROTOCOLS,
     author_byte_size,
 )
@@ -32,9 +31,6 @@ class TestMooncakeConstants:
 
     def test_offload_tiers(self):
         assert {"cpu", "disk", "none"} == MOONCAKE_OFFLOAD_TIERS
-
-    def test_proxy_scheduling(self):
-        assert {"round_robin"} == MOONCAKE_PROXY_SCHEDULING
 
     def test_byte_size_bounds_are_signed_64_bit_range(self):
         assert MOONCAKE_BYTE_SIZE_MIN == 0

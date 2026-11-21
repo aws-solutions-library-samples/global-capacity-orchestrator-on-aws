@@ -15,8 +15,9 @@ Environment variables:
     REGIONAL_ENDPOINT_CACHE_TTL_SECONDS: Registry cache TTL, bounded to 0-300
         seconds (default: 60; 0 disables caching).
     PROXY_MAX_RETRIES: Max attempts per request (default: 3). Read-only
-        methods spend them on any retryable answer; mutating methods only on
-        the ALB's own 503 page, served before a target is selected.
+        methods spend them on any retryable answer, each retry signed afresh;
+        mutating methods only on the ALB's own 503 page, served before a
+        target is selected.
     PROXY_RETRY_BACKOFF_BASE: Base retry backoff in seconds (default: 0.3).
     SECRET_CACHE_TTL_SECONDS: Signing-key cache TTL in seconds (default: 300).
     BACKEND_TLS_SERVER_NAME: Private certificate identity asserted via SNI.
@@ -31,6 +32,7 @@ import logging
 import os
 import re
 import time
+from functools import partial
 from typing import Any
 
 import boto3
@@ -41,12 +43,13 @@ from proxy_utils import (
     caller_identity_headers,
     forward_request,
     get_secret_token,
+    has_dot_segment,
     sanitize_request_headers,
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-08-30T12:00:00Z
-# Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5
+# Generated at (UTC): 2026-11-19T12:23:38Z
+# Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/regional-api-proxy/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/regional-api-proxy/handler.lambda_handler.png``)
@@ -231,6 +234,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     http_method = event["httpMethod"]
     path = event["path"]
+    if has_dot_segment(path):
+        return _error_response(400, "The request path must not have a '.' or '..' segment")
     query_string = (
         event.get("multiValueQueryStringParameters") or event.get("queryStringParameters") or {}
     )
@@ -240,9 +245,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         return _error_response(415, "Base64-encoded request bodies are not supported")
 
     target_url = build_target_url(alb_endpoint, path, query_string)
+    # The HMAC nonce is single-use, so forward_request signs each retry afresh.
+    sign = partial(build_signed_headers, signing_key, http_method, target_url, body)
     headers = sanitize_request_headers(headers)
     headers.update(caller_identity_headers(event))
-    headers.update(build_signed_headers(signing_key, http_method, target_url, body))
+    headers.update(sign())
 
     return forward_request(
         target_url,
@@ -250,4 +257,5 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         headers,
         body,
         timeout=_get_request_timeout_seconds(context),
+        resign_headers=sign,
     )

@@ -15,9 +15,11 @@ hot loop.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import ipaddress
+import logging
 import shutil
 import socket
 import ssl
@@ -30,10 +32,10 @@ import httpx2
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from kubernetes.client.models import V1Job
 
 from gco.services.template_store import WebhookStore
 from gco.services.webhook_dispatcher import (
-    BLOCKED_NETWORKS,
     JobStateCache,
     WebhookDeliveryResult,
     WebhookDispatcher,
@@ -41,6 +43,24 @@ from gco.services.webhook_dispatcher import (
     create_webhook_dispatcher_from_env,
     validate_webhook_url,
 )
+
+
+def _stream_via_post(client):
+    """Serve the dispatcher's streamed POSTs from ``client.post``.
+
+    Each delivery attempt is ``client.stream("POST", url, ...)``. These tests
+    configure the outcome of an attempt (a response or an exception) on
+    ``client.post`` and read its ``call_args``, so the stream context awaits
+    ``post`` with the same arguments and yields what it returns.
+    """
+
+    @contextlib.asynccontextmanager
+    async def stream(method, url, **kwargs):
+        assert method == "POST"
+        yield await client.post(url, **kwargs)
+
+    client.stream = stream
+    return client
 
 
 class TestJobStateCache:
@@ -245,6 +265,7 @@ class TestWebhookDispatcher:
             mock_response.status_code = 200
             mock_client.post.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -269,6 +290,7 @@ class TestWebhookDispatcher:
             mock_response.status_code = 200
             mock_client.post.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             await dispatcher._deliver_webhook(webhook, payload)
 
@@ -321,6 +343,7 @@ class TestWebhookDispatcher:
             mock_response = MagicMock(status_code=200)
             mock_client.post.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             results = await dispatcher._dispatch_event(WebhookEvent.JOB_COMPLETED, job)
 
@@ -352,6 +375,7 @@ class TestWebhookDispatcher:
             mock_response_200.status_code = 200
             mock_client.post.side_effect = [mock_response_500, mock_response_200]
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -375,6 +399,7 @@ class TestWebhookDispatcher:
             mock_response.text = "Bad Request"
             mock_client.post.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -396,6 +421,7 @@ class TestWebhookDispatcher:
             mock_client = AsyncMock()
             mock_client.post.side_effect = httpx2.TimeoutException("Timeout")
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -462,6 +488,7 @@ class TestWebhookDispatcher:
             mock_response.status_code = 200
             mock_client.post.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             results = await dispatcher._dispatch_event(WebhookEvent.JOB_COMPLETED, job)
 
@@ -672,13 +699,60 @@ class TestComputeJobStatusFallbacks:
         job.status.failed = 0
         assert dispatcher._compute_job_status(job) == "succeeded"
 
-    def test_failed_without_conditions(self, dispatcher):
-        """Test failed status via status.failed when no conditions."""
-        job = MagicMock()
-        job.status.conditions = []
-        job.status.active = 0
-        job.status.succeeded = 0
-        job.status.failed = 3
+    def test_failed_pods_without_a_failed_condition_are_a_retry(self, dispatcher):
+        """Failed pods alone are retries within backoffLimit, not a failed Job."""
+        job = V1Job.from_dict(
+            {
+                "metadata": {"name": "train", "namespace": "gco-jobs", "uid": "u"},
+                "status": {"active": 0, "failed": 3, "startTime": "2026-01-01T00:00:00Z"},
+            }
+        )
+        assert dispatcher._compute_job_status(job) == "running"
+
+    @pytest.mark.asyncio
+    async def test_a_job_that_retries_then_succeeds_fires_started_and_completed_only(
+        self, dispatcher
+    ):
+        """Pod retries never fire job.failed for a Job that goes on to succeed."""
+
+        def job(status: dict) -> V1Job:
+            return V1Job.from_dict(
+                {
+                    "metadata": {"name": "train", "namespace": "gco-jobs", "uid": "u"},
+                    "status": status,
+                }
+            )
+
+        complete = [{"type": "Complete", "status": "True"}]
+        sequence = [
+            ("ADDED", job({})),
+            ("MODIFIED", job({"active": 1})),
+            ("MODIFIED", job({"active": 0, "failed": 1})),  # backoff before pod 2
+            ("MODIFIED", job({"active": 1, "failed": 1})),
+            ("MODIFIED", job({"succeeded": 1, "failed": 1, "conditions": complete})),
+        ]
+        fired = []
+
+        async def record(event, _job):
+            fired.append(event.value)
+            return []
+
+        dispatcher._dispatch_event = record
+        for event_type, update in sequence:
+            await dispatcher._process_job_event(event_type, update)
+
+        assert fired == ["job.started", "job.completed"]
+
+    def test_the_failed_condition_still_means_failed(self, dispatcher):
+        job = V1Job.from_dict(
+            {
+                "metadata": {"name": "train", "namespace": "gco-jobs", "uid": "u"},
+                "status": {
+                    "failed": 4,
+                    "conditions": [{"type": "Failed", "status": "True"}],
+                },
+            }
+        )
         assert dispatcher._compute_job_status(job) == "failed"
 
     def test_conditions_none(self, dispatcher):
@@ -766,6 +840,7 @@ class TestDeliverWebhookEdgeCases:
             mock_client = AsyncMock()
             mock_client.post.side_effect = httpx2.ConnectError("Connection refused")
             mock_cls.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -788,6 +863,7 @@ class TestDeliverWebhookEdgeCases:
             resp.text = "Service Unavailable"
             mock_client.post.return_value = resp
             mock_cls.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -811,6 +887,7 @@ class TestDeliverWebhookEdgeCases:
                 ok_resp,
             ]
             mock_cls.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -837,6 +914,7 @@ class TestDeliverWebhookEdgeCases:
             client = AsyncMock()
             client.post.return_value = MagicMock(status_code=204)
             mock_cls.return_value.__aenter__.return_value = client
+            _stream_via_post(client)
             result = await dispatcher._deliver_webhook(webhook, {"event": "job.completed"})
 
         assert result.success is True
@@ -866,12 +944,111 @@ class TestDeliverWebhookEdgeCases:
                 httpx2.ConnectError(f"transport {secret}"),
             ]
             mock_cls.return_value.__aenter__.return_value = client
+            _stream_via_post(client)
             result = await dispatcher._deliver_webhook(webhook, {"event": "job.failed"})
 
         assert result.success is False
         assert secret not in caplog.text
         assert "wh-redacted" in caplog.text
         assert result.error == "ConnectError"
+
+    @pytest.mark.asyncio
+    async def test_the_http_client_request_log_never_carries_the_url(self, dispatcher, caplog):
+        """httpx2 logs every request line, full URL included, at INFO."""
+        webhook = {
+            "id": "wh-quiet",
+            "url": "https://hooks.example/services/T000/B000/XXXXSECRETXXXX?token=abc123",
+            "secret": None,
+        }
+        address = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.11", 443))]
+        real_client = httpx2.AsyncClient
+
+        def client_with_mock_transport(*args, **kwargs):
+            transport = httpx2.MockTransport(lambda request: httpx2.Response(503))
+            return real_client(*args, transport=transport, **kwargs)
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=address),
+            patch("gco.services.webhook_dispatcher.httpx2.AsyncClient", client_with_mock_transport),
+        ):
+            result = await dispatcher._deliver_webhook(webhook, {"event": "job.failed"})
+
+        assert result.status_code == 503
+        assert "XXXXSECRETXXXX" not in caplog.text
+        assert "abc123" not in caplog.text
+        assert not [r for r in caplog.records if r.name.split(".")[0] in {"httpx2", "httpcore2"}]
+        assert "wh-quiet" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_the_response_body_is_never_read(self, dispatcher):
+        """A receiver that streams a huge body cannot make delivery buffer it."""
+        address = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.11", 443))]
+        pulled = {"bytes": 0}
+        chunk = b"x" * (64 * 1024)
+
+        class EndlessBody(httpx2.AsyncByteStream):
+            async def __aiter__(self):
+                for _ in range(256):  # 16 MiB
+                    pulled["bytes"] += len(chunk)
+                    yield chunk
+
+        real_client = httpx2.AsyncClient
+
+        def client_with_mock_transport(*args, **kwargs):
+            transport = httpx2.MockTransport(
+                lambda request: httpx2.Response(200, stream=EndlessBody())
+            )
+            return real_client(*args, transport=transport, **kwargs)
+
+        with (
+            patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=address),
+            patch("gco.services.webhook_dispatcher.httpx2.AsyncClient", client_with_mock_transport),
+        ):
+            result = await dispatcher._deliver_webhook(
+                {"id": "wh-big", "url": "https://hooks.example/x"}, {"event": "job.completed"}
+            )
+
+        assert result.success is True
+        assert result.status_code == 200
+        assert pulled["bytes"] == 0
+
+    @pytest.mark.asyncio
+    async def test_each_attempt_has_an_overall_deadline(self, dispatcher):
+        """A receiver that never finishes its response cannot hold an attempt open."""
+        dispatcher.timeout = 0.2
+        address = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.11", 443))]
+        attempts = 0
+
+        async def never_answers(request):
+            nonlocal attempts
+            attempts += 1
+            await asyncio.Event().wait()
+
+        real_client = httpx2.AsyncClient
+
+        def client_with_mock_transport(*args, **kwargs):
+            return real_client(*args, transport=httpx2.MockTransport(never_answers), **kwargs)
+
+        with (
+            patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=address),
+            patch("gco.services.webhook_dispatcher.httpx2.AsyncClient", client_with_mock_transport),
+        ):
+            result = await asyncio.wait_for(
+                dispatcher._deliver_webhook(
+                    {"id": "wh-slow", "url": "https://hooks.example/x"}, {"event": "job.failed"}
+                ),
+                timeout=5,
+            )
+
+        assert result.success is False
+        assert result.error == "Request timed out"
+        assert attempts == dispatcher.max_retries
+        assert dispatcher.get_metrics()["deliveries_failed"] == 1
+
+    def test_http_client_loggers_are_capped_at_warning(self):
+        for name in ("httpx2", "httpcore2"):
+            assert logging.getLogger(name).level == logging.WARNING, name
 
     @pytest.mark.asyncio
     async def test_pre_http_failures_are_counted_once(self, dispatcher, caplog):
@@ -948,6 +1125,7 @@ class TestDeliverWebhookEdgeCases:
             client = AsyncMock()
             client.post.side_effect = blocked_post
             mock_cls.return_value.__aenter__.return_value = client
+            _stream_via_post(client)
             task = asyncio.create_task(
                 dispatcher._deliver_webhook(
                     {"id": "wh-cancel", "url": "https://hooks.example/hook"},
@@ -984,7 +1162,7 @@ class TestDeliverWebhookEdgeCases:
             patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=public),
             patch(
                 "gco.services.webhook_dispatcher.httpx2.AsyncClient",
-                return_value=BlockingExitClient(),
+                return_value=_stream_via_post(BlockingExitClient()),
             ),
         ):
             task = asyncio.create_task(
@@ -1140,6 +1318,75 @@ class TestDeliverWebhookEdgeCases:
         assert all(f"Host: hooks.example:{port}\r\n" in request for request in requests)
 
 
+async def _max_loop_stall(work) -> float:
+    """Run ``work`` beside a 20 ms heartbeat; return the longest gap between beats."""
+    import time
+
+    gaps: list[float] = []
+    stop = asyncio.Event()
+
+    async def heartbeat():
+        last = time.monotonic()
+        while not stop.is_set():
+            await asyncio.sleep(0.02)
+            now = time.monotonic()
+            gaps.append(now - last)
+            last = now
+
+    beating = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0.05)
+    try:
+        await work
+    finally:
+        stop.set()
+        await beating
+    return max(gaps)
+
+
+class TestBlockingCallsStayOffTheEventLoop:
+    """The dispatcher shares the health API's event loop with its probes."""
+
+    @pytest.fixture
+    def dispatcher(self):
+        with patch("gco.services.webhook_dispatcher.config") as mock_config:
+            mock_config.ConfigException = Exception
+            mock_config.load_incluster_config.side_effect = Exception()
+            with patch("gco.services.webhook_dispatcher.client"):
+                return WebhookDispatcher(
+                    cluster_id="c", region="r", webhook_store=MagicMock(), max_retries=1
+                )
+
+    @pytest.mark.asyncio
+    async def test_webhook_lookup_and_dns_do_not_stall_the_loop(self, dispatcher):
+        import time
+
+        def slow_lookup(event, namespace=None):
+            time.sleep(0.4)  # a cross-region DynamoDB query
+            return [{"id": "w1", "url": "https://hooks.example/x", "events": [event]}]
+
+        def slow_getaddrinfo(*_args, **_kwargs):
+            time.sleep(0.4)  # a slow authoritative DNS server
+            raise socket.gaierror("timeout")
+
+        dispatcher.webhook_store.get_webhooks_for_event.side_effect = slow_lookup
+        job = MagicMock()
+        job.metadata.namespace = "gco-jobs"
+        job.metadata.name = "j"
+        job.status.conditions = []
+        job.status.active = 1
+        job.status.succeeded = 0
+        job.status.failed = 0
+        job.status.start_time = None
+        job.status.completion_time = None
+
+        with patch("gco.services.webhook_dispatcher.socket.getaddrinfo", slow_getaddrinfo):
+            stall = await _max_loop_stall(dispatcher._dispatch_event(WebhookEvent.JOB_STARTED, job))
+
+        assert dispatcher.webhook_store.get_webhooks_for_event.call_count == 2
+        assert dispatcher.get_metrics()["deliveries_failed"] == 1
+        assert stall < 0.3
+
+
 class TestDispatchEventEdgeCases:
     """Tests for _dispatch_event error handling and filtering."""
 
@@ -1220,6 +1467,7 @@ class TestDispatchEventEdgeCases:
             resp.status_code = 200
             mock_client.post.return_value = resp
             mock_cls.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             results = await dispatcher._dispatch_event(WebhookEvent.JOB_COMPLETED, job)
 
@@ -1334,6 +1582,8 @@ class TestSyncWatchJobs:
                     webhook_store=MagicMock(),
                 )
                 d._running = True
+                # As after a successful list: the watch resumes from here.
+                d._resource_version = "1"
                 return d
 
     def test_collects_events(self, dispatcher):
@@ -1346,11 +1596,27 @@ class TestSyncWatchJobs:
 
         with patch("gco.services.webhook_dispatcher.Watch") as MockWatch:
             MockWatch.return_value.stream.return_value = iter(events_iter)
+            MockWatch.return_value.resource_version = "9"
             result = dispatcher._sync_watch_jobs()
 
         assert len(result) == 2
         assert result[0] == ("ADDED", fake_job)
         assert result[1] == ("MODIFIED", fake_job)
+        stream_kwargs = MockWatch.return_value.stream.call_args.kwargs
+        assert stream_kwargs["resource_version"] == "1"
+        assert dispatcher._resource_version == "9"
+
+    def test_bookmark_is_not_an_event(self, dispatcher):
+        """A BOOKMARK only moves the resume point forward."""
+        with patch("gco.services.webhook_dispatcher.Watch") as MockWatch:
+            MockWatch.return_value.stream.return_value = iter(
+                [{"type": "BOOKMARK", "object": {"metadata": {"resourceVersion": "42"}}}]
+            )
+            MockWatch.return_value.resource_version = "42"
+            result = dispatcher._sync_watch_jobs()
+
+        assert result == []
+        assert dispatcher._resource_version == "42"
 
     def test_stops_when_not_running(self, dispatcher):
         """Test that watch stops when _running is set to False."""
@@ -1375,6 +1641,8 @@ class TestSyncWatchJobs:
             result = dispatcher._sync_watch_jobs()
 
         assert result == []
+        # Gone: the next loop pass lists again before watching.
+        assert dispatcher._resource_version is None
 
     def test_api_exception_other_raises(self, dispatcher):
         """Test that non-410 ApiException is re-raised."""
@@ -1401,9 +1669,11 @@ class TestSyncWatchJobs:
 
         with patch("gco.services.webhook_dispatcher.Watch") as MockWatch:
             MockWatch.return_value.stream.return_value = iter(events_iter)
+            MockWatch.return_value.resource_version = "11"
             result = dispatcher._sync_watch_jobs()
 
         assert len(result) == 10
+        assert dispatcher._resource_version == "11"
 
 
 class TestWatchJobsAsync:
@@ -1421,6 +1691,9 @@ class TestWatchJobsAsync:
                     region="r",
                     webhook_store=MagicMock(),
                 )
+                # Already listed, so each pass goes straight to the watch.
+                d._resource_version = "1"
+                d._cache_seeded = True
                 return d
 
     @pytest.mark.asyncio
@@ -1617,10 +1890,15 @@ class TestInitializeJobCache:
             job2,
         ]
 
-        await dispatcher._initialize_job_cache()
+        dispatcher.batch_v1.list_job_for_all_namespaces.return_value.metadata.resource_version = (
+            "77"
+        )
+
+        assert await dispatcher._initialize_job_cache() is True
 
         assert dispatcher._job_state_cache.get_state("uid-1") == "running"
         assert dispatcher._job_state_cache.get_state("uid-2") == "succeeded"
+        assert dispatcher._resource_version == "77"
 
     @pytest.mark.asyncio
     async def test_skips_system_namespaces(self, dispatcher):
@@ -1658,9 +1936,10 @@ class TestInitializeJobCache:
     async def test_handles_api_error(self, dispatcher):
         """API errors during cache init are caught and logged."""
         dispatcher.batch_v1.list_job_for_all_namespaces.side_effect = RuntimeError("API down")
-        # Should not raise
-        await dispatcher._initialize_job_cache()
+        # Should not raise; the failure is reported so nothing is delivered yet.
+        assert await dispatcher._initialize_job_cache() is False
         assert len(dispatcher._job_state_cache.job_states) == 0
+        assert dispatcher._resource_version is None
 
 
 class TestMainFunction:
@@ -1730,10 +2009,22 @@ class TestMainFunction:
 _non_https_schemes = st.sampled_from(["http", "ftp", "gopher", "file", "ssh", "telnet", "ws"])
 
 # Blocked IPv4 networks
-_blocked_ipv4_networks = [n for n in BLOCKED_NETWORKS if n.version == 4]
+# Private, loopback, link-local, and unique-local networks the SSRF guard
+# (``_globally_routable_unicast``) must reject; test data, not the guard's list.
+_NON_PUBLIC_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+_blocked_ipv4_networks = [n for n in _NON_PUBLIC_NETWORKS if n.version == 4]
 
 # Blocked IPv6 networks
-_blocked_ipv6_networks = [n for n in BLOCKED_NETWORKS if n.version == 6]
+_blocked_ipv6_networks = [n for n in _NON_PUBLIC_NETWORKS if n.version == 6]
 
 
 def _ip_from_network(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> st.SearchStrategy:

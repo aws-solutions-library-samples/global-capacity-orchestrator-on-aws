@@ -4,6 +4,7 @@ This directory contains example [IAM](https://docs.aws.amazon.com/IAM/latest/Use
 
 ## Table of Contents
 
+- [Who May Call the GCO APIs](#who-may-call-the-gco-apis)
 - [Policy Templates](#policy-templates)
 - [Getting API Gateway Information](#getting-api-gateway-information)
 - [Applying Policies](#applying-policies)
@@ -11,6 +12,30 @@ This directory contains example [IAM](https://docs.aws.amazon.com/IAM/latest/Use
 - [Testing Permissions](#testing-permissions)
 - [Troubleshooting](#troubleshooting)
 - [Security Best Practices](#security-best-practices)
+
+## Who May Call the GCO APIs
+
+Every route of the global API and of each regional bridge, except the
+analytics `/studio/*` pages, uses IAM authorization, and neither API's
+resource policy admits the deployment account as a whole. API Gateway
+therefore allows a caller in the account only when the caller's own
+identity-based policy allows `execute-api:Invoke` on the route and nothing
+denies it ([how API Gateway combines the two policies](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-authorization-flow.html)).
+Callers in other accounts are refused. The policies here are how you grant
+that access:
+
+- **Operators running the `gco` CLI** need `execute-api:Invoke` on the global
+  API and on every regional bridge, because region-pinned commands sign
+  against the bridge of that Region. Administrator credentials already have it;
+  a narrower grant is `arn:aws:execute-api:*:ACCOUNT_ID:*/prod/*`, or one
+  resource per API id.
+- **GCO's own roles** carry what they call: the cross-region aggregator's role
+  (named in each bridge's resource policy as well), the analytics SageMaker
+  execution role (`/api/v1/*` and `/inference/*` on the global API) and the
+  MCP server role (`/api/v1/*` and `/inference/*` on the global API and every
+  regional bridge; see
+  [gco_mcp/README.md → IAM role](../../gco_mcp/README.md#iam-role-gco_mcp_role_arn)).
+- **Applications and teams** get the narrower templates below.
 
 ## Policy Templates
 
@@ -72,13 +97,14 @@ To find your API Gateway ID and construct the correct ARNs:
 ```bash
 # The API ID is the host prefix of the endpoint URL
 # (https://API_ID.execute-api.REGION.amazonaws.com/prod/).
-# Global API (stack gco-api-gateway, output ApiEndpoint):
-gco stacks outputs gco-api-gateway
+# Global API (stack gco-api-gateway in deployment_regions.api_gateway,
+# us-east-2 by default; output ApiEndpoint):
+gco stacks outputs gco-api-gateway -r us-east-2
 # Regional API (stack gco-regional-api-us-east-1, output RegionalApiEndpoint):
-gco stacks outputs gco-regional-api-us-east-1
+gco stacks outputs gco-regional-api-us-east-1 -r us-east-1
 # Or with the AWS CLI:
 aws cloudformation describe-stacks \
-  --stack-name gco-api-gateway \
+  --stack-name gco-api-gateway --region us-east-2 \
   --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
   --output text
 

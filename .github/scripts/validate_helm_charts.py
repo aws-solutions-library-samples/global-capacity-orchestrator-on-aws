@@ -41,14 +41,15 @@ By default *every* chart in the file is validated, including entries with
 ``enabled: false``: those are toggled on via ``cdk.json``, so their pinned
 ``(name, version)`` must be valid too.
 
-Three lockstep contracts ride along (each with an offline half that always
+Four lockstep contracts ride along (each with an offline half that always
 runs and an online half): the AWS Load Balancer Controller chart against the
 Gateway API CRD bundles the helm-installer pins, the Kubeflow Trainer chart
-against the shipped ``torch-distributed`` runtime, and the ``slinky-slurm``
+against the shipped ``torch-distributed`` runtime, the ``slinky-slurm``
 slurmrestd image against ``SLURM_API_VERSION`` in ``gco/slurm_config.py``
 (the online half runs ``slurmrestd -d list`` inside the pinned image, so it
 needs a container runtime: ``docker`` by default, ``--container-runtime``
-for podman/finch).
+for podman/finch), and Volcano's pinned image tags against the Volcano
+chart's release (the online half reads the chart's ``appVersion``).
 
 Usage::
 
@@ -739,9 +740,10 @@ def validate_gateway_lockstep(
 # blueprints through a post-install hook Job (an unpinned run-time network
 # fetch), so GCO disables that hook and ships the ``torch-distributed``
 # runtime itself — extracted verbatim from the pinned chart into
-# ``post-helm-kubeflow-trainer-runtimes.yaml`` with two documented
-# deviations (``automountServiceAccountToken: false`` and NoNewPrivs on the
-# ``node`` container). Three more surfaces
+# ``post-helm-kubeflow-trainer-runtimes.yaml`` with three documented
+# deviations (``automountServiceAccountToken: false``, NoNewPrivs on the
+# ``node`` container and a ``kubernetes.io/arch: amd64`` node selector).
+# Three more surfaces
 # repeat the runtime's pinned trainer image so users see exactly what runs:
 #
 #   * the shipped runtime manifest (the source of truth in-repo),
@@ -884,14 +886,18 @@ def doc_pytorch_images(doc_text: str) -> list[str]:
 def _apply_documented_runtime_deviations(upstream_spec: dict[str, Any]) -> dict[str, Any]:
     """Return the upstream runtime spec with GCO's sanctioned deviations applied.
 
-    Exactly two deviations from verbatim extraction are documented in the
-    manifest header, both on the ``node`` pod template:
+    Exactly three deviations from verbatim extraction are documented in the
+    manifest header, all on the ``node`` pod template:
 
     - ``automountServiceAccountToken: false`` (the same security default
-      both submission paths inject into user Jobs), and
+      both submission paths inject into user Jobs),
     - ``securityContext.allowPrivilegeEscalation: false`` on the ``node``
       container (NoNewPrivs; the platform's manifest policy already rejects
-      an explicit ``true``).
+      an explicit ``true``), and
+    - ``nodeSelector`` ``kubernetes.io/arch: amd64`` (the runtime's
+      ``pytorch/pytorch`` image is published for linux/amd64 only, and GCO's
+      CPU and GPU NodePools also launch arm64 nodes). Revisit it when an
+      image bump brings an arm64 build.
 
     Anything else that differs from upstream is drift and must fail — a new
     deliberate deviation belongs here *and* in the manifest header, in the
@@ -908,6 +914,9 @@ def _apply_documented_runtime_deviations(upstream_spec: dict[str, Any]) -> dict[
         if not isinstance(pod_spec, dict):
             continue
         pod_spec["automountServiceAccountToken"] = False
+        node_selector = pod_spec.setdefault("nodeSelector", {})
+        if isinstance(node_selector, dict):
+            node_selector["kubernetes.io/arch"] = "amd64"
         for container in pod_spec.get("containers") or []:
             if isinstance(container, dict) and container.get("name") == "node":
                 security = container.setdefault("securityContext", {})
@@ -1324,6 +1333,153 @@ def validate_slurm_api_version_lockstep(
     return errors
 
 
+# ---------------------------------------------------------------------------
+# Volcano image / chart lockstep
+#
+# charts.yaml pins Volcano's image tag (``volcano.values.basic.image_tag_version``)
+# instead of taking the chart's default, because ``gco images mirror`` copies
+# exactly that tag into ECR. The chart's templates are written for its own
+# release's components, though. Chart 1.16.0 registers the PodGroup validating
+# webhook for UPDATE as well as CREATE, and the v1.15.2 webhook manager the
+# pin still named answered every UPDATE with "unsupported operation UPDATE".
+# The scheduler could then never move a PodGroup to Inqueue, so no Volcano Job
+# got its pods. These checks hold the tags to the chart's release:
+#
+#   offline: every pinned tag (``image_tag_version`` and any non-empty
+#     ``<component>_image_tag_version`` override, which the chart prefers) is
+#     ``v<chart version>``.
+#   online: the chart's ``appVersion`` (``helm show chart``) is the chart
+#     version, the convention the offline half relies on.
+# ---------------------------------------------------------------------------
+
+_VOLCANO_CHART_KEY = "volcano"
+_VOLCANO_TAG_KEY_RE = re.compile(r"(?:[a-z]+_)*image_tag_version")
+
+
+def volcano_image_tags(entry: dict[str, Any]) -> dict[str, str]:
+    """Return ``{values.basic key: tag}`` for every image tag a ``volcano`` entry pins.
+
+    The chart uses a ``<component>_image_tag_version`` override only when it
+    is a non-empty string, so empty overrides are left out.
+    """
+    basic = (entry.get("values") or {}).get("basic")
+    if not isinstance(basic, dict):
+        return {}
+    return {
+        str(key): str(value).strip()
+        for key, value in basic.items()
+        if _VOLCANO_TAG_KEY_RE.fullmatch(str(key)) and str(value or "").strip()
+    }
+
+
+def chart_app_version_from_show(show_output: str) -> str | None:
+    """Extract the ``appVersion`` field from ``helm show chart`` YAML output."""
+    try:
+        meta = yaml.safe_load(show_output)
+    except yaml.YAMLError:
+        return None
+    if isinstance(meta, dict):
+        app_version = meta.get("appVersion")
+        if isinstance(app_version, str) and app_version.strip():
+            return app_version.strip()
+    return None
+
+
+def fetch_volcano_app_version(entry: dict[str, Any], helm_binary: str = "helm") -> str:
+    """Return the pinned ``volcano`` chart's ``appVersion``, read with ``helm show chart``.
+
+    Runs against an isolated Helm home and rides the shared retry ladder, like
+    the trainer check. Raises ``RuntimeError`` with an actionable message when
+    the chart cannot be resolved or declares no ``appVersion``.
+    """
+    refs = build_refs({_VOLCANO_CHART_KEY: entry})
+    if not refs:
+        raise RuntimeError(
+            f"cannot build a Helm reference from the {_VOLCANO_CHART_KEY!r} charts.yaml entry"
+        )
+    ref = refs[0]
+    with tempfile.TemporaryDirectory(prefix="gco-volcano-lockstep-") as tmp:
+        env = _helm_env(Path(tmp))
+        if not ref.use_oci:
+            _sync_classic_repos({ref.repo_name: ref.repo_url}, helm_binary, env)
+        rc, out, err = _run_with_retry(
+            [helm_binary, "show", "chart", ref.reference(), "--version", ref.version],
+            env,
+            description=f"helm show chart {ref.name} (appVersion)",
+        )
+    if rc != 0:
+        raise RuntimeError(
+            f"helm show chart {ref.reference()} at {ref.version!r} failed: {_tail(err)}"
+        )
+    app_version = chart_app_version_from_show(out)
+    if app_version is None:
+        raise RuntimeError(
+            f"chart {ref.version} declares no appVersion; update this check alongside "
+            "whatever now names the images the chart was released with"
+        )
+    return app_version
+
+
+def validate_volcano_image_lockstep(
+    charts: dict[str, Any],
+    *,
+    online: bool = False,
+    app_version_fetcher: Any = None,
+    helm_binary: str = "helm",
+    require_entry: bool = True,
+) -> list[str]:
+    """Check that Volcano's pinned image tags match its chart; return error strings.
+
+    Offline: every image tag the ``volcano`` entry pins is ``v<chart version>``.
+    Online (adds one ``helm show chart``): the chart's ``appVersion`` is its
+    version, so the offline rule names the images the chart was released
+    with. With ``require_entry`` (the default, used for the repository's real
+    charts.yaml) a missing chart entry is reported rather than skipped;
+    ``main()`` disables it for ``--charts`` fixture files.
+    """
+    entry = charts.get(_VOLCANO_CHART_KEY)
+    if not isinstance(entry, dict) or not entry.get("version"):
+        if require_entry:
+            return [
+                f"volcano image lockstep: no {_VOLCANO_CHART_KEY!r} entry with a version "
+                "in charts.yaml"
+            ]
+        return []
+
+    version = str(entry["version"]).strip().lstrip("v")
+    tags = volcano_image_tags(entry)
+    if not tags:
+        return [
+            "volcano image lockstep: charts.yaml volcano.values.basic pins no "
+            "image_tag_version; gco images mirror reads it to know which tag to copy"
+        ]
+    expected = f"v{version}"
+    errors = [
+        f"volcano image lockstep: charts.yaml volcano.values.basic.{key} is {tag!r} but "
+        f"the chart is {version}; pin {expected!r} in the same change. The chart's "
+        "templates are written for its own release's components: chart 1.16.0's PodGroup "
+        "webhook made a v1.15.2 webhook manager reject every PodGroup update"
+        for key, tag in sorted(tags.items())
+        if tag != expected
+    ]
+    if not online:
+        return errors
+
+    fetcher = app_version_fetcher or fetch_volcano_app_version
+    try:
+        app_version = fetcher(entry, helm_binary)
+    except RuntimeError as exc:
+        errors.append(f"volcano image lockstep: {exc}")
+        return errors
+    if app_version.lstrip("v") != version:
+        errors.append(
+            f"volcano image lockstep: chart {version} declares appVersion {app_version}, "
+            f"so its images are not tagged v<chart version>; pin "
+            f"'v{app_version.lstrip('v')}' and change this check to compare against appVersion"
+        )
+    return errors
+
+
 def emit_chart_ref(charts: dict[str, Any], chart_name: str) -> tuple[str, str]:
     """Return ``(text, error)`` for --emit-ref.
 
@@ -1501,8 +1657,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # Fixture chart files passed via --charts may legitimately omit the
-    # controller / trainer / Slurm entries; the repository's real charts.yaml
-    # may not.
+    # controller / trainer / Slurm / Volcano entries; the repository's real
+    # charts.yaml may not.
     is_default_charts = args.charts.resolve() == _DEFAULT_CHARTS.resolve()
     errors.extend(
         validate_gateway_lockstep(
@@ -1524,6 +1680,14 @@ def main(argv: list[str] | None = None) -> int:
             charts,
             online=run_slurm_online,
             container_runtime=args.container_runtime,
+            require_entry=is_default_charts,
+        )
+    )
+    errors.extend(
+        validate_volcano_image_lockstep(
+            charts,
+            online=run_online,
+            helm_binary=args.helm_binary,
             require_entry=is_default_charts,
         )
     )

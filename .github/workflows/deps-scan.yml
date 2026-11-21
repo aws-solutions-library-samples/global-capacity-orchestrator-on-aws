@@ -60,10 +60,17 @@
 # If any are outdated, opens (or refreshes) a single rolling GitHub issue with
 # the details and mirrors the report into the workflow run's job summary. Once
 # a complete scan is clean (no skipped checks), comments on and closes that
-# issue. Uses the built-in GITHUB_TOKEN throughout — for the issue writes
-# (`issues: write`) and, as a bearer token on the scan's own api.github.com
-# release/tag lookups, to stay off the shared anonymous rate-limit bucket. No
-# long-lived PAT needed.
+# issue. Uses the built-in GITHUB_TOKEN throughout — as a bearer token on the
+# scan's own api.github.com release/tag lookups, to stay off the shared
+# anonymous rate-limit bucket, and for the issue writes. No long-lived PAT
+# needed.
+#
+# Two jobs, so each credential reaches only the code that needs it. The scan
+# job installs latest-PyPI packages and runs the scan with `contents: read`
+# plus `id-token: write` (the OIDC role for the AWS-backed reads). The issue
+# job holds `issues: write` alone, checks nothing out, and acts on the scan
+# job's outputs and uploaded report, so neither the issue-writing token nor
+# the AWS credentials ever share a job with the scan's third-party code.
 #
 # =============================================================================
 
@@ -85,8 +92,6 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write
-  id-token: write  # Required for OIDC authentication to AWS
 
 env:
   # Helm/kubectl pins (version + checksum) are derived at runtime from
@@ -112,6 +117,12 @@ jobs:
     if: github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write  # Required for OIDC authentication to AWS
+    outputs:
+      has_drift: ${{ steps.scan.outputs.has_drift }}
+      scan_complete: ${{ steps.scan.outputs.scan_complete }}
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
@@ -140,24 +151,38 @@ jobs:
         with:
           packages: jq skopeo curl
           no-install-recommends: "true"
-      - name: Install Python security tooling + AWS CLI
+      - name: Install Python security tooling
+        # The AWS-backed checks use the runner image's AWS CLI v2, the major
+        # Dockerfile.dev pins. `pip install awscli` would put CLI v1 first on
+        # PATH (setup-python's bin directory) and, since awscli pins botocore
+        # exactly, move botocore off the project's boto3 pin.
         run: |
           pip install -e ".[security]"
-          pip install awscli
       - name: Install latest aws-cdk-lib (for CDK enum drift check)
         # The CDK-enum section of dependency-scan.sh introspects
-        # ``aws_cdk.aws_lambda.Runtime`` (Python and Node.js managed runtimes)
-        # and ``aws_cdk.aws_rds.AuroraPostgresEngineVersion`` to find the
-        # newest enum members shipped by the library, then compares them
-        # against the constants pinned in ``gco/stacks/constants.py``.
-        # We install ``--upgrade`` (no version pin) on purpose so the
-        # check reflects the absolute latest enums available, even when
-        # ``aws-cdk-lib`` itself is also drifting (which is reported
-        # separately by the Python-deps section). When this step is
-        # skipped or fails, the scan logs a one-line note and the rest
-        # of the surfaces still report drift.
+        # ``aws_cdk.aws_lambda.Runtime`` (the Python and Node.js managed
+        # runtimes) to find the newest enum members shipped by the library,
+        # then compares them against the constants pinned in
+        # ``gco/stacks/constants.py``. We install the latest release (no
+        # version pin) on purpose so the check reflects the absolute latest
+        # enums available, even when ``aws-cdk-lib`` itself is also drifting
+        # (which is reported separately by the Python-deps section).
+        #
+        # In a virtualenv of its own, named to the scan by CDK_ENUM_PYTHON:
+        # the scan's project install pins aws-cdk-lib exactly, so a latest
+        # copy in the scan's environment is downgraded before the enum
+        # section reads it. CDK_ENUM_PYTHON is exported before the install,
+        # so a failed install (a PyPI blip) leaves the enum check skipped
+        # with a one-line note, never reading the pinned library instead;
+        # continue-on-error keeps that failure from skipping the scan, and
+        # the rest of the surfaces still report drift.
+        continue-on-error: true
         run: |
-          pip install --upgrade aws-cdk-lib
+          set -euo pipefail
+          venv="${RUNNER_TEMP}/cdk-latest"
+          echo "CDK_ENUM_PYTHON=${venv}/bin/python" >> "$GITHUB_ENV"
+          python -m venv "$venv"
+          "${venv}/bin/pip" install --quiet aws-cdk-lib
       - name: Derive Helm/kubectl pins from the production installer Dockerfile
         # lambda/helm-installer/Dockerfile is the single source for both
         # pins: this loads HELM_VERSION / HELM_SHA256 / KUBECTL_VERSION /
@@ -218,8 +243,9 @@ jobs:
           # fifteen GitHub lookups at once while PyPI, npm and the OCI
           # registries succeed (the shape of a partial monthly report). The
           # job's own token moves those reads to the 5 000 req/h per-token
-          # bucket; `contents: read` above is all it needs, since every repo
-          # queried is public. Nothing else in the scan step uses the token.
+          # bucket; this job's `contents: read` is all it needs, since every
+          # repo queried is public. Nothing else in the scan step uses the
+          # token, and it cannot write issues: that grant lives in drift-issue.
           GITHUB_TOKEN: ${{ github.token }}
         run: bash .github/scripts/dependency-scan.sh
       - name: Upload the machine-readable findings
@@ -234,12 +260,62 @@ jobs:
           path: ${{ steps.scan.outputs.findings_path }}
           retention-days: 90
           if-no-files-found: error
+      - name: Stage the drift report for the issue job
+        # A fixed name, so drift-issue can address the file it downloads.
+        if: always() && steps.scan.outcome == 'success' && steps.scan.outputs.has_drift == 'true'
+        env:
+          REPORT_PATH: ${{ steps.scan.outputs.report_path }}
+        run: cp "$REPORT_PATH" "${RUNNER_TEMP}/dependency-drift-report.md"
+      - name: Upload the drift report
+        if: always() && steps.scan.outcome == 'success' && steps.scan.outputs.has_drift == 'true'
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: dependency-drift-report
+          path: ${{ runner.temp }}/dependency-drift-report.md
+          retention-days: 90
+          if-no-files-found: error
+      - name: Fail an incomplete dependency scan
+        if: >-
+          always() &&
+          steps.scan.outcome == 'success' &&
+          steps.scan.outputs.scan_complete != 'true'
+        run: |
+          echo "::error::Dependency scan was incomplete; see the job summary and INCOMPLETE log entries."
+          exit 1
+
+  drift-issue:
+    name: "deps-scan:drift-issue"
+    needs: deps-scan
+    # always(): an incomplete scan fails the scan job on purpose, and its
+    # partial report must still refresh the issue. The outputs are set only
+    # when the scan step ran, so a skipped or crashed scan does nothing here.
+    if: >-
+      always() &&
+      (needs.deps-scan.outputs.has_drift == 'true' ||
+       (needs.deps-scan.outputs.has_drift == 'false' &&
+        needs.deps-scan.outputs.scan_complete == 'true'))
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+      - name: Download the drift report
+        if: needs.deps-scan.outputs.has_drift == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dependency-drift-report
+          path: ${{ runner.temp }}/drift-report
       - name: Open or refresh the drift issue
-        if: steps.scan.outputs.has_drift == 'true'
+        if: needs.deps-scan.outputs.has_drift == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          REPORT_PATH: ${{ steps.scan.outputs.report_path }}
-          SCAN_COMPLETE: ${{ steps.scan.outputs.scan_complete }}
+          # No checkout in this job, so gh cannot infer the repository.
+          GH_REPO: ${{ github.repository }}
+          REPORT_PATH: ${{ runner.temp }}/drift-report/dependency-drift-report.md
+          SCAN_COMPLETE: ${{ needs.deps-scan.outputs.scan_complete }}
         run: |
           set -euo pipefail
           # Self-provision the labels we use so `gh issue create --label`
@@ -278,10 +354,11 @@ jobs:
           fi
       - name: Close the resolved drift issue
         if: >-
-          steps.scan.outputs.has_drift == 'false' &&
-          steps.scan.outputs.scan_complete == 'true'
+          needs.deps-scan.outputs.has_drift == 'false' &&
+          needs.deps-scan.outputs.scan_complete == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           today="$(date -u +%Y-%m-%d)"
@@ -304,11 +381,3 @@ jobs:
           else
             echo "Complete dependency scan is clean and no matching rolling issue is open."
           fi
-      - name: Fail an incomplete dependency scan
-        if: >-
-          always() &&
-          steps.scan.outcome == 'success' &&
-          steps.scan.outputs.scan_complete != 'true'
-        run: |
-          echo "::error::Dependency scan was incomplete; see the job summary and INCOMPLETE log entries."
-          exit 1

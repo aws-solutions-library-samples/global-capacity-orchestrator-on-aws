@@ -13,6 +13,11 @@ from __future__ import annotations
 import base64
 import json
 import re
+import subprocess
+import types
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,9 +32,36 @@ BASE = "http://localhost:3000"
 AUTH = ("admin", "s3cret")
 
 
+_CONTEXT = "arn:aws:eks:us-west-2:123456789012:cluster/gco-us-west-2"
+_SERVER = "https://127.0.0.1:18443"
+_SNI = "abc.gr7.us-west-2.eks.amazonaws.com"
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
+
+
+@pytest.fixture
+def cluster(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Fake kubeconfig refresh and tunnel; records what the Secret read asked for."""
+    state: dict[str, Any] = {"kubeconfig": [], "tunnels": []}
+
+    @contextmanager
+    def fake_tunnel(formatter: Any, **kwargs: Any) -> Iterator[Any]:
+        state["tunnels"].append(kwargs)
+        formatter.print_info("Route: SSM tunnel via the test instance")
+        formatter.print_success("Ephemeral bastion is online.")
+        formatter.print_warning("Private endpoint only.")
+        yield types.SimpleNamespace(server=_SERVER, tls_server_name=_SNI)
+
+    def fake_update(cluster_name: str, region: str) -> str:
+        state["kubeconfig"].append((cluster_name, region))
+        return _CONTEXT
+
+    monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", fake_tunnel)
+    monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", fake_update)
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +160,53 @@ class TestReadAdminCredentials:
         with pytest.raises(ValueError, match=re.escape("Invalid namespace 'Bad NS'")):
             mum.read_grafana_admin_credentials(namespace="Bad NS")
 
+    def test_reads_through_the_context_and_tunnel_with_a_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        payload = {
+            "data": {
+                "admin-user": base64.b64encode(b"admin").decode(),
+                "admin-password": base64.b64encode(b"topsecret").decode(),
+            }
+        }
+        calls: list[tuple[list[str], dict[str, Any]]] = []
+
+        def run(cmd: list[str], **kwargs: Any) -> MagicMock:
+            calls.append((cmd, kwargs))
+            return MagicMock(returncode=0, stdout=json.dumps(payload), stderr="")
+
+        monkeypatch.setattr(mum.subprocess, "run", run)
+        assert mum.read_grafana_admin_credentials(
+            server=_SERVER, tls_server_name=_SNI, context=_CONTEXT
+        ) == ("admin", "topsecret")
+        ((cmd, kwargs),) = calls
+        assert cmd == [
+            "kubectl",
+            f"--context={_CONTEXT}",
+            "get",
+            "secret",
+            "kube-prometheus-stack-grafana",
+            "-n",
+            "monitoring",
+            "-o",
+            "json",
+            "--server",
+            _SERVER,
+            "--tls-server-name",
+            _SNI,
+        ]
+        assert kwargs["timeout"] == 60
+
+    def test_an_api_server_that_never_answers_times_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def run(cmd: list[str], **kwargs: Any) -> None:
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+        monkeypatch.setattr(mum.subprocess, "run", run)
+        with pytest.raises(RuntimeError, match=r"Timed out after 60s.*pass --via-ssm"):
+            mum.read_grafana_admin_credentials()
+
 
 # ---------------------------------------------------------------------------
 # CLI: gco monitoring users
@@ -167,7 +246,7 @@ class TestUsersCli:
         assert captured["login"] == "alice"
 
     def test_add_reads_secret_when_no_admin_password(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, cluster: dict[str, Any]
     ) -> None:
         monkeypatch.setattr(
             "cli.monitoring_user_mgmt.read_grafana_admin_credentials",
@@ -265,9 +344,13 @@ class TestUsersCli:
         result = runner.invoke(
             cli,
             ["monitoring", "users", "add", "--username", "x", "--admin-password", "a"],
+            env={"GCO_GRAFANA_USER_PASSWORD": None},
         )
         assert result.exit_code == 1
-        assert "Pass --password or --generate-password" in result.output
+        assert (
+            "Pass --password (or set $GCO_GRAFANA_USER_PASSWORD) or --generate-password"
+            in result.output
+        )
 
     def test_list_json(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
@@ -331,7 +414,7 @@ class TestUsersCli:
         assert "Failed to create Grafana user" in result.output
 
     def test_list_surfaces_secret_read_error(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, cluster: dict[str, Any]
     ) -> None:
         # No --admin-password => reads Secret; make that fail.
         def _boom(*a: object, **k: object) -> tuple[str, str]:
@@ -341,6 +424,66 @@ class TestUsersCli:
         result = runner.invoke(cli, ["monitoring", "users", "list"])
         assert result.exit_code == 1
         assert "Failed to list Grafana users" in result.output
+
+    def test_list_reads_the_secret_on_the_regions_cluster_through_a_tunnel(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, cluster: dict[str, Any]
+    ) -> None:
+        """The documented laptop flow, `monitoring open --via-ssm` in one
+        terminal and `monitoring users list` in another, needs the Secret read
+        to reach the private endpoint itself, on the right cluster."""
+        reads: list[dict[str, Any]] = []
+
+        def read(**kwargs: Any) -> tuple[str, str]:
+            reads.append(kwargs)
+            return ("admin", "from-secret")
+
+        monkeypatch.setattr("cli.monitoring_user_mgmt.read_grafana_admin_credentials", read)
+        monkeypatch.setattr(
+            "cli.monitoring_user_mgmt.list_users", lambda base_url, auth: [{"login": auth[0]}]
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "monitoring",
+                "users",
+                "list",
+                "-r",
+                "us-west-2",
+                "--via-ssm",
+                "auto",
+                "-y",
+                "--as-json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert cluster["kubeconfig"] == [("gco-us-west-2", "us-west-2")]
+        (tunnel,) = cluster["tunnels"]
+        assert tunnel["cluster"] == "gco-us-west-2" and tunnel["region"] == "us-west-2"
+        assert tunnel["via_ssm"] == "auto" and tunnel["assume_yes"] is True
+        # Its own tunnel: `monitoring open` holds the default API port.
+        assert tunnel["local_port"] != 8443
+        assert reads == [{"server": _SERVER, "tls_server_name": _SNI, "context": _CONTEXT}]
+        # The route line goes to stderr; stdout stays the JSON document.
+        assert json.loads(result.stdout) == [{"login": "admin"}]
+        assert "Route: SSM tunnel" in result.stderr
+        assert "Ephemeral bastion is online." in result.stderr
+        assert "Private endpoint only." in result.stderr
+
+    def test_remove_yes_also_skips_the_bastion_prompt(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, cluster: dict[str, Any]
+    ) -> None:
+        monkeypatch.setattr(
+            "cli.monitoring_user_mgmt.read_grafana_admin_credentials",
+            lambda **_k: ("admin", "from-secret"),
+        )
+        monkeypatch.setattr("cli.monitoring_user_mgmt.lookup_user_id", lambda b, a, u: 3)
+        monkeypatch.setattr("cli.monitoring_user_mgmt.delete_user", lambda b, a, uid: None)
+        result = runner.invoke(
+            cli,
+            ["monitoring", "users", "remove", "--username", "a", "--via-ssm", "auto", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        assert cluster["tunnels"][0]["assume_yes"] is True
 
 
 @pytest.mark.parametrize("output_format", ["json", "yaml"])

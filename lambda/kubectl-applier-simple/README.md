@@ -21,7 +21,10 @@ Applies Kubernetes manifests to [EKS](https://docs.aws.amazon.com/eks/latest/use
 
 ### Create/Update
 
-1. Configures a Kubernetes client with EKS token authentication
+1. Configures a Kubernetes client with EKS token authentication. Every API
+   call that sets no `_request_timeout` of its own gets a 10-second connect and
+   30-second read timeout (`_K8S_REQUEST_TIMEOUT_SECONDS`), so a stalled
+   API-server connection fails the call instead of holding the invocation
 2. Reads all YAML files from the `manifests/` directory (sorted by filename)
 3. Replaces placeholders (e.g., image URIs) with values from CloudFormation properties
 4. Applies each resource with create-or-patch idempotency. Deployment creates
@@ -76,7 +79,8 @@ The handler's `_SUPPORTED_MANIFEST_KINDS` is the authoritative list:
 ## IAM Permissions
 
 - `eks:DescribeCluster` on the EKS cluster
-- `sts:GetCallerIdentity` (for EKS token generation)
+- `sts:GetCallerIdentity` (a presigned URL for the EKS token; needs no IAM permission)
+- `ssm:PutParameter` on `/<project>/addons/*` (per-phase apply status for `gco stacks addons status`)
 - Kubernetes RBAC: cluster-admin or equivalent for manifest application
 
 ## Dependencies

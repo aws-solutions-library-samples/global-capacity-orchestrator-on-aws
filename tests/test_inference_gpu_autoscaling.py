@@ -52,6 +52,13 @@ def _make_monitor(region: str = "us-west-2"):
         return monitor
 
 
+def _absent_autoscalers(custom: MagicMock, autoscaling: MagicMock | None = None) -> None:
+    """The monitor reads before it creates: no ScaledObject or HPA exists yet."""
+    custom.get_namespaced_custom_object.side_effect = ApiException(status=404)
+    if autoscaling is not None:
+        autoscaling.read_namespaced_horizontal_pod_autoscaler.side_effect = ApiException(status=404)
+
+
 def _gpu_spec(target: int = 60) -> dict:
     return {
         "autoscaling": {
@@ -68,6 +75,7 @@ def test_gpu_metric_creates_scaled_object_not_hpa():
     monitor = _make_monitor()
     custom = MagicMock()
     autoscaling = MagicMock()
+    _absent_autoscalers(custom, autoscaling)
     with (
         patch("gco.services.inference_monitor.client.CustomObjectsApi", return_value=custom),
         patch("gco.services.inference_monitor.client.AutoscalingV2Api", return_value=autoscaling),
@@ -91,6 +99,7 @@ def test_gpu_trigger_targets_cloudwatch_container_insights():
     """The GPU trigger reads the ContainerInsights metric for the Deployment."""
     monitor = _make_monitor(region="eu-west-1")
     custom = MagicMock()
+    _absent_autoscalers(custom)
     with (
         patch("gco.services.inference_monitor.client.CustomObjectsApi", return_value=custom),
         patch("gco.services.inference_monitor.client.AutoscalingV2Api"),
@@ -112,6 +121,7 @@ def test_cpu_rides_along_with_gpu_in_same_scaled_object():
     """CPU/memory targets become native KEDA triggers next to the GPU trigger."""
     monitor = _make_monitor()
     custom = MagicMock()
+    _absent_autoscalers(custom)
     spec = {
         "autoscaling": {
             "enabled": True,
@@ -142,6 +152,7 @@ def test_cpu_only_stays_on_native_hpa():
     monitor = _make_monitor()
     custom = MagicMock()
     autoscaling = MagicMock()
+    _absent_autoscalers(custom, autoscaling)
     spec = {
         "autoscaling": {
             "enabled": True,
@@ -164,6 +175,7 @@ def test_role_gpu_scaling_targets_role_deployment():
     """A Mooncake role's GPU scaler targets the {name}-{role} Deployment."""
     monitor = _make_monitor()
     custom = MagicMock()
+    _absent_autoscalers(custom)
     spec = {
         "mooncake": {
             "autoscaling": {

@@ -41,19 +41,6 @@ Statements deployed on the REST API (`${AWS::AccountId}` is the deploying accoun
 [
   {
     "Action": "execute-api:Invoke",
-    "Condition": {
-      "StringEquals": {
-        "aws:PrincipalAccount": "${AWS::AccountId}"
-      }
-    },
-    "Effect": "Allow",
-    "Principal": {
-      "AWS": "*"
-    },
-    "Resource": "execute-api:/*"
-  },
-  {
-    "Action": "execute-api:Invoke",
     "Effect": "Allow",
     "Principal": {
       "AWS": "*"
@@ -62,6 +49,8 @@ Statements deployed on the REST API (`${AWS::AccountId}` is the deploying accoun
   }
 ]
 ```
+
+Any other call is allowed only for a principal of the deploying account whose identity-based policy allows `execute-api:Invoke` on this API; principals of other accounts are refused.
 
 ### WAF
 
@@ -127,7 +116,7 @@ Fans out to `/api/v1/health` on every regional API Gateway and returns one healt
 - **Lambda:** `cross-region-aggregator` (`lambda/cross-region-aggregator/handler.py`; python3.14, handler.lambda_handler, 29 s timeout)
 - **Behaviour:** Discovers every <project>-regional-api-<region> stack's RegionalApiEndpoint output, fans the request out to each regional API with SigV4 and merges the answers into one response.
 - **Then:**
-    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy) — [`api-gateway-regional`](api-gateway-regional.md)
+    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status) — [`api-gateway-regional`](api-gateway-regional.md)
     2. regional-api-proxy VPC Lambda: resolves the ALB from SSM /<project>/alb-hostname-<region> and signs the HMAC envelope
     3. Internal ALB — the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix — [`cluster-gateway`](cluster-gateway.md)
     4. manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz) — [`manifest-processor`](manifest-processor.md), [`health-monitor`](health-monitor.md)
@@ -155,7 +144,7 @@ Fans out to `/api/v1/jobs` on every regional API Gateway and merges the results.
 - **Lambda:** `cross-region-aggregator` (`lambda/cross-region-aggregator/handler.py`; python3.14, handler.lambda_handler, 29 s timeout)
 - **Behaviour:** Discovers every <project>-regional-api-<region> stack's RegionalApiEndpoint output, fans the request out to each regional API with SigV4 and merges the answers into one response.
 - **Then:**
-    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy) — [`api-gateway-regional`](api-gateway-regional.md)
+    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status) — [`api-gateway-regional`](api-gateway-regional.md)
     2. regional-api-proxy VPC Lambda: resolves the ALB from SSM /<project>/alb-hostname-<region> and signs the HMAC envelope
     3. Internal ALB — the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix — [`cluster-gateway`](cluster-gateway.md)
     4. manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz) — [`manifest-processor`](manifest-processor.md), [`health-monitor`](health-monitor.md)
@@ -184,7 +173,7 @@ Fans out to `/api/v1/jobs` on every regional API Gateway and merges the results.
 - **Lambda:** `cross-region-aggregator` (`lambda/cross-region-aggregator/handler.py`; python3.14, handler.lambda_handler, 29 s timeout)
 - **Behaviour:** Discovers every <project>-regional-api-<region> stack's RegionalApiEndpoint output, fans the request out to each regional API with SigV4 and merges the answers into one response.
 - **Then:**
-    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy) — [`api-gateway-regional`](api-gateway-regional.md)
+    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status) — [`api-gateway-regional`](api-gateway-regional.md)
     2. regional-api-proxy VPC Lambda: resolves the ALB from SSM /<project>/alb-hostname-<region> and signs the HMAC envelope
     3. Internal ALB — the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix — [`cluster-gateway`](cluster-gateway.md)
     4. manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz) — [`manifest-processor`](manifest-processor.md), [`health-monitor`](health-monitor.md)
@@ -213,7 +202,7 @@ Fans out to `/api/v1/status` on every regional API Gateway (answered by the mani
 - **Lambda:** `cross-region-aggregator` (`lambda/cross-region-aggregator/handler.py`; python3.14, handler.lambda_handler, 29 s timeout)
 - **Behaviour:** Discovers every <project>-regional-api-<region> stack's RegionalApiEndpoint output, fans the request out to each regional API with SigV4 and merges the answers into one response.
 - **Then:**
-    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status, api/v1/policy) — [`api-gateway-regional`](api-gateway-regional.md)
+    1. Each region's API Gateway bridge, called with SigV4 by the aggregator's own execution role (GET/DELETE api/v1/jobs, GET api/v1/health, api/v1/status) — [`api-gateway-regional`](api-gateway-regional.md)
     2. regional-api-proxy VPC Lambda: resolves the ALB from SSM /<project>/alb-hostname-<region> and signs the HMAC envelope
     3. Internal ALB — the Kubernetes Gateway gco-system/gco-gateway; HTTPRoute gco-routes picks the Service by longest path prefix — [`cluster-gateway`](cluster-gateway.md)
     4. manifest-processor (catch-all and /api/v1/manifests) or health-monitor (/api/v1/health, /api/v1/metrics, /healthz) — [`manifest-processor`](manifest-processor.md), [`health-monitor`](health-monitor.md)
@@ -518,17 +507,19 @@ Authenticated with a Cognito ID token from the Studio user pool rather than SigV
 
 **Backend**
 
-- **Lambda:** `analytics-presigned-url` (`lambda/analytics-presigned-url/handler.py`; python3.13, index.handler)
-- **Behaviour:** The analytics stack's presigned-URL Lambda (GCOAnalyticsStack): exchanges the Cognito identity for a SageMaker Studio presigned login URL. Synthesized here with an inline stand-in because the analytics stack is not part of this API's template.
+- **Lambda:** `analytics-presigned-url` (`lambda/analytics-presigned-url/handler.py`; python3.14, handler.lambda_handler, 29 s timeout)
+- **Behaviour:** The analytics stack's presigned-URL Lambda (GCOAnalyticsStack): exchanges the Cognito identity for a SageMaker Studio presigned login URL. Synthesized here with an inline stand-in that carries the function's runtime, handler, timeout and memory, because the analytics stack is not part of this API's template.
 
 **Responses**
 
 | Status | Description | Content |
 |---|---|---|
 | `200` | Success; the backend's response is returned unchanged. | — |
+| `202` | Accepted: the caller's SageMaker Studio user profile is still being created or updated (`{"status": "provisioning"}`); retry until the response is 200. | — |
 | `400` | Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend. | — |
 | `401` | Unauthorized: the Cognito ID token is missing, expired or not from the Studio pool. | — |
 | `404` | Not found: the endpoint does not exist in this region or the path is outside the inference serving-path allowlist. | — |
+| `409` | Conflict: the caller's SageMaker Studio user profile is in a failed state the backend cannot recover from (`{"error": "UserProfileFailed"}`); an operator must delete it, and the next login creates it again. | — |
 | `500` | Internal error in the proxy Lambda or the backend. | — |
 
 ## Schemas

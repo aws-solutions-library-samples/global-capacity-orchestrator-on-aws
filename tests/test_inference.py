@@ -25,6 +25,7 @@ from gco.models.inference_models import (
     RegionStatus,
     RegionSyncState,
 )
+from gco.services.inference_monitor import ForeignEndpointResourceError, ResourceCleanupResult
 from gco.services.inference_store import (
     InferenceEndpointStore,
     _deserialize_from_dynamo,
@@ -378,6 +379,17 @@ class TestSerializationHelpers:
         assert result["spec"]["items"] == [1, 2.5]
 
 
+def _serve_only(name, deployment):
+    """A ``read_namespaced_deployment`` stand-in: ``deployment`` at ``name``, 404 elsewhere."""
+
+    def read(resource_name, *_args, **_kwargs):
+        if resource_name == name:
+            return deployment
+        raise ApiException(status=404)
+
+    return read
+
+
 # =============================================================================
 # InferenceEndpointStore Tests (moto)
 # =============================================================================
@@ -512,6 +524,44 @@ class TestInferenceEndpointStore:
         assert result is not None
         assert result["desired_state"] == "deploying"  # reset on spec change
 
+    def test_update_spec_leaves_a_stopped_endpoint_stopped(self, store):
+        """A spec change is applied on the next start, not by restarting."""
+        created = store.create_endpoint("stopped-ep", {"image": "img:v1"}, ["us-east-1"])
+        stopped = store.update_desired_state(
+            "stopped-ep", "stopped", expected_lifecycle_id=created["lifecycle_id"]
+        )
+
+        result = store.update_spec(
+            "stopped-ep",
+            {"image": "img:v2"},
+            expected_lifecycle_id=created["lifecycle_id"],
+            expected_updated_at=stopped["updated_at"],
+        )
+
+        assert (result["desired_state"], result["spec"]) == ("stopped", {"image": "img:v2"})
+        latest = store.get_endpoint("stopped-ep", consistent_read=True)
+        assert (latest["desired_state"], latest["spec"]["image"]) == ("stopped", "img:v2")
+        started = store.start_endpoint("stopped-ep")
+        assert (started["desired_state"], started["spec"]["image"]) == ("running", "img:v2")
+
+    def test_update_spec_of_a_stopped_endpoint_still_needs_a_fresh_snapshot(self, store):
+        created = store.create_endpoint("stale-ep", {"image": "img:v1"}, ["us-east-1"])
+        store.update_desired_state(
+            "stale-ep", "stopped", expected_lifecycle_id=created["lifecycle_id"]
+        )
+
+        assert (
+            store.update_spec(
+                "stale-ep",
+                {"image": "img:v2"},
+                expected_lifecycle_id=created["lifecycle_id"],
+                expected_updated_at=created["updated_at"],
+            )
+            is None
+        )
+        latest = store.get_endpoint("stale-ep", consistent_read=True)
+        assert (latest["desired_state"], latest["spec"]["image"]) == ("stopped", "img:v1")
+
     def test_deleted_lifecycle_rejects_ordinary_store_mutations(self, store):
         created = store.create_endpoint(
             "terminal-ep", {"image": "old", "replicas": 1}, ["us-east-1"]
@@ -584,6 +634,88 @@ class TestInferenceEndpointStore:
         store.update_region_status("rs-err", "us-east-1", "error", error="OOMKilled")
         ep = store.get_endpoint("rs-err")
         assert ep["region_status"]["us-east-1"]["error"] == "OOMKilled"
+
+    @staticmethod
+    def _remove_west_then_delete(store, name):
+        """Remove us-west-2 (acknowledged), then delete; return (lifecycle, generation)."""
+        ep = store.create_endpoint(name, {"image": "img"}, ["us-east-1", "us-west-2"])
+        lifecycle = ep["lifecycle_id"]
+        generations = {**ep["region_generations"], "us-west-2": "west-removed"}
+        ep = store.update_target_regions(
+            name,
+            ["us-east-1"],
+            ["us-east-1", "us-west-2"],
+            generations,
+            expected_lifecycle_id=lifecycle,
+            expected_updated_at=ep["updated_at"],
+        )
+        assert ep["cleanup_regions"] == ["us-east-1", "us-west-2"]
+        # The removed Region's terminal removal acknowledgement.
+        assert store.update_region_status(
+            name,
+            "us-west-2",
+            "deleted",
+            extra={"absence_observations": 2},
+            expected_lifecycle_id=lifecycle,
+            expected_region_generation="west-removed",
+        )
+        deleted = store.update_desired_state(name, "deleted", expected_lifecycle_id=lifecycle)
+        assert "us-west-2" in deleted["deletion_regions"]
+        return lifecycle, deleted["deletion_generation"]
+
+    def test_region_removed_before_delete_acknowledges_the_deletion(self, store):
+        """A removal acknowledgement does not block the deletion's own writes."""
+        lifecycle, generation = self._remove_west_then_delete(store, "rm-ep")
+
+        for observations, state in ((1, "deleting"), (2, "deleted")):
+            assert store.update_region_status(
+                "rm-ep",
+                "us-west-2",
+                state,
+                extra={"absence_observations": observations},
+                expected_lifecycle_id=lifecycle,
+                expected_deletion_generation=generation,
+            )
+        # This generation's own terminal acknowledgement stays final.
+        assert not store.update_region_status(
+            "rm-ep",
+            "us-west-2",
+            "error",
+            error="stale leader",
+            expected_lifecycle_id=lifecycle,
+            expected_deletion_generation=generation,
+        )
+        status = store.get_endpoint("rm-ep", consistent_read=True)["region_status"]["us-west-2"]
+        assert (status["state"], status["deletion_generation"]) == ("deleted", generation)
+        assert status["absence_observations"] == 2
+
+    def test_endpoint_deleted_after_a_region_removal_is_purged(self, store):
+        """End to end: both Regions' monitors acknowledge and the record goes."""
+        import asyncio
+
+        from gco.services import inference_monitor as im
+
+        self._remove_west_then_delete(store, "rm-ep")
+
+        def monitor(region):
+            with (
+                patch.object(im.config, "load_incluster_config"),
+                patch.object(im.client, "AppsV1Api"),
+                patch.object(im.client, "CoreV1Api"),
+                patch.object(im.client, "NetworkingV1Api"),
+                patch.object(im.client, "DiscoveryV1Api"),
+            ):
+                built = im.InferenceMonitor("cluster", region, store)
+            # Nothing of the endpoint is left in either cluster.
+            built._delete_resources = MagicMock(return_value=im.ResourceCleanupResult())
+            return built
+
+        east, west = monitor("us-east-1"), monitor("us-west-2")
+        for _ in range(3):
+            asyncio.run(east.reconcile())
+            asyncio.run(west.reconcile())
+
+        assert store.get_endpoint("rm-ep", consistent_read=True) is None
 
     # -- delete_endpoint --
 
@@ -713,11 +845,13 @@ class TestInferenceMonitor:
         monitor.core_v1.delete_namespaced_service.assert_any_call(
             "ep", "ns", body=ANY, _request_timeout=30
         )
-        # Legacy per-endpoint routing objects are removed during terminal proof;
-        # the shared platform route has a different fixed name and is untouched.
-        monitor.networking_v1.delete_namespaced_ingress.assert_any_call(
-            "ep", "ns", body=ANY, _request_timeout=30
-        )
+        # The Ingresses releases up to v4.1.0 created are removed during terminal
+        # proof; the shared platform route has a different fixed name and is untouched.
+        for ingress_name in ("inference-ep", "inference-ep-proxy"):
+            monitor.networking_v1.delete_namespaced_ingress.assert_any_call(
+                ingress_name, "ns", body=ANY, _request_timeout=30
+            )
+        assert observed_ingresses == {"inference-ep", "inference-ep-proxy"}
         monitor.networking_v1.create_namespaced_ingress.assert_not_called()
 
     def test_delete_resources_tears_down_mooncake_topology(self, monitor):
@@ -1420,7 +1554,7 @@ class TestInferenceMonitor:
         deployment = MagicMock()
         deployment.spec.replicas = 2
         deployment.status.ready_replicas = 2
-        monitor.apps_v1.read_namespaced_deployment.return_value = deployment
+        monitor.apps_v1.read_namespaced_deployment.side_effect = _serve_only("stop-ep", deployment)
         endpoint = {
             "endpoint_name": "stop-ep",
             "desired_state": "stopped",
@@ -1508,7 +1642,7 @@ class TestInferenceMonitor:
         deployment = MagicMock()
         deployment.spec.replicas = 2
         deployment.status.ready_replicas = 2
-        monitor.apps_v1.read_namespaced_deployment.return_value = deployment
+        monitor.apps_v1.read_namespaced_deployment.side_effect = _serve_only("stop-ep", deployment)
         endpoint = {
             "endpoint_name": "stop-ep",
             "desired_state": "stopped",
@@ -1554,7 +1688,7 @@ class TestInferenceMonitor:
         deployment = MagicMock()
         deployment.spec.replicas = 2
         deployment.status.ready_replicas = 1
-        monitor.apps_v1.read_namespaced_deployment.return_value = deployment
+        monitor.apps_v1.read_namespaced_deployment.side_effect = _serve_only("stop-ep", deployment)
         endpoint = {
             "endpoint_name": "stop-ep",
             "desired_state": "stopped",
@@ -1601,6 +1735,112 @@ class TestInferenceMonitor:
         )
         assert "sensitive" not in status_call.kwargs["error"]
 
+    @staticmethod
+    def _absent_autoscalers():
+        custom = MagicMock()
+        hpa = MagicMock()
+        custom.get_namespaced_custom_object.side_effect = ApiException(status=404)
+        hpa.read_namespaced_horizontal_pod_autoscaler.side_effect = ApiException(status=404)
+        return (
+            patch("gco.services.inference_monitor.client.CustomObjectsApi", return_value=custom),
+            patch("gco.services.inference_monitor.client.AutoscalingV2Api", return_value=hpa),
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_scales_the_canary_with_its_endpoint(self, monitor, mock_store):
+        """A stopped classic endpoint's canary releases its GPUs too."""
+        deployments = {}
+        for deployment_name, replicas, ready in (("ep", 2, 2), ("ep-canary", 1, 1)):
+            deployment = MagicMock()
+            deployment.spec.replicas = replicas
+            deployment.status.ready_replicas = ready
+            deployments[deployment_name] = deployment
+
+        def read_deployment(resource_name, *_args, **_kwargs):
+            if resource_name in deployments:
+                return deployments[resource_name]
+            raise ApiException(status=404)
+
+        monitor.apps_v1.read_namespaced_deployment.side_effect = read_deployment
+        endpoint = {
+            "endpoint_name": "ep",
+            "desired_state": "stopped",
+            "target_regions": ["us-east-1"],
+            "spec": {"image": "img:v1", "canary": {"image": "img:v2", "weight": 10}},
+        }
+        custom_patch, hpa_patch = self._absent_autoscalers()
+
+        with custom_patch, hpa_patch:
+            result = await monitor._reconcile_endpoint(endpoint)
+
+        assert result == {"action": "stop", "endpoint": "ep", "cleanup_complete": True}
+        assert [
+            (call_args.args[0], call_args.kwargs["body"])
+            for call_args in monitor.apps_v1.patch_namespaced_deployment.call_args_list
+        ] == [("ep", {"spec": {"replicas": 0}}), ("ep-canary", {"spec": {"replicas": 0}})]
+        mock_store.update_region_status.assert_called_once_with(
+            "ep", "us-east-1", "stopped", replicas_ready=0, replicas_desired=0
+        )
+
+    @pytest.mark.asyncio
+    async def test_stopping_status_counts_the_canary_replicas(self, monitor, mock_store):
+        deployments = {}
+        for deployment_name, replicas, ready in (("ep", 2, 2), ("ep-canary", 1, 1)):
+            deployment = MagicMock()
+            deployment.spec.replicas = replicas
+            deployment.status.ready_replicas = ready
+            deployments[deployment_name] = deployment
+        monitor.apps_v1.read_namespaced_deployment.side_effect = (
+            lambda resource_name, *_args, **_kwargs: deployments[resource_name]
+        )
+        monitor._delete_autoscalers = MagicMock(
+            return_value=ResourceCleanupResult(pending=("hpa/ep",))
+        )
+
+        await monitor._reconcile_endpoint(
+            {
+                "endpoint_name": "ep",
+                "desired_state": "stopped",
+                "target_regions": ["us-east-1"],
+                "spec": {"image": "img:v1"},
+            }
+        )
+
+        mock_store.update_region_status.assert_called_once_with(
+            "ep", "us-east-1", "stopping", replicas_ready=3, replicas_desired=3
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_leaves_another_endpoint_named_like_the_canary_alone(
+        self, monitor, mock_store
+    ):
+        primary = MagicMock()
+        primary.spec.replicas = 1
+        primary.status.ready_replicas = 1
+
+        def get_deployment(resource_name, _namespace):
+            if resource_name == "ep-canary":
+                raise ForeignEndpointResourceError("belongs to endpoint ep-canary")
+            return primary
+
+        monitor._get_deployment = MagicMock(side_effect=get_deployment)
+        custom_patch, hpa_patch = self._absent_autoscalers()
+
+        with custom_patch, hpa_patch:
+            await monitor._reconcile_endpoint(
+                {
+                    "endpoint_name": "ep",
+                    "desired_state": "stopped",
+                    "target_regions": ["us-east-1"],
+                    "spec": {"image": "img:v1"},
+                }
+            )
+
+        assert [
+            call_args.args[0]
+            for call_args in monitor.apps_v1.patch_namespaced_deployment.call_args_list
+        ] == ["ep"]
+
     # -- _reconcile_endpoint: deleted --
 
     @pytest.mark.asyncio
@@ -1615,7 +1855,9 @@ class TestInferenceMonitor:
         deployment = MagicMock()
         deployment.spec.replicas = 2
         deployment.status.ready_replicas = 1
-        monitor.apps_v1.read_namespaced_deployment.return_value = deployment
+        monitor.apps_v1.read_namespaced_deployment.side_effect = _serve_only(
+            "stale-owner", deployment
+        )
         endpoint = {
             "endpoint_name": "stale-owner",
             "desired_state": "stopped",

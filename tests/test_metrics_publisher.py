@@ -33,6 +33,20 @@ class TestMetricsPublisher:
             assert publisher.cluster_name == "test-cluster"
             assert publisher.region == "us-east-1"
 
+    def test_cloudwatch_calls_have_bounded_timeouts_and_retries(self):
+        """Publishing runs beside the health API's probes; botocore's 60 s defaults do not."""
+        from gco.services.metrics_publisher import MetricsPublisher
+
+        with patch("boto3.client") as mock_client:
+            MetricsPublisher(namespace="Test/Namespace", cluster_name="c", region="us-east-1")
+
+        assert mock_client.call_args.args == ("cloudwatch",)
+        assert mock_client.call_args.kwargs["region_name"] == "us-east-1"
+        client_config = mock_client.call_args.kwargs["config"]
+        assert client_config.connect_timeout == 3
+        assert client_config.read_timeout == 10
+        assert client_config.retries == {"max_attempts": 3, "mode": "standard"}
+
     def test_put_metric_success(self):
         """Test successful metric put."""
         from gco.services.metrics_publisher import MetricsPublisher

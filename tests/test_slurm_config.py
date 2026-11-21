@@ -827,6 +827,23 @@ class TestChartValues:
         }
         assert cpu["podSpec"]["tolerations"] == []
 
+    def test_every_worker_turns_off_the_images_host_reservation(
+        self, values: dict[str, Any]
+    ) -> None:
+        """The worker image reserves the host outside the pod's limits from slurmd.
+
+        Its entrypoint sets CoreSpecCount and MemSpecLimit from the host minus
+        the operator's POD_CPUS and POD_MEMORY. The node record already
+        advertises only the pod's share, so on a 16-vCPU, 64 GiB host a live
+        worker kept 4 CPUs and 642 MiB and never ran a default job. Every
+        NodeSet sets both variables to 0, which the operator's merge by name
+        puts in place of its own values.
+        """
+        assert values["nodesets"]
+        for name, nodeset in values["nodesets"].items():
+            env = {item["name"]: item["value"] for item in nodeset["slurmd"]["env"]}
+            assert env == {"POD_CPUS": "0", "POD_MEMORY": "0"}, name
+
     def test_gpu_nodeset(self, values: dict[str, Any]) -> None:
         gpu = values["nodesets"]["gpu"]
         assert gpu["slurmd"]["resources"]["limits"]["nvidia.com/gpu"] == "1"
@@ -1041,12 +1058,28 @@ def _loader(valid_cdk_context: dict[str, Any], **context: Any) -> ConfigLoader:
 
 
 class TestConfigLoaderWiring:
+    def test_partitions_are_checked_against_the_default_quota(
+        self, valid_cdk_context: dict[str, Any]
+    ) -> None:
+        """Without a resource_quota block the stack deploys the defaults (192 CPUs per
+        container), so a bigger partition must fail here, not sit PENDING forever."""
+        valid_cdk_context.pop("resource_quota", None)
+        slurm = {"enabled": True, "partitions": {"cpu": {"cpu": "256", "memory": "64Gi"}}}
+        with pytest.raises(
+            ConfigValidationError,
+            match=re.escape(
+                "helm.slurm.partitions.cpu.cpu='256' exceeds resource_quota.container_max_cpu='192'"
+            ),
+        ):
+            _loader(valid_cdk_context, helm={"slurm": slurm})
+
     def test_absent_block_reads_as_off(self, valid_cdk_context: dict[str, Any]) -> None:
         assert _loader(valid_cdk_context).get_slurm_config()["enabled"] is False
         assert (
             _loader(valid_cdk_context, helm={"volcano": {}}).get_slurm_config()["enabled"] is False
         )
-        assert _loader(valid_cdk_context, helm=[]).get_slurm_config()["enabled"] is False
+        with pytest.raises(ConfigValidationError, match=r"helm must be an object, got list"):
+            _loader(valid_cdk_context, helm=[])
 
     def test_valid_block_is_returned_with_defaults(self, valid_cdk_context: dict[str, Any]) -> None:
         loader = _loader(
@@ -1111,3 +1144,10 @@ class TestConfigLoaderWiring:
                 loader.get_slurm_config()
         finally:
             loader._raw_slurm_config = original  # type: ignore[method-assign]
+
+
+def test_quota_quantity_reads_an_unparseable_value_as_absent() -> None:
+    """The regional stack reports a malformed quota itself; this module stays quiet."""
+    assert sc._quota_quantity({"cpu": "not-a-quantity"}, "cpu") is None
+    assert sc._quota_quantity({}, "cpu") is None
+    assert sc._quota_quantity({"cpu": "2"}, "cpu") == 2.0

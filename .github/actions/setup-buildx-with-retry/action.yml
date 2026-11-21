@@ -1,6 +1,7 @@
 name: "Setup Buildx (with retry)"
 description: |
-  Wraps `docker/setup-buildx-action@v4.2.0` with retry-on-failure.
+  Wraps `docker/setup-buildx-action` (the release pinned below) with
+  retry-on-failure.
 
   Creating a `docker-container` builder pulls the BuildKit image from Docker
   Hub, whose registry and token endpoints intermittently time out on GitHub
@@ -17,7 +18,7 @@ description: |
 
   Retrying the whole action (rather than pre-pulling a hard-coded BuildKit tag)
   keeps this correct if the pinned buildx version changes the image or tag it
-  resolves. Behaviour matches `docker/setup-buildx-action@v4.2.0` on every
+  resolves. Behaviour matches the pinned `docker/setup-buildx-action` on every
   successful path; the only observable difference is on transient failures.
 
 inputs:

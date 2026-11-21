@@ -19,7 +19,9 @@ boundary is faked.
 from __future__ import annotations
 
 import json
+import re
 import threading
+from collections import Counter
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -136,6 +138,33 @@ class _FakeLogs:
 
 def _complete(*rows: dict[str, str]) -> dict[str, Any]:
     return {"statuses": ["Complete"], "rows": _rows(*rows)}
+
+
+class _SpanStore(_FakeLogs):
+    """``aws/spans`` holding spans at given times: a count query sees its own window."""
+
+    def __init__(self, spans: list[tuple[str, int]], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.spans = spans
+
+    def start_query(self, **kwargs: Any) -> dict[str, str]:
+        if "by traceId, service" in kwargs["queryString"]:
+            return super().start_query(**kwargs)
+        names = re.search(r"in \[(.*)\]", kwargs["queryString"])
+        assert names is not None
+        services = set(json.loads(f"[{names.group(1)}]"))
+        counts = Counter(
+            service
+            for service, at in self.spans
+            if service in services and kwargs["startTime"] <= at <= kwargs["endTime"]
+        )
+        self.started.append({"kind": "counts", **kwargs})
+        query_id = f"q{len(self.started)}"
+        self.pending[query_id] = {
+            "statuses": ["Complete"],
+            "rows": _rows(*({"service": name, "spans": str(n)} for name, n in counts.items())),
+        }
+        return {"queryId": query_id}
 
 
 def _all_counts(*services: str, spans: str = "3") -> dict[str, Any]:
@@ -473,6 +502,7 @@ class TestSpanSnapshot:
             counts=[
                 _complete(
                     {"service": "health-monitor", "spans": "4"},
+                    {"service": "inference-proxy", "spans": "2"},
                     {"service": "cost-monitor", "spans": "not-a-number"},
                     {"service": "cost-monitor", "spans": "inf"},
                     {"service": "someone-else", "spans": "9"},
@@ -493,17 +523,22 @@ class TestSpanSnapshot:
 
         counts, correlated = checks._span_snapshot(
             logs,
-            ["health-monitor", "cost-monitor"],
-            window_start_ms=INFERENCE_STARTED_MS,
+            ["health-monitor", "inference-proxy", "cost-monitor"],
             traffic_start_ms=INFERENCE_STARTED_MS + 600_000,
+            counted_from={"inference-proxy": INFERENCE_STARTED_MS},
             correlate=True,
         )
 
-        assert counts == {"health-monitor": 4, "cost-monitor": 0}
+        # Each row counts only in the query whose window its service has: the
+        # proxy's from the inference action's start, the others' from the traffic.
+        assert counts == {"health-monitor": 4, "inference-proxy": 2, "cost-monitor": 0}
         assert correlated == 2
-        count_query, join_query = logs.started
-        # Both windows open two minutes early for skew; the join only covers the traffic.
-        assert count_query["startTime"] == INFERENCE_STARTED_MS // 1000 - 120
+        proxy_query, count_query, join_query = logs.started
+        assert '["inference-proxy"]' in proxy_query["queryString"]
+        assert '["health-monitor", "cost-monitor"]' in count_query["queryString"]
+        # Every window opens two minutes early for skew.
+        assert proxy_query["startTime"] == INFERENCE_STARTED_MS // 1000 - 120
+        assert count_query["startTime"] == (INFERENCE_STARTED_MS + 600_000) // 1000 - 120
         assert join_query["startTime"] == (INFERENCE_STARTED_MS + 600_000) // 1000 - 120
         assert count_query["endTime"] == int(WALL_START) + 120
 
@@ -513,7 +548,7 @@ class TestSpanSnapshot:
         _install_clock(monkeypatch)
         logs = _FakeLogs(counts=[_all_counts("health-monitor")])
         counts, correlated = checks._span_snapshot(
-            logs, ["health-monitor"], window_start_ms=0, traffic_start_ms=0, correlate=False
+            logs, ["health-monitor"], traffic_start_ms=0, counted_from={}, correlate=False
         )
         assert counts == {"health-monitor": 3}
         assert correlated is None
@@ -528,8 +563,8 @@ class TestWaitForSpans:
             ctx,
             REGION,
             self.EXPECTED,
-            window_start_ms=0,
             traffic_start_ms=0,
+            counted_from={},
             correlate=True,
         )
 
@@ -601,8 +636,8 @@ class TestWaitForSpans:
                 ctx,
                 REGION,
                 ["health-monitor", "manifest-processor"],
-                window_start_ms=0,
                 traffic_start_ms=0,
+                counted_from={},
                 correlate=False,
             )
 
@@ -652,10 +687,33 @@ class TestVerifyRegion:
         assert record["evidence"] is evidence
         assert record["traffic"] == evidence["traffic"]
         assert TRACE_A not in json.dumps(record)
-        # The count window opens at the inference action's start for the proxy.
-        assert logs.started[0]["startTime"] == INFERENCE_STARTED_MS // 1000 - 120
-        assert logs.started[1]["startTime"] == int(WALL_START) - 120
+        # Only the proxy is counted from the inference action's start; the
+        # services this action calls, and their trace join, from its traffic.
+        proxy, driven, join = logs.started
+        assert proxy["startTime"] == INFERENCE_STARTED_MS // 1000 - 120
+        assert '["inference-proxy"]' in proxy["queryString"]
+        assert driven["startTime"] == int(WALL_START) - 120
+        assert "inference-proxy" not in driven["queryString"]
+        assert join["kind"] == "correlation"
+        assert join["startTime"] == int(WALL_START) - 120
         assert ctx.persist.call_count == 2
+
+    def test_spans_earlier_actions_left_do_not_stand_in_for_this_actions_traffic(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_clock(monkeypatch, step=checks._SPAN_WAIT_SECONDS)
+        inference_s = INFERENCE_STARTED_MS // 1000
+        # The actions between the inference action and this one called every
+        # service; this action's own requests reached only the cost monitor.
+        earlier = [(service, inference_s + 600) for service in checks.TRACED_SERVICES]
+        logs = _SpanStore([*earlier, ("cost-monitor", int(WALL_START) + 5)], correlation=[_JOINED])
+        ctx = _context(clients={("xray", REGION): _FakeXRay(), ("logs", REGION): logs})
+
+        with pytest.raises(
+            checks.TracingValidationError,
+            match=r"no spans for health-monitor, manifest-processor in aws/spans within 900s",
+        ):
+            checks.verify_region_tracing(ctx, REGION, self._config())
 
     def test_a_zero_ratio_samples_nothing_and_is_skipped(self) -> None:
         ctx = _context()

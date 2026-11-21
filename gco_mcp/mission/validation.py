@@ -647,6 +647,31 @@ resolution.
 """
 
 
+def reject_control_tools(allowlist: object) -> None:
+    """Refuse an explicit allowlist that names a loop-management tool.
+
+    A session must never start, drive, or tear down Mission or swarm sessions
+    from inside its own loop, so no name in :data:`SWARM_EXCLUDED_TOOLS` (the
+    nine ``mission_*`` control tools, the swarm supervisor names and the
+    ``swarm_*`` MCP tools) is accepted, whatever the registry holds. Raises
+    ``validation_error`` with ``details.reason == "control_tool_not_allowed"``
+    and the offending ``tool_name``. A value that is not a list is left to
+    :func:`validate_tool_allowlist`, which rejects it as ``not_a_list``.
+    """
+    if not isinstance(allowlist, list):
+        return
+    for name in allowlist:
+        if isinstance(name, str) and name in SWARM_EXCLUDED_TOOLS:
+            raise MissionValidationError(
+                "validation_error",
+                details={
+                    "field": "tool_allowlist",
+                    "tool_name": name,
+                    "reason": "control_tool_not_allowed",
+                },
+            )
+
+
 def resolve_effective_allowlist(
     *,
     allow_all_tools: bool,
@@ -662,7 +687,8 @@ def resolve_effective_allowlist(
     are read) and the set of control-tool names to exclude from an all-tools
     expansion (``control_tools``, defaulting to :data:`SWARM_EXCLUDED_TOOLS` —
     the ``mission_*`` control tools plus the swarm supervisor and ``swarm_*``
-    MCP tool names).
+    MCP tool names). :data:`SWARM_EXCLUDED_TOOLS` is always excluded, even when
+    the caller passes a narrower set.
 
     Behaviour:
 
@@ -671,12 +697,15 @@ def resolve_effective_allowlist(
       :class:`MissionValidationError` with
       ``details.reason == "allow_all_and_explicit_allowlist_mutually_exclusive"``.
     * When ``allow_all_tools`` is True and no explicit list is supplied, the
-      candidate is ``sorted(set(registered_tools) - set(control_tools))``. An
+      candidate is the registered names minus ``control_tools`` and
+      :data:`SWARM_EXCLUDED_TOOLS`, sorted. An
       empty candidate (nothing registered, or only control tools registered)
       raises ``details.reason == "allow_all_tools_empty_registry"``. Otherwise
       the candidate is passed through :func:`validate_tool_allowlist` so the
       resolved list satisfies every invariant an operator-supplied list would.
-    * When ``allow_all_tools`` is False, the call delegates to
+    * When ``allow_all_tools`` is False, an explicit list naming a
+      loop-management tool is rejected by :func:`reject_control_tools`
+      (``control_tool_not_allowed``); otherwise the call delegates to
       :func:`validate_tool_allowlist` over ``explicit_allowlist or []``,
       preserving its existing ``empty`` rejection on an empty/absent list.
 
@@ -693,7 +722,8 @@ def resolve_effective_allowlist(
                     "reason": "allow_all_and_explicit_allowlist_mutually_exclusive",
                 },
             )
-        candidate = sorted(set(registered_tools) - set(control_tools))
+        excluded = set(control_tools) | SWARM_EXCLUDED_TOOLS
+        candidate = sorted(set(registered_tools) - excluded)
         if not candidate:
             raise MissionValidationError(
                 "validation_error",
@@ -703,6 +733,7 @@ def resolve_effective_allowlist(
                 },
             )
         return validate_tool_allowlist(candidate, registered_tools)
+    reject_control_tools(explicit_allowlist)
     return validate_tool_allowlist(explicit_allowlist or [], registered_tools, flag_lookup)
 
 

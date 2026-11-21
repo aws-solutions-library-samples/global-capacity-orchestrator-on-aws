@@ -13,7 +13,7 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 156 tools; with every flag enabled the
+default registration the server exposes 155 tools; with every flag enabled the
 ceiling is 216. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
@@ -31,7 +31,7 @@ flag-to-tool mapping.
 | `examples.py` | 1 | `find_examples` (example-manifest discovery) |
 | `gitops.py` | 1 | `gitops_status` (the self-managed Argo CD, read-only) |
 | `images.py` | 20 | `images_list`, `images_tags`, `images_describe`, `images_uri`, `images_replication_get`, `images_replication_status`, `images_orphans`, `images_mirror_plan`, `images_mirror_status`, `images_init`, `images_lifecycle_get`, `images_lifecycle_set`, `images_replication_sync`, `images_build` (gated), `images_push` (gated), `images_mirror` (gated), `images_delete_tag` (gated), `images_delete_repo` (gated), `images_cleanup` (gated), `images_prune` (gated) |
-| `inference.py` | 22 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `add_inference_region`, `remove_inference_region`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `configure_mooncake_store`, `mooncake_topology_status`, `populate_kv_cache` |
+| `inference.py` | 22 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `add_inference_region`, `remove_inference_region`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `configure_mooncake_store`, `mooncake_topology_status`, `populate_kv_cache` (gated by `GCO_ENABLE_MODEL_UPLOAD`) |
 | `jobs.py` | 15 | `list_jobs`, `submit_job_sqs`, `submit_job_api`, `get_job`, `get_job_logs`, `get_job_events`, `get_job_pods`, `get_pod_logs`, `get_job_metrics`, `retry_job`, `delete_job` (gated), `cluster_health`, `queue_status`, `get_job_validation_policy`, `check_job_policy` |
 | `metrics.py` | 4 | `metrics_cloudwatch_get`, `metrics_from_job_logs`, `metrics_from_shared_storage_file` (default-on); `metrics_from_local_file` (gated by `GCO_ENABLE_LOCAL_METRICS`, default-off) — all `safe` |
 | `mission.py` | 10 | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list`, `mission_memory_search` — all gated by `GCO_ENABLE_MISSION` |
@@ -133,14 +133,14 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
-| `dag_run` | `gco dag run` — execute a DAG manifest end-to-end. |
+| `dag_run` | `gco dag run` — execute a DAG manifest end-to-end. long-running: the CLI waits for each step, so a run goes through `_run_long_task` (progress, task status, `task_tail`, background-task mode) and returns the task status; `dry_run` returns the CLI's validation document. |
 | `dag_validate` | `gco dag validate` — statically validate a DAG manifest. |
 
 ### `deps.py`
 
 | Tool | Description |
 |------|-------------|
-| `deps_scan` | `gco deps scan` — generate the monthly dependency-update report on demand; `nodepools_only=true` runs just the accelerator-catalog / NodePool freshness check. |
+| `deps_scan` | `gco deps scan` — generate the monthly dependency-update report on demand; `nodepools_only=true` runs just the accelerator-catalog / NodePool freshness check. The full scan pip-installs the project's extras into the server's environment, so the tool is tagged `low-risk`, not `safe`. |
 
 ### `docs.py`
 
@@ -202,7 +202,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `list_endpoint_models` | List models loaded on an inference endpoint. |
 | `list_inference_endpoints` | List all inference endpoints. |
 | `mooncake_topology_status` | Show a disaggregated endpoint's per-role topology status. |
-| `populate_kv_cache` | `gco inference populate-kv` — upload data into an endpoint's KV-cache cold tier. |
+| `populate_kv_cache` | `gco inference populate-kv` — upload a descriptor-backed snapshot of a source confined beneath `GCO_STORAGE_LOCAL_ROOT` into an endpoint's KV-cache cold tier (gated by `GCO_ENABLE_MODEL_UPLOAD`; links, special files, and filesystem crossings fail closed). |
 | `promote_canary` | Promote canary to primary (100% traffic to new version). |
 | `remove_inference_region` | Remove a Region from an inference endpoint. |
 | `rollback_canary` | Rollback canary (remove canary, 100% traffic to primary). |
@@ -223,7 +223,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `get_job_events` | Get Kubernetes events for a job (useful for debugging). |
 | `get_job_logs` | Get logs from a job. |
 | `get_job_metrics` | Get CPU and memory usage for all pods in a job. |
-| `get_job_pods` | Get pod details, placement, and container status for a job. Each pod carries the instance type and capacity type of the node it landed on. |
+| `get_job_pods` | Get pod details, placement, and container status for a job. Each pod carries the instance type and capacity type of the node it landed on; each exited container carries its exit code and its `startedAt` and `finishedAt` times. |
 | `get_job_validation_policy` | Get the job validation policy a region actually enforces, as deployed — per-manifest caps, namespace/kind/registry allowlists, pod-security flags, and the live `LimitRange` / `ResourceQuota` ceilings. Reads the cluster, not a local `cdk.json`. |
 | `get_pod_logs` | Get a bounded log tail from one specific pod belonging to a job. |
 | `list_jobs` | List jobs across GCO clusters. |
@@ -239,7 +239,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `metrics_cloudwatch_get` | Read one [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) datapoint as a canonical metric. |
 | `metrics_from_job_logs` | Extract a scalar from the tail of a job's logs. |
 | `metrics_from_local_file` | Read a named field from a LOCAL metrics file. |
-| `metrics_from_shared_storage_file` | Read a named field from a shared-storage metrics file. |
+| `metrics_from_shared_storage_file` | Read a named field from a metrics file on the cluster's shared EFS file system (`gco files download` through a helper pod; needs kubectl access; does not read S3). |
 
 ### `mission.py`
 
@@ -272,9 +272,9 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `disable_monitoring` | `gco monitoring disable` — flip cluster observability off in cdk.json. |
 | `enable_monitoring` | `gco monitoring enable` — flip cluster observability on in cdk.json. |
 | `monitoring_status` | `gco monitoring status` — show the cluster observability toggle + config. |
-| `monitoring_user_add` | `gco monitoring users add` — create a Grafana user via the admin API. |
-| `monitoring_user_remove` | `gco monitoring users remove` — delete a Grafana user (gated). |
-| `monitoring_users_list` | `gco monitoring users list` — list Grafana users via the admin API. |
+| `monitoring_user_add` | `gco monitoring users add` — create a Grafana user via the admin API. `region` and `via_ssm` (an SSM-managed instance id) pick the cluster whose Grafana Secret it reads; `via_ssm="auto"` is refused. |
+| `monitoring_user_remove` | `gco monitoring users remove` — delete a Grafana user (gated). Takes `region` and `via_ssm` like `monitoring_user_add`. |
+| `monitoring_users_list` | `gco monitoring users list` — list Grafana users via the admin API. Takes `region` and `via_ssm` like `monitoring_user_add`. |
 
 ### `nodepools.py`
 
@@ -290,9 +290,9 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
-| `cancel_queue_job` | `gco queue cancel` — cancel a queued job (only works for jobs not yet running). |
+| `cancel_queue_job` | `gco queue cancel` — cancel a job that is still queued, before a region claims it. |
 | `queue_get` | `gco queue get` — fetch a single job from the global queue. |
-| `queue_list` | `gco queue list` — list jobs in the global queue. |
+| `queue_list` | `gco queue list` — list one page of jobs in the global queue. |
 | `queue_stats` | `gco queue stats` — show aggregate stats for the global queue. |
 | `queue_submit` | `gco queue submit` — submit a job manifest to the global queue. |
 
@@ -367,7 +367,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
-| `files_access_points` | `gco files access-points` — list [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) access points. |
+| `files_access_points` | `gco files access-points FILE_SYSTEM_ID --region REGION` — list the access points of one [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) file system. |
 | `files_get` | `gco files get` — get file system details for a region (EFS/FSx). |
 | `list_file_systems` | List EFS and FSx file systems. |
 | `list_storage_buckets` | List deployed GCO [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) buckets and their human-friendly aliases. |
@@ -419,9 +419,66 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 Every tool follows the same pattern:
 
 1. Decorated with `@mcp.tool()` (registers with FastMCP) and `@audit_logged` (structured audit logging)
-2. Builds a CLI argument list from the tool's parameters
+2. Checks its path arguments (see below) and builds a CLI argument list from the tool's parameters
 3. Calls `cli_runner._run_cli(*args)` which shells out to `gco --output json ...`
 4. Returns the JSON string result to the LLM
+
+The runners pass every argument to the CLI unchanged, so each tool checks the
+arguments that are paths before it calls them:
+
+- A local file or directory the CLI opens (`manifest_path`, `script_path`,
+  `context`, `outputs_file`) goes through
+  `cli_runner.reject_paths_outside_project_root(...)`. The path is resolved
+  against the project root the CLI runs from, symlinks included, and must stay
+  inside it (`code: path_outside_project_root`). A file that names other files
+  gets the same check for each of them: `dag_validate` and `dag_run` read the
+  DAG file and check every `steps[].manifest`, reported as
+  `parameter: steps[<i>].manifest`.
+- A name or ID the CLI puts into an API request path (job, pod and namespace
+  names, template names, webhook and queue job IDs, `invoke_inference`'s
+  `api_path`) goes through `cli_runner.reject_traversal_segments(...)`, which
+  refuses a `..` segment (`code: path_traversal_segment`). The HTTP client
+  removes dot segments before sending, so such a value would reach another
+  API route.
+
+Prompts, chat messages, JSON bodies, descriptions, and other free text are not
+checked.
+
+A secret never goes on the CLI's command line, which every local user can read
+through `ps`. Pass it with `cli_runner._run_cli(*args, env={...})` in a variable
+the CLI option also reads (Click's `envvar=`): `GCO_STUDIO_PASSWORD`,
+`GCO_GRAFANA_USER_PASSWORD`, `GCO_WEBHOOK_URL`, `GCO_WEBHOOK_SECRET`. The
+variables reach the child only and are never logged. `@audit_logged` redacts
+arguments whose names contain `password`, `secret`, `token` or `key`, and logs a
+`url` / `*_url` argument as its scheme and host only.
+
+Every child process (the `gco` runners, `_run_long_task`, and the kubectl calls
+behind the `gco://` resources) gets `/dev/null` as stdin. Under the stdio
+transport the server's own stdin is the client's message stream, so an
+inherited one would let a CLI prompt read the client's messages. A prompt now
+reads end-of-file and the CLI exits at once (`Aborted!`). A tool must not rely
+on a prompt: pass `-y` or an environment variable instead, or refuse before
+calling the CLI, as `analytics_login_url` does without a password. No tool
+provisions an SSM bastion: a `via_ssm` argument names an existing
+SSM-managed instance, and the monitoring user tools refuse `auto`
+(`code: bastion_not_provisioned`).
+
+Every child process also gets its environment from `iam.child_environment(env)`:
+the server's own environment plus a tool's `env`, unless `GCO_MCP_ROLE_ARN` is
+set. Then the child gets the MCP role instead of the server's ambient
+credentials: the server's credential variables are left out, and the child
+reads the role from a container credentials endpoint on `127.0.0.1` with
+private AWS config files that carry no credentials. A new spawn site must pass
+`env=child_environment(...)` and `stdin=DEVNULL` like the existing ones.
+
+`_run_cli` and `_run_cli_async` stop the CLI after two minutes. A command that
+takes longer needs a different path: the tools that copy local data to or from
+S3 (`models_upload`, `upload_to_regional_bucket`, `populate_kv_cache`,
+`sync_storage_bucket`) pass `timeout_seconds=cli_runner.TRANSFER_TIMEOUT_SECONDS`
+(one hour), and commands that wait on cloud work (`deploy_*`, `destroy_*`,
+`bootstrap_cdk`, `images_build`, `images_push`, `dag_run`) run through
+`_run_long_task`, which has no timeout, streams progress, records task status
+for `task_status` / `task_tail`, and stops the CLI when the call is cancelled.
 
 Most tools follow this `_run_cli` shell-out pattern. A few domains — notably the
 image-registry and image-mirror tools in `images.py` — instead wrap their CLI
@@ -435,6 +492,7 @@ JSON string. The image-mirror tools (`images_mirror_plan`, `images_mirror_status
 
 1. Add the function to the appropriate domain file (or create a new one)
 2. Decorate with `@mcp.tool()` and `@audit_logged`
-3. Call `cli_runner._run_cli(...)` with the correct CLI arguments
-4. Register the module in `tools/__init__.py` if it's a new file
-5. Add tests in `tests/test_mcp_server.py` and `tests/test_mcp_integration.py`
+3. Check local path and request-path arguments as described in [How Tools Work](#how-tools-work)
+4. Call `cli_runner._run_cli(...)` with the correct CLI arguments
+5. Register the module in `tools/__init__.py` if it's a new file
+6. Add tests in `tests/test_mcp_server.py` and `tests/test_mcp_integration.py`

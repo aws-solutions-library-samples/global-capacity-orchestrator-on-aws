@@ -90,6 +90,13 @@ Scheduled report object keys are **deterministic per window** (aligned to the
 report interval), so a worker restart, rollout overlap, or retry converges on
 the same object instead of double-counting a window in Athena.
 
+Each scheduled pass (once a minute) also looks back over the last 24 hours for
+completed windows that have no report yet, for example because the pod was
+down or OpenCost was unreachable for a whole window, and writes them, newest
+first and at most four per pass. A missed window OpenCost has no allocations
+for (one from before the cluster existed, say) is left out rather than written
+as an empty report; the most recent window is always written.
+
 ## Cost of cost monitoring
 
 The feature is deliberately lightweight:
@@ -250,7 +257,8 @@ Each Parquet row is one namespace's accumulated allocation for one window:
 Partition columns `region` and `date` come from the object key. The bucket is
 KMS-encrypted (customer-managed key), versioned, blocks public access,
 denies insecure transport, and writes server access logs to a dedicated
-lifecycle-expired log bucket. Each region's cost-monitor role is granted
+lifecycle-expired log bucket (SSE-S3, which S3 server access logging requires
+of a destination bucket). Each region's cost-monitor role is granted
 write access by literal deterministic ARN — no cross-region lookups, and the
 monitoring stack can safely deploy after the regional stacks (the service
 retries its next scheduled write until the bucket exists).
@@ -312,9 +320,9 @@ Ad-hoc reports land under `adhoc/` — deliberately outside the scheduled
 prefix the Athena table reads, so a user-requested window that overlaps
 scheduled windows can never double-count in aggregations.
 
-`--region` pins the call to that region's API bridge (in the commercial
-partition direct bridge access requires `api_gateway.regional_api_enabled=true`;
-in other partitions it is always available). Without `--region` the request
+`--region` pins the call to that region's API bridge (your credentials need
+`execute-api:Invoke` on it; see [CLI.md → Regional API Mode](CLI.md#regional-api-mode)).
+Without `--region` the request
 rides the global API to the nearest healthy region, and the response names
 the region that answered. Endpoint details and response shapes:
 [API.md — Cost Reporting](API.md#cost-reporting).
@@ -327,9 +335,11 @@ spend** — discounts, Savings Plans, and spot pricing included:
 
 ### Cost allocation tags
 
-Every `gco costs` Cost Explorer query filters on the `Project` tag, which
-only matches spend after the tag key is activated as a cost allocation tag
-in the billing account:
+Every `gco costs` Cost Explorer query filters on the `Project` tag, with the
+value `cdk.json` `context.tags.Project` gives every stack (`GCO` in the
+committed file; the CLI uses `GCO` when it runs outside a checkout). The
+filter only matches spend after the tag key is activated as a cost
+allocation tag in the billing account:
 
 ```bash
 gco costs allocation status    # activation state of GCO's tag keys
@@ -343,6 +353,15 @@ GPU spend: EKS Auto Mode launches EC2 capacity outside CloudFormation, so
 those instances never carry `Project` — but AWS stamps them with
 `aws:eks:cluster-name`, giving per-cluster attribution with zero manifest
 changes. Group by it in Cost Explorer or the CUR to split spend by cluster.
+The instances and volumes AWS PCS launches do carry the same `Project` value:
+the stack writes it into the node groups' launch templates. A HyperPod cluster
+carries it too, and HyperPod propagates its cluster tags to the instances it
+launches.
+
+The `Project` value is not derived from `project_name`. Two deployments in
+one account that keep the same value report each other's spend, so give
+each its own `context.tags.Project` value when you need project-scoped
+Cost Explorer figures.
 
 Operational notes:
 

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import copy
 import json
+import re
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -364,13 +366,58 @@ class TestValidConfigurations:
             "https://github.com/example/gco-tenants",
             "ssh://git@example.com/tenants.git",
             "git@github.com:example/gco-tenants.git",
-            "file-share/tenants.git",
         ],
     )
     def test_git_url_shapes(self, repo_url: str) -> None:
         assert ac.is_git_repository_url(repo_url)
         config = ac.validate_argocd_config({"gitops": {"repo_url": repo_url}})
         assert ac.gitops_enabled(config)
+
+    @pytest.mark.parametrize(
+        "repo_url",
+        ["http://git.example.com/repo.git", "file:///srv/repo.git", "file-share/tenants.git"],
+    )
+    def test_a_git_suffix_alone_is_not_a_repository_url(self, repo_url: str) -> None:
+        """The check now matches its message: https://, ssh:// or git@ only."""
+        assert not ac.is_git_repository_url(repo_url)
+        with pytest.raises(
+            ac.ArgoCdConfigError,
+            match=re.escape(
+                "helm.argocd.gitops.repo_url must be a Git repository URL (https://, ssh:// or "
+                f"git@), got {repo_url!r}"
+            ),
+        ):
+            ac.validate_argocd_config({"gitops": {"repo_url": repo_url}})
+
+    def test_quotes_and_backslashes_render_to_valid_yaml(self) -> None:
+        """The values sit inside double quotes in the manifest, so they are escaped."""
+        import yaml
+
+        config = ac.validate_argocd_config(
+            _block(
+                gitops=_gitops(
+                    repo_url="https://github.com/example/t.git",
+                    revision='v1"rc',
+                    path="overlays\\{region}",
+                )
+            )
+        )
+        replacements = ac.compute_argocd_replacements(
+            config, enabled=True, region="eu-west-1", cluster_name="gco-eu-west-1"
+        )
+        template = Path("lambda/kubectl-applier-simple/manifests/post-helm-argocd-gitops.yaml")
+        rendered = template.read_text(encoding="utf-8")
+        for token, value in replacements.items():
+            rendered = rendered.replace(token, value)
+        documents = [d for d in yaml.safe_load_all(rendered) if d]
+        sources = [d["spec"]["source"] for d in documents if d.get("kind") == "Application"]
+        assert sources == [
+            {
+                "repoURL": "https://github.com/example/t.git",
+                "targetRevision": 'v1"rc',
+                "path": "overlays\\eu-west-1",
+            }
+        ]
 
     def test_repo_url_padding_is_tolerated(self) -> None:
         config = ac.validate_argocd_config(
@@ -486,9 +533,15 @@ def _loader(valid_cdk_context: dict[str, Any], helm: object = None) -> ConfigLoa
 class TestConfigLoaderWiring:
     def test_absent_block_reads_as_off(self, valid_cdk_context: dict[str, Any]) -> None:
         assert _loader(valid_cdk_context).get_argocd_config() == ac.ARGOCD_DEFAULTS
-        # A helm block without argocd (or a non-object helm) is the same.
+        # A helm block without argocd is the same.
         assert _loader(valid_cdk_context, {"volcano": {}}).get_argocd_config()["enabled"] is False
-        assert _loader(valid_cdk_context, []).get_argocd_config()["enabled"] is False
+
+    def test_non_object_helm_block_is_rejected(self, valid_cdk_context: dict[str, Any]) -> None:
+        """A list where the helm block belongs used to read as absent."""
+        from gco.config.config_loader import ConfigValidationError
+
+        with pytest.raises(ConfigValidationError, match=r"helm must be an object, got list"):
+            _loader(valid_cdk_context, [])
 
     def test_valid_block_is_returned_with_defaults(self, valid_cdk_context: dict[str, Any]) -> None:
         loader = _loader(valid_cdk_context, {"argocd": {"enabled": True}})

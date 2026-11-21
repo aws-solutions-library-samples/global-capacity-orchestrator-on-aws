@@ -315,24 +315,57 @@ class TestStackDeleteBudgets:
     def test_custom_resource_charts_get_longer_uninstall_tasks(self) -> None:
         assert rs._UNINSTALL_TIMEOUT_MINUTES == {
             "keda": 6,
+            "kueue": 4,
             "argocd": 4,
-            "crossplane": 6,
+            "crossplane": 7,
             "slinky-slurm": 4,
         }
 
-    def test_every_extended_budget_belongs_to_a_cleanup_chart(self, helm_handler: Any) -> None:
-        assert set(rs._UNINSTALL_TIMEOUT_MINUTES) <= set(
+    def test_every_cleanup_chart_has_an_extended_budget(self, helm_handler: Any) -> None:
+        assert set(rs._UNINSTALL_TIMEOUT_MINUTES) == set(
             helm_handler.CHART_CUSTOM_RESOURCE_API_GROUPS
         )
 
-    def test_keda_task_covers_its_cleanup_and_helm_deadline(self, helm_handler: Any) -> None:
-        """Four discovery calls, two deletion passes and Helm fit the KEDA task."""
-        ceiling = (
-            4 * helm_handler.KEDA_CUSTOM_RESOURCE_DISCOVERY_TIMEOUT_SECONDS
-            + 2 * helm_handler.KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS
-            + helm_handler.KEDA_UNINSTALL_COMMAND_TIMEOUT_SECONDS
+    @staticmethod
+    def _worst_case_seconds(helm_handler: Any, chart: str) -> int:
+        """The uninstall's fixed call sequence with every call at its own timeout."""
+        helm_cap = helm_handler._UNINSTALL_DEADLINES.get(
+            chart, (None, helm_handler.HELM_UNINSTALL_COMMAND_TIMEOUT_SECONDS)
+        )[1]
+        groups = helm_handler.CHART_CUSTOM_RESOURCE_API_GROUPS.get(chart)
+        if groups is None:
+            return helm_cap
+        scopes = 1 if chart in helm_handler.CHART_CUSTOM_RESOURCES_IN_RELEASE_NAMESPACE else 2
+        passes = 2 if chart in helm_handler.CHART_CUSTOM_RESOURCES_DELETED_LAST else 1
+        return (
+            helm_handler.HELM_RELEASE_LOOKUP_TIMEOUT_SECONDS
+            + len(groups) * scopes * helm_handler.KEDA_CUSTOM_RESOURCE_DISCOVERY_TIMEOUT_SECONDS
+            + scopes * passes * helm_handler.KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS
+            + helm_cap
         )
-        assert ceiling == 345 <= rs._UNINSTALL_TIMEOUT_MINUTES["keda"] * 60
+
+    def test_every_chart_task_covers_its_uninstall(self, helm_handler: Any) -> None:
+        """Each chart's Step Functions task outlasts the handler's worst case for it."""
+        for chart in rs._load_helm_chart_order():
+            minutes = (
+                5
+                if chart == helm_handler.LBC_CHART_NAME
+                else rs._UNINSTALL_TIMEOUT_MINUTES.get(chart, 2)
+            )
+            assert self._worst_case_seconds(helm_handler, chart) <= minutes * 60, chart
+
+    def test_worst_cases_match_the_sums_the_budget_comments_give(self, helm_handler: Any) -> None:
+        worst = {
+            c: self._worst_case_seconds(helm_handler, c) for c in rs._UNINSTALL_TIMEOUT_MINUTES
+        }
+        assert worst == {
+            "keda": 355,
+            "kueue": 215,
+            "argocd": 205,
+            "crossplane": 385,
+            "slinky-slurm": 215,
+        }
+        assert self._worst_case_seconds(helm_handler, helm_handler.LBC_CHART_NAME) == 270
 
 
 # ─── Chart value overrides ───────────────────────────────────────────────────
@@ -606,8 +639,13 @@ class TestHelmInstallerCleanup:
             "appprojects.argoproj.io",
         ]
         assert all("--wait=true" in command for command in deletes)
-        assert all("--all-namespaces" in command for command in deletes)
-        assert message == "Deleted and waited for 3 argocd custom resource type(s)"
+        # Only the release namespace: argoproj.io is also Argo Workflows',
+        # Rollouts' and Events' group, and GCO's Argo CD is namespaced.
+        assert all(command[-2:] == ["-n", "argocd"] for command in deletes)
+        assert all("--namespaced=false" not in command for command in commands)
+        assert (
+            message == "Deleted and waited for 3 argocd custom resource type(s) in namespace argocd"
+        )
 
     def test_a_failed_application_pass_keeps_the_projects(
         self, helm_handler: Any, monkeypatch: pytest.MonkeyPatch

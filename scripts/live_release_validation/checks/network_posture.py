@@ -19,10 +19,22 @@ pods and reading the verdict from each probe's exit code:
 * ``default`` -> the live cost-monitor's ``https://…:8443``: **blocked**
   (``allow-manifest-processor-to-cost-monitor-ingress`` admits only the
   manifest processor), and its plaintext ``:8080``: **blocked** (loopback);
-* ``default`` and ``gco-jobs`` -> a stand-in model pod in ``gco-inference`` on
-  ``:8443``: **blocked** (``allow-inference-proxy-ingress`` admits only the
-  inference proxy; the stand-in carries the ``gco.io/type: inference`` label
-  those policies select);
+* a probe in ``gco-inference`` carrying ``gco.io/type: inference`` -> a
+  stand-in model pod there on ``:8443``: **reachable**
+  (``allow-inference-internal`` admits TCP among inference pods). This is the
+  positive control for the next two verdicts: it shows the stand-in serves on
+  the pod network, so their "blocked" is the policies' answer and not a
+  listener nobody can reach;
+* ``default`` and ``gco-jobs`` -> the same stand-in on ``:8443``: **blocked**
+  (``allow-inference-proxy-ingress`` admits only the inference proxy; the
+  stand-in carries the ``gco.io/type: inference`` label those policies
+  select);
+* ``default`` -> a second stand-in in ``gco-inference``, the same Job without
+  the ``gco.io/type: inference`` label, on ``:8443``: **blocked**
+  (``default-deny-ingress``: no allow rule there selects a pod without that
+  label). Its positive control is the same ``model-from-inference`` probe: it
+  shows that pod shape serving on the pod network in ``gco-inference``, so
+  this "blocked" is the default deny and not a listener nobody can reach;
 * ``gco-jobs`` -> ``https://checkip.amazonaws.com/``: **reachable**
   (``allow-dns`` plus ``allow-https-egress``);
 * ``gco-jobs`` -> ``http://checkip.amazonaws.com/`` on port 80: **blocked**
@@ -46,7 +58,8 @@ Services expose only 8443).
 Every probe is a digest-pinned BusyBox Job labelled with this run's token
 (``manifests/netpol-probe-job.yaml``); the listeners are the same image
 behind ``httpd`` (``manifests/netpol-target-job.yaml`` in ``gco-system`` and
-``gco-jobs``, ``manifests/netpol-model-target-job.yaml`` in ``gco-inference``).
+``gco-jobs``, ``manifests/netpol-model-target-job.yaml`` twice in
+``gco-inference``: as shipped, and without its ``gco.io/type`` label).
 All of them are deleted before the action returns, and each carries
 ``activeDeadlineSeconds`` plus a TTL so a harness that dies mid-probe still
 leaves nothing behind.
@@ -111,6 +124,12 @@ _COST_MONITOR_LOOPBACK_PORT = 8080
 #: The model pods' only Service port (their TLS sidecar).
 _MODEL_PORT = 8443
 _MODEL_NAMESPACE = "gco-inference"
+#: The label the gco-inference policies select model pods by.
+_MODEL_POD_LABEL = ("gco.io/type", "inference")
+#: The key, in the ``targets`` evidence, of the second gco-inference listener:
+#: the model stand-in without ``_MODEL_POD_LABEL``, which no allow rule selects.
+#: The other listeners are keyed by their namespace.
+_UNLABELLED_TARGET = "gco-inference-unlabelled"
 _COST_STATUS_PATH = "/api/v1/cost/status"
 _EGRESS_HOST = "checkip.amazonaws.com"
 #: The EKS Pod Identity Agent's link-local address on every node; the
@@ -157,6 +176,9 @@ class ProbeSpec:
     enforcement_only: bool
     #: Dials the cost monitor, which exists only with cost monitoring on.
     requires_cost_monitor: bool = False
+    #: Labels the probe pod carries on top of the manifest's, for a client the
+    #: policy under test selects by label.
+    pod_labels: tuple[tuple[str, str], ...] = ()
 
 
 def _probe_specs(
@@ -165,6 +187,7 @@ def _probe_specs(
     inference_monitor_ip: str,
     *,
     model_target_ip: str,
+    unlabelled_target_ip: str,
     cost_monitor_ip: str | None,
 ) -> tuple[ProbeSpec, ...]:
     cost_host = cost_monitor_ip or "cost-monitor-not-deployed"
@@ -229,6 +252,15 @@ def _probe_specs(
             requires_cost_monitor=True,
         ),
         ProbeSpec(
+            "model-from-inference",
+            _MODEL_NAMESPACE,
+            f"http://{model_target_ip}:{_MODEL_PORT}/",
+            "reachable",
+            "gco-inference/allow-inference-internal (gco.io/type: inference peers, any TCP)",
+            enforcement_only=False,
+            pod_labels=(_MODEL_POD_LABEL,),
+        ),
+        ProbeSpec(
             "model-from-default",
             _UNPOLICED_NAMESPACE,
             f"http://{model_target_ip}:{_MODEL_PORT}/",
@@ -242,6 +274,17 @@ def _probe_specs(
             f"http://{model_target_ip}:{_MODEL_PORT}/",
             "blocked",
             "gco-inference/allow-inference-proxy-ingress (inference-proxy only, TCP 8443)",
+            enforcement_only=True,
+        ),
+        # Positive control: model-from-inference, the same pod shape reachable
+        # with the label (see the module docstring).
+        ProbeSpec(
+            "nolabel-from-default",
+            _UNPOLICED_NAMESPACE,
+            f"http://{unlabelled_target_ip}:{_MODEL_PORT}/",
+            "blocked",
+            "gco-inference/default-deny-ingress (no allow rule selects a pod without "
+            "gco.io/type: inference)",
             enforcement_only=True,
         ),
         ProbeSpec(
@@ -571,8 +614,13 @@ class NetworkPostureProbe:
         the old one would read ``blocked`` for a reason no policy chose.
         """
         dialed = [
-            (namespace, f"job-name={target['job']}", target["pod"], f"{namespace}/{target['job']}")
-            for namespace, target in targets.items()
+            (
+                target["namespace"],
+                f"job-name={target['job']}",
+                target["pod"],
+                f"{target['namespace']}/{target['job']}",
+            )
+            for target in targets.values()
         ]
         dialed.extend(
             ("gco-system", f"app={app}", pod_name, f"gco-system/{pod_name}")
@@ -689,17 +737,27 @@ class NetworkPostureProbe:
         }
 
     def _start_listeners(self) -> dict[str, dict[str, str]]:
-        """Start every ``httpd`` target and return ``{namespace: {job, pod, ip}}``."""
+        """Start every ``httpd`` target; return ``{key: {namespace, job, pod, ip}}``.
+
+        Each listener is keyed by its namespace, except the unlabelled
+        gco-inference stand-in (``_UNLABELLED_TARGET``): the model listener's
+        Job with ``_MODEL_POD_LABEL`` taken off its pod template.
+        """
         listeners = (
-            ("gco-system", _TARGET_MANIFEST, f"gco-live-netpol-target-{self.token}"),
-            ("gco-jobs", _TARGET_MANIFEST, f"gco-live-netpol-target-{self.token}"),
-            (_MODEL_NAMESPACE, _MODEL_TARGET_MANIFEST, f"gco-live-netpol-model-{self.token}"),
+            ("gco-system", "gco-system", _TARGET_MANIFEST, "target"),
+            ("gco-jobs", "gco-jobs", _TARGET_MANIFEST, "target"),
+            (_MODEL_NAMESPACE, _MODEL_NAMESPACE, _MODEL_TARGET_MANIFEST, "model"),
+            (_UNLABELLED_TARGET, _MODEL_NAMESPACE, _MODEL_TARGET_MANIFEST, "unlabelled"),
         )
         targets: dict[str, dict[str, str]] = {}
-        for namespace, manifest, name in listeners:
-            self._create_job(self._job_manifest(manifest, name=name, namespace=namespace))
+        for key, namespace, manifest, role in listeners:
+            name = f"gco-live-netpol-{role}-{self.token}"
+            job = self._job_manifest(manifest, name=name, namespace=namespace)
+            if key == _UNLABELLED_TARGET:
+                del job["spec"]["template"]["metadata"]["labels"][_MODEL_POD_LABEL[0]]
+            self._create_job(job)
             pod_name, pod_ip = self._wait_for_listener(namespace, name)
-            targets[namespace] = {"job": name, "pod": pod_name, "ip": pod_ip}
+            targets[key] = {"namespace": namespace, "job": name, "pod": pod_name, "ip": pod_ip}
         return targets
 
     def run(self) -> dict[str, Any]:
@@ -732,6 +790,7 @@ class NetworkPostureProbe:
                 targets["gco-jobs"]["ip"],
                 monitor_ip,
                 model_target_ip=targets[_MODEL_NAMESPACE]["ip"],
+                unlabelled_target_ip=targets[_UNLABELLED_TARGET]["ip"],
                 cost_monitor_ip=cost_monitor_ip,
             )
             launched: list[tuple[ProbeSpec, dict[str, Any]]] = []
@@ -759,6 +818,8 @@ class NetworkPostureProbe:
                     namespace=spec.client_namespace,
                     replacements={"__PROBE_URL__": spec.url},
                 )
+                if spec.pod_labels:
+                    job["spec"]["template"]["metadata"]["labels"].update(dict(spec.pod_labels))
                 self._create_job(job)
                 launched.append((spec, job))
             for spec, job in launched:

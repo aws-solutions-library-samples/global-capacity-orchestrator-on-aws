@@ -29,7 +29,9 @@ import tempfile
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlsplit
 
+import boto3
 import pytest
 import yaml
 
@@ -641,12 +643,12 @@ class TestKedaCustomResourceCleanup:
     def test_keda_cleanup_runs_before_helm_uninstall(self):
         calls = []
 
-        def _cleanup(_chart_name, _kubeconfig):
-            calls.append("cleanup")
+        def _cleanup(chart_name, _kubeconfig, namespace):
+            calls.append(f"cleanup:{chart_name}:{namespace}")
             return True, "clean"
 
-        def _helm(*_args, **_kwargs):
-            calls.append("helm")
+        def _helm(args, *_args, **_kwargs):
+            calls.append(f"helm {args[0]}")
             return 0, "", ""
 
         with (
@@ -656,7 +658,7 @@ class TestKedaCustomResourceCleanup:
             success, _ = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
 
         assert success is True
-        assert calls == ["cleanup", "helm"]
+        assert calls == ["helm status", "cleanup:keda:keda", "helm uninstall"]
 
     def test_cleanup_failure_prevents_helm_uninstall(self):
         with (
@@ -665,13 +667,13 @@ class TestKedaCustomResourceCleanup:
                 "_delete_chart_custom_resources",
                 return_value=(False, "scaledjobs remain"),
             ),
-            patch.object(helm_handler, "run_helm") as mock_run,
+            patch.object(helm_handler, "run_helm", return_value=(0, "{}", "")) as mock_run,
         ):
             success, message = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
 
         assert success is False
         assert "scaledjobs remain" in message
-        mock_run.assert_not_called()
+        assert [call.args[0][0] for call in mock_run.call_args_list] == ["status"]
 
     def test_non_finalizer_chart_uninstall_skips_custom_resource_cleanup(self):
         with (
@@ -698,12 +700,12 @@ class TestKueueCustomResourceCleanup:
     def test_kueue_uninstall_purges_custom_resources_first(self):
         calls = []
 
-        def _cleanup(chart_name, _kubeconfig):
+        def _cleanup(chart_name, _kubeconfig, _namespace):
             calls.append(f"cleanup:{chart_name}")
             return True, "clean"
 
-        def _helm(*_args, **_kwargs):
-            calls.append("helm")
+        def _helm(args, *_args, **_kwargs):
+            calls.append(f"helm {args[0]}")
             return 0, "", ""
 
         with (
@@ -712,7 +714,7 @@ class TestKueueCustomResourceCleanup:
         ):
             success, _ = helm_handler.uninstall_chart("kueue", "kueue", "/tmp/kc")
         assert success is True
-        assert calls == ["cleanup:kueue", "helm"]
+        assert calls == ["helm status", "cleanup:kueue", "helm uninstall"]
 
     def test_kueue_discovery_targets_the_kueue_api_group(self):
         with patch.object(helm_handler.subprocess, "run") as mock_run:
@@ -802,6 +804,197 @@ class TestKueueCustomResourceCleanup:
         assert error is None
 
 
+def _cluster_run(helm_status: MagicMock | BaseException, commands: list[list[str]]):
+    """A ``subprocess.run`` double: ``helm status`` answers ``helm_status``.
+
+    Discovery serves one namespaced and one cluster-scoped type of whatever
+    group it is asked about; every other helm or kubectl command succeeds.
+    """
+
+    def fake_run(command: list[str], **_kwargs):
+        commands.append(command)
+        if command[:2] == ["helm", "status"]:
+            if isinstance(helm_status, BaseException):
+                raise helm_status
+            return helm_status
+        if "api-resources" in command:
+            group = next(arg for arg in command if arg.startswith("--api-group="))
+            kind = "things" if "--namespaced=true" in command else "clusterthings"
+            return _completed(0, stdout=f"{kind}.{group.partition('=')[2]}\n")
+        return _completed(0)
+
+    return fake_run
+
+
+class TestCustomResourceCleanupNeedsGcoRelease:
+    """The cleanup runs only while GCO's own release of the chart exists.
+
+    A disabled chart is uninstalled on every deploy. Before this gate the
+    cleanup ran first and asked Helm afterwards, so on a cluster with its own
+    Argo CD, Crossplane or KEDA each ``gco stacks deploy`` deleted every object
+    of those API groups (Argo CD Applications pruning what they synced) and
+    then reported "already uninstalled".
+    """
+
+    _NOT_FOUND = _completed(1, stderr="Error: release: not found")
+
+    @pytest.mark.parametrize("chart", sorted(helm_handler.CHART_CUSTOM_RESOURCE_API_GROUPS))
+    def test_absent_release_runs_no_kubectl_at_all(self, chart):
+        commands: list[list[str]] = []
+        with patch.object(
+            helm_handler.subprocess, "run", side_effect=_cluster_run(self._NOT_FOUND, commands)
+        ):
+            success, message = helm_handler.uninstall_chart(chart, "addon-ns", "/tmp/kc")
+
+        assert success is True
+        assert message == (
+            f"Chart {chart} not found (already uninstalled); custom-resource cleanup skipped"
+        )
+        assert commands == [["helm", "status", chart, "-n", "addon-ns", "-o", "json"]]
+
+    def test_release_lookup_is_bounded_and_quiet(self):
+        with patch.object(helm_handler, "run_helm", return_value=(0, "{}", "")) as mock_helm:
+            assert helm_handler._helm_release_present("keda", "keda", "/tmp/kc") == (True, None)
+        assert mock_helm.call_args.kwargs == {
+            "command_timeout_seconds": helm_handler.HELM_RELEASE_LOOKUP_TIMEOUT_SECONDS,
+            "log_output": False,
+        }
+
+    @pytest.mark.parametrize("chart", sorted(helm_handler.CHART_CUSTOM_RESOURCE_API_GROUPS))
+    def test_present_release_cleans_up_before_helm_uninstall(self, chart):
+        commands: list[list[str]] = []
+        with patch.object(
+            helm_handler.subprocess,
+            "run",
+            side_effect=_cluster_run(_completed(0, stdout="{}"), commands),
+        ):
+            success, message = helm_handler.uninstall_chart(chart, "addon-ns", "/tmp/kc")
+
+        assert success is True
+        assert message == f"Successfully uninstalled {chart}"
+        assert commands[0][:3] == ["helm", "status", chart]
+        assert commands[-1][:3] == ["helm", "uninstall", chart]
+        kubectl = commands[1:-1]
+        assert kubectl and all(command[0] == "kubectl" for command in kubectl)
+        deleted = [
+            command[command.index("delete") + 1] for command in kubectl if "delete" in command
+        ]
+        assert deleted
+
+    @pytest.mark.parametrize(
+        ("helm_status", "detail"),
+        [
+            (
+                _completed(1, stderr="Error: Kubernetes cluster unreachable: i/o timeout"),
+                "Error: Kubernetes cluster unreachable: i/o timeout",
+            ),
+            (
+                subprocess.TimeoutExpired(cmd=["helm"], timeout=10),
+                "timeout: helm command exceeded 10s",
+            ),
+        ],
+    )
+    def test_unknown_release_state_fails_without_deleting_anything(self, helm_status, detail):
+        commands: list[list[str]] = []
+        with patch.object(
+            helm_handler.subprocess, "run", side_effect=_cluster_run(helm_status, commands)
+        ):
+            success, message = helm_handler.uninstall_chart("argocd", "argocd", "/tmp/kc")
+
+        assert success is False
+        assert message == f"Could not tell whether release argocd exists in argocd: {detail}"
+        assert [command[:2] for command in commands] == [["helm", "status"]]
+
+    def test_deploy_with_the_chart_disabled_leaves_an_unmanaged_install_alone(self):
+        """Argo CD off in GCO, an operator's own Argo CD on."""
+        commands: list[list[str]] = []
+        event = {
+            "Action": "install_chart",
+            "Chart": "argocd",
+            "ClusterName": "gco-us-east-1",
+            "Region": "us-east-1",
+            "EnabledCharts": ["keda"],
+            "Charts": {},
+        }
+        with (
+            patch.object(helm_handler, "configure_kubeconfig", return_value="/tmp/kc"),
+            patch.object(
+                helm_handler.subprocess, "run", side_effect=_cluster_run(self._NOT_FOUND, commands)
+            ),
+            patch.object(helm_handler, "_record_addon_status") as mock_status,
+            patch.object(helm_handler.os, "remove"),
+        ):
+            result = helm_handler.handle_task(event)
+
+        assert result["status"] == "uninstalled"
+        assert "custom-resource cleanup skipped" in result["message"]
+        assert [command[:2] for command in commands] == [["helm", "status"]]
+        mock_status.assert_called_once_with("argocd", "uninstalled", result["message"])
+
+    def test_argocd_cleanup_stays_in_the_release_namespace(self):
+        """Argo CD's group is shared with Argo Workflows, Rollouts and Events."""
+        commands: list[list[str]] = []
+        with patch.object(
+            helm_handler.subprocess,
+            "run",
+            side_effect=_cluster_run(_completed(0, stdout="{}"), commands),
+        ):
+            success, message = helm_handler._delete_chart_custom_resources(
+                "argocd", "/tmp/kc", "gitops"
+            )
+
+        assert success is True
+        assert message == (
+            "Deleted and waited for 1 argocd custom resource type(s) in namespace gitops"
+        )
+        discovery = [command for command in commands if "api-resources" in command]
+        assert len(discovery) == 1 and "--namespaced=true" in discovery[0]
+        deletes = [command for command in commands if "delete" in command]
+        assert [command[command.index("delete") + 1] for command in deletes] == [
+            "things.argoproj.io"
+        ]
+        assert deletes[0][-2:] == ["-n", "gitops"]
+        assert all("--all-namespaces" not in command for command in commands)
+
+    def test_argocd_namespace_defaults_to_the_charts_yaml_namespace(self):
+        commands: list[list[str]] = []
+        with patch.object(
+            helm_handler.subprocess,
+            "run",
+            side_effect=_cluster_run(_completed(0, stdout="{}"), commands),
+        ):
+            success, message = helm_handler._delete_chart_custom_resources("argocd", "/tmp/kc")
+
+        assert success is True
+        assert message.endswith("in namespace argocd")
+        delete = next(command for command in commands if "delete" in command)
+        assert delete[-2:] == ["-n", "argocd"]
+
+    def test_stalled_argocd_delete_strips_finalizers_in_the_release_namespace_only(self):
+        with patch.object(helm_handler.subprocess, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout="applications.argoproj.io\n"),
+                _completed(1, stderr="timed out waiting for the condition"),
+                _completed(0, stdout="argocd,hello\n"),
+                _completed(0),
+                _completed(0),
+            ]
+            success, _ = helm_handler._delete_chart_custom_resources("argocd", "/tmp/kc", "argocd")
+
+        assert success is True
+        listing = mock_run.call_args_list[2].args[0]
+        assert listing[listing.index("get") : listing.index("-o")] == [
+            "get",
+            "applications.argoproj.io",
+            "-n",
+            "argocd",
+        ]
+        patch_command = mock_run.call_args_list[3].args[0]
+        assert patch_command[patch_command.index("-n") + 1] == "argocd"
+        retry = mock_run.call_args_list[4].args[0]
+        assert retry[-2:] == ["-n", "argocd"]
+
+
 class TestHandleTask:
     """``handle_task`` performs exactly one helm op per call and raises on failure."""
 
@@ -878,6 +1071,7 @@ class TestHandleTask:
         mock_status.assert_called_once_with("keda", "failed", "api timeout")
 
     def test_not_found_uninstall_remains_idempotent_success(self):
+        # The release was there for ``helm status`` and gone by the uninstall.
         with (
             patch.object(
                 helm_handler,
@@ -885,7 +1079,9 @@ class TestHandleTask:
                 return_value=(True, "clean"),
             ),
             patch.object(
-                helm_handler, "run_helm", return_value=(1, "", "release: not found")
+                helm_handler,
+                "run_helm",
+                side_effect=[(0, "{}", ""), (1, "", "release: not found")],
             ) as mock_run,
         ):
             success, message = helm_handler.uninstall_chart("kueue", "kueue", "/tmp/kc")
@@ -977,12 +1173,12 @@ class TestHandleTask:
                 "_delete_chart_custom_resources",
                 return_value=(True, "clean"),
             ),
-            patch.object(helm_handler, "run_helm", return_value=(1, "", error)),
+            patch.object(helm_handler, "run_helm", side_effect=[(0, "{}", ""), (1, "", error)]),
         ):
             success, message = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
 
         assert success is False
-        assert error in message
+        assert message == f"Failed to uninstall keda: {error}"
 
     def test_install_failure_raises(self):
         with (
@@ -2433,45 +2629,60 @@ class TestSendResponse:
 class TestEksAuthentication:
     """EKS bearer tokens and kubeconfig files are produced offline from STS signing."""
 
-    def test_token_is_presigned_sts_url_in_k8s_aws_v1_format(self):
-        presigned = (
-            "https://sts.us-east-1.amazonaws.com/?Action=GetCallerIdentity"
-            "&Version=2011-06-15&X-Amz-Signature=deadbeef"
-        )
+    @pytest.mark.parametrize(
+        ("region", "sts_endpoint"),
+        [
+            ("cn-north-1", "https://sts.cn-north-1.amazonaws.com.cn"),
+            ("us-east-1", "https://sts.us-east-1.amazonaws.com/"),
+            # Legacy STS endpoint resolution: the global host, us-east-1 scope.
+            ("us-west-2", "https://sts.amazonaws.com"),
+        ],
+    )
+    def test_token_presigns_the_clients_resolved_sts_endpoint(self, region, sts_endpoint):
+        presigned = f"{sts_endpoint.rstrip('/')}/?Action=GetCallerIdentity&X-Amz-Signature=beef"
+        sts_client = MagicMock()
+        sts_client.meta.endpoint_url = sts_endpoint
+        sts_client._request_signer.generate_presigned_url.return_value = presigned
         session = MagicMock()
-        session.client.return_value.meta.service_model.service_id = "STS"
-        signer = MagicMock()
-        signer.generate_presigned_url.return_value = presigned
-        with (
-            patch.object(helm_handler.boto3, "Session", return_value=session),
-            patch("botocore.signers.RequestSigner", return_value=signer) as signer_cls,
-        ):
-            token = helm_handler.get_eks_token("gco-us-east-1", "us-east-1")
+        session.client.return_value = sts_client
+        with patch.object(helm_handler.boto3, "Session", return_value=session):
+            token = helm_handler.get_eks_token(f"gco-{region}", region)
 
         expected_suffix = base64.urlsafe_b64encode(presigned.encode()).decode().rstrip("=")
         assert token == f"k8s-aws-v1.{expected_suffix}"
         assert "=" not in token
-        session.client.assert_called_once_with("sts", region_name="us-east-1")
-        signer_cls.assert_called_once_with(
-            "STS",
-            "us-east-1",
-            "sts",
-            "v4",
-            session.get_credentials.return_value,
-            session.events,
+        session.client.assert_called_once_with("sts", region_name=region)
+        # The client's own signer: its signing region matches its endpoint.
+        sts_client._request_signer.generate_presigned_url.assert_called_once_with(
+            request_dict={
+                "method": "GET",
+                "url": f"{sts_endpoint.rstrip('/')}/?Action=GetCallerIdentity&Version=2011-06-15",
+                "body": {},
+                "headers": {"x-k8s-aws-id": f"gco-{region}"},
+                "context": {},
+            },
+            operation_name="GetCallerIdentity",
+            expires_in=60,
         )
-        presign = signer.generate_presigned_url.call_args
-        params = presign.args[0]
-        assert params["method"] == "GET"
-        assert params["url"].startswith(
-            "https://sts.us-east-1.amazonaws.com/?Action=GetCallerIdentity"
+
+    def test_aws_cn_token_is_signed_for_the_china_sts_host(self):
+        """Real botocore, offline: the token EKS in cn-north-1 accepts."""
+        session = boto3.Session(
+            aws_access_key_id="AKIDEXAMPLE",
+            aws_secret_access_key="example-secret",
+            region_name="cn-north-1",
         )
-        assert params["headers"] == {"x-k8s-aws-id": "gco-us-east-1"}
-        assert presign.kwargs == {
-            "region_name": "us-east-1",
-            "expires_in": 60,
-            "operation_name": "",
-        }
+        with patch.object(helm_handler.boto3, "Session", return_value=session):
+            token = helm_handler.get_eks_token("gco-cn-north-1", "cn-north-1")
+
+        encoded = token.removeprefix("k8s-aws-v1.")
+        url = urlsplit(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode())
+        query = parse_qs(url.query)
+        assert url.netloc == "sts.cn-north-1.amazonaws.com.cn"
+        assert query["Action"] == ["GetCallerIdentity"]
+        assert query["X-Amz-Credential"][0].endswith("/cn-north-1/sts/aws4_request")
+        assert query["X-Amz-SignedHeaders"] == ["host;x-k8s-aws-id"]
+        assert query["X-Amz-Expires"] == ["60"]
 
     def test_kubeconfig_embeds_cluster_endpoint_ca_and_token_in_private_file(self):
         eks = MagicMock()

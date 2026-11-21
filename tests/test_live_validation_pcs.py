@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -42,8 +43,12 @@ def _ctx(
     overrides: str = _OVERRIDES,
     regions: tuple[str, ...] = (_REGION,),
     job_timeout_seconds: int = 30,
+    state: dict[str, Any] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        checkpoint=SimpleNamespace(state=dict(state or {})),
+        state_lock=threading.RLock(),
+        persist=MagicMock(),
         settings=SimpleNamespace(
             run_id="run-123",
             pcs_overrides_json=overrides,
@@ -301,6 +306,109 @@ class TestProbe:
                 "pcs",
             ]
         ]
+
+    def test_the_submission_is_journaled_before_the_post_and_with_its_answer(self) -> None:
+        ctx = _ctx()
+        api = _Api(_happy_script())
+        seen_at_post: list[dict[str, Any]] = []
+
+        def request(**kwargs: Any) -> SimpleNamespace:
+            if kwargs["method"] == "POST":
+                seen_at_post.append(dict(ctx.checkpoint.state[checks_pcs.PCS_PROBE_STATE_KEY]))
+            return api(**kwargs)
+
+        ctx.aws_client.make_authenticated_request.side_effect = request
+        with patch.object(
+            checks_pcs.subprocess, "run", return_value=_completed(stdout=_output_document())
+        ):
+            evidence = checks_pcs.probe_pcs(ctx)
+
+        assert seen_at_post == [{"name": _NAME, "region": _REGION}]
+        journal = ctx.checkpoint.state[checks_pcs.PCS_PROBE_STATE_KEY]
+        assert journal == {"name": _NAME, "region": _REGION, "job": evidence["job"]}
+        assert evidence["job"]["job_id"] == 42 and "resumed" not in evidence["job"]
+        assert ctx.persist.call_count == 2
+
+    def test_a_resumed_probe_waits_for_the_journaled_job_without_submitting(self) -> None:
+        job = {"job_id": 42, "name": _NAME, "submitted_at": 1700000000.0}
+        ctx = _ctx(
+            state={checks_pcs.PCS_PROBE_STATE_KEY: {"name": _NAME, "region": _REGION, "job": job}}
+        )
+        script = [entry for entry in _happy_script() if entry[0] != "POST"]
+
+        evidence, api, _ = _probe(
+            ctx, script, lambda *_a, **_k: _completed(stdout=_output_document())
+        )
+
+        assert evidence["job"] == {**job, "resumed": "journaled job id"}
+        assert evidence["completion"]["states"] == ["COMPLETED"]
+        assert all(method != "POST" for method, _path, _body in api.calls)
+        ctx.persist.assert_not_called()
+
+    def test_a_probe_interrupted_mid_post_adopts_the_job_it_finds_by_name(self) -> None:
+        ctx = _ctx(state={checks_pcs.PCS_PROBE_STATE_KEY: {"name": _NAME, "region": _REGION}})
+        happy = _happy_script()
+        script = [
+            happy[0],
+            (
+                "GET",
+                f"/api/v1/slurm/jobs?backend=pcs&name={_NAME}",
+                {"jobs": [{"job_id": 42, "name": _NAME}, "junk"]},
+            ),
+            (
+                "GET",
+                _ACCOUNTING_PATH,
+                {"jobs": [{"job_id": 42, "name": _NAME}, {"job_id": 7, "name": "another-job"}]},
+            ),
+            *happy[2:],
+        ]
+
+        evidence, api, _ = _probe(
+            ctx, script, lambda *_a, **_k: _completed(stdout=_output_document())
+        )
+
+        assert evidence["job"] == {
+            "job_id": 42,
+            "name": _NAME,
+            "submitted_at": None,
+            "resumed": "found by name (job ids [42])",
+        }
+        assert all(method != "POST" for method, _path, _body in api.calls)
+        assert ctx.checkpoint.state[checks_pcs.PCS_PROBE_STATE_KEY]["job"]["job_id"] == 42
+
+    def test_a_probe_interrupted_before_its_post_landed_submits_once(self) -> None:
+        ctx = _ctx(state={checks_pcs.PCS_PROBE_STATE_KEY: {"name": _NAME, "region": _REGION}})
+        happy = _happy_script()
+        script = [
+            happy[0],
+            ("GET", f"/api/v1/slurm/jobs?backend=pcs&name={_NAME}", {"jobs": []}),
+            ("GET", _ACCOUNTING_PATH, {}),
+            *happy[1:],
+        ]
+
+        evidence, api, _ = _probe(
+            ctx, script, lambda *_a, **_k: _completed(stdout=_output_document())
+        )
+
+        assert [method for method, _path, _body in api.calls].count("POST") == 1
+        assert evidence["job"]["job_id"] == 42 and "resumed" not in evidence["job"]
+
+    def test_a_journal_for_another_probe_name_is_not_this_probes(self) -> None:
+        ctx = _ctx(
+            state={
+                checks_pcs.PCS_PROBE_STATE_KEY: {
+                    "name": "gco-live-pcs-other",
+                    "job": {"job_id": 9, "name": "gco-live-pcs-other"},
+                }
+            }
+        )
+
+        evidence, api, _ = _probe(
+            ctx, _happy_script(), lambda *_a, **_k: _completed(stdout=_output_document())
+        )
+
+        assert evidence["job"]["job_id"] == 42
+        assert [method for method, _path, _body in api.calls].count("POST") == 1
 
     def test_both_backends_require_a_selection(self) -> None:
         ctx = _ctx()
@@ -603,10 +711,12 @@ class TestPcsNodeDrain:
                     _ec2_pages(),
                     _ec2_pages(),
                 ],
+                # The listing filters on the non-terminal states, so a volume
+                # leaves it once EBS starts deleting it.
                 "describe_volumes": [
                     _volume_pages(("vol-aaa", "in-use"), ("vol-bbb", "in-use")),
-                    _volume_pages(("vol-aaa", "deleting")),
-                    _volume_pages(("vol-aaa", "deleting")),
+                    _volume_pages(("vol-aaa", "in-use")),
+                    _volume_pages(("vol-aaa", "in-use")),
                     _volume_pages(),
                 ],
             }
@@ -640,7 +750,7 @@ class TestPcsNodeDrain:
         assert {"Name": "tag-key", "Values": ["gco:pcs-node-group"]} in volume_filters
         assert {
             "Name": "status",
-            "Values": ["creating", "available", "in-use", "deleting", "error"],
+            "Values": ["creating", "available", "in-use", "error"],
         } in volume_filters
         ctx.session.client.assert_called_with("ec2", region_name=_REGION)
 
@@ -669,8 +779,8 @@ class TestPcsNodeDrain:
                     _ec2_pages(("i-aaa", "shutting-down")),
                 ],
                 "describe_volumes": [
-                    _volume_pages(("vol-aaa", "deleting")),
-                    _volume_pages(("vol-aaa", "deleting")),
+                    _volume_pages(("vol-aaa", "available")),
+                    _volume_pages(("vol-aaa", "available")),
                 ],
             }
         )
@@ -679,18 +789,18 @@ class TestPcsNodeDrain:
             RuntimeError,
             match=(
                 r"still present after 0s: us-east-1: i-aaa \(shutting-down\), "
-                r"vol-aaa \(deleting\)"
+                r"vol-aaa \(available\)"
             ),
         ):
             cleanup_pcs_nodes._wait_for_pcs_nodes_terminated(ctx, timeout_seconds=0)
 
-    def test_a_lone_deleting_volume_is_waited_for(self) -> None:
+    def test_a_lone_volume_still_attached_is_waited_for(self) -> None:
         """What the first full run saw: instances gone, the login node's root volume not yet."""
         ctx = _ctx()
         ctx.session, _paginators = _ec2_session(
             {
                 "describe_instances": [_ec2_pages(), _ec2_pages()],
-                "describe_volumes": [_volume_pages(("vol-login", "deleting")), _volume_pages()],
+                "describe_volumes": [_volume_pages(("vol-login", "in-use")), _volume_pages()],
             }
         )
 
@@ -698,8 +808,27 @@ class TestPcsNodeDrain:
 
         entry = result["regions"][_REGION]
         assert entry["initial_instances"] == [] and entry["remaining_instances"] == []
-        assert entry["initial_volumes"] == [{"volume_id": "vol-login", "state": "deleting"}]
+        assert entry["initial_volumes"] == [{"volume_id": "vol-login", "state": "in-use"}]
         assert entry["remaining_volumes"] == [] and entry["polls"] == 1 and entry["terminated"]
+
+    def test_the_wait_and_the_final_inventory_agree_on_which_volumes_are_gone(self) -> None:
+        """A volume EBS is already deleting is no residue to the inventory, so none to wait for.
+
+        The wait used to keep polling a ``deleting`` volume, and fail the
+        retained cleanup at its deadline, although the tagged-volume strip and
+        the cluster-volume scanner accept that state.
+        """
+        from scripts.live_release_validation.inventory import _shared as inventory_shared
+        from scripts.live_release_validation.inventory import scanners as inventory_scanners
+        from scripts.live_release_validation.ownership import ebs_volumes
+
+        terminal = inventory_shared._TERMINAL_VOLUME_STATES
+        assert terminal == {"deleting", "deleted"}
+        assert ebs_volumes._TERMINAL_VOLUME_STATES is terminal
+        assert inventory_scanners._TERMINAL_VOLUME_STATES is terminal
+        assert set(cleanup_pcs_nodes._VOLUME_STATES) == (
+            set(inventory_shared._EBS_VOLUME_STATES) - terminal
+        )
 
     def test_an_instance_or_volume_without_an_id_fails_closed(self) -> None:
         ctx = _ctx()

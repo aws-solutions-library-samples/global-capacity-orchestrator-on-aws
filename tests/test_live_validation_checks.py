@@ -49,6 +49,7 @@ from scripts.live_release_validation.checks.inference_common import (
     ManagedInferenceValidationError,
 )
 from scripts.live_release_validation.inference_contract import MOONCAKE_CONFIG_DIGEST_ANNOTATION
+from tests._lambda_imports import load_lambda_module
 from tests._live_validation_patching import patch_live_validation_helper
 from tests.test_live_release_validation import (
     TestDeterministicTopologyReadiness as _TopologyFixtures,
@@ -63,7 +64,9 @@ from tests.test_live_validation_inference import (
     TRITON_STATS,
     _lifecycle,
     _owned_item,
+    _prove_leg,
     _settings,
+    _verified_shared_proxy,
 )
 from tests.test_live_validation_inference import (
     TestSharedProxyAutoscalingProof as _SharedProxyFixtures,
@@ -116,7 +119,9 @@ def _job_context(tmp_path: Path) -> Any:
     ctx = _real_context(tmp_path)
     ctx.job_manager = _offline_job_manager()
     ctx.session.get_partition_for_region.return_value = "aws"
-    ctx.cdk_context = {"api_gateway": {"regional_api_enabled": True}}
+    # Two Regions: each Job is reached through its own Region's API bridge,
+    # whatever cdk.json says (it carries no api_gateway block here).
+    ctx.deployment_regions = ("us-east-1", "eu-west-1")
     return ctx
 
 
@@ -169,6 +174,48 @@ _FAILED = {"conditions": [{"type": "Failed", "status": "True"}]}
 def _logs_payload(record: dict[str, Any], logs: str) -> dict[str, Any]:
     name, namespace = checks_jobs._job_reference_identity(record)
     return {"region": record["region"], "job_name": name, "namespace": namespace, "logs": logs}
+
+
+def _job_container(**overrides: Any) -> dict[str, Any]:
+    """A completed container as the pods route reports it (the API prints ``+00:00``)."""
+    return {
+        "name": "smoke",
+        "ready": False,
+        "restartCount": 0,
+        "state": "terminated",
+        "exitCode": 0,
+        "reason": "Completed",
+        "startedAt": "2026-07-17T00:01:00+00:00",
+        "finishedAt": "2026-07-17T00:01:07+00:00",
+        "lastState": None,
+        **overrides,
+    }
+
+
+def _job_pod(
+    name: str = "smoke-abcde",
+    *,
+    uid: str = "uid-1",
+    phase: str = "Succeeded",
+    containers: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "metadata": {"name": name, "labels": {"batch.kubernetes.io/controller-uid": uid}},
+        "status": {
+            "phase": phase,
+            "containerStatuses": [_job_container()] if containers is None else containers,
+        },
+    }
+
+
+def _job_pods_payload(record: dict[str, Any], *pods: dict[str, Any]) -> dict[str, Any]:
+    name, namespace = checks_jobs._job_reference_identity(record)
+    return {
+        "region": record["region"],
+        "job_name": name,
+        "namespace": namespace,
+        "pods": list(pods) if pods else [_job_pod()],
+    }
 
 
 # --------------------------------------------------------------------------- jobs
@@ -857,6 +904,7 @@ class TestCompleteJobLifecycle:
             _response(200, _job_payload(record, uid="uid-1", status=_SUCCEEDED)),
             _response(200, job),
             _response(200, _logs_payload(record, logs)),
+            _response(200, _job_pods_payload(record)),
             _response(200, job),
             _response(200, {"region": "us-east-1", "uid": "uid-1"}),
             _response(404),
@@ -879,6 +927,20 @@ class TestCompleteJobLifecycle:
         assert evidence["appearance"] == {"region": "us-east-1", "uid": "uid-1"}
         assert evidence["deletion"] == {"region": "us-east-1", "uid": "uid-1"}
         assert evidence["requested_name"] == "gco-live-api-run-123"
+        assert evidence["pods"] == [
+            {
+                "name": "smoke-abcde",
+                "containers": [
+                    {
+                        "name": "smoke",
+                        "state": "terminated",
+                        "exitCode": 0,
+                        "startedAt": "2026-07-17T00:01:00+00:00",
+                        "finishedAt": "2026-07-17T00:01:07+00:00",
+                    }
+                ],
+            }
+        ]
         assert record["validation_evidence"]["marker"] == "GCO_LIVE_API_run-123"
         assert "deletion" not in record["validation_evidence"]
 
@@ -911,6 +973,132 @@ class TestCompleteJobLifecycle:
             checks_jobs._complete_job_lifecycle(ctx, record=record, marker="M")
 
 
+class TestCompletedPodTimes:
+    """A completed Job's containers, as ``GET /api/v1/jobs/{ns}/{name}/pods`` reports them."""
+
+    @staticmethod
+    def _record(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+        ctx = _job_context(tmp_path)
+        record = _register(ctx)
+        record["uid"] = "uid-1"
+        return ctx, record
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("2026-07-17T00:01:07+00:00", "2026-07-17T00:01:07+00:00"),
+            # kubectl's spelling of the same instant.
+            ("2026-07-17T00:01:07Z", "2026-07-17T00:01:07+00:00"),
+            ("2026-07-17T00:01:07", None),
+            ("yesterday", None),
+            (None, None),
+            (1752710467, None),
+        ],
+    )
+    def test_instants_need_an_offset(self, value: object, expected: str | None) -> None:
+        parsed = checks_jobs._api_instant(value)
+        assert (parsed.isoformat() if parsed else None) == expected
+
+    def test_succeeded_pods_of_the_job_are_reported_and_others_left_out(
+        self, tmp_path: Path
+    ) -> None:
+        ctx, record = self._record(tmp_path)
+        disrupted = _job_pod(
+            "smoke-evicted", phase="Failed", containers=[_job_container(exitCode=137)]
+        )
+        foreign = _job_pod("smoke-other", uid="uid-2", containers=[_job_container(exitCode=1)])
+        legacy = {
+            **_job_pod("smoke-legacy"),
+            "metadata": {"name": "smoke-legacy", "labels": {"controller-uid": "uid-1"}},
+        }
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200, _job_pods_payload(record, disrupted, foreign, _job_pod(), legacy, "junk")
+        )
+
+        evidence = checks_jobs._owned_job_pod_times(ctx, record)
+
+        assert [pod["name"] for pod in evidence] == ["smoke-abcde", "smoke-legacy"]
+        request = ctx.aws_client.make_authenticated_request.call_args.kwargs
+        assert request["path"] == "/api/v1/jobs/gco-jobs/gco-live-api-run-123/pods"
+        assert request["target_region"] == "us-east-1"
+
+    @pytest.mark.parametrize(
+        ("container", "problem"),
+        [
+            (_job_container(state="running"), "smoke-abcde/smoke is 'running', not terminated"),
+            (_job_container(exitCode=2), "smoke-abcde/smoke exited 2, not 0"),
+            (_job_container(exitCode=False), "smoke-abcde/smoke exited False, not 0"),
+            (
+                _job_container(startedAt=None),
+                "smoke-abcde/smoke startedAt None is not an ISO 8601 instant",
+            ),
+            (
+                _job_container(finishedAt="2026-07-17T00:01:07"),
+                "smoke-abcde/smoke finishedAt '2026-07-17T00:01:07' is not an ISO 8601 instant",
+            ),
+        ],
+    )
+    def test_a_misreported_container_fails_with_what_is_wrong(
+        self, tmp_path: Path, container: dict[str, Any], problem: str
+    ) -> None:
+        ctx, record = self._record(tmp_path)
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200, _job_pods_payload(record, _job_pod(containers=[container]))
+        )
+
+        with pytest.raises(RuntimeError, match="misreports its completed containers") as raised:
+            checks_jobs._owned_job_pod_times(ctx, record)
+        assert problem in str(raised.value)
+
+    def test_an_exit_reported_before_the_start_passes(self, tmp_path: Path) -> None:
+        """The runtime sets both instants; their order is not the route's to prove.
+
+        A live run's AWS Nitro Sandbox container reported its ``finishedAt``
+        before its ``startedAt``. The route passes both on as the API server
+        holds them, so the check accepts the pair as it is.
+        """
+        ctx, record = self._record(tmp_path)
+        container = _job_container(
+            startedAt="2026-07-17T00:01:07+00:00", finishedAt="2026-07-17T00:01:06+00:00"
+        )
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200, _job_pods_payload(record, _job_pod(containers=[container]))
+        )
+        (pod,) = checks_jobs._owned_job_pod_times(ctx, record)
+        assert pod["containers"][0]["startedAt"] == "2026-07-17T00:01:07+00:00"
+        assert pod["containers"][0]["finishedAt"] == "2026-07-17T00:01:06+00:00"
+
+    def test_a_pod_without_container_statuses_fails(self, tmp_path: Path) -> None:
+        ctx, record = self._record(tmp_path)
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200, _job_pods_payload(record, _job_pod(containers=[]))
+        )
+        with pytest.raises(RuntimeError, match="smoke-abcde reports no container status"):
+            checks_jobs._owned_job_pod_times(ctx, record)
+
+    def test_no_succeeded_pod_of_the_job_fails(self, tmp_path: Path) -> None:
+        ctx, record = self._record(tmp_path)
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200,
+            _job_pods_payload(
+                record, _job_pod(phase="Failed"), _job_pod("smoke-other", uid="uid-2")
+            ),
+        )
+        with pytest.raises(RuntimeError, match=r"no Succeeded pod of it \(phases: \['Failed'\]\)"):
+            checks_jobs._owned_job_pod_times(ctx, record)
+
+    def test_the_lookup_must_answer_for_this_job(self, tmp_path: Path) -> None:
+        ctx, record = self._record(tmp_path)
+        ctx.aws_client.make_authenticated_request.return_value = _response(502, text="bad")
+        with pytest.raises(RuntimeError, match="Job pod lookup failed: 502 bad"):
+            checks_jobs._owned_job_pod_times(ctx, record)
+
+        other = {**_job_pods_payload(record), "job_name": "other"}
+        ctx.aws_client.make_authenticated_request.return_value = _response(200, other)
+        with pytest.raises(RuntimeError, match="Job pod lookup returned a different Job identity"):
+            checks_jobs._owned_job_pod_times(ctx, record)
+
+
 class TestApiTransportLifecycle:
     MARKER = "GCO_LIVE_API_run-123"
 
@@ -929,6 +1117,7 @@ class TestApiTransportLifecycle:
             _response(200, _job_payload(record, uid="uid-1", status=_SUCCEEDED)),
             _response(200, job),
             _response(200, _logs_payload(record, f"log {self.MARKER}")),
+            _response(200, _job_pods_payload(record)),
             _response(200, job),
             _response(200, {"region": "us-east-1", "uid": "uid-1"}),
             _response(404),
@@ -1974,6 +2163,98 @@ class TestConvergeRegionAddons:
         _install_clock(monkeypatch, checks_topology)
         self._converge(environment)
         assert "sfn:us-east-1" in environment.events
+
+    _INPUT = "/gco-live/addons/us-east-1/_input"
+
+    def _store_input_in_parts(self, environment: SimpleNamespace) -> tuple[list[str], str]:
+        """Grow the Region's input past one SSM value and store it as the orchestrator does.
+
+        Returns the written parameter names (header last) and the input JSON.
+        """
+        region = "us-east-1"
+        execution_input = dict(environment.inputs[region])
+        execution_input["ImageReplacements"] = {
+            f"{{{{IMAGE_{index:03d}}}}}": (
+                f"123456789012.dkr.ecr.{region}.amazonaws.com/gco/component-{index:03d}"
+                f"@sha256:{hashlib.sha256(f'image-{index}'.encode()).hexdigest()}"
+            )
+            for index in range(143)
+        }
+        input_json = _canonical(execution_input)
+        orchestrator = load_lambda_module("helm-orchestrator")
+        writes = orchestrator._replay_input_writes(
+            self._INPUT, orchestrator._encode_replay_input(input_json)
+        )
+        assert len(writes) == 3, "the fixture must need two parts and a header"
+        environment.parameter_values.update(dict(writes))
+        self._set_execution(
+            environment,
+            {
+                **environment.metadata[region],
+                "input_sha256": hashlib.sha256(input_json.encode("utf-8")).hexdigest(),
+            },
+        )
+        describe = environment.clients[("stepfunctions", region)].describe_execution
+        describe.return_value["input"] = input_json
+        return [name for name, _value in writes], input_json
+
+    def test_a_replay_input_stored_in_parts_converges(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        environment = _topology_environment()
+        _install_clock(monkeypatch, checks_topology)
+        (first, second, _header), input_json = self._store_input_in_parts(environment)
+        evidence: dict[str, Any] = {}
+
+        checks_topology._converge_region_addons(
+            environment.ctx,
+            region="us-east-1",
+            stack_name=environment.stack_names["us-east-1"],
+            stack=environment.stacks[environment.stack_names["us-east-1"]],
+            evidence=evidence,
+        )
+
+        assert evidence["input"] == json.loads(input_json)
+        assert evidence["input_sha256"] == hashlib.sha256(input_json.encode()).hexdigest()
+        reads = [event for event in environment.events if event.startswith("ssm:")]
+        assert reads[:4] == [
+            "ssm:us-east-1:_execution",
+            "ssm:us-east-1:_input",
+            f"ssm:us-east-1:{first.rsplit('/', 1)[1]}",
+            f"ssm:us-east-1:{second.rsplit('/', 1)[1]}",
+        ]
+
+    def test_a_corrupted_replay_input_in_parts_is_refused(self) -> None:
+        environment = _topology_environment()
+        (first, second, header_name), _input_json = self._store_input_in_parts(environment)
+        values = environment.parameter_values
+        header = values[header_name]
+        digest = header.rsplit(":", 1)[1]
+        original = values[first]
+
+        values[first] = original[:-1] + ("A" if original[-1] != "A" else "B")
+        with pytest.raises(RuntimeError, match="has a 2-part value that does not match"):
+            self._converge(environment)
+        values[first] = original
+
+        values[header_name] = f"chunked:v1:1:{digest}"
+        with pytest.raises(RuntimeError, match="has a 1-part value that does not match"):
+            self._converge(environment)
+
+        values[header_name] = f"chunked:v1:3:{digest}"
+        with pytest.raises(RuntimeError, match=r"names 3 parts, and part 3 \(.*\.3\) could not"):
+            self._converge(environment)
+
+        values[header_name] = header
+        original_second = values.pop(second)
+        with pytest.raises(RuntimeError, match=r"names 2 parts, and part 2 \(.*\.2\) could not"):
+            self._converge(environment)
+        values[second] = original_second
+
+        for malformed in ("chunked:v1:two:" + digest, "chunked:v1:2:" + digest[:40]):
+            values[header_name] = malformed
+            with pytest.raises(RuntimeError, match="has a malformed chunked-input header"):
+                self._converge(environment)
 
 
 class TestHealthAndMetricsPayloads:
@@ -3576,6 +3857,7 @@ class TestExecuteMatrix:
         cli = _FakeCli(runner, plans, runner.table)
         kubectl.reconfigured = cli.reconfigured
         monkeypatch.setattr(lifecycle_module.subprocess, "run", cli)
+        _verified_shared_proxy(runner)
 
         evidence = runner.execute()
 
@@ -3583,8 +3865,9 @@ class TestExecuteMatrix:
         assert evidence["validated_or_resumed"] == 6
         assert evidence["newly_validated"] == 6
         assert evidence["all_endpoints_absent"] is True
-        assert evidence["shared_proxy_autoscaling_verified"] is False
+        assert evidence["shared_proxy_autoscaling_verified"] is True
         assert evidence["invocations"]["completed"] == 6
+        assert evidence["restart_audits"] == {"required": 6, "clean": 6}
         assert evidence["frameworks"] == {
             "vllm": {
                 "baseline": True,
@@ -3648,25 +3931,28 @@ class TestExecuteMatrix:
         _inference_clock(monkeypatch)
         launched = MagicMock()
         monkeypatch.setattr(lifecycle_module.subprocess, "run", launched)
-        for record in records:
+        for plan, record in zip(runner.plans, records, strict=True):
+            # A leg recorded complete carries the evidence its steps left.
+            _prove_leg(plan, record)
             record["validation_complete"] = True
+        _verified_shared_proxy(runner)
 
         evidence = runner.execute()
 
         launched.assert_not_called()
         assert evidence["validated_or_resumed"] == 6
         assert evidence["newly_validated"] == 0
-        assert evidence["invocations"]["completed"] == 0
+        assert evidence["invocations"]["completed"] == 6
         assert evidence["frameworks"] == {
             "vllm": {
                 "baseline": True,
                 "hpa": True,
                 "store": True,
-                "invocations": 0,
-                "model_info": 0,
+                "invocations": 3,
+                "model_info": 3,
             },
-            "sglang": {"baseline": True, "hpa": True, "invocations": 0, "model_info": 0},
-            "triton": {"baseline": True, "invocations": 0, "model_info": 0},
+            "sglang": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 2},
+            "triton": {"baseline": True, "invocations": 1, "model_info": 1},
         }
         assert all(record["absence_proven"] is True for record in records)
         inventory_reads = [call for call in kubectl.calls if call[0] == "get"]
@@ -4205,8 +4491,10 @@ class TestInventoryAndAbsence:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         runner, plan, record, kubectl, clock = self._runner(tmp_path, monkeypatch)
-        # Twelve 0.17s reads: the last one ends past the 2s deletion budget.
-        kubectl.clock, kubectl.tick = clock, 0.17
+        # One read per inventory kind, together just past the 2s deletion budget,
+        # so the sweep's last read ends after the deadline.
+        kubectl.clock = clock
+        kubectl.tick = 2.1 / len(inventory_module.KUBERNETES_INVENTORY_KINDS)
         runner.table.item = _owned_item(runner.settings, plan, runner.owner_nonce)
         with pytest.raises(ManagedInferenceValidationError, match="absence was not proven"):
             runner.prove_absence(record)

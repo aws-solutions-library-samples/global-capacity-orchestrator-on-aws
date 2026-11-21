@@ -9,12 +9,10 @@ history) and the private workspace the base release is cloned into.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import os
 import re
 import subprocess
 import sys
-import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -24,10 +22,10 @@ from scripts.live_release_validation.cli_args import (
     repository_root,
     split_csv_names,
 )
-from scripts.live_release_validation.models import ValidationReport, utc_now
 from scripts.live_release_validation.runner import (
     LiveValidationRunner,
     require_local_execution,
+    write_startup_failure_report,
 )
 
 from .models import UpgradeRunSettings
@@ -234,19 +232,13 @@ def main() -> int:
     except BaseException as exc:
         print(f"Upgrade validation could not start: {type(exc).__name__}: {exc}", file=sys.stderr)
         if settings is not None:
-            report = ValidationReport(
-                run_id=settings.run_id,
-                identity=settings.identity(),
-                selected_actions=list(settings.requested_actions),
-                started_at=utc_now(),
-                ended_at=utc_now(),
-                status="failed",
-                fatal_error="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            write_startup_failure_report(
+                settings,
+                exc,
+                module="scripts.upgrade_validation",
                 title=REPORT_TITLE,
                 report_stem=REPORT_STEM,
             )
-            with contextlib.suppress(OSError):
-                report.write(settings.report_dir)
         return 1
 
 

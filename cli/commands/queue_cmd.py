@@ -5,24 +5,66 @@ from typing import Any
 
 import click
 
+from gco.job_admission import SANDBOX_MODES, apply_sandbox
+
 from ..config import GCOConfig
 from ..output import confirm, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
+#: ``--sandbox`` for every submit command (gco.job_admission.apply_sandbox).
+#: It lives here because ``gco queue submit`` needs it and jobs_cmd already
+#: imports this module for ``gco jobs submit-queue``; the reverse import would
+#: be circular.
+sandbox_option = click.option(
+    "--sandbox",
+    type=click.Choice(sorted(SANDBOX_MODES)),
+    help=(
+        "Run every pod in an AWS Nitro Sandbox: isolated sets runtimeClassName: "
+        "isolated-sandbox on each pod template. Needs EKS 1.36 or later; see "
+        "docs/NITRO_SANDBOXES.md"
+    ),
+)
+
 
 def _parse_labels(raw_labels: tuple[str, ...]) -> dict[str, str]:
-    """Parse repeated ``--label KEY=VALUE`` options without dropping bad input."""
+    """Parse repeated ``--label KEY=VALUE`` options without dropping bad input.
+
+    The key must be non-empty; the value may be empty and may contain ``=``,
+    the same rule as the other submit commands.
+    """
     labels: dict[str, str] = {}
     for raw_label in raw_labels:
         key, separator, value = raw_label.partition("=")
-        if not separator or not key or not value:
+        if not separator or not key:
             raise click.BadParameter(
-                "must be KEY=VALUE with a non-empty key and value",
+                "labels must use key=value with a non-empty key",
                 param_hint="--label",
             )
         labels[key] = value
     return labels
+
+
+def _queue_namespace(manifest: dict[str, Any], namespace: str | None, default: str) -> str:
+    """Pick the namespace the queue envelope carries for *manifest*.
+
+    The queue API requires the envelope namespace to equal a namespace the
+    manifest declares, so the manifest's own ``metadata.namespace`` is used
+    when there is one; *default* (the configured default namespace) applies
+    only to a manifest that declares none. An explicit ``--namespace`` that
+    contradicts the manifest is refused here, before any AWS call, instead
+    of surfacing as the API's 422.
+    """
+    metadata = manifest.get("metadata")
+    declared = metadata.get("namespace") if isinstance(metadata, dict) else None
+    if isinstance(declared, str) and declared:
+        if namespace and namespace != declared:
+            raise ValueError(
+                f"the manifest declares namespace '{declared}' but --namespace is "
+                f"'{namespace}'; drop --namespace or make them match"
+            )
+        return declared
+    return namespace or default
 
 
 @click.group()
@@ -40,9 +82,23 @@ def queue(config: Any) -> None:
 @queue.command("submit")
 @click.argument("manifest_path", type=click.Path(exists=True))
 @click.option("--region", "-r", required=True, help="Target region for job execution")
-@click.option("--namespace", "-n", default="gco-jobs", help="Kubernetes namespace")
-@click.option("--priority", "-p", default=0, help="Job priority (0-100, higher = more important)")
+@click.option(
+    "--namespace",
+    "-n",
+    help=(
+        "Namespace for a manifest that declares none (default: the configured "
+        "default namespace); must match one the manifest declares"
+    ),
+)
+@click.option(
+    "--priority",
+    "-p",
+    type=click.IntRange(0, 100),
+    default=0,
+    help="Job priority (0-100, higher = more important)",
+)
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
+@sandbox_option
 @click.option(
     "--max-spot-price",
     type=float,
@@ -67,25 +123,36 @@ def queue_submit(
     namespace: Any,
     priority: Any,
     label: Any,
+    sandbox: Any,
     max_spot_price: Any,
     spot_instance_type: Any,
 ) -> None:
-    """Submit a job to the global queue for regional pickup.
+    """Submit a job to the global DynamoDB queue for regional pickup.
 
     Jobs are stored in DynamoDB and picked up by the target region's
-    manifest processor. This enables global job submission with
-    centralized tracking.
+    manifest processor, which gives global visibility of queued jobs,
+    status history and priority-based dispatch. `gco jobs submit-sqs`
+    instead uses the target region's SQS queue. `gco jobs submit-queue`
+    is this same command under another name.
+
+    The job runs in the manifest's own metadata.namespace; --namespace
+    names it for a manifest that declares none and must match one that
+    does.
 
     With --max-spot-price and --spot-instance-type the job is cost-gated:
     it stays queued until spot pricing for that instance type in the target
     region drops to or below the cap. Cancel with `gco queue cancel` if the
     price never clears.
 
+    Track the job with `gco queue list` or `gco queue get JOB_ID`.
+
+    \b
     Examples:
         gco queue submit job.yaml --region us-east-1
         gco queue submit job.yaml -r us-west-2 --priority 50
         gco queue submit job.yaml -r us-east-1 -l team=ml -l project=training
         gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-type g5.xlarge
+        gco jobs submit-queue job.yaml -r us-east-1 --sandbox isolated
     """
 
     from gco.services.manifest_processor import safe_load_yaml
@@ -105,6 +172,11 @@ def queue_submit(
         # Load manifest
         with open(manifest_path, encoding="utf-8") as f:
             manifest = safe_load_yaml(f, allow_aliases=False)
+        if not isinstance(manifest, dict):
+            raise ValueError("the manifest must be a single YAML mapping (one batch/v1 Job)")
+        envelope_namespace = _queue_namespace(manifest, namespace, config.default_namespace)
+        if sandbox:
+            apply_sandbox([manifest], sandbox)
 
         # Submit via API
         from ..aws_client import get_aws_client
@@ -114,7 +186,7 @@ def queue_submit(
         body = {
             "manifest": manifest,
             "target_region": region,
-            "namespace": namespace,
+            "namespace": envelope_namespace,
             "priority": priority,
             "labels": labels if labels else None,
         }
@@ -122,6 +194,9 @@ def queue_submit(
             body["max_spot_price"] = max_spot_price
             body["spot_instance_type"] = spot_instance_type
 
+        # The queue is global: any region's API can enqueue for any target
+        # region, so the request goes through the global API (the target
+        # region's bridge only in --regional-api mode).
         result = aws_client.call_api(
             method="POST",
             path="/api/v1/queue/jobs",
@@ -135,6 +210,7 @@ def queue_submit(
                 f"Spot price gate: dispatches when {spot_instance_type} spot "
                 f"price in {region} is <= ${max_spot_price}/hour"
             )
+        formatter.print_info("Use 'gco queue list' or 'gco queue get <job_id>' to track status")
         formatter.print(result)
 
     except Exception as e:
@@ -142,24 +218,78 @@ def queue_submit(
         sys.exit(1)
 
 
+def _next_page_command(
+    region: str | None, status: str | None, namespace: str | None, limit: int, cursor: str
+) -> str:
+    """The ``gco queue list`` command line that reads the page after this one."""
+    import shlex
+
+    args = ["gco", "queue", "list"]
+    for option, value in (("--region", region), ("--status", status), ("--namespace", namespace)):
+        if value:
+            args += [option, value]
+    args += ["--limit", str(limit), "--cursor", cursor]
+    return shlex.join(args)
+
+
+#: Every status a central-queue record can hold, in lifecycle order: the
+#: ``JobStatus`` values in gco/services/template_store.py (a test keeps the two
+#: equal; importing that module here would load boto3 for every command).
+QUEUE_JOB_STATUSES = (
+    "queued",
+    "claimed",
+    "applying",
+    "pending",
+    "running",
+    "succeeded",
+    "failed",
+    "cancelled",
+)
+
+
 @queue.command("list")
 @click.option("--region", "-r", help="Filter by target region")
 @click.option(
     "--status",
     "-s",
-    type=click.Choice(["queued", "claimed", "running", "succeeded", "failed", "cancelled"]),
-    help="Filter by status",
+    type=click.Choice(QUEUE_JOB_STATUSES),
+    help=(
+        "Filter by status. A region claims a queued job, applies it (applying), "
+        "and it is pending until its pods run"
+    ),
 )
 @click.option("--namespace", "-n", help="Filter by namespace")
-@click.option("--limit", "-l", default=50, help="Maximum results")
+@click.option(
+    "--limit",
+    "-l",
+    default=50,
+    type=click.IntRange(1, 1000),
+    help="Maximum jobs in this page (1-1000)",
+)
+@click.option(
+    "--cursor",
+    help=(
+        "Read the page after a previous one: the cursor that page printed. "
+        "Pass the same filters; a cursor is bound to them"
+    ),
+)
 @pass_config
-def queue_list(config: Any, region: Any, status: Any, namespace: Any, limit: Any) -> None:
-    """List jobs in the global queue.
+def queue_list(
+    config: Any, region: Any, status: Any, namespace: Any, limit: Any, cursor: Any
+) -> None:
+    """List jobs in the global queue, one page at a time.
 
+    A page holds up to --limit jobs in the queue's scan order (neither
+    newest first nor by priority). When more jobs may match, the table ends
+    with the command for the next page, and JSON/YAML output carries the
+    page's next_cursor; pass it back with --cursor and the same filters.
+
+    \b
     Examples:
         gco queue list
         gco queue list --region us-east-1 --status queued
         gco queue list -s running
+        gco queue list -s running --cursor CURSOR_FROM_THE_PREVIOUS_PAGE
     """
     formatter = get_output_formatter(config)
 
@@ -176,6 +306,8 @@ def queue_list(config: Any, region: Any, status: Any, namespace: Any, limit: Any
             params["status"] = status
         if namespace:
             params["namespace"] = namespace
+        if cursor:
+            params["cursor"] = cursor
 
         # The region is a DynamoDB filter, not a transport pin. The global API
         # can serve it; forced regional mode uses the configured default bridge.
@@ -189,22 +321,28 @@ def queue_list(config: Any, region: Any, status: Any, namespace: Any, limit: Any
 
         if config.output_format == "table":
             jobs = result.get("jobs", [])
+            next_cursor = result.get("next_cursor")
             if not jobs:
-                formatter.print_info("No jobs found")
-                return
-
-            print(f"\n  Queued Jobs ({result.get('count', 0)} total)")
-            print("  " + "-" * 90)
-            print(
-                "  JOB ID                               NAME                    REGION          STATUS"
-            )
-            print("  " + "-" * 90)
-            for job in jobs:
-                job_id = job.get("job_id", "")[:36]
-                name = job.get("job_name", "")[:22]
-                target = job.get("target_region", "")[:14]
-                job_status = job.get("status", "")[:10]
-                print(f"  {job_id:<36} {name:<23} {target:<15} {job_status}")
+                # An empty page with a cursor is not the end: the scan budget
+                # ran out before it found a match.
+                formatter.print_info("No jobs in this page" if next_cursor else "No jobs found")
+            else:
+                print(f"\n  Queued Jobs ({result.get('count', len(jobs))} in this page)")
+                print("  " + "-" * 90)
+                print(
+                    "  JOB ID                               NAME                    "
+                    "REGION          STATUS"
+                )
+                print("  " + "-" * 90)
+                for job in jobs:
+                    job_id = job.get("job_id", "")[:36]
+                    name = job.get("job_name", "")[:22]
+                    target = job.get("target_region", "")[:14]
+                    job_status = job.get("status", "")[:10]
+                    print(f"  {job_id:<36} {name:<23} {target:<15} {job_status}")
+            if next_cursor:
+                next_page = _next_page_command(region, status, namespace, limit, next_cursor)
+                formatter.print_info(f"More jobs may match. Next page: {next_page}")
         else:
             formatter.print(result)
 
@@ -227,14 +365,14 @@ def queue_get(config: Any, job_id: Any, region: Any) -> None:
     formatter = get_output_formatter(config)
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
         query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="GET",
-            path=f"/api/v1/queue/jobs/{job_id}",
+            path=f"/api/v1/queue/jobs/{api_path_segment(job_id)}",
             region=query_region,
         )
 
@@ -290,7 +428,11 @@ def queue_get(config: Any, job_id: Any, region: Any) -> None:
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @pass_config
 def queue_cancel(config: Any, job_id: Any, reason: Any, region: Any, yes: Any) -> None:
-    """Cancel a queued job (only works for jobs not yet running).
+    """Cancel a job that is still queued, before a region claims it.
+
+    Only a `queued` job can be cancelled. Once a region has claimed it
+    (`claimed`, `applying`, `pending`, `running`) or it has finished, the API
+    refuses with 409 and the command exits 1.
 
     Examples:
         gco queue cancel abc123-def456
@@ -302,7 +444,7 @@ def queue_cancel(config: Any, job_id: Any, reason: Any, region: Any, yes: Any) -
         confirm(f"Cancel job {job_id}?", abort=True)
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
@@ -313,7 +455,7 @@ def queue_cancel(config: Any, job_id: Any, reason: Any, region: Any, yes: Any) -
 
         result = aws_client.call_api(
             method="DELETE",
-            path=f"/api/v1/queue/jobs/{job_id}",
+            path=f"/api/v1/queue/jobs/{api_path_segment(job_id)}",
             region=query_region,
             params=params,
         )

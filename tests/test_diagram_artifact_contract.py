@@ -676,6 +676,24 @@ class TestCodeCatalogueViolations:
             "retired source marker: scripts/harness/retired.py",
         ]
 
+    def test_a_checkout_under_a_build_directory_is_still_checked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only a "-build" directory inside the project is skipped, never the checkout's path.
+
+        Tested against the absolute path, a CI workspace or worktree named like
+        ``gco-build`` skipped every file, so a retired marker passed the contract.
+        """
+        root = tmp_path / "workspace" / "gco-build"
+        targets = _write_catalogue(root, {"alpha.py": _STAMP_A})
+        monkeypatch.setattr(diagrams_generate, "TARGETS", targets)
+        marker = f"# <{SENTINEL}> BEGIN\n# <{SENTINEL}> END\n"
+        (root / "cli").mkdir()
+        (root / "cli" / "retired.py").write_text(marker, encoding="utf-8")
+        (root / "lambda" / "x-build").mkdir(parents=True)
+        (root / "lambda" / "x-build" / "handler.py").write_text(marker, encoding="utf-8")
+        assert self._issues(root) == ["retired source marker: cli/retired.py"]
+
     def test_shared_source_copies_carry_the_canonical_marker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

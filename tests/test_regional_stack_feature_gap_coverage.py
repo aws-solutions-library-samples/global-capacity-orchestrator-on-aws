@@ -671,10 +671,17 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
         "{{FSX_FILE_SYSTEM_ID}}": "GCOFsxLustre",
         "{{FSX_DNS_NAME}}": "GCOFsxLustre",
         "{{FSX_MOUNT_NAME}}": "GCOFsxLustre",
-        "{{FSX_SECURITY_GROUP_ID}}": "FsxSecurityGroup",
     }
     for key, logical_prefix in optional_tokens.items():
         assert logical_prefix in json.dumps(replacements[key])
+    # No manifest reads these; the stack no longer renders them.
+    for unused in (
+        "{{EFS_ACCESS_POINT_ID}}",
+        "{{JOB_QUEUE_ARN}}",
+        "{{PRIVATE_SUBNET_ID}}",
+        "{{FSX_SECURITY_GROUP_ID}}",
+    ):
+        assert unused not in replacements
 
     assert properties["ProjectName"] == "gco-test"
     assert properties["Region"] == _REGION
@@ -955,8 +962,9 @@ def test_teardown_waits_then_uninstalls_in_strict_reverse_order(feature_stack):
             assert state["End"] is True
         assert state["TimeoutSeconds"] == {
             "keda": 360,
+            "kueue": 240,
             "argocd": 240,
-            "crossplane": 360,
+            "crossplane": 420,
             "slinky-slurm": 240,
         }.get(chart_name, 120)
         assert "Catch" not in state
@@ -1142,6 +1150,25 @@ def test_explicit_context_bool_parser(raw, expected):
 def test_explicit_context_bool_parser_rejects_ambiguous_values():
     with pytest.raises(ValueError, match="must be true or false"):
         rs._explicit_context_bool("enabled", key="test")
+
+
+@pytest.mark.parametrize("raw", ["yes", "1", 1, "retain"])
+def test_an_ambiguous_provider_log_retention_flag_fails_the_synth(raw):
+    # The harness-only flag used to read every value but true/"true" as
+    # "delete the provider log groups", so a typo silently changed teardown.
+    app = cdk.App(context={rs._LIVE_VALIDATION_PROVIDER_LOG_CONTEXT: raw})
+    with pytest.raises(
+        ValueError,
+        match=r"gco_live_validation_retain_provider_log_groups must be true or false",
+    ):
+        rs.GCORegionalStack(
+            app,
+            "provider-log-flag",
+            config=MagicMock(),
+            region=_REGION,
+            auth_secret_arn=f"arn:aws:secretsmanager:{_REGION}:{_ACCOUNT}:secret:test-auth",
+            env=cdk.Environment(account=_ACCOUNT, region=_REGION),
+        )
 
 
 def test_non_ga_partition_omits_registration_and_tears_down_directly(ga_disabled_stack):

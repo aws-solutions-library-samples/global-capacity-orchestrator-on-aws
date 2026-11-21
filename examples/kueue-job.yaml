@@ -9,13 +9,17 @@
 #
 # Usage:
 #   kubectl apply -f examples/kueue-job.yaml
-#   # Submit jobs (they will be queued if resources are limited):
-#   kubectl create job test-job-1 --image=python:3.14.9-slim -n gco-jobs -- sleep 60
-#   kubectl create job test-job-2 --image=python:3.14.9-slim -n gco-jobs -- sleep 60
 #   # Inspect queue state:
 #   kubectl get clusterqueue
 #   kubectl get localqueue -n gco-jobs
 #   kubectl get workloads -n gco-jobs
+#
+# Only labelled workloads are queued. The Kueue chart GCO installs leaves
+# manageJobsWithoutQueueName at its default, false, so Kueue ignores a Job
+# without the kueue.x-k8s.io/queue-name label: it starts at once, limited
+# only by the namespace ResourceQuota. A Job made with `kubectl create job`
+# carries no label, so it bypasses the queue. To queue more work, submit
+# copies of the sample Jobs below under new names, keeping the label.
 #
 # Docs: ../docs/KUEUE.md
 

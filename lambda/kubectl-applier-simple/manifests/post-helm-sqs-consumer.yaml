@@ -29,6 +29,7 @@
 #   resource_quotas.max_*:     max CPU / memory / GPU per submitted manifest
 #   trusted_registries/orgs:   image registry allowlist
 #   manifest_security_policy:  block_privileged, block_host_network, etc.
+# plus manifest_processor.yaml_max_depth, the manifest nesting-depth limit.
 #
 # Template variables are replaced by the kubectl-applier Lambda
 # during CDK deployment using values from the regional stack.
@@ -157,6 +158,11 @@ spec:
           # so the SQS path enforces the same policy as the REST path.
           - name: REQUIRE_ACCELERATOR_TOLERATION
             value: "{{QP_REQUIRE_ACCELERATOR_TOLERATION}}"
+          # Maximum manifest nesting depth: the REST Deployment's own token
+          # (cdk.json manifest_processor.yaml_max_depth), so both paths
+          # refuse the same manifests.
+          - name: YAML_MAX_DEPTH
+            value: "{{MP_YAML_MAX_DEPTH}}"
           resources:
             requests:
               cpu: "100m"

@@ -12,6 +12,7 @@ during validation.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -687,3 +688,109 @@ class TestDagRunProgressCallback:
         assert "dep failed" in result.output  # skipped branch
         assert "boom" in result.output  # failed branch
         assert "DAG done" in result.output  # "completed" branch
+
+
+class TestDagMachineOutput:
+    """``dag run`` / ``dag validate`` print exactly one document with -o json/yaml."""
+
+    @staticmethod
+    def _dag(tmp_path, steps=None):
+        a = tmp_path / "a.yaml"
+        b = tmp_path / "b.yaml"
+        a.write_text("kind: Job\napiVersion: batch/v1")
+        b.write_text("kind: Job\napiVersion: batch/v1")
+        definition = {
+            "name": "pipe",
+            "region": "us-east-1",
+            "steps": steps
+            or [
+                {"name": "prep", "manifest": str(a)},
+                {"name": "train", "manifest": str(b), "depends_on": ["prep"]},
+            ],
+        }
+        path = tmp_path / "dag.yaml"
+        path.write_text(yaml.dump(definition))
+        return str(path), str(a), str(b)
+
+    @pytest.mark.parametrize("command", [["dag", "validate"], ["dag", "run", "--dry-run"]])
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_valid_definition_is_one_document(self, tmp_path, command, output_format):
+        from cli.main import cli
+
+        path, a, b = self._dag(tmp_path)
+
+        result = CliRunner().invoke(cli, ["-o", output_format, *command, path])
+
+        assert result.exit_code == 0, result.output
+        document = yaml.safe_load(result.stdout)
+        assert document == {
+            "name": "pipe",
+            "valid": True,
+            "errors": [],
+            "region": "us-east-1",
+            "namespace": "gco-jobs",
+            "steps": [
+                {"name": "prep", "manifest": a, "depends_on": []},
+                {"name": "train", "manifest": b, "depends_on": ["prep"]},
+            ],
+            "execution_order": ["prep", "train"],
+        }
+        if output_format == "json":
+            assert json.loads(result.stdout) == document
+
+    @pytest.mark.parametrize("command", [["dag", "validate"], ["dag", "run"]])
+    def test_invalid_definition_is_one_document_and_exit_1(self, tmp_path, command):
+        from cli.main import cli
+
+        path, _, _ = self._dag(
+            tmp_path, steps=[{"name": "a", "manifest": "/nonexistent.yaml", "depends_on": ["x"]}]
+        )
+
+        result = CliRunner().invoke(cli, ["-o", "json", *command, path])
+
+        assert result.exit_code == 1
+        document = json.loads(result.stdout)
+        assert document["valid"] is False
+        assert "Step 'a' depends on unknown step 'x'" in document["errors"]
+        assert "execution_order" not in document
+
+    @pytest.mark.parametrize("failed", [False, True])
+    @patch("cli.dag.get_dag_runner")
+    def test_run_is_one_document_with_step_statuses(self, mock_runner_fn, tmp_path, failed):
+        from cli.dag import DagDefinition, DagStep
+        from cli.main import cli
+
+        path, a, b = self._dag(tmp_path)
+
+        def run(dag_def, region=None, timeout_per_step=None, progress_callback=None):
+            progress_callback("pipe", "started", "Running DAG 'pipe' with 2 steps")
+            progress_callback("prep", "succeeded", "done")
+            summary = "completed with failures" if failed else "completed"
+            progress_callback("pipe", summary, "DAG 'pipe': summary")
+            return DagDefinition(
+                name="pipe",
+                region="us-east-1",
+                steps=[
+                    DagStep(name="prep", manifest=a, status="succeeded", job_name="prep-x"),
+                    DagStep(
+                        name="train",
+                        manifest=b,
+                        depends_on=["prep"],
+                        status="failed" if failed else "succeeded",
+                        error="boom" if failed else None,
+                    ),
+                ],
+            )
+
+        mock_runner_fn.return_value.run.side_effect = run
+
+        result = CliRunner().invoke(cli, ["-o", "json", "dag", "run", path])
+
+        assert result.exit_code == (1 if failed else 0), result.output
+        document = json.loads(result.stdout)
+        assert document["status"] == ("failed" if failed else "succeeded")
+        assert [(s["name"], s["status"]) for s in document["steps"]] == [
+            ("prep", "succeeded"),
+            ("train", "failed" if failed else "succeeded"),
+        ]
+        assert document["steps"][0]["job_name"] == "prep-x"

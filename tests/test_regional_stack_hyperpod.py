@@ -230,11 +230,14 @@ class TestHyperpodOn:
         assert sg_ref["Fn::GetAtt"][0].startswith("HyperpodSecurityGroup")
         assert sg_ref["Fn::GetAtt"][1] == "GroupId"
         assert len(props["VpcConfig"]["Subnets"]) == 1
-        assert sorted(tag["Key"] for tag in props["Tags"]) == [
-            "Project",
-            "gco:hyperpod-cluster",
-            "gco:project",
-        ]
+        # ``Project`` is cdk.json ``context.tags.Project`` (MockConfigLoader:
+        # ``gco``), the value the cost reports filter on; ``gco:project`` is
+        # the project name.
+        assert {tag["Key"]: tag["Value"] for tag in props["Tags"]} == {
+            "Project": "gco",
+            "gco:hyperpod-cluster": "research-hyperpod",
+            "gco:project": "gco-test",
+        }
         assert cluster["DeletionPolicy"] == "Retain"
         assert cluster["UpdateReplacePolicy"] == "Retain"
         # Created after the convergence trigger, the access entry, the SG and the script.
@@ -365,6 +368,38 @@ class TestHyperpodOn:
         assert len(targets) == 2
         assert sg["DeletionPolicy"] == "Retain"
 
+    def test_each_all_traffic_rule_carries_its_restricted_ports_acknowledgment(
+        self, synthesized
+    ) -> None:
+        """All three rules, the one CDK files under the cluster security group included.
+
+        The cluster security group's rule from the HyperPod group sits under the
+        EKS cluster construct; it was covered only by the cluster-wide token-CIDR
+        acknowledgment until that was removed, so the rule packs failed it.
+        """
+        from gco.stacks.nag_suppressions import _ACK_METADATA_KEY
+
+        stack, _resources = synthesized
+        assert stack.hyperpod is not None
+        hyperpod_group_id = stack.hyperpod.security_group.security_group_id
+        rules = [
+            c
+            for c in stack.node.find_all()
+            if isinstance(c, ec2.CfnSecurityGroupIngress)
+            and c.ip_protocol == "-1"
+            and hyperpod_group_id in (c.group_id, c.source_security_group_id)
+        ]
+        assert len(rules) == 3
+        assert any("GCOEksCluster" in rule.node.path for rule in rules)
+        for rule in rules:
+            acknowledged = {
+                key
+                for entry in rule.node.metadata
+                if entry.type == _ACK_METADATA_KEY
+                for key in entry.data
+            }
+            assert set(hc._ALL_TRAFFIC_RULES) <= acknowledged, rule.node.path
+
     def test_lifecycle_script_is_published_to_the_shared_bucket(self, synthesized) -> None:
         _stack, resources = synthesized
         [(_logical_id, resource)] = [
@@ -426,6 +461,9 @@ class TestHyperpodOn:
         assert replacements["{{HYPERPOD_HMA_IMAGE}}"] == hp.health_monitoring_agent_image(_REGION)
         assert replacements["{{HYPERPOD_QUEUE_MAX_GPU}}"] == "32"
         assert replacements["{{HYPERPOD_QUEUE_MAX_MEMORY}}"] == "8Ti"
+        assert replacements["{{HYPERPOD_QUEUE_MAX_EFA}}"] == "160"
+        # The default queue's EFA quota follows resource_quota.max_gpu ("32").
+        assert replacements["{{QUOTA_MAX_EFA}}"] == "160"
         charts = stack._get_enabled_helm_charts()
         assert "nvidia-device-plugin" in charts
         assert charts.index("nvidia-device-plugin") > charts.index("kueue") or charts[-1] in (
@@ -528,6 +566,7 @@ class TestConstructGuards:
                 "Hyperpod",
                 config=hp.validate_hyperpod_config({"enabled": True}),
                 project_name="gco",
+                project_tag="GCO",
                 region=_REGION,
                 **kwargs,
             )
@@ -540,6 +579,7 @@ class TestConstructGuards:
             "Hyperpod",
             config=hp.validate_hyperpod_config({"enabled": True}),
             project_name="gco",
+            project_tag="GCO",
             region=_REGION,
             **kwargs,
         )
@@ -563,7 +603,13 @@ class TestConstructGuards:
             ValueError, match=r"us-east-1f.*EKS-supported zones: us-east-1a, us-east-1b"
         ):
             hc.HyperpodCluster(
-                stack, "Hyperpod", config=config, project_name="gco", region=_REGION, **kwargs
+                stack,
+                "Hyperpod",
+                config=config,
+                project_name="gco",
+                project_tag="GCO",
+                region=_REGION,
+                **kwargs,
             )
 
     def test_no_subnets_is_refused(self) -> None:
@@ -575,6 +621,7 @@ class TestConstructGuards:
                 "Hyperpod",
                 config=hp.validate_hyperpod_config({"enabled": True}),
                 project_name="gco",
+                project_tag="GCO",
                 region=_REGION,
                 **kwargs,
             )

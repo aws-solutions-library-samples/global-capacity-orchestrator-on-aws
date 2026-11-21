@@ -286,11 +286,13 @@ def _code_artifact_contract(project_root: Path) -> list[str]:
     for marker_root in marker_roots:
         paths = [marker_root] if marker_root.is_file() else marker_root.rglob("*.py")
         for path in paths:
-            if not path.is_file() or "-build" in path.as_posix():
+            # Relative, so a checkout that itself sits under a "-build"
+            # directory (a CI workspace, a worktree) is not skipped whole.
+            relative = path.relative_to(project_root).as_posix()
+            if not path.is_file() or "-build" in relative:
                 continue
             if SENTINEL not in path.read_text(encoding="utf-8"):
                 continue
-            relative = path.relative_to(project_root).as_posix()
             if relative not in allowed_marker_sources:
                 issues.append(f"retired source marker: {relative}")
     return issues

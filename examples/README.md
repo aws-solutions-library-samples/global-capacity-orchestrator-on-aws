@@ -278,7 +278,7 @@ kubectl delete -f examples/crossplane-batch-api.yaml
 
 **Files:** `pipeline-dag.yaml`, `dag-step-preprocess.yaml`, `dag-step-train.yaml`
 
-A multi-step pipeline with dependency ordering. The preprocess step generates training data on shared [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), then the train step reads it and produces model artifacts. Steps only run after their dependencies complete successfully.
+A multi-step pipeline with dependency ordering. The preprocess step generates training data on shared [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), then the train step reads it and produces model artifacts. Steps only run after their dependencies complete successfully. Each step allows no retries (`backoffLimit: 0`) but ignores disruptions, so a step whose pod is preempted gets a new pod instead of failing the pipeline (see [Troubleshooting](../docs/TROUBLESHOOTING.md#job-fails-after-its-pod-was-preempted)).
 
 **Usage:**
 
@@ -382,7 +382,7 @@ gco jobs submit-sqs examples/gpu-job.yaml --region us-east-1
 kubectl logs job/gpu-test-job
 ```
 
-**Requirements:** GPU nodepools (included by default), NVIDIA device plugin (included by default).
+**Requirements:** GPU nodepools (included by default). Nothing to install for the GPU itself: EKS Auto Mode nodes ship the NVIDIA driver and device plugin, which advertises `nvidia.com/gpu`. GCO installs its own `nvidia-device-plugin` chart only for [SageMaker HyperPod](../docs/HYPERPOD.md) nodes, which run outside Auto Mode.
 
 **When to use:** ML model training, GPU-accelerated workloads, testing GPU availability.
 
@@ -521,7 +521,7 @@ kubectl delete -f examples/kro-batch-api.yaml
 
 **File:** `kubeflow-trainjob.yaml`
 
-Runs a 2-node distributed PyTorch all-reduce through the Kubeflow Trainer v2 `TrainJob` API against the platform-shipped `torch-distributed` runtime. The runtime supplies the pod template and torchrun rendezvous wiring; the manifest only declares what to run (`spec.trainer`) and how wide (`numNodes`). Trainer v2 supersedes the legacy training-operator (PyTorchJob/TFJob/MPIJob) with one `TrainJob` kind plus runtime blueprints. Deliberately CPU-sized so the distributed plumbing is provable without accelerator quota — the manifest documents the GPU variant (per-node GPU resources plus a toleration delivered via `runtimePatches`).
+Runs a 2-node distributed PyTorch all-reduce through the Kubeflow Trainer v2 `TrainJob` API against the platform-shipped `torch-distributed` runtime. The runtime supplies the pod template and torchrun rendezvous wiring; the manifest only declares what to run (`spec.trainer`) and how wide (`numNodes`). Trainer v2 supersedes the legacy training-operator (PyTorchJob/TFJob/MPIJob) with one `TrainJob` kind plus runtime blueprints. Deliberately CPU-sized so the distributed plumbing is provable without accelerator quota — the manifest documents the GPU variant (per-node GPU resources plus a toleration delivered via `runtimePatches`). The shipped runtime pins the pods to amd64 nodes (`kubernetes.io/arch: amd64`), and a runtime patch in the manifest repeats the pin: the runtime's `pytorch/pytorch` image is linux/amd64 only, and the CPU and GPU pools also launch arm64 nodes. Every runtime patch needs a `manager` (any non-empty string), which the TrainJob CRD requires.
 
 The trainer controller compiles the TrainJob into a JobSet whose child Job `<name>-node-0` runs `numNodes` indexed pods (completion index = node rank). The `gco jobs` commands resolve TrainJobs automatically: `gco jobs get`, `gco jobs delete`, and `gco jobs logs` (rank 0 by default, `--node N` for another rank) all work unchanged.
 
@@ -702,7 +702,7 @@ gco inference deploy my-model -i vllm/vllm-openai:v0.32.0 \
 
 **File:** `multi-gpu-training.yaml`
 
-Distributed training across multiple GPUs using PyTorch DistributedDataParallel (DDP). Creates indexed pods with a headless service for DNS-based peer discovery.
+Distributed training across multiple GPUs using PyTorch DistributedDataParallel (DDP). Creates indexed pods with a headless service for DNS-based peer discovery. The pods select one-GPU amd64 nodes (`kubernetes.io/arch: amd64`): the `pytorch/pytorch` CUDA image is linux/amd64 only, and a one-GPU selector alone also matches the arm64 g5g pool.
 
 **Usage:**
 
@@ -712,7 +712,7 @@ kubectl get pods -n gco-jobs -l job-name=pytorch-ddp-training
 kubectl logs -f job/pytorch-ddp-training -n gco-jobs
 ```
 
-**Requirements:** GPU nodes available, NVIDIA device plugin (installed by default).
+**Requirements:** GPU nodes available. EKS Auto Mode nodes ship the NVIDIA driver and device plugin, so there is nothing to install for the GPUs.
 
 **When to use:** Multi-node distributed training, PyTorch DDP workloads, scaling training across GPUs.
 
@@ -1074,21 +1074,26 @@ This tells the autoscaler to leave the node alone until the pod completes. Remov
 
 ### "Resource limits exceed maximum allowed values"
 
-The GCO API validates manifest resource requests against configurable limits. If your job needs more CPU, memory, or GPUs than the defaults allow, update the limits in `cdk.json` and redeploy:
+The GCO API checks the total resource requests of each submitted manifest against `job_validation_policy.resource_quotas`: by default 384 vCPU, 4096Gi of memory and 16 GPUs, two full accelerator nodes. `gco jobs policy -r <region>` shows what a Region enforces. If your job needs more, raise the caps in `cdk.json`. A cap may not exceed the `gco-jobs` namespace ResourceQuota (`resource_quota.max_cpu`, `max_memory` and `max_gpu`, by default 400, 4096Gi and 32) or fall below the per-container limit (`resource_quota.container_max_*`, by default 192, 2048Gi and 8), and the synth stops on a value that breaks either rule, so raise `resource_quota` with them:
 
 ```json
 {
   "job_validation_policy": {
     "resource_quotas": {
-      "max_cpu_per_manifest": "96",
-      "max_memory_per_manifest": "192Gi",
-      "max_gpu_per_manifest": 8
+      "max_cpu_per_manifest": "768",
+      "max_memory_per_manifest": "8192Gi",
+      "max_gpu_per_manifest": 32
     }
+  },
+  "resource_quota": {
+    "max_cpu": "800",
+    "max_memory": "8192Gi",
+    "max_gpu": "32"
   }
 }
 ```
 
-Then redeploy: `gco stacks deploy-all -y`
+Keys you leave out keep their defaults. Then redeploy: `gco stacks deploy-all -y`
 
 `job_validation_policy` is authoritative for both submission paths: the REST manifest processor and SQS queue processor enforce the same limits, namespace/kind allowlists, image policy, and security controls.
 

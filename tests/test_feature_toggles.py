@@ -7,6 +7,7 @@ to use the same generic helpers still works.
 """
 
 import json
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -133,6 +134,110 @@ class TestGenericFeatureConfig:
             pytest.raises(RuntimeError, match=re.escape("cdk.json not found")),
         ):
             _update_feature_config("my_feature", {"enabled": True}, {"enabled": False})
+
+    def test_serialize_cdk_json_is_the_shared_on_disk_format(self):
+        from cli.stacks import serialize_cdk_json
+
+        document = {"context": {"_comment_x": "a \u2014 b", "items": [1, 2]}}
+
+        assert serialize_cdk_json(document) == (
+            b'{\n  "context": {\n    "_comment_x": "a \xe2\x80\x94 b",\n'
+            b'    "items": [\n      1,\n      2\n    ]\n  }\n}\n'
+        )
+
+    def test_the_committed_cdk_json_is_in_the_shared_format(self):
+        """The committed file is byte for byte what the CLI writes.
+
+        Otherwise the first ``gco stacks ... enable`` rewrites every line of
+        the file (inline arrays, blank lines) instead of the keys it changes.
+        """
+        from cli.stacks import serialize_cdk_json
+
+        raw = (Path(__file__).resolve().parents[1] / "cdk.json").read_bytes()
+        assert raw == serialize_cdk_json(json.loads(raw))
+
+    def test_update_feature_config_keeps_utf8_and_ends_with_newline(self, tmp_path: Path):
+        """A toggle writes the shared format: no \\uXXXX churn, one trailing newline."""
+        from cli.stacks import _update_feature_config, serialize_cdk_json
+
+        comment = "Valkey cache \u2014 see docs/CUSTOMIZATION.md \u2192 R\u00e9gions"
+        cdk_path = tmp_path / "cdk.json"
+        cdk_path.write_text(
+            json.dumps({"context": {"_comment_valkey": comment, "valkey": {"enabled": False}}}),
+            encoding="utf-8",
+        )
+        with patch("cli.stacks._find_cdk_json", return_value=cdk_path):
+            _update_feature_config("valkey", {"enabled": True}, {"enabled": False})
+
+        raw = cdk_path.read_bytes()
+        assert raw == serialize_cdk_json(json.loads(raw))
+        assert comment.encode("utf-8") in raw
+        assert b"\\u2014" not in raw
+        assert raw.endswith(b"}\n")
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+    def test_update_feature_config_through_symlink_updates_target(self, tmp_path: Path):
+        """A symlinked cdk.json stays a link; the file it points at changes."""
+        from cli.stacks import _update_feature_config
+
+        real = tmp_path / "deployments" / "cdk.json"
+        real.parent.mkdir()
+        real.write_text(json.dumps({"context": {"valkey": {"enabled": False}}}), encoding="utf-8")
+        link = tmp_path / "checkout" / "cdk.json"
+        link.parent.mkdir()
+        link.symlink_to(real)
+        with patch("cli.stacks._find_cdk_json", return_value=link):
+            _update_feature_config("valkey", {"enabled": True}, {"enabled": False})
+
+        assert link.is_symlink()
+        assert json.loads(real.read_text(encoding="utf-8"))["context"]["valkey"]["enabled"]
+        assert sorted(path.name for path in link.parent.iterdir()) == ["cdk.json"]
+
+    def test_update_feature_config_removes_keys(self, tmp_path: Path):
+        """A key in ``remove`` is deleted unless the same call gives it a value."""
+        from cli.stacks import _update_feature_config
+
+        cdk_path = tmp_path / "cdk.json"
+        cdk_path.write_text(
+            json.dumps(
+                {"context": {"my_feature": {"enabled": True, "stale": 1, "old": 2, "kept": 3}}}
+            )
+        )
+        with patch("cli.stacks._find_cdk_json", return_value=cdk_path):
+            _update_feature_config(
+                "my_feature",
+                {"enabled": True, "stale": None, "kept": 4},
+                {"enabled": False},
+                remove=["stale", "old", "kept", "never_there"],
+            )
+
+        assert json.loads(cdk_path.read_text())["context"]["my_feature"] == {
+            "enabled": True,
+            "kept": 4,
+        }
+
+    def test_update_feature_config_removes_keys_from_the_region_overlay_only(self, tmp_path: Path):
+        from cli.stacks import _update_feature_config
+
+        cdk_path = tmp_path / "cdk.json"
+        cdk_path.write_text(
+            json.dumps(
+                {
+                    "context": {
+                        "my_feature": {"enabled": False, "path": "global"},
+                        "my_feature_regions": {"us-west-2": {"enabled": True, "path": "region"}},
+                    }
+                }
+            )
+        )
+        with patch("cli.stacks._find_cdk_json", return_value=cdk_path):
+            _update_feature_config(
+                "my_feature", {"enabled": True}, {"enabled": False}, "us-west-2", remove=["path"]
+            )
+
+        context = json.loads(cdk_path.read_text())["context"]
+        assert context["my_feature_regions"] == {"us-west-2": {"enabled": True}}
+        assert context["my_feature"] == {"enabled": False, "path": "global"}
 
     def test_update_feature_config_skips_none_values(self):
         from cli.stacks import _update_feature_config
@@ -431,3 +536,71 @@ class TestFsxRefactored:
                 global_result = get_fsx_config()
                 assert global_result["storage_capacity_gib"] == 1200
                 assert global_result["is_region_specific"] is False
+
+
+class TestFsxEnableWritesWhatItShows:
+    """``gco stacks fsx enable`` removes the settings it was not given.
+
+    It used to skip every option left out, so an import path, export path or
+    PERSISTENT throughput from an earlier run stayed in cdk.json although the
+    confirmation summary did not show it, and the deprecated ``node_group``
+    stayed too.
+    """
+
+    _STALE = {
+        "enabled": False,
+        "storage_capacity_gib": 2400,
+        "deployment_type": "PERSISTENT_2",
+        "per_unit_storage_throughput": 500,
+        "data_compression_type": "LZ4",
+        "import_path": "s3://example-bucket/in",
+        "export_path": "s3://example-bucket/out",
+        "auto_import_policy": "NEW",
+        "node_group": {"instance_types": ["m5.large"]},
+    }
+
+    @staticmethod
+    def _enable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *args: str) -> dict:
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(cli, ["stacks", "fsx", "enable", "-y", *args])
+        assert result.exit_code == 0, result.output
+        return json.loads((tmp_path / "cdk.json").read_text(encoding="utf-8"))["context"]
+
+    def test_the_global_block_holds_exactly_the_shown_settings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "cdk.json").write_text(json.dumps({"context": {"fsx_lustre": self._STALE}}))
+        context = self._enable(tmp_path, monkeypatch, "-d", "SCRATCH_2")
+        assert context["fsx_lustre"] == {
+            "enabled": True,
+            "storage_capacity_gib": 1200,
+            "deployment_type": "SCRATCH_2",
+            "data_compression_type": "LZ4",
+        }
+
+    def test_a_region_entry_drops_its_stale_settings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "cdk.json").write_text(
+            json.dumps(
+                {
+                    "context": {
+                        "fsx_lustre": {"enabled": False},
+                        "fsx_lustre_regions": {"us-west-2": self._STALE},
+                    }
+                }
+            )
+        )
+        context = self._enable(tmp_path, monkeypatch, "-r", "us-west-2", "-d", "PERSISTENT_1")
+        assert context["fsx_lustre_regions"]["us-west-2"] == {
+            "enabled": True,
+            "storage_capacity_gib": 1200,
+            "deployment_type": "PERSISTENT_1",
+            "per_unit_storage_throughput": 200,
+            "data_compression_type": "LZ4",
+        }
+        assert context["fsx_lustre"] == {"enabled": False}

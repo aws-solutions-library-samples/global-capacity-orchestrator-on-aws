@@ -85,7 +85,10 @@ spec:
 ```
 
 The `ClusterQueue`'s nominal quotas come from `hyperpod.queue`; they are
-admission caps, the instance groups are the real limit.
+admission caps, the instance groups are the real limit. It also covers
+`aws.amazon.com/neuron` (the `max_gpu` quota) and `vpc.amazonaws.com/efa`
+(five interfaces per unit of `max_gpu`), so Neuron and EFA Jobs are admitted;
+see [KUEUE.md → Submitting Jobs](KUEUE.md#submitting-jobs).
 
 The job API's toleration rule (`require_accelerator_toleration`, which
 otherwise rejects a GPU request that does not tolerate `nvidia.com/gpu`) knows
@@ -106,6 +109,16 @@ tolerations:
     value: "true"
     effect: NoSchedule
 ```
+
+A `TrainJob` sets them in a runtime patch on its `node` pod template
+(`spec.trainer` has no scheduling fields; see
+[`examples/kubeflow-trainjob.yaml`](../examples/kubeflow-trainjob.yaml)).
+Trainer merges every patch that names the same replicated job into one pod
+template, and the job API judges the merged template, so the selector and the
+toleration may sit in different patches. Every pod template the patches set
+must select HyperPod. Tolerations do not merge: a later patch that sets
+tolerations for the same replicated job replaces the earlier list, so the
+last such patch must carry the HyperPod toleration.
 
 **Inference.** `gco inference deploy --capacity-type hyperpod` (and the MCP
 `deploy_inference` tool) pins an endpoint's model pods to HyperPod nodes the
@@ -217,7 +230,7 @@ for a per-Region overlay). Every key is validated at synth time by
 | `instance_groups[].deep_health_checks` | `[]` | `OnStartDeepHealthChecks` SageMaker runs when an instance is created or replaced: `InstanceStress` (hardware, DCGM and EFA tests on the instance), `InstanceConnectivity` (NCCL tests across the group). Off by default because they hold each new instance for about two hours, and because SageMaker accepts `InstanceConnectivity` only for instance families with multi-node GPU networking (`CreateCluster` named G5 and G6 from 8xlarge up, P4, P5, P6 and Trn on 2026-10-31; it refuses `ml.g4dn.xlarge`). Turn them on per group for production training capacity. |
 | `instance_groups[].training_plan_arn` | `null` | A SageMaker Training Plan whose reserved capacity this group launches into (see below). |
 | `instance_groups[].data_volume_size_gb` | `null` | Size of an additional EBS volume SageMaker attaches to every instance in the group and mounts at `/opt/sagemaker` (1–16384 GB); `null` attaches none. The root volume is sized by SageMaker and cannot be set here: the API accepts `RootVolume: true` only to encrypt the root volume with your own KMS key, and rejects a size with it. |
-| `queue.max_cpu` / `max_memory` / `max_gpu` | `"1000"` / `"4Ti"` / `"64"` | Nominal quotas of the `gco-hyperpod-queue` Kueue ClusterQueue (Kubernetes quantities). |
+| `queue.max_cpu` / `max_memory` / `max_gpu` | `"1000"` / `"4Ti"` / `"64"` | Nominal quotas of the `gco-hyperpod-queue` Kueue ClusterQueue (Kubernetes quantities). `max_gpu` also sets the `aws.amazon.com/neuron` quota and, times five, the `vpc.amazonaws.com/efa` quota. |
 | `removal_policy` | `"destroy"` | `retain` keeps the cluster, execution role and security group on stack deletion. |
 
 The run-scoped CDK context `hyperpod_overrides` (a JSON object) deep-merges
@@ -257,8 +270,9 @@ nodes never join: the Region publishes a health-monitoring agent image,
 HyperPod publishes a node AMI for the EKS minor the cluster runs (cdk.json
 `kubernetes_version`; see [Enabling it](#enabling-it)), the
 account's `<instance type> for cluster usage` Service Quotas cover every
-instance group's count (a type with no such quota is not a HyperPod type in
-the Region), each `training_plan_arn` exists, is `Active` or `Scheduled`,
+instance group's count (the applied value, or AWS's default for a quota the
+account never had changed; a type with neither is not a HyperPod type in the
+Region), each `training_plan_arn` exists, is `Active` or `Scheduled`,
 targets HyperPod clusters, reserves the group's instance type and sits in the
 configured zone, the configured Availability Zone exists, the EKS cluster
 (once deployed) is `ACTIVE` and authenticates with access entries, and no

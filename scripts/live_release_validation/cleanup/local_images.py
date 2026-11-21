@@ -7,8 +7,11 @@ image set each — a validation host filled its disk with hundreds of stale asse
 images, which failed an image build mid-deploy and then the checkpoint write
 that guaranteed cleanup depends on. Once an image is published to ECR the local
 copy has no further use (CDK checks ECR before rebuilding), so the deploy
-action prunes exactly the CDK asset images plus dangling build layers, and
-nothing else the operator keeps in the local store.
+action removes exactly the CDK asset references plus dangling build layers,
+and nothing else the operator keeps in the local store. It removes them by
+reference, never by image ID: an ID takes every tag of the image, including
+one the operator gave a CDK asset image, and an image that keeps such a tag
+stays.
 """
 
 from __future__ import annotations
@@ -78,18 +81,20 @@ def prune_cdk_asset_images(
     if listing.returncode != 0:
         errors.append(f"images: {(listing.stderr or '').strip()[:_MAX_ERROR_CHARS]}")
     else:
-        image_ids: set[str] = set()
         for line in (listing.stdout or "").splitlines():
             parts = line.split()
             if len(parts) != 2:
                 continue
-            reference, image_id = parts
-            repository = reference.rsplit(":", 1)[0]
-            if _is_cdk_asset_repository(repository):
+            reference = parts[0]
+            repository, _, tag = reference.rpartition(":")
+            # An untagged entry has no reference to remove; once nothing tags
+            # the image, the dangling prune below reclaims it.
+            if tag != "<none>" and _is_cdk_asset_repository(repository):
                 removed.append(reference)
-                image_ids.add(image_id)
-        if image_ids:
-            result = _run(runtime, ["rmi", "-f", *sorted(image_ids)], run)
+        if removed:
+            # Without -f: it would remove the image by force, and podman's
+            # also removes every container using it.
+            result = _run(runtime, ["rmi", *sorted(removed)], run)
             if result.returncode != 0:
                 errors.append(f"rmi: {(result.stderr or '').strip()[:_MAX_ERROR_CHARS]}")
 

@@ -159,7 +159,9 @@ def _references_logical_id(obj: Any, logical_id: str) -> bool:
     return False
 
 
-def _pod_role_statements(template: dict[str, Any]) -> list[dict[str, Any]]:
+def _pod_role_statements(
+    template: dict[str, Any], role_prefix: str = "ServiceAccountRole"
+) -> list[dict[str, Any]]:
     """Every policy statement attached to the ``gco-service-account`` pod role.
 
     Finds the role by its construct ID prefix (``ServiceAccountRole``), then
@@ -169,9 +171,9 @@ def _pod_role_statements(template: dict[str, Any]) -> list[dict[str, Any]]:
     role_ids = {
         logical_id
         for logical_id, res in resources.items()
-        if res.get("Type") == "AWS::IAM::Role" and logical_id.startswith("ServiceAccountRole")
+        if res.get("Type") == "AWS::IAM::Role" and logical_id.startswith(role_prefix)
     }
-    assert role_ids, "could not locate the gco-service-account pod role in the template"
+    assert role_ids, f"could not locate the {role_prefix} role in the template"
 
     statements: list[dict[str, Any]] = []
     for res in resources.values():
@@ -355,27 +357,31 @@ class TestRegionalSharedBucketSynthesis:
             "regional KMS grant must reference only the regional bucket's key"
         )
 
-    def test_pod_role_can_read_only_the_bucket_name_parameter(self) -> None:
-        """The pod role may read the ``/name`` discovery parameter, by literal ARN.
+    def test_monitor_role_can_read_only_the_bucket_name_parameter(self) -> None:
+        """The inference monitor's role may read the ``/name`` parameter, by literal ARN.
 
-        The inference monitor runs under the pod role and resolves the Mooncake
-        cold-tier bucket from ``/<project>/regional-shared-bucket/name`` at
-        reconcile time. Live validation showed the read denied (the role had S3
+        The inference monitor resolves the Mooncake cold-tier bucket from
+        ``/<project>/regional-shared-bucket/name`` at reconcile time. It runs
+        under its own role (``InferenceMonitorRole``); job and model pods share
+        the pod role, which holds no SSM grant. Live validation showed the read denied (the role had S3
         and KMS on the bucket but no SSM grant), which dropped the cold tier on
         every pass. The grant is one ``ssm:GetParameter`` statement whose only
         resource is that parameter's ARN — no wildcard and no other parameter.
         """
         template = _regional_template_json()
-        statements = _pod_role_statements(template)
 
-        ssm_grants = [
-            stmt
-            for stmt in statements
-            if stmt.get("Effect") == "Allow"
-            and _as_action_set(stmt.get("Action", [])) & {"ssm:GetParameter", "ssm:*"}
-        ]
+        def ssm_grants_of(role_prefix: str) -> list[dict[str, Any]]:
+            return [
+                stmt
+                for stmt in _pod_role_statements(template, role_prefix)
+                if stmt.get("Effect") == "Allow"
+                and _as_action_set(stmt.get("Action", [])) & {"ssm:GetParameter", "ssm:*"}
+            ]
+
+        assert ssm_grants_of("ServiceAccountRole") == [], "the pod role must hold no SSM grant"
+        ssm_grants = ssm_grants_of("InferenceMonitorRole")
         assert len(ssm_grants) == 1, (
-            f"expected exactly one SSM read grant on the pod role, found {len(ssm_grants)}"
+            f"expected exactly one SSM read grant on the monitor role, found {len(ssm_grants)}"
         )
         grant = ssm_grants[0]
         assert _as_action_set(grant["Action"]) == {"ssm:GetParameter"}
@@ -397,5 +403,5 @@ class TestRegionalSharedBucketSynthesis:
         # (Ref on an SSM parameter yields its name), so the grant is bound to
         # exactly the parameter this stack publishes.
         assert _references_logical_id(resource_entries[0], name_parameter_ids[0]), (
-            f"pod-role SSM grant must reference the /name discovery parameter, got {rendered}"
+            f"monitor-role SSM grant must reference the /name discovery parameter, got {rendered}"
         )

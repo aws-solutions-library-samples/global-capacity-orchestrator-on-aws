@@ -111,7 +111,7 @@ Accelerator from the global API, inside the VPC from the regional bridge — to
 the region's internal ALB: the Kubernetes Gateway `gco-system/gco-gateway`,
 whose HTTPRoute picks the Service by longest path prefix. `/api/v1/global/*` is
 answered by the cross-region aggregator, which fans out to every regional API
-Gateway with SigV4 instead. Dashed arrows are opt-in or dynamic paths; `†`
+Gateway with SigV4 instead. Dashed arrows are indirect or dynamic paths; `†`
 marks routes that exist only under a deployment condition (Global Accelerator
 in the commercial `aws` partition, the analytics environment).
 
@@ -191,7 +191,8 @@ out to this path and reads `templates_count`, `webhooks_count`,
 Every path in this document is relative to one of two hosts.
 
 **Global API Gateway** — the `ApiEndpoint` CloudFormation output of the
-`gco-api-gateway` stack (`gco stacks outputs gco-api-gateway`). Use it for cross-region aggregation, and for
+`gco-api-gateway` stack (`gco stacks outputs gco-api-gateway -r us-east-2`, with the
+`deployment_regions.api_gateway` Region, `us-east-2` by default). Use it for cross-region aggregation, and for
 workload traffic in the commercial `aws` partition:
 
 ```http
@@ -494,6 +495,16 @@ allowlist in [Allowed Upstream Paths](#allowed-upstream-paths). Full detail is i
 
 ## Detailed Endpoint Documentation
 
+Timestamps are ISO 8601 in UTC, in three forms. A response's own `timestamp`,
+when the service answered, has microseconds and a `+00:00` offset
+(`2024-01-15T10:30:00.512834+00:00`). Kubernetes times (`creationTimestamp`,
+`startTime`, event and container times) are whole seconds with `+00:00`, the
+same instants `kubectl` prints with a `Z` suffix. The records of the global
+queue, templates and webhooks (`submitted_at`, `claimed_at`,
+`status_history`, `created_at`) keep the store's fixed-width form, six
+fractional digits and `Z` (`2024-01-15T10:00:00.274913Z`), so that they sort
+as text in time order; the webhook payload's `timestamp` also ends in `Z`.
+
 ### Global Jobs List
 
 ```http
@@ -514,8 +525,8 @@ gco jobs list -a --namespace gco-jobs --status running
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `namespace` | string | - | Filter by namespace |
-| `status` | string | - | Filter by status |
-| `limit` | int | 50 | Maximum jobs to return |
+| `status` | string | - | Filter by status: `pending`, `running`, `completed` or `failed` (`succeeded` is an alias of `completed`) |
+| `limit` | int | 50 | Maximum jobs to return (1-1000; anything else is a `400`) |
 
 **Response:**
 
@@ -648,7 +659,7 @@ gco jobs list -r us-east-1 --limit 10
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `namespace` | string | - | Filter by namespace |
-| `status` | string | - | Filter by status (pending, running, completed, succeeded, failed) |
+| `status` | string | - | Filter by status: `pending`, `running`, `completed` or `failed`. `succeeded`, what the responses call a finished Job, is an alias of `completed` |
 | `limit` | int | 50 | Maximum jobs to return (1-1000) |
 | `offset` | int | 0 | Number of jobs to skip |
 | `sort` | string | createdAt:desc | Sort field and order (field:asc\|desc) |
@@ -660,7 +671,7 @@ gco jobs list -r us-east-1 --limit 10
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "total": 100,
   "limit": 50,
   "offset": 0,
@@ -671,7 +682,7 @@ gco jobs list -r us-east-1 --limit 10
       "metadata": {
         "name": "training-job-001",
         "namespace": "gco-jobs",
-        "creationTimestamp": "2024-01-15T10:00:00Z",
+        "creationTimestamp": "2024-01-15T10:00:00+00:00",
         "labels": {"app": "ml-training"},
         "uid": "abc123"
       },
@@ -684,7 +695,7 @@ gco jobs list -r us-east-1 --limit 10
         "active": 1,
         "succeeded": 0,
         "failed": 0,
-        "startTime": "2024-01-15T10:00:05Z",
+        "startTime": "2024-01-15T10:00:05+00:00",
         "completionTime": null,
         "conditions": []
       },
@@ -720,11 +731,11 @@ gco jobs get training-job -r us-west-2 -n ml-jobs
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "metadata": {
     "name": "training-job-001",
     "namespace": "gco-jobs",
-    "creationTimestamp": "2024-01-15T10:00:00Z",
+    "creationTimestamp": "2024-01-15T10:00:00+00:00",
     "labels": {"app": "ml-training"},
     "annotations": {},
     "uid": "abc123"
@@ -739,7 +750,7 @@ gco jobs get training-job -r us-west-2 -n ml-jobs
     "active": 1,
     "succeeded": 0,
     "failed": 0,
-    "startTime": "2024-01-15T10:00:05Z",
+    "startTime": "2024-01-15T10:00:05+00:00",
     "completionTime": null,
     "conditions": []
   },
@@ -888,7 +899,7 @@ gco jobs logs multi-container-job -r us-east-1 --container sidecar
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "job_name": "training-job-001",
   "namespace": "gco-jobs",
   "pod_name": "training-job-001-abc123",
@@ -970,7 +981,7 @@ gco jobs events training-job -n ml-jobs -r us-west-2
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2026-11-15T10:30:00Z",
+  "timestamp": "2026-11-15T10:30:00.512834+00:00",
   "job_name": "training-job-001",
   "namespace": "gco-jobs",
   "count": 4,
@@ -980,8 +991,8 @@ gco jobs events training-job -n ml-jobs -r us-west-2
       "reason": "Evicted",
       "message": "Evicted pod: Forceful Termination",
       "count": 1,
-      "firstTimestamp": "2026-11-15T10:00:05Z",
-      "lastTimestamp": "2026-11-15T10:00:05Z",
+      "firstTimestamp": "2026-11-15T10:00:05+00:00",
+      "lastTimestamp": "2026-11-15T10:00:05+00:00",
       "eventTime": null,
       "source": {"component": "karpenter", "host": null},
       "involvedObject": {
@@ -995,8 +1006,8 @@ gco jobs events training-job -n ml-jobs -r us-west-2
       "reason": "SpotInterrupted",
       "message": "Spot interruption warning was triggered",
       "count": 1,
-      "firstTimestamp": "2026-11-15T10:00:00Z",
-      "lastTimestamp": "2026-11-15T10:00:00Z",
+      "firstTimestamp": "2026-11-15T10:00:00+00:00",
+      "lastTimestamp": "2026-11-15T10:00:00+00:00",
       "eventTime": null,
       "source": {"component": "karpenter", "host": null},
       "involvedObject": {
@@ -1010,8 +1021,8 @@ gco jobs events training-job -n ml-jobs -r us-west-2
       "reason": "SpotInterrupted",
       "message": "Spot interruption warning was triggered",
       "count": 1,
-      "firstTimestamp": "2026-11-15T10:00:00Z",
-      "lastTimestamp": "2026-11-15T10:00:00Z",
+      "firstTimestamp": "2026-11-15T10:00:00+00:00",
+      "lastTimestamp": "2026-11-15T10:00:00+00:00",
       "eventTime": null,
       "source": {"component": "karpenter", "host": null},
       "involvedObject": {
@@ -1025,8 +1036,8 @@ gco jobs events training-job -n ml-jobs -r us-west-2
       "reason": "SuccessfulCreate",
       "message": "Created pod: training-job-001-abc12",
       "count": 1,
-      "firstTimestamp": "2026-11-15T09:00:00Z",
-      "lastTimestamp": "2026-11-15T09:00:00Z",
+      "firstTimestamp": "2026-11-15T09:00:00+00:00",
+      "lastTimestamp": "2026-11-15T09:00:00+00:00",
       "eventTime": null,
       "source": {"component": "job-controller", "host": null},
       "involvedObject": {
@@ -1072,7 +1083,7 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "job_name": "training-job-001",
   "namespace": "gco-jobs",
   "count": 1,
@@ -1081,7 +1092,7 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
       "metadata": {
         "name": "training-job-001-abc123",
         "namespace": "gco-jobs",
-        "creationTimestamp": "2024-01-15T10:00:00Z",
+        "creationTimestamp": "2024-01-15T10:00:00+00:00",
         "deletionTimestamp": null,
         "labels": {"job-name": "training-job-001"},
         "uid": "pod-uid-123"
@@ -1095,7 +1106,7 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
         "phase": "Running",
         "hostIP": "10.0.1.100",
         "podIP": "10.0.2.50",
-        "startTime": "2024-01-15T10:00:05Z",
+        "startTime": "2024-01-15T10:00:05+00:00",
         "containerStatuses": [
           {
             "name": "main",
@@ -1103,7 +1114,8 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
             "restartCount": 0,
             "image": "pytorch:latest",
             "state": "running",
-            "startedAt": "2024-01-15T10:00:10Z"
+            "startedAt": "2024-01-15T10:00:10+00:00",
+            "lastState": null
           }
         ],
         "initContainerStatuses": [],
@@ -1150,19 +1162,72 @@ a pod that has not been scheduled; that pod then appears in
 `scheduling.unscheduled` with the scheduler's reason. `scheduling` has the same
 shape and meaning as on [Get Job](#get-job).
 
+Each entry of `status.containerStatuses` and `status.initContainerStatuses`
+carries `name`, `ready`, `restartCount` and `image`, the container's current
+`state` with that state's fields, and `lastState`:
+
+| `state` | Fields |
+|---------|--------|
+| `running` | `startedAt` |
+| `waiting` | `reason` (`ContainerCreating`, `ImagePullBackOff`, `CrashLoopBackOff`, …) and `message` |
+| `terminated` | `exitCode`, `reason` (`Completed`, `Error`, `OOMKilled`, …), `signal`, `message`, `startedAt` and `finishedAt` |
+
+`startedAt` and `finishedAt` are the container's own start and exit times,
+read from the pod status (`state.terminated.startedAt` and
+`state.terminated.finishedAt` in `kubectl get pod -o json`). The container
+runtime sets both and Kubernetes keeps them to the second, so a short
+container can show the same instant twice, and a container in an
+[AWS Nitro Sandbox](NITRO_SANDBOXES.md) can show a `finishedAt` before its
+`startedAt`. Use `finishedAt`
+to order the container's exit against the Node and NodeClaim events on
+[Get Job Events](#get-job-events): an event later than `finishedAt` happened
+after the container exited, so it did not cause the exit. `signal` is the
+signal number that ended the container when the runtime reports one, which is
+rare (a SIGKILL usually shows only as `exitCode` 137). `message` is the
+termination message: the contents of the container's `terminationMessagePath`
+file, or the end of its log under `terminationMessagePolicy:
+FallbackToLogsOnError`. The kubelet truncates it to 4096 bytes. Fields
+Kubernetes did not set are `null`.
+
+`lastState` is the container's previous termination, in the same shape as a
+`terminated` state, when the kubelet has restarted it in place
+(`restartCount` above 0, which a Job's pod reaches under `restartPolicy:
+OnFailure`). It is `null` when the container has not restarted. A waiting
+container reports neither `startedAt` nor `finishedAt`.
+
+```json
+{
+  "name": "main",
+  "ready": false,
+  "restartCount": 0,
+  "image": "pytorch:latest",
+  "state": "terminated",
+  "exitCode": 1,
+  "reason": "Error",
+  "signal": null,
+  "message": null,
+  "startedAt": "2026-11-17T20:21:02+00:00",
+  "finishedAt": "2026-11-17T20:25:46+00:00",
+  "lastState": null
+}
+```
+
+Timestamps are ISO 8601 with an explicit UTC offset (`+00:00`). They are the
+same instants `kubectl` prints with a `Z` suffix.
+
 A pod in the middle of an eviction is still listed while its grace period
 runs, with `metadata.deletionTimestamp` set and, when a disruption is what is
 deleting it, `status.disruptionTarget` carrying the Kubernetes
 `DisruptionTarget` condition's `reason`, `message`, and `since`:
 
 ```json
-"metadata": {"name": "training-job-001-abc123", "deletionTimestamp": "2026-11-15T10:00:05Z", "...": "..."},
+"metadata": {"name": "training-job-001-abc123", "deletionTimestamp": "2026-11-15T10:00:05+00:00", "...": "..."},
 "status": {
   "phase": "Running",
   "disruptionTarget": {
     "reason": "EvictionByEvictionAPI",
     "message": "Eviction API: evicting",
-    "since": "2026-11-15T10:00:05Z"
+    "since": "2026-11-15T10:00:05+00:00"
   },
   "...": "..."
 }
@@ -1196,7 +1261,7 @@ gco jobs metrics training-job -n ml-jobs -r us-west-2
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "job_name": "training-job-001",
   "namespace": "gco-jobs",
   "summary": {
@@ -1257,7 +1322,7 @@ gco jobs bulk-delete --all-regions --status failed --older-than-days 30 --execut
 | Field | Type | Description |
 |-------|------|-------------|
 | `namespace` | string | Filter by namespace |
-| `status` | string | Filter by status |
+| `status` | string | Filter by status: `pending`, `running`, `completed` or `failed` (`succeeded` is an alias of `completed`) |
 | `older_than_days` | int | Delete jobs older than N days (1-365) |
 | `label_selector` | string | Kubernetes label selector |
 | `dry_run` | bool | If true, only return what would be deleted |
@@ -1268,7 +1333,7 @@ gco jobs bulk-delete --all-regions --status failed --older-than-days 30 --execut
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "dry_run": false,
   "total_matched": 5,
   "deleted_count": 5,
@@ -1302,7 +1367,7 @@ gco jobs retry training-job -n ml-jobs -r us-west-2 -y
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "original_job": "failed-job-001",
   "new_job": "failed-job-001-retry-20240115103000",
   "namespace": "gco-jobs",
@@ -1379,7 +1444,7 @@ gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-typ
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "message": "Job queued successfully",
   "job": {
     "job_id": "abc123-def456-ghi789",
@@ -1388,7 +1453,7 @@ gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-typ
     "namespace": "gco-jobs",
     "status": "queued",
     "priority": 10,
-    "submitted_at": "2024-01-15T10:30:00Z"
+    "submitted_at": "2024-01-15T10:30:00.498211Z"
   }
 }
 ```
@@ -1399,7 +1464,13 @@ gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-typ
 GET /api/v1/queue/jobs
 ```
 
-List jobs in the global queue with optional filters.
+List one page of jobs in the global queue, with optional filters.
+
+Jobs come in no particular order: DynamoDB scan order, which is neither
+newest first nor by priority, and is not sorted within a page either. To read
+every match, repeat the request with `cursor` set to the previous page's
+`next_cursor` until it is `null`, then sort the collected jobs if you need an
+order.
 
 **CLI:**
 
@@ -1412,6 +1483,8 @@ gco queue list --region us-east-1 --status queued
 
 # Filter by status only
 gco queue list -s running
+# Read the next page with the cursor the previous page printed
+gco queue list -s running --cursor CURSOR_FROM_THE_PREVIOUS_PAGE
 ```
 
 **Query Parameters:**
@@ -1419,15 +1492,16 @@ gco queue list -s running
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `target_region` | string | Filter by target region |
-| `status` | string | Filter by status (queued, claimed, running, succeeded, failed, cancelled) |
+| `status` | string | Filter by status (queued, claimed, applying, pending, running, succeeded, failed, cancelled) |
 | `namespace` | string | Filter by namespace |
-| `limit` | int | Maximum results (default: 100) |
+| `limit` | int | Maximum results, 1-1000 (default: 100) |
+| `cursor` | string | The previous page's `next_cursor`. It is bound to the filters it was issued with; another combination answers `422` |
 
 **Response:**
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "count": 5,
   "jobs": [
     {
@@ -1437,11 +1511,18 @@ gco queue list -s running
       "namespace": "gco-jobs",
       "status": "queued",
       "priority": 10,
-      "submitted_at": "2024-01-15T10:00:00Z"
+      "submitted_at": "2024-01-15T10:00:00.274913Z"
     }
-  ]
+  ],
+  "next_cursor": null,
+  "partial": false
 }
 ```
+
+`next_cursor` is `null` on the last page. `partial` is `true` when this page's
+scan used up its 20,000-item evaluation budget with more of the table still
+unread, so the page can hold fewer than `limit` jobs; `next_cursor` then
+continues the listing.
 
 ### Get Queued Job
 
@@ -1462,7 +1543,7 @@ gco queue get abc123-def456 --region us-east-1
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "job": {
     "job_id": "abc123-def456",
     "job_name": "training-job-1",
@@ -1472,15 +1553,16 @@ gco queue get abc123-def456 --region us-east-1
     "priority": 10,
     "manifest": {"apiVersion": "batch/v1", "...": "..."},
     "labels": {"team": "ml"},
-    "submitted_at": "2024-01-15T10:00:00Z",
-    "claimed_by": "us-east-1",
-    "claimed_at": "2024-01-15T10:00:05Z",
+    "submitted_at": "2024-01-15T10:00:00.274913Z",
+    "claimed_by": "us-east-1/0b6c2f9e-4d1a-4e7b-9a3c-5f8e2d1b7c40/8f14e45fceea4c1f9d6a2b7e3c5d9a01",
+    "claimed_at": "2024-01-15T10:00:05.103842Z",
     "k8s_job_uid": "k8s-uid-123",
     "status_history": [
-      {"status": "queued", "timestamp": "2024-01-15T10:00:00Z", "message": "Job submitted"},
-      {"status": "claimed", "timestamp": "2024-01-15T10:00:05Z"},
-      {"status": "applying", "timestamp": "2024-01-15T10:00:06Z"},
-      {"status": "running", "timestamp": "2024-01-15T10:00:10Z"}
+      {"status": "queued", "timestamp": "2024-01-15T10:00:00.274913Z", "message": "Job submitted"},
+      {"status": "claimed", "timestamp": "2024-01-15T10:00:05.103842Z", "message": "Claimed by us-east-1/0b6c2f9e-4d1a-4e7b-9a3c-5f8e2d1b7c40/8f14e45fceea4c1f9d6a2b7e3c5d9a01"},
+      {"status": "applying", "timestamp": "2024-01-15T10:00:06.007531Z"},
+      {"status": "pending", "timestamp": "2024-01-15T10:00:07.315629Z"},
+      {"status": "running", "timestamp": "2024-01-15T10:00:10.861004Z"}
     ]
   }
 }
@@ -1492,7 +1574,9 @@ gco queue get abc123-def456 --region us-east-1
 DELETE /api/v1/queue/jobs/{job_id}
 ```
 
-Cancel a queued job. Only works for jobs in `queued` or `claimed` status.
+Cancel a queued job. Only a job still in `queued` status can be cancelled; once a
+region has claimed it (`claimed`, `applying`, `pending`, `running`, or a final
+status) the call answers `409`, as it does for an unknown job ID.
 
 **CLI:**
 
@@ -1511,7 +1595,7 @@ gco queue cancel abc123-def456 --reason "No longer needed"
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "message": "Job 'abc123-def456' cancelled successfully"
 }
 ```
@@ -1534,7 +1618,7 @@ gco queue stats
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "summary": {
     "total_jobs": 150,
     "total_queued": 10,
@@ -1595,7 +1679,7 @@ gco costs report status -r us-east-1
     "window_end": "2026-07-26T10:00:00+00:00"
   },
   "last_error": null,
-  "timestamp": "2026-07-26T10:42:00+00:00"
+  "timestamp": "2026-07-26T10:42:00.512834+00:00"
 }
 ```
 
@@ -1619,7 +1703,7 @@ gco costs report list -r us-east-1 --limit 50
 
 ```json
 {
-  "timestamp": "2026-07-26T10:42:00+00:00",
+  "timestamp": "2026-07-26T10:42:00.512834+00:00",
   "region": "us-east-1",
   "bucket": "gco-monitoring-costreportbucketea8cce7a-1a2b3c4d5e6f",
   "count": 1,
@@ -1660,7 +1744,7 @@ gco costs report generate -r us-east-1 --window-hours 48
 
 ```json
 {
-  "timestamp": "2026-07-26T10:42:05+00:00",
+  "timestamp": "2026-07-26T10:42:05.512834+00:00",
   "region": "us-east-1",
   "bucket": "gco-monitoring-costreportbucketea8cce7a-1a2b3c4d5e6f",
   "report": {
@@ -1697,7 +1781,7 @@ gco slurm backends -r us-east-1
 
 ```json
 {
-  "timestamp": "2026-10-27T23:40:00+00:00",
+  "timestamp": "2026-10-27T23:40:00.512834+00:00",
   "backends": [
     {
       "name": "slinky",
@@ -1752,7 +1836,7 @@ gco slurm status -r us-east-1
 
 ```json
 {
-  "timestamp": "2026-10-27T23:40:00+00:00",
+  "timestamp": "2026-10-27T23:40:00.512834+00:00",
   "enabled": true,
   "controller": [
     {"hostname": "slinky-slurm-controller-0", "responding": true, "latency_us": 412, "mode": "primary"}
@@ -1809,7 +1893,7 @@ Only `script` is required; `name` defaults to `gco-job`, `nodes`/`tasks`/`cpus_p
 
 ```json
 {
-  "timestamp": "2026-10-27T23:41:00+00:00",
+  "timestamp": "2026-10-27T23:41:00.512834+00:00",
   "job_id": 42,
   "step_id": "batch",
   "name": "train",
@@ -1858,6 +1942,14 @@ gco slurm accounting -r us-east-1 --since 7d --state COMPLETED
 ## Job Templates
 
 Templates allow you to define reusable job configurations with parameter substitution.
+
+A parameter replaces each `{{name}}` placeholder inside a string of the
+manifest (a value or a mapping key) as plain text, in one pass: quotes and
+backslashes in the value stay as written, a placeholder inside a value is not
+expanded, and a value cannot add structure to the manifest. Placeholders go
+inside strings (`"image": "{{image}}"`, `["python", "-c", "{{code}}"]`), and the
+result is always a string, which Kubernetes accepts for quantities such as
+`"{{gpu_count}}"`. A placeholder with no parameter is left as written.
 
 ### List Templates
 
@@ -1954,7 +2046,7 @@ gco templates run gpu-template -n my-job -r us-east-1 -p image=custom:v1 -p gpus
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "template": "gpu-training-template",
   "job_name": "my-training-job",
   "namespace": "gco-jobs",
@@ -1981,7 +2073,14 @@ When a job event occurs (started, completed, or failed), the webhook dispatcher:
 1. Detects the job status transition
 2. Queries matching webhooks from DynamoDB based on event type and namespace
 3. Sends HTTP POST requests to all matching webhook URLs
-4. Retries failed deliveries with exponential backoff (up to 3 attempts)
+4. Retries a delivery that failed with a 5xx status, a timeout, or a connection
+   error, with exponential backoff, for at most 3 attempts in total (see
+   [Retry Behavior](#retry-behavior))
+
+Each attempt has 30 seconds to connect, send the payload, and receive the
+response status line and headers. Only the status code counts: the dispatcher
+never reads the response body, so a receiver should not rely on the
+dispatcher reading anything it sends back.
 
 The dispatcher runs inside the health-monitor, which has two replicas for
 availability. Only one of them delivers at a time: the replicas elect a
@@ -1990,7 +2089,18 @@ deliverer through the pre-created `gco-health-monitor-webhooks` Lease in
 that wins it re-seeds its view of current job states before delivering. Each
 transition is therefore delivered at most once; during a failover (bounded by
 the 90-second lease duration) transitions may be dropped, never duplicated, so
-webhook consumers see one POST per event, not one per replica.
+webhook consumers see one POST per event, not one per replica. A deliverer
+that shuts down cleanly (a rollout or scale-down) hands the Lease back, so the
+standby takes over on its next check; after a crash the standby takes over
+once the Lease has gone unrenewed for the 90-second lease duration.
+
+The deliverer lists the Jobs once and then watches for changes from that
+point, resuming each watch request where the previous one stopped. Nothing is
+delivered until that first list succeeds; a failed list or watch is retried
+with backoff (1 second, doubling to at most 60 seconds). If the API server no
+longer holds the watch history (HTTP 410 Gone), the dispatcher lists the Jobs
+again and sends the transitions that happened in the gap, such as a Job that
+completed while the watch was down.
 
 ### Webhook Payload Format
 
@@ -1999,7 +2109,7 @@ All webhook deliveries use the following JSON payload format:
 ```json
 {
   "event": "job.completed",
-  "timestamp": "2024-01-15T12:00:00Z",
+  "timestamp": "2024-01-15T12:00:00.381502Z",
   "cluster_id": "gco-cluster-us-east-1",
   "region": "us-east-1",
   "job": {
@@ -2008,8 +2118,8 @@ All webhook deliveries use the following JSON payload format:
     "uid": "abc-123-def-456",
     "labels": {"app": "ml-training", "team": "data-science"},
     "status": "succeeded",
-    "start_time": "2024-01-15T11:55:00Z",
-    "completion_time": "2024-01-15T12:00:00Z",
+    "start_time": "2024-01-15T11:55:00+00:00",
+    "completion_time": "2024-01-15T12:00:00+00:00",
     "active": 0,
     "succeeded": 1,
     "failed": 0
@@ -2048,10 +2158,15 @@ def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
 
 ### Retry Behavior
 
-- **5xx errors**: Retried up to 3 times with exponential backoff (5s, 10s, 20s)
-- **4xx errors**: Not retried (client error)
-- **Timeouts**: Retried up to 3 times (default timeout: 30 seconds)
-- **Connection errors**: Retried up to 3 times
+Each webhook gets at most 3 delivery attempts: the first request and up to 2
+retries.
+
+- **2xx**: Delivered; no further attempts.
+- **5xx errors, timeouts, and connection errors**: Retried after 5 seconds,
+  then after 10 seconds. A delivery whose third attempt fails is given up.
+- **Other statuses (3xx, 4xx)**: Not retried. Redirects are not followed.
+- **Timeouts**: Each attempt has 30 seconds, from connecting to receiving the
+  response status and headers.
 
 ### List Webhooks
 
@@ -2100,19 +2215,20 @@ gco webhooks create -u https://example.com/webhook -e job.completed --secret my-
 
 - `job.started` - Job started running (transitioned from pending to running)
 - `job.completed` - Job completed successfully
-- `job.failed` - Job failed
+- `job.failed` - Job failed (Kubernetes set the Job's `Failed` condition, for example after `backoffLimit` pod failures; a failed pod that the Job retries does not fire it)
 
 **Response:**
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "message": "Webhook registered successfully",
   "webhook": {
     "id": "abc12345",
     "url": "https://example.com/webhook",
     "events": ["job.completed", "job.failed"],
-    "namespace": "gco-jobs"
+    "namespace": "gco-jobs",
+    "created_at": "2024-01-15T10:30:00.498211Z"
   }
 }
 ```
@@ -2263,7 +2379,7 @@ Service directly or scraped by the cluster's Prometheus.
 | Endpoint | Service | Auth | Purpose |
 |----------|---------|------|---------|
 | `GET /api/v1/health` | `health-monitor` | None | `200` when the cluster is healthy, `503` otherwise. Global Accelerator health check target |
-| `GET /api/v1/metrics` | `health-monitor` | HMAC envelope | CPU / memory / GPU utilization, configured thresholds, active job count, threshold violations |
+| `GET /api/v1/metrics` | `health-monitor` | HMAC envelope | CPU / memory / GPU utilization (percent of allocatable; can exceed 100 when the cluster is over-committed), configured thresholds, active job count (Jobs in the job namespaces with a pending or running pod), threshold violations |
 | `GET /api/v1/status` | `health-monitor` | HMAC envelope | Monitor initialization, background task state, webhook dispatcher counters |
 | `GET /api/v1/status` | `manifest-processor` | HMAC envelope | Resource limits, allowed namespaces, template/webhook counts, central queue worker health |
 | `GET /api/v1/policy` | `manifest-processor` | HMAC envelope | The effective job validation policy this region enforces — per-manifest cpu/memory/gpu caps, `allowed_namespaces`, `allowed_kinds`, `allowed_api_versions`, `trusted_registries`, `trusted_dockerhub_orgs`, `require_accelerator_toleration`, `yaml_max_depth`, the eight `manifest_security_policy.block_*` flags, and each allowed namespace's live ResourceQuota / LimitRange ceilings. `503` until the processor is initialized |
@@ -2277,6 +2393,13 @@ bypass the HMAC envelope; see [Authentication](#authentication).
 The health monitor also publishes resource utilization and health status to
 CloudWatch every 30 seconds independently of these endpoints, which is how
 dashboards and alarms are fed. See the [Monitoring Guide](MONITORING.md).
+
+Each refresh reads metrics-server once and lists the nodes and pods once;
+requests that arrive while a refresh runs share it. If one of those reads
+fails, the monitor serves the last complete reading for up to 60 seconds (the
+`message` field says which read failed and how old the reading is) and then
+reports `unhealthy` with the failed read named in `message`, so a failed read
+never makes `/api/v1/health` answer `200`.
 
 > **Which `/api/v1/status` you get.** As described in
 > [API Surface at a Glance](#api-surface-at-a-glance), the ALB resolves
@@ -2307,7 +2430,9 @@ deployed policy for two independent reasons:
   are reading.
 - CDK augments `trusted_registries` with the project's own ECR registry
   hostnames at synth time, so the effective allowlist is always strictly larger
-  than the configured one.
+  than the configured one. A policy without `trusted_registries` starts from
+  the services' default list (`gco/job_admission.py`
+  `DEFAULT_TRUSTED_REGISTRIES`) rather than from ECR alone.
 
 Because both the REST manifest processor and the SQS queue processor read the
 same environment variables, this endpoint describes both submission paths —
@@ -2334,8 +2459,13 @@ configured strings under `manifest_caps.configured`, because `"384"` vCPU and
 `384000` millicores are the same cap and a caller doing a local pre-check needs
 to know which one it is holding.
 
-Note that `gco jobs submit --dry-run` is **not** an admission preview — it runs
-`kubectl --dry-run=client`, a client-side parse that never consults this policy.
+`gco jobs submit --dry-run` (`POST /api/v1/manifests` with `"dry_run": true`)
+checks the manifests against the first layer, the front-door policy of the
+region that receives them, and applies nothing. It is not a full admission
+preview: the manifests never reach the Kubernetes API server, so the
+`LimitRange` and `ResourceQuota` layers are not evaluated. `gco jobs
+submit-direct --dry-run` is a client-side `kubectl --dry-run=client` parse
+that consults none of the three.
 
 ## Cluster-Internal Surfaces
 
@@ -2371,7 +2501,7 @@ decode Services over HTTPS on 8443, trusting only the internal CA:
 |----------|-------------|
 | `GET /health`, `GET /healthz` | Liveness for the proxy pod |
 | `POST /instances/add` | Register a prefill or decode instance. Requires the `ADMIN_API_KEY` shared secret via `x-admin-api-key` or `Authorization: Bearer`; `403` otherwise. Never exposed through an Ingress |
-| `POST /{path}` | Disaggregation dispatch for serving paths; non-serving POSTs pass through to decode. Bodies must be JSON objects (`400` otherwise). `503` when no decode backend is Ready |
+| `POST /{path}` | Disaggregation dispatch for serving paths; non-serving POSTs pass through to decode. Bodies must be JSON objects (`400` otherwise). Prefill is primed with a one-token, non-streamed copy of the request without `stream_options`, `min_tokens` or `min_completion_tokens`; decode receives the request as sent. `503` (`no_decode_backend`) when no decode backend is Ready (connection refused or not accepted within 5 s), `504` (`decode_timeout`) when the decode call times out otherwise, `502` (`decode_unavailable`) for any other transport failure |
 | `GET /{path}` | Pass through to decode, including OpenAI-compatible model discovery such as `GET /v1/models`; path and query are preserved |
 
 The Mooncake hop forwards the inference proxy's approved end-to-end request
@@ -2407,15 +2537,48 @@ copy of the same schemas, see the committed documents in
 
 ## Error Responses
 
-All error responses follow this format:
+The services answer an error with FastAPI's `detail` field:
 
 ```json
 {
-  "error": "Error type",
-  "detail": "Detailed error message",
-  "timestamp": "2024-01-15T10:30:00Z"
+  "detail": "Job 'training-job-001' not found in namespace 'gco-jobs'"
 }
 ```
+
+A request whose parameters or body fail validation (`422`) carries the failed
+checks as a list instead:
+
+```json
+{
+  "detail": [
+    {
+      "type": "greater_than_equal",
+      "loc": ["query", "limit"],
+      "msg": "Input should be greater than or equal to 1",
+      "input": "0",
+      "ctx": {"ge": 1}
+    }
+  ]
+}
+```
+
+An exception that no route handles answers `500` with
+`"error": "Internal server error"`; the manifest processor adds `detail`,
+`request_id` and `timestamp`, and the health monitor `detail`:
+
+```json
+{
+  "error": "Internal server error",
+  "detail": "An unexpected error occurred",
+  "request_id": "3f2a…",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00"
+}
+```
+
+Errors that the API Gateway proxy Lambdas return themselves, such as the `400`
+for a path with a dot segment or a `503` or `504` when the backend cannot be
+reached, carry `{"error": "..."}`. API Gateway's own refusals, such as the
+`403` for a caller without `execute-api:Invoke`, carry `{"message": "..."}`.
 
 **Common HTTP Status Codes:**
 
@@ -2423,12 +2586,22 @@ All error responses follow this format:
 |------|-------------|
 | 200 | Success |
 | 201 | Created |
-| 400 | Bad Request - Invalid input |
+| 400 | Bad Request - Invalid input, or a request path with a `.` or `..` segment (literal or percent-encoded), which the API Gateway proxies refuse before forwarding |
 | 403 | Forbidden - Namespace not allowed |
 | 404 | Not Found - Resource doesn't exist |
 | 409 | Conflict - Resource already exists |
+| 422 | Unprocessable Entity - A parameter or body field failed validation |
 | 500 | Internal Server Error |
 | 503 | Service Unavailable - Processor not ready |
+
+**Kubernetes API timeouts:**
+
+Every Kubernetes API request the manifest processor makes is bounded:
+`K8S_API_TIMEOUT` seconds per attempt (default 30), with a read that times out
+retried up to three times. An API server that does not answer in time fails
+the request with the route's usual error status (for most routes the generic
+500 below) instead of holding the connection open, and it delays only that
+request: the client calls run in worker threads, not on the event loop.
 
 **Request correlation:**
 
@@ -2570,7 +2743,7 @@ awscurl --service execute-api --region "$API_REGION" \
       "spec": {
         "template": {
           "spec": {
-            "containers": [{"name": "main", "image": "{{image}}", "command": {{command}}}],
+            "containers": [{"name": "main", "image": "{{image}}", "command": ["python", "-c", "{{code}}"]}],
             "restartPolicy": "Never"
           }
         }
@@ -2586,6 +2759,6 @@ awscurl --service execute-api --region "$API_REGION" \
   -d '{
     "name": "my-python-job",
     "namespace": "gco-jobs",
-    "parameters": {"command": "[\"python\", \"-c\", \"print(1+1)\"]"}
+    "parameters": {"code": "print(1+1)"}
   }'
 ```

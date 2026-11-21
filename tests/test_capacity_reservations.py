@@ -107,8 +107,9 @@ class TestListCapacityReservations:
         mock_ec2.get_paginator.return_value = mock_paginator
         checker._session.client = MagicMock(return_value=mock_ec2)
 
-        result = checker.list_capacity_reservations("us-east-1")
-        assert result == []
+        # A refused call used to come back as "no reservations".
+        with pytest.raises(ClientError, match="UnauthorizedOperation"):
+            checker.list_capacity_reservations("us-east-1")
 
     def test_list_reservations_utilization_zero_total(self):
         """Edge case: total_instances is 0 should not divide by zero."""
@@ -1108,3 +1109,287 @@ class TestFindCapacityReservations:
 
         assert result["instance_type"] is None
         assert result["reservations_found"] == 1
+
+
+def _odcr(region: str, available: int, total: int, suffix: str) -> dict:
+    return {
+        "reservation_id": f"cr-{suffix}",
+        "region": region,
+        "availability_zone": f"{region}a",
+        "instance_type": "p5.48xlarge",
+        "available_instances": available,
+        "total_instances": total,
+    }
+
+
+def test_reservation_check_needs_the_count_in_one_region_not_summed_across_regions():
+    """2 free in us-east-1 plus 2 in us-west-2 used to satisfy --count 4, though
+    no single Region can launch 4 instances into reserved capacity."""
+    from cli.capacity.checker import CapacityChecker
+
+    with patch("cli.capacity.checker.get_config") as mock_config:
+        mock_config.return_value = MagicMock(default_region="us-east-1")
+        checker = CapacityChecker()
+    by_region = {
+        "us-east-1": [_odcr("us-east-1", 2, 4, "east")],
+        "us-west-2": [_odcr("us-west-2", 2, 2, "west")],
+    }
+    with patch.object(
+        checker,
+        "list_capacity_reservations",
+        side_effect=lambda region, instance_type=None: by_region[region],
+    ):
+        report = checker.check_reservation_availability(
+            "p5.48xlarge",
+            min_count=4,
+            include_capacity_blocks=False,
+            regions=["us-east-1", "us-west-2"],
+        )
+
+    odcr = report["odcr"]
+    assert odcr["total_available_instances"] == 4
+    assert odcr["has_availability"] is False
+    assert odcr["by_region"] == [
+        {
+            "region": "us-east-1",
+            "reserved_instances": 4,
+            "available_instances": 2,
+            "has_availability": False,
+        },
+        {
+            "region": "us-west-2",
+            "reserved_instances": 2,
+            "available_instances": 2,
+            "has_availability": False,
+        },
+    ]
+    assert "ODCR capacity available" not in report["recommendation"]
+
+
+def test_reservation_check_names_the_region_that_holds_the_count():
+    from cli.capacity.checker import CapacityChecker
+
+    with patch("cli.capacity.checker.get_config") as mock_config:
+        mock_config.return_value = MagicMock(default_region="us-east-1")
+        checker = CapacityChecker()
+    by_region = {
+        "us-east-1": [_odcr("us-east-1", 1, 4, "east")],
+        "us-west-2": [_odcr("us-west-2", 3, 4, "west-1"), _odcr("us-west-2", 2, 2, "west-2")],
+    }
+    with patch.object(
+        checker,
+        "list_capacity_reservations",
+        side_effect=lambda region, instance_type=None: by_region[region],
+    ):
+        report = checker.check_reservation_availability(
+            "p5.48xlarge",
+            min_count=4,
+            include_capacity_blocks=False,
+            regions=["us-east-1", "us-west-2", "us-east-1"],
+        )
+
+    assert report["regions_checked"] == ["us-east-1", "us-west-2"]
+    assert report["odcr"]["has_availability"] is True
+    assert [row["has_availability"] for row in report["odcr"]["by_region"]] == [False, True]
+    assert report["recommendation"] == (
+        "ODCR capacity available in us-west-2: 5 instances across 2 reservation(s)"
+    )
+
+
+def test_reservation_check_table_lists_each_region_when_several_are_checked():
+    from click.testing import CliRunner
+
+    from cli.main import cli
+
+    report = {
+        "instance_type": "p5.48xlarge",
+        "odcr": {
+            "total_reserved_instances": 6,
+            "total_available_instances": 4,
+            "has_availability": False,
+            "by_region": [
+                {
+                    "region": "us-east-1",
+                    "reserved_instances": 4,
+                    "available_instances": 2,
+                    "has_availability": False,
+                },
+                {
+                    "region": "us-west-2",
+                    "reserved_instances": 2,
+                    "available_instances": 2,
+                    "has_availability": False,
+                },
+            ],
+            "reservations": [_odcr("us-east-1", 2, 4, "east"), _odcr("us-west-2", 2, 2, "west")],
+        },
+        "capacity_blocks": {"offerings": [], "duration_hours": 24},
+        "recommendation": "No reserved capacity or block offerings found.",
+    }
+    checker = MagicMock()
+    checker.check_reservation_availability.return_value = report
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "capacity",
+                "reservation-check",
+                "-i",
+                "p5.48xlarge",
+                "-c",
+                "4",
+                "--no-blocks",
+                "-r",
+                "us-east-1",
+                "-r",
+                "us-west-2",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Total: 4 available of 6 reserved" in result.output
+    assert "    us-east-1: 2 available of 4 reserved" in result.output
+    assert "    us-west-2: 2 available of 2 reserved" in result.output
+
+
+def _denied(code: str = "UnauthorizedOperation") -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code, "Message": "not authorized"}}, "DescribeCapacityReservations"
+    )
+
+
+def _checker_with_reservations(by_region: dict):
+    from cli.capacity.checker import CapacityChecker
+
+    with patch("cli.capacity.checker.get_config") as mock_config:
+        mock_config.return_value = MagicMock(default_region="us-east-1")
+        checker = CapacityChecker()
+
+    def listing(region, instance_type=None, **_kwargs):
+        result = by_region[region]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    checker.list_capacity_reservations = MagicMock(side_effect=listing)
+    return checker
+
+
+_DENIED_ROW = {
+    "region": "us-west-2",
+    "error_code": "UnauthorizedOperation",
+    "error": "not authorized",
+}
+
+
+def test_list_all_reservations_reports_a_refused_region_instead_of_hiding_it():
+    checker = _checker_with_reservations(
+        {"us-east-1": [_odcr("us-east-1", 1, 2, "east")], "us-west-2": _denied()}
+    )
+    report = checker.list_all_reservations(regions=["us-east-1", "us-west-2"])
+    assert report["total_reservations"] == 1
+    assert report["errors"] == [_DENIED_ROW]
+
+
+def test_list_all_reservations_fails_when_every_region_refuses():
+    from cli.capacity import CapacityCheckError
+
+    checker = _checker_with_reservations({"us-east-1": _denied(), "us-west-2": _denied()})
+    with pytest.raises(CapacityCheckError, match="in every Region"):
+        checker.list_all_reservations(regions=["us-east-1", "us-west-2"])
+
+
+def test_reservation_check_reports_a_refused_region_and_fails_when_all_refuse():
+    from cli.capacity import CapacityCheckError
+
+    checker = _checker_with_reservations(
+        {"us-east-1": [_odcr("us-east-1", 4, 4, "east")], "us-west-2": _denied()}
+    )
+    report = checker.check_reservation_availability(
+        "p5.48xlarge",
+        min_count=1,
+        include_capacity_blocks=False,
+        regions=["us-east-1", "us-west-2"],
+    )
+    assert report["odcr"]["errors"] == [_DENIED_ROW]
+    assert [row["region"] for row in report["odcr"]["by_region"]] == ["us-east-1"]
+    assert report["odcr"]["has_availability"] is True
+
+    checker = _checker_with_reservations({"us-east-1": _denied(), "us-west-2": _denied()})
+    with pytest.raises(CapacityCheckError, match="in every Region"):
+        checker.check_reservation_availability(
+            "p5.48xlarge", include_capacity_blocks=False, regions=["us-east-1", "us-west-2"]
+        )
+
+
+def test_find_reservations_reports_a_refused_region_and_fails_when_all_refuse():
+    from cli.capacity import CapacityCheckError
+
+    checker = _checker_with_reservations(
+        {"us-east-1": [_odcr("us-east-1", 1, 2, "east")], "us-west-2": _denied()}
+    )
+    report = checker.find_capacity_reservations(regions=["us-east-1", "us-west-2"])
+    assert report["reservations_found"] == 1
+    assert report["errors"] == [_DENIED_ROW]
+
+    checker = _checker_with_reservations({"us-east-1": _denied(), "us-west-2": _denied()})
+    with pytest.raises(CapacityCheckError, match="in every Region"):
+        checker.find_capacity_reservations(regions=["us-east-1", "us-west-2"])
+
+
+@pytest.mark.parametrize(
+    ("method", "arguments", "report"),
+    [
+        (
+            "list_all_reservations",
+            ["capacity", "reservations"],
+            {
+                "regions_checked": ["us-east-1", "us-west-2"],
+                "total_reservations": 0,
+                "total_reserved_instances": 0,
+                "total_available_instances": 0,
+                "reservations": [],
+                "errors": [_DENIED_ROW],
+            },
+        ),
+        (
+            "check_reservation_availability",
+            ["capacity", "reservation-check", "-i", "p5.48xlarge", "--no-blocks"],
+            {
+                "odcr": {
+                    "total_reserved_instances": 0,
+                    "total_available_instances": 0,
+                    "by_region": [],
+                    "reservations": [],
+                    "errors": [_DENIED_ROW],
+                },
+                "capacity_blocks": {"offerings": []},
+                "recommendation": "No reserved capacity or block offerings found.",
+            },
+        ),
+        (
+            "find_capacity_reservations",
+            ["capacity", "find-reservations", "-i", "p5.48xlarge"],
+            {
+                "instance_type": "p5.48xlarge",
+                "regions_checked": ["us-east-1", "us-west-2"],
+                "reservations": [],
+                "errors": [_DENIED_ROW],
+                "recommendation": "No active On-Demand Capacity Reservations.",
+            },
+        ),
+    ],
+)
+def test_reservation_tables_name_the_regions_that_refused(method, arguments, report):
+    from click.testing import CliRunner
+
+    from cli.main import cli
+
+    checker = MagicMock()
+    getattr(checker, method).return_value = report
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(cli, arguments)
+
+    assert result.exit_code == 0, result.output
+    assert "EC2 refused the reservation lookup in 1 Region(s)" in result.output
+    assert "us-west-2: UnauthorizedOperation: not authorized" in result.output

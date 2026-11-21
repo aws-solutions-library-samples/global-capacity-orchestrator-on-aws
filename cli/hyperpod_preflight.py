@@ -23,8 +23,9 @@ Checks, per Region:
   in-place upgrade the deploy runs before HyperPod is created, so that minor is
   the one checked.
 - ``instance-types``: every instance group's ``<type> for cluster usage``
-  Service Quota covers its ``instance_count``; a type with no such quota is
-  not a HyperPod type in this Region.
+  Service Quota covers its ``instance_count``: the account's applied value,
+  else AWS's default for a quota never changed; a type with neither is not a
+  HyperPod type in this Region.
 - ``training-plans``: every ``training_plan_arn`` names a plan that exists,
   is usable by a HyperPod cluster, is ``Active`` or ``Scheduled``, reserves
   the group's instance type and sits in the configured zone.
@@ -350,17 +351,27 @@ def _check_agent_image(checker: _Checker) -> None:
     )
 
 
-def _cluster_usage_quotas(checker: _Checker) -> dict[str, float] | None:
-    """``instance type -> applied quota`` for every ``<type> for cluster usage`` quota."""
+_CLUSTER_USAGE_SUFFIX = " for cluster usage"
+
+
+def _cluster_usage_quotas(checker: _Checker, operation: str) -> dict[str, float] | None:
+    """``instance type -> quota`` for every ``<type> for cluster usage`` quota ``operation`` lists.
+
+    ``operation`` is ``list_service_quotas`` (the account's applied values) or
+    ``list_aws_default_service_quotas`` (AWS's defaults). An AWS error records
+    a warning and returns ``None``.
+    """
 
     def collect() -> dict[str, float]:
         quotas: dict[str, float] = {}
-        paginator = checker.client("service-quotas").get_paginator("list_service_quotas")
+        paginator = checker.client("service-quotas").get_paginator(operation)
         for page in paginator.paginate(ServiceCode="sagemaker"):
             for quota in page.get("Quotas") or []:
                 name = str(quota.get("QuotaName") or "")
-                if name.endswith(" for cluster usage"):
-                    quotas[name.removesuffix(" for cluster usage")] = float(quota.get("Value") or 0)
+                if name.endswith(_CLUSTER_USAGE_SUFFIX):
+                    quotas[name.removesuffix(_CLUSTER_USAGE_SUFFIX)] = float(
+                        quota.get("Value") or 0
+                    )
         return quotas
 
     result = checker.guarded("instance-types", collect)
@@ -372,35 +383,48 @@ def _check_instance_types(checker: _Checker, config: Mapping[str, Any]) -> None:
     if not groups:
         checker.add("instance-types", SKIP, "no instance groups")
         return
-    quotas = _cluster_usage_quotas(checker)
-    if quotas is None:
+    applied = _cluster_usage_quotas(checker, "list_service_quotas")
+    if applied is None:
         return  # the warning is already recorded
     wanted: dict[str, int] = {}
     for group in groups:
         wanted[str(group["instance_type"])] = wanted.get(str(group["instance_type"]), 0) + int(
             group["instance_count"]
         )
+    # ListServiceQuotas omits a quota that has no applied value (the account
+    # never had it changed), so such a type is looked up among the defaults.
+    defaults: dict[str, float] | None = {}
+    if any(instance_type not in applied for instance_type in wanted):
+        defaults = _cluster_usage_quotas(checker, "list_aws_default_service_quotas")
     for instance_type, count in wanted.items():
-        quota = quotas.get(instance_type)
-        if quota is None:
+        note = ""
+        if instance_type in applied:
+            quota = applied[instance_type]
+        elif defaults is None:
+            continue  # its default could not be read; the warning is recorded
+        elif instance_type in defaults:
+            quota = defaults[instance_type]
+            note = " (the default; no increase applied)"
+        else:
             checker.add(
                 "instance-types",
                 FAIL,
-                f"{instance_type}: no '{instance_type} for cluster usage' quota in "
+                f"{instance_type}: no '{instance_type}{_CLUSTER_USAGE_SUFFIX}' quota in "
                 f"{checker.region}; not a HyperPod instance type here",
             )
-        elif count > quota:
+            continue
+        if count > quota:
             checker.add(
                 "instance-types",
                 FAIL,
                 f"{instance_type}: instance groups ask for {count}, the account's "
-                f"'for cluster usage' quota is {quota:g}; request an increase",
+                f"'for cluster usage' quota is {quota:g}{note}; request an increase",
             )
         else:
             checker.add(
                 "instance-types",
                 PASS,
-                f"{instance_type}: {count} of {quota:g} quota for cluster usage",
+                f"{instance_type}: {count} of {quota:g} quota for cluster usage{note}",
             )
 
 
@@ -539,8 +563,10 @@ def _check_cluster_name(checker: _Checker, name: str, project: str) -> None:
     arn = str(summary.get("ClusterArn") or "")
 
     def tags() -> dict[str, str]:
-        response = sagemaker.list_tags(ResourceArn=arn)
-        return {str(t.get("Key")): str(t.get("Value")) for t in response.get("Tags") or []}
+        found: dict[str, str] = {}
+        for page in sagemaker.get_paginator("list_tags").paginate(ResourceArn=arn):
+            found.update({str(t.get("Key")): str(t.get("Value")) for t in page.get("Tags") or []})
+        return found
 
     owned = checker.guarded("cluster-name", tags)
     if owned is None:

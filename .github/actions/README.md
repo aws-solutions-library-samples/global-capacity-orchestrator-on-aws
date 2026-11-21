@@ -110,7 +110,7 @@ steps:
   - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
     with:
       python-version-file: ".python-version"
-  - run: pip install -e ".[cdk]"
+  - run: pip install -c requirements-lock.txt -e ".[cdk]"
   - uses: ./.github/actions/build-lambda-package
 ```
 
@@ -148,17 +148,18 @@ Pulls one or more pinned container images with a retry loop, so a following `doc
 
 | Name | Default | Description |
 |------|---------|-------------|
-| `images` | (required) | Whitespace- or newline-separated image references. Always pin a tag or digest. |
+| `images` | (required) | Whitespace- or newline-separated image references. Always pin a tag. An image a security or lint gate runs is pinned by tag and manifest-list digest (`<repository>:<tag>@sha256:<digest>`), held once in the job's `*_IMAGE` env, so a re-pushed tag cannot change what the gate runs; `test_gate_images_are_pinned_by_tag_and_digest` requires that shape. |
 | `attempts` | `3` | Total attempts per image. Set to `1` to disable retries. |
 | `delay` | `15` | Seconds to sleep between attempts. |
 
-**Used by:** `lint.yml` (`lint:hadolint:dockerfile`, `lint:shellcheck:shell`), `security.yml` (`security:trufflehog:secrets`, `security:gitleaks:secrets`, `security:checkov:iac`, `security:kics:iac`), `integration-tests.yml` (`integration:docker:dev-container` — DinD probe base image; `integration:kind:cluster-e2e` and `integration:kind:examples-smoke` — kind node image), and `mooncake-image.yml` — every job that runs or builds from a Docker Hub image it did not itself build.
+**Used by:** `lint.yml` (`lint:hadolint:dockerfile`, `lint:shellcheck:shell`), `security.yml` (`security:trufflehog:secrets`, `security:gitleaks:secrets`, `security:checkov:iac`, `security:kics:iac`), `integration-tests.yml` (`integration:docker:dev-container` — DinD probe base image; every `integration:kind:*` job — kind node image, plus the probe and emulator images cluster-e2e and cost-pipeline load and the example images examples-smoke runs), and `mooncake-image.yml` — every job that runs or builds from a Docker Hub image it did not itself build.
 
 **Usage:**
 
 ```yaml
 env:
-  SHELLCHECK_IMAGE: "koalaman/shellcheck-alpine:v0.11.0"
+  # Tag and manifest-list digest; the real value is in lint.yml.
+  SHELLCHECK_IMAGE: "koalaman/shellcheck-alpine:v0.11.0@sha256:<digest>"
 steps:
   - name: Pre-pull shellcheck image
     uses: ./.github/actions/docker-pull-with-retry

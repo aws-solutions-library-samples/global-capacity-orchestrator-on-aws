@@ -17,6 +17,7 @@ through the private API endpoint — there is no public Grafana ingress.
 
 from __future__ import annotations
 
+import socket
 import sys
 from typing import Any
 
@@ -183,7 +184,7 @@ def monitoring_disable(config: Any, yes: bool) -> None:
     show_default=True,
     help="Which component to port-forward.",
 )
-@click.option("--region", help="Cluster region (defaults to the first cdk.json regional entry).")
+@click.option("--region", help=cluster_ui._REGION_HELP)
 @click.option("--local-port", type=int, help="Local port to bind (defaults per-service).")
 @click.option(
     "--via-ssm",
@@ -239,7 +240,7 @@ def monitoring_open(
     bind_port = local_port or svc["default_local_port"]
 
     try:
-        update_kubeconfig(cluster, target_region)
+        context = update_kubeconfig(cluster, target_region)
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))
         sys.exit(1)
@@ -263,6 +264,7 @@ def monitoring_open(
                 svc["remote_port"],
                 server=session.server,
                 tls_server_name=session.tls_server_name,
+                context=context,
             )
             url = f"http://localhost:{bind_port}"
             formatter.print_info(
@@ -292,9 +294,28 @@ def monitoring_open(
 
 
 def _grafana_conn_options(func: Any) -> Any:
-    """Shared --grafana-url / --admin-user / --admin-password options."""
+    """Shared --grafana-url / --admin-user / --admin-password options, plus the
+    --region / --via-ssm / --bastion-ttl-minutes the Secret read uses."""
     from ..monitoring_user_mgmt import DEFAULT_GRAFANA_URL
 
+    func = click.option(
+        "--bastion-ttl-minutes",
+        type=int,
+        default=_DEFAULT_BASTION_TTL_MINUTES,
+        show_default=True,
+        help="Self-terminate backstop (minutes) for an `--via-ssm auto` bastion.",
+    )(func)
+    func = click.option(
+        "--via-ssm",
+        "via_ssm",
+        metavar="INSTANCE_ID|auto",
+        help=(
+            "Read the Grafana Secret through an SSM tunnel to the private API endpoint "
+            "(an instance id, or 'auto' for a self-terminating ephemeral bastion), on a "
+            "local port of its own. Not needed with --admin-password."
+        ),
+    )(func)
+    func = click.option("--region", "-r", help=cluster_ui._REGION_HELP)(func)
     func = click.option(
         "--grafana-url",
         default=DEFAULT_GRAFANA_URL,
@@ -316,13 +337,83 @@ def _grafana_conn_options(func: Any) -> Any:
     return func
 
 
-def _resolve_grafana_auth(admin_user: str | None, admin_password: str | None) -> tuple[str, str]:
-    """Return ``(user, password)`` from the flags, else from the Grafana Secret."""
+class _ProgressToStderr:
+    """The tunnel's progress messages on stderr: these commands' stdout is their result."""
+
+    def __init__(self, formatter: Any) -> None:
+        self._formatter = formatter
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._formatter, name)
+
+    @staticmethod
+    def print_info(message: str) -> None:
+        click.echo(f"ℹ {message}", err=True)
+
+    @staticmethod
+    def print_success(message: str) -> None:
+        click.echo(f"✓ {message}", err=True)
+
+
+def _free_local_port() -> int:
+    """A free loopback port for the Secret read's own SSM tunnel.
+
+    The Grafana calls go through a running ``gco monitoring open``, whose SSM
+    tunnel holds the default API port.
+    """
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _resolve_grafana_auth(
+    config: Any,
+    formatter: Any,
+    admin_user: str | None,
+    admin_password: str | None,
+    *,
+    region: str | None,
+    via_ssm: str | None,
+    bastion_ttl_minutes: int,
+    assume_yes: bool,
+) -> tuple[str, str]:
+    """Return ``(user, password)`` from the flags, else from the Grafana Secret.
+
+    The Secret is read the way ``gco gitops password`` reads Argo CD's: on the
+    region's cluster, through its kubeconfig context, over the route
+    :func:`cli.cluster_tunnel.open_api_server_tunnel` picks for ``--via-ssm``.
+    """
     if admin_password:
         return (admin_user or "admin", admin_password)
+    from ..cluster_tunnel import open_api_server_tunnel, resolve_region
+    from ..kubectl_helpers import update_kubeconfig
     from ..monitoring_user_mgmt import read_grafana_admin_credentials
 
-    return read_grafana_admin_credentials()
+    target_region = resolve_region(config, region)
+    cluster = f"{config.project_name}-{target_region}"
+    context = update_kubeconfig(cluster, target_region)
+    with open_api_server_tunnel(
+        _ProgressToStderr(formatter),
+        cluster=cluster,
+        region=target_region,
+        via_ssm=via_ssm,
+        local_port=_free_local_port(),
+        bastion_ttl_minutes=bastion_ttl_minutes,
+        assume_yes=assume_yes,
+    ) as session:
+        return read_grafana_admin_credentials(
+            server=session.server, tls_server_name=session.tls_server_name, context=context
+        )
+
+
+#: ``--yes`` for the users commands without a confirmation of their own.
+_BASTION_YES_OPTION = click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    help="Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion.",
+)
 
 
 @monitoring.group("users")
@@ -334,13 +425,21 @@ def users_cmd(config: Any) -> None:
 @users_cmd.command("add")
 @click.option("--username", required=True, help="Grafana login for the new user.")
 @click.option("--email", help="Email address for the new user (optional).")
-@click.option("--password", help="Set this password. Mutually exclusive with --generate-password.")
+@click.option(
+    "--password",
+    envvar="GCO_GRAFANA_USER_PASSWORD",
+    help=(
+        "Set this password (also read from $GCO_GRAFANA_USER_PASSWORD, which keeps "
+        "it off the command line). Mutually exclusive with --generate-password."
+    ),
+)
 @click.option(
     "--generate-password",
     is_flag=True,
     help="Generate a strong random password and print it once.",
 )
 @_grafana_conn_options
+@_BASTION_YES_OPTION
 @pass_config
 def users_add(
     config: Any,
@@ -351,6 +450,10 @@ def users_add(
     grafana_url: str,
     admin_user: str | None,
     admin_password: str | None,
+    region: str | None,
+    via_ssm: str | None,
+    bastion_ttl_minutes: int,
+    assume_yes: bool,
 ) -> None:
     """Create a Grafana user via the admin HTTP API."""
     from ..monitoring_user_mgmt import create_user
@@ -361,12 +464,23 @@ def users_add(
         formatter.print_error("--password and --generate-password are mutually exclusive")
         sys.exit(1)
     if not password and not generate_password:
-        formatter.print_error("Pass --password or --generate-password")
+        formatter.print_error(
+            "Pass --password (or set $GCO_GRAFANA_USER_PASSWORD) or --generate-password"
+        )
         sys.exit(1)
 
     final_password = password or _gen()
     try:
-        auth = _resolve_grafana_auth(admin_user, admin_password)
+        auth = _resolve_grafana_auth(
+            config,
+            formatter,
+            admin_user,
+            admin_password,
+            region=region,
+            via_ssm=via_ssm,
+            bastion_ttl_minutes=bastion_ttl_minutes,
+            assume_yes=assume_yes,
+        )
         user_id = create_user(
             grafana_url, auth, login=username, password=final_password, email=email
         )
@@ -396,6 +510,7 @@ def users_add(
 @users_cmd.command("list")
 @click.option("--as-json", "as_json", is_flag=True, help="Emit JSON instead of a table.")
 @_grafana_conn_options
+@_BASTION_YES_OPTION
 @pass_config
 def users_list(
     config: Any,
@@ -403,13 +518,26 @@ def users_list(
     grafana_url: str,
     admin_user: str | None,
     admin_password: str | None,
+    region: str | None,
+    via_ssm: str | None,
+    bastion_ttl_minutes: int,
+    assume_yes: bool,
 ) -> None:
     """List Grafana organisation users."""
     from ..monitoring_user_mgmt import list_users
 
     formatter = get_output_formatter(config)
     try:
-        auth = _resolve_grafana_auth(admin_user, admin_password)
+        auth = _resolve_grafana_auth(
+            config,
+            formatter,
+            admin_user,
+            admin_password,
+            region=region,
+            via_ssm=via_ssm,
+            bastion_ttl_minutes=bastion_ttl_minutes,
+            assume_yes=assume_yes,
+        )
         users = list_users(grafana_url, auth)
     except (requests.RequestException, RuntimeError, ValueError) as exc:
         formatter.print_error(f"Failed to list Grafana users: {exc}")
@@ -429,7 +557,11 @@ def users_list(
 
 @users_cmd.command("remove")
 @click.option("--username", required=True, help="Grafana login/email to remove.")
-@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Skip the confirmation prompt and the `--via-ssm auto` bastion prompt.",
+)
 @_grafana_conn_options
 @pass_config
 def users_remove(
@@ -439,6 +571,9 @@ def users_remove(
     grafana_url: str,
     admin_user: str | None,
     admin_password: str | None,
+    region: str | None,
+    via_ssm: str | None,
+    bastion_ttl_minutes: int,
 ) -> None:
     """Delete a Grafana user by login or email."""
     from ..monitoring_user_mgmt import delete_user, lookup_user_id
@@ -448,7 +583,16 @@ def users_remove(
         confirm(f"Delete Grafana user '{username}'?", abort=True)
 
     try:
-        auth = _resolve_grafana_auth(admin_user, admin_password)
+        auth = _resolve_grafana_auth(
+            config,
+            formatter,
+            admin_user,
+            admin_password,
+            region=region,
+            via_ssm=via_ssm,
+            bastion_ttl_minutes=bastion_ttl_minutes,
+            assume_yes=yes,
+        )
         user_id = lookup_user_id(grafana_url, auth, username)
         delete_user(grafana_url, auth, user_id)
     except (requests.RequestException, RuntimeError, ValueError) as exc:

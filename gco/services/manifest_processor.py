@@ -27,6 +27,9 @@ Environment Variables:
     MAX_GPU_PER_MANIFEST: Maximum GPUs per manifest (default: 16)
     ALLOWED_NAMESPACES: Comma-separated list of allowed namespaces
     VALIDATION_ENABLED: Enable/disable validation (default: true)
+    K8S_API_TIMEOUT: Seconds each Kubernetes API request attempt may take
+        (default: 30); applied to every call, including those that name no
+        timeout of their own (gco.services.k8s_client)
 
 Usage:
     processor = create_manifest_processor_from_env()
@@ -35,11 +38,13 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from typing import Any, cast
@@ -147,6 +152,9 @@ from gco.job_admission import (
 from gco.job_admission import (
     weighted_pod_specs as weighted_pod_specs,
 )
+from gco.job_admission import (
+    within_nesting_depth as within_nesting_depth,
+)
 from gco.k8s_objects import json_object, present
 from gco.manifest_security_policy import (
     MANIFEST_SECURITY_POLICY_DEFAULTS,
@@ -159,11 +167,12 @@ from gco.models import (
     ResourceStatus,
 )
 from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
+from gco.services.k8s_client import BoundedApiClient, k8s_api_timeout_from_env
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-16T21:53:25Z
-# Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298
+# Generated at (UTC): 2026-11-19T12:23:38Z
+# Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894
 # Flowchart(s) generated from this file:
 #   * ``ManifestProcessor.apply_queued_job`` -> ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.png``)
@@ -446,23 +455,25 @@ class ManifestProcessor:
                 logger.error(f"Failed to load Kubernetes configuration: {e}")
                 raise
 
-        # Initialize API clients
-        self.api_client = client.ApiClient()
-        self.api_client.configuration.request_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
-        self.core_v1 = client.CoreV1Api()
-        self.apps_v1 = client.AppsV1Api()
-        self.batch_v1 = client.BatchV1Api()
-        self.networking_v1 = client.NetworkingV1Api()
-        self.custom_objects = client.CustomObjectsApi()
+        # Timeout for Kubernetes API calls (seconds). The client applies one
+        # only when a call names it, so every API below shares one client that
+        # supplies this default (gco.services.k8s_client).
+        self._k8s_timeout = k8s_api_timeout_from_env()
+        self.api_client = BoundedApiClient(default_request_timeout=self._k8s_timeout)
+        self.core_v1 = client.CoreV1Api(self.api_client)
+        self.apps_v1 = client.AppsV1Api(self.api_client)
+        self.batch_v1 = client.BatchV1Api(self.api_client)
+        self.networking_v1 = client.NetworkingV1Api(self.api_client)
+        self.custom_objects = client.CustomObjectsApi(self.api_client)
 
-        # Dynamic client for CRDs - lazy initialized to avoid cluster connection during init
+        # Dynamic client for CRDs - lazy initialized to avoid cluster connection
+        # during init, and built once under a lock because requests reach it
+        # from worker threads.
         self._dynamic_client: dynamic.DynamicClient | None = None
-
-        # Timeout for Kubernetes API calls (seconds)
-        self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
+        self._dynamic_client_lock = threading.Lock()
 
         # Whether a Nitro Sandbox RuntimeClass exists here (validate_manifest).
-        self.node_v1 = client.NodeV1Api()
+        self.node_v1 = client.NodeV1Api(self.api_client)
         self.runtime_class_exists = RuntimeClassPresence(
             lambda name: self.node_v1.read_runtime_class(name, _request_timeout=self._k8s_timeout)
         )
@@ -774,14 +785,13 @@ class ManifestProcessor:
 
         The method mutates *manifest* in-place and returns it for convenience.
 
-        For a TrainJob the default is injected into every pod spec embedded
-        in ``runtimePatches`` (live references into the manifest); the base
-        pod template comes from the shipped ClusterTrainingRuntime, which
-        already disables the token.
+        A TrainJob is left as it is: its pod template comes from the runtime,
+        and a runtime patch's pod spec has no ``automountServiceAccountToken``
+        (Kubeflow Trainer 2.3.0's TrainJob CRD), so the API server would drop
+        an injected one. The shipped ``torch-distributed`` ClusterTrainingRuntime
+        sets it to false (docs/DISTRIBUTED_TRAINING.md, Runtimes).
         """
         if manifest.get("kind") == "TrainJob":
-            for embedded in extract_trainjob_pod_specs(manifest).embedded:
-                embedded.setdefault("automountServiceAccountToken", False)
             return manifest
         pod_spec = self._extract_pod_spec(manifest)
         if pod_spec is not None:
@@ -791,39 +801,40 @@ class ManifestProcessor:
 
     @property
     def dynamic_client(self) -> dynamic.DynamicClient:
-        """Lazy-initialized dynamic client for CRD support."""
-        if self._dynamic_client is None:
-            self._dynamic_client = dynamic.DynamicClient(self.api_client)
-        return self._dynamic_client
+        """Lazy-initialized dynamic client for CRD support.
 
-    def _parse_cpu_string(self, cpu_str: str) -> int:
-        """Parse CPU string to millicores"""
+        Constructing it runs API discovery, so concurrent first requests wait
+        for one construction instead of each starting their own.
+        """
+        with self._dynamic_client_lock:
+            if self._dynamic_client is None:
+                self._dynamic_client = dynamic.DynamicClient(self.api_client)
+            return self._dynamic_client
+
+    def _parse_cpu_string(self, cpu_str: object) -> int:
+        """A CPU quantity in millicores (any form the API server accepts); empty is 0."""
         return parse_cpu_millicores(cpu_str)
 
-    def _parse_memory_string(self, memory_str: str) -> int:
-        """Parse memory string to bytes"""
+    def _parse_memory_string(self, memory_str: object) -> int:
+        """A memory quantity in bytes (any form the API server accepts); empty is 0."""
         return parse_memory_bytes(memory_str)
 
     def _check_yaml_depth(self, obj: Any, current_depth: int = 0) -> bool:
         """Check if a parsed YAML/JSON object exceeds max nesting depth.
 
-        Recursively walks dicts and lists. Returns False if depth exceeds
+        Walks dicts and lists through
+        :func:`gco.job_admission.within_nesting_depth`, the check the SQS
+        consumer applies too. Returns False if depth exceeds
         ``self.yaml_max_depth``.
 
         Args:
             obj: The parsed object to check (dict, list, or scalar).
-            current_depth: Current recursion depth (callers should leave at 0).
+            current_depth: Depth ``obj`` sits at already (callers should leave at 0).
 
         Returns:
             True if the object is within the depth limit, False otherwise.
         """
-        if current_depth > self.yaml_max_depth:
-            return False
-        if isinstance(obj, dict):
-            return all(self._check_yaml_depth(v, current_depth + 1) for v in obj.values())
-        if isinstance(obj, list):
-            return all(self._check_yaml_depth(item, current_depth + 1) for item in obj)
-        return True
+        return within_nesting_depth(obj, self.yaml_max_depth - current_depth)
 
     def validate_manifest(
         self,
@@ -870,23 +881,16 @@ class ManifestProcessor:
                 )
 
             # Validate resource kind using the policy shared with the SQS path.
-            kind = manifest.get("kind", "")
             kind_valid, kind_error = validate_resource_kind(manifest, self.allowed_kinds)
             if not kind_valid:
                 return False, kind_error
 
-            # Validate resource limits for workload resources
-            if kind in [
-                "Deployment",
-                "Job",
-                "CronJob",
-                "StatefulSet",
-                "DaemonSet",
-                "TrainJob",
-            ]:
-                resource_valid, resource_error = self._validate_resource_limits(manifest)
-                if not resource_valid:
-                    return False, resource_error
+            # Every manifest is held to the caps, whatever its kind: a bare Pod
+            # runs on the same nodes as a Job's template, and a manifest with
+            # no pod spec sums to zero. The SQS consumer gates the same way.
+            resource_valid, resource_error = self._validate_resource_limits(manifest)
+            if not resource_valid:
+                return False, resource_error
 
             # Require accelerator jobs to carry a matching toleration.
             if self.require_accelerator_toleration:
@@ -1006,8 +1010,10 @@ class ManifestProcessor:
             # Process each manifest
             for i, manifest_data in enumerate(request.manifests):
                 try:
-                    # Validate manifest
-                    is_valid, error_msg = self.validate_manifest(manifest_data, request.namespace)
+                    # Off the event loop: the sandbox check can read a RuntimeClass.
+                    is_valid, error_msg = await asyncio.to_thread(
+                        self.validate_manifest, manifest_data, request.namespace
+                    )
                     if not is_valid:
                         error_msg = f"Manifest {i + 1} validation failed: {error_msg}"
                         errors.append(error_msg)
@@ -1282,8 +1288,6 @@ class ManifestProcessor:
                             f"Job {name} already exists and is finished, deleting before recreating"
                         )
                         await self.delete_resource(api_version, kind, name, namespace)
-                        import asyncio
-
                         await asyncio.sleep(1)
                         await self._create_resource(manifest_data)
                         status = "created"
@@ -1368,19 +1372,27 @@ class ManifestProcessor:
         *,
         api_resource: Any | None = None,
     ) -> dict[str, Any] | None:
-        """Check if a resource already exists using dynamic client."""
+        """Check if a resource already exists using dynamic client.
+
+        Discovery and the read block on the API server, so they run in a
+        worker thread rather than on the event loop, as in every async method
+        here.
+        """
         try:
             # Reuse an already-authorized discovery result when supplied so a
             # status request cannot observe a different resource definition
             # between the scope check and the actual read.
-            if api_resource is None:
-                api_resource = self._get_api_resource(api_version, kind)
+            resolved = (
+                api_resource
+                if api_resource is not None
+                else await asyncio.to_thread(self._get_api_resource, api_version, kind)
+            )
 
             # Try to get the resource
-            if namespace and api_resource.namespaced:
-                resource = api_resource.get(name=name, namespace=namespace)
+            if namespace and resolved.namespaced:
+                resource = await asyncio.to_thread(resolved.get, name=name, namespace=namespace)
             else:
-                resource = api_resource.get(name=name)
+                resource = await asyncio.to_thread(resolved.get, name=name)
 
             if resource is not None:
                 return dict(resource.to_dict())
@@ -1419,10 +1431,12 @@ class ManifestProcessor:
             kind = manifest_data.get("kind", "")
             namespace = manifest_data.get("metadata", {}).get("namespace")
 
-            api_resource = self._get_api_resource(api_version, kind)
+            api_resource = await asyncio.to_thread(self._get_api_resource, api_version, kind)
             if namespace and api_resource.namespaced:
-                return api_resource.create(body=manifest_data, namespace=namespace)
-            return api_resource.create(body=manifest_data)
+                return await asyncio.to_thread(
+                    api_resource.create, body=manifest_data, namespace=namespace
+                )
+            return await asyncio.to_thread(api_resource.create, body=manifest_data)
         except Exception as e:
             logger.error(f"Error creating resource: {e}")
             raise
@@ -1436,18 +1450,20 @@ class ManifestProcessor:
             namespace = manifest_data.get("metadata", {}).get("namespace")
 
             # Get the API resource
-            api_resource = self._get_api_resource(api_version, kind)
+            api_resource = await asyncio.to_thread(self._get_api_resource, api_version, kind)
 
             # Update the resource using patch (server-side apply)
             if namespace and api_resource.namespaced:
-                api_resource.patch(
+                await asyncio.to_thread(
+                    api_resource.patch,
                     body=manifest_data,
                     name=name,
                     namespace=namespace,
                     content_type="application/merge-patch+json",
                 )
             else:
-                api_resource.patch(
+                await asyncio.to_thread(
+                    api_resource.patch,
                     body=manifest_data,
                     name=name,
                     content_type="application/merge-patch+json",
@@ -1477,7 +1493,7 @@ class ManifestProcessor:
 
         try:
             # Get the API resource
-            api_resource = self._get_api_resource(api_version, kind)
+            api_resource = await asyncio.to_thread(self._get_api_resource, api_version, kind)
             if not api_resource.namespaced:
                 return ResourceStatus(
                     api_version=api_version,
@@ -1489,7 +1505,7 @@ class ManifestProcessor:
                 )
 
             # Every authorized GVK is namespaced; never drop the namespace.
-            api_resource.delete(name=name, namespace=namespace)
+            await asyncio.to_thread(api_resource.delete, name=name, namespace=namespace)
 
             return ResourceStatus(
                 api_version=api_version,
@@ -1546,11 +1562,15 @@ class ManifestProcessor:
 
         Args:
             namespace: Filter by specific namespace (must be in allowed_namespaces)
-            status_filter: Filter by status: "running", "completed", "failed"
+            status_filter: Filter by status: "pending", "running", "completed"
+                or "failed" (:meth:`_get_job_status`). "succeeded", what the
+                job responses call a finished Job, is an alias of "completed".
 
         Returns:
             List of job dictionaries with metadata and status
         """
+        if status_filter == "succeeded":
+            status_filter = "completed"
         jobs = []
 
         # Determine which namespaces to query
@@ -1566,8 +1586,10 @@ class ManifestProcessor:
 
         for ns in namespaces_to_query:
             try:
-                job_list = self.batch_v1.list_namespaced_job(
-                    namespace=ns, _request_timeout=self._k8s_timeout
+                job_list = await asyncio.to_thread(
+                    self.batch_v1.list_namespaced_job,
+                    namespace=ns,
+                    _request_timeout=self._k8s_timeout,
                 )
                 for job in job_list.items:
                     job_dict = self._job_to_dict(job)
@@ -1663,7 +1685,7 @@ class ManifestProcessor:
             }
 
         try:
-            api_resource = self._get_api_resource(api_version, kind)
+            api_resource = await asyncio.to_thread(self._get_api_resource, api_version, kind)
             if not api_resource.namespaced:
                 return {
                     "api_version": api_version,

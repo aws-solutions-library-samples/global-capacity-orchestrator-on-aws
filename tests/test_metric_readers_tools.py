@@ -227,15 +227,31 @@ def test_cloudwatch_get_success_honours_output_name() -> None:
 
 
 def _patch_job_logs(metrics_module, monkeypatch: pytest.MonkeyPatch, lines: list[str]) -> None:
-    """Patch the job-log retrieval seam to return ``lines`` as log text.
+    """Patch the job-log retrieval seam to return what ``_run_cli`` returns for ``lines``.
 
-    The tool fetches logs through ``cli_runner._run_cli("jobs", "logs", ...)``;
-    replacing that call with one that returns the joined lines exercises the
-    reader end-to-end without any job-log access.
+    The tool fetches logs through ``cli_runner._run_cli("jobs", "logs", ...)``,
+    which runs ``gco --output json jobs logs``. The real command runs here
+    (Click's CliRunner, job manager mocked) and its stdout goes through the
+    validation ``_run_cli`` applies, so the reader sees the CLI's JSON
+    envelope, ``{"status": "ok", "output": "<log>"}``, rather than bare log
+    lines (a shape ``_run_cli`` never returns).
     """
+    from click.testing import CliRunner
+
+    from cli.main import cli
+
+    manager = MagicMock()
+    manager.get_job_logs.return_value = "\n".join(lines)
+    with patch("cli.commands.jobs_cmd.get_job_manager", return_value=manager):
+        result = CliRunner().invoke(
+            cli, ["--output", "json", "jobs", "logs", "sft-run", "-r", "us-east-1"]
+        )
+    assert result.exit_code == 0, result.output
+    payload = metrics_module.cli_runner._validated_cli_json_output(result.stdout.strip())
+    assert json.loads(payload)["status"] == "ok"
 
     def _fake_run_cli(*_args: object, **_kwargs: object) -> str:
-        return "\n".join(lines)
+        return payload
 
     monkeypatch.setattr(metrics_module.cli_runner, "_run_cli", _fake_run_cli)
 

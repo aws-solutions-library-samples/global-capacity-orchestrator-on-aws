@@ -1,0 +1,554 @@
+{
+  "app": "python3 app.py",
+  "watch": {
+    "include": [
+      "**"
+    ],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "requirements*.txt",
+      "source.bat",
+      "**/__pycache__",
+      "**/.venv"
+    ]
+  },
+  "context": {
+    "_comment_format": "JSON has no comments. Per-block documentation lives in sibling '_comment_<block>' keys placed immediately before the block they describe. Anything starting with '_comment' is ignored at runtime — no code reads those keys.",
+
+    "_comment_project": "Project identity and deployment topology",
+
+    "_comment_project_name": "Used as the resource-name prefix for every stack (e.g., '<project>-<region>') and as the SSM parameter path root for cross-region ALB hostname registration.",
+    "project_name": "gco",
+
+    "_comment_deployment_regions": "Where each stack class deploys. 'global' hosts partition-wide ECR, S3, DynamoDB, and the cross-region SSM hostname registry; in the commercial 'aws' partition it also hosts Global Accelerator. 'api_gateway' and 'monitoring' often co-locate with 'global' but can be split. 'regional' is the unlimited list of EKS clusters; every configured Region must be SDK-known and all configured Regions must belong to one AWS partition.",
+    "deployment_regions": {
+      "global": "us-east-2",
+      "api_gateway": "us-east-2",
+      "monitoring": "us-east-2",
+      "regional": [
+        "us-east-1"
+      ]
+    },
+
+    "_comment_tags": "Common tags applied to every stack and resource that supports tagging (cost-allocation, ownership, compliance). Add or override here. WARNING: every key in this block becomes a literal AWS tag — do not add documentation keys here.",
+    "tags": {
+      "Project": "GCO",
+      "Environment": "production",
+      "Owner": "platform-team"
+    },
+
+    "_comment_bedrock": "Model defaults for GCO's optional Bedrock-powered features, resolved through gco/bedrock.py. Each consumer has its own clearly named knob: mission_default_model_id is what Mission sampling uses, capacity_advisor_default_model_id is what `gco capacity ai-recommend` and `gco capacity predict` use, and claude_code_default_model_id is the session model `gco autopilot --engine claude-code` hands to Claude Code (per-launch overrides: --model flag or GCO_AUTOPILOT_MODEL). codex_default_model_id and codex.reasoning_effort independently configure `gco autopilot --engine codex`; the shipped Codex profile is global.openai.gpt-6.1-sol at xhigh reasoning. opencode_default_model_id independently configures `gco autopilot --engine opencode` (per-launch overrides: --model flag, GCO_AUTOPILOT_OPENCODE_MODEL, or GCO_AUTOPILOT_MODEL); the shipped OpenCode profile is global.moonshotai.kimi-k3, Moonshot AI's Kimi K3 through Global cross-Region inference. generation_reasoning.effort is shared by the two generation knobs, and canonical reasoning translation applies only when the invoked model is one of those defaults. embedding_model_id is the text-embedding model mission memory uses to embed directives; its output dimensionality must stay compatible with mission_memory.dimensions (see _comment_mission_memory - changing either after index creation invalidates search results). The pre-v6 default_model_id key (one knob that silently steered both Mission sampling and the advisor) is no longer read and fails validation with rename instructions. Explicit command/environment model overrides always take precedence and never inherit model-specific thinking fields. The three Anthropic keys ship the same profile, which requires the one-time Anthropic first-time-use case form per account (https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html); see docs/CUSTOMIZATION.md (Bedrock Model Selection).",
+    "bedrock": {
+      "mission_default_model_id": "global.anthropic.claude-opus-5-5",
+      "capacity_advisor_default_model_id": "global.anthropic.claude-opus-5-5",
+      "claude_code_default_model_id": "global.anthropic.claude-opus-5-5",
+      "codex_default_model_id": "global.openai.gpt-6.1-sol",
+      "codex": {
+        "reasoning_effort": "xhigh"
+      },
+      "opencode_default_model_id": "global.moonshotai.kimi-k3",
+      "embedding_model_id": "amazon.titan-embed-text-v2:0",
+      "generation_reasoning": {
+        "effort": "high"
+      }
+    },
+
+    "_comment_eks": "EKS cluster version and access posture. GCO runs EKS Auto Mode (https://docs.aws.amazon.com/eks/latest/userguide/automode.html), so node provisioning is managed by AWS — GPU/inference/EFA/Neuron compute is steered via the Karpenter NodePool manifests in lambda/kubectl-applier-simple/manifests/ (40-* through 46-*).",
+
+    "_comment_kubernetes_version": "EKS minor version. kubectl in Dockerfile.dev should track this within the ±1 minor skew policy (https://kubernetes.io/releases/version-skew-policy/).",
+    "kubernetes_version": "1.37",
+
+    "_comment_eks_cluster": "Who can reach AND who can use the EKS API server — three independent layers (run `gco cluster doctor` to check all three). REACHABILITY: endpoint_access PRIVATE = inside the VPC only (production posture; `gco cluster tunnel --via-ssm auto` reaches it from a laptop over SSM); PUBLIC_AND_PRIVATE additionally exposes the endpoint to the internet, restricted to public_access_cidrs when set (empty list = 0.0.0.0/0, loudly warned at synth; prefer `gco stacks eks endpoint set PUBLIC_AND_PRIVATE --cidr <your-ip>/32`). AUTHENTICATION+AUTHORIZATION: the cluster uses EKS access entries, and by default only platform Lambdas have them — a tunnel alone is not enough. Grant yourself access with `gco stacks access -r <region>` (one-shot, after deploy) or declare principals here under developer_access ([{principal_arn, scope, namespaces}], default scope=namespace + namespaces=[gco-jobs] granting AmazonEKSEditPolicy; scope=cluster grants AmazonEKSClusterAdminPolicy). NETWORK ISOLATION: network_policy_enforcement (default true) switches on the EKS Auto Mode network policy controller so the NetworkPolicies GCO ships (default-deny ingress in gco-system and gco-jobs, per-service allow rules, DNS+HTTPS egress) are enforced rather than merely stored; false keeps the objects but disables enforcement. See docs/CUSTOMIZATION.md (EKS Cluster Configuration) and docs/ARCHITECTURE.md (Network Security).",
+    "eks_cluster": {
+      "endpoint_access": "PRIVATE",
+      "public_access_cidrs": [],
+      "developer_access": [],
+      "network_policy_enforcement": true
+    },
+
+    "_comment_eks_capabilities": "Opt-in EKS Capabilities: AWS-managed AWS Controllers for Kubernetes (ACK) and kro attached to each regional cluster as AWS::EKS::Capability resources (billed for every hour a capability is active on a cluster plus hourly for specific Kubernetes resources it manages — see the Amazon EKS pricing page; every type is off by default). Each enabled type synthesizes one capability IAM role (trust capabilities.eks.amazonaws.com, sts:AssumeRole + sts:TagSession, no service permissions unless listed here) and one capability per cluster; regions [] means every regional deployment region, a non-empty list selects a subset. ack.disabled_services lists ACK controllers to leave out, enable_cross_namespace is ACK's cross-namespace flag, assume_role_arns are the per-service roles the capability role may assume (IAM Role Selectors, the least-privilege model) and iam_policy_arns are managed policies attached to the capability role itself (the simple setup); with both empty ACK can call no AWS API. kro gets write access to an allow-listed set of workload kinds in gco-jobs and gco-inference (07-kro-tenant-access.yaml) so ResourceGraphDefinitions can compose tenant workloads. Argo CD is not an EKS Capability here: GCO runs it in the cluster (helm.argocd, docs/GITOPS.md). Inspect live state with `gco stacks capabilities status -r <region>`. See docs/EKS_CAPABILITIES.md.",
+    "eks_capabilities": {
+      "ack": {
+        "enabled": false,
+        "regions": [],
+        "disabled_services": [],
+        "enable_cross_namespace": false,
+        "assume_role_arns": [],
+        "iam_policy_arns": []
+      },
+      "kro": {
+        "enabled": false,
+        "regions": []
+      }
+    },
+
+    "_comment_networking": "Networking, security, and ingress",
+
+    "_comment_global_accelerator": "AWS Global Accelerator front door in the commercial 'aws' partition only. Other AWS partitions omit the accelerator, listener, endpoint groups, and registration resources and use the IAM-authenticated regional APIs directly. When applicable: health_check_interval is seconds between endpoint-group probes (Global Accelerator accepts only 10 or 30); health_check_threshold is the consecutive-probe count before an endpoint flips state (1-10); health_check_path is the HTTPS path probed on each regional ALB; client_affinity is 'NONE' or 'SOURCE_IP'. traffic_dial is the optional capacity-driven traffic-dial controller (see docs/CUSTOMIZATION.md): disabled by default; in 'monitor' mode it only computes and publishes per-region dial decisions from the GCO/HealthMonitor ClusterHealthy signal, while 'enforce' mode applies them via UpdateEndpointGroup. min_dial_percentage floors how far a degraded region is dialed down; max_step_percentage caps the change per run; full_health_percentage is the healthy fraction (percent) at or above which a region returns to 100; interval_minutes and lookback_minutes are the run cadence and the health window.",
+    "global_accelerator": {
+      "health_check_interval": 30,
+      "health_check_threshold": 3,
+      "health_check_path": "/api/v1/health",
+      "client_affinity": "NONE",
+      "traffic_dial": {
+        "enabled": false,
+        "mode": "monitor",
+        "interval_minutes": 5,
+        "lookback_minutes": 15,
+        "min_dial_percentage": 10,
+        "max_step_percentage": 20,
+        "full_health_percentage": 95
+      }
+    },
+
+    "_comment_backend_tls": "Mandatory authenticated TLS from the proxy Lambdas through Global Accelerator/direct regional routing to each internal ALB. GCO creates a deployment-local ECDSA root CA in a customer-managed-KMS-encrypted secret, publishes only its public trust bundle, and imports short-lived signed leaves into regional ACM. The scheduled manager reimports renewed leaves into stable ACM ARNs. root_generation can be incremented for an explicit staged rollover; activation delay must exceed the maximum stale trust-cache window, and overlap must exceed leaf validity.",
+    "backend_tls": {
+      "root_generation": 1,
+      "root_validity_days": 3650,
+      "root_rotate_before_days": 180,
+      "root_activation_delay_hours": 24,
+      "root_overlap_days": 45,
+      "leaf_validity_days": 30,
+      "leaf_rotate_before_days": 10,
+      "rotation_schedule_hours": 12,
+      "trust_cache_ttl_seconds": 300,
+      "trust_cache_max_stale_seconds": 3600
+    },
+
+    "_comment_alb_config": "Internal ALB target-group health checks for the manifest-processor service. health_check_interval / health_check_timeout in seconds. healthy_threshold / unhealthy_threshold are the consecutive-probe counts before a target flips state. See https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-target-groups.html.",
+    "alb_config": {
+      "health_check_interval": 30,
+      "health_check_timeout": 5,
+      "healthy_threshold": 2,
+      "unhealthy_threshold": 2
+    },
+
+    "_comment_api_gateway": "Authenticated API behavior and direct-caller policy. In the commercial 'aws' partition the global REST API is edge-optimized and its control/inference proxies use Global Accelerator; regional_api_enabled optionally admits other IAM-authorized principals from this account to each regional bridge. In other partitions the global API is regional and aggregate-only, Global Accelerator proxy routes are omitted, and same-account regional bridge access is forced on as the supported workload ingress. The exact aggregator role is always admitted. throttle/logging/metrics/tracing settings apply in every partition.",
+    "api_gateway": {
+      "throttle_rate_limit": 1000,
+      "throttle_burst_limit": 2000,
+      "log_level": "INFO",
+      "metrics_enabled": true,
+      "tracing_enabled": true,
+      "regional_api_enabled": false
+    },
+
+    "_comment_waf": "WAFv2 web ACL in front of API Gateway. per_ip_rate_limit is the WAF rate-based rule's request budget per source IP over a 5-minute window. See https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-rate-based.html.",
+    "waf": {
+      "per_ip_rate_limit": 100
+    },
+
+    "_comment_vpc_endpoint_cidrs": "In-VPC address ranges that gco-jobs pods may reach on any port (the allow-vpc-egress NetworkPolicy: Valkey, Aurora, EFS/FSx mount targets, VPC endpoints) and that the MLflow tracking server accepts Host headers and kubelet probes from. Defaults to the VPC's own CIDR; add peered VPC ranges if jobs must reach them. Internet and AWS-API traffic from jobs is governed separately (HTTPS to any destination is allowed).",
+    "vpc_endpoint_cidrs": [
+      "10.0.0.0/16"
+    ],
+    "_comment_vpc_endpoints": "VPC endpoints created in each regional VPC. gateway (free, route-table based): s3 and dynamodb by default — the S3 endpoint takes model, dataset, checkpoint, MLflow-artifact and cost-report traffic off the NAT gateways' per-GB metering and keeps it inside the VPC. interface (PrivateLink, billed per AZ-hour plus per GB, so opt-in) keeps the remaining AWS API calls private; supported names: sts, ecr.api, ecr.dkr, logs, monitoring, sqs, ssm, secretsmanager, kms, eks, elasticfilesystem, bedrock-runtime, xray (span export when tracing is enabled). Cross-region calls to the global region's tables, buckets and parameters still leave through the NAT gateways. See docs/CUSTOMIZATION.md (VPC Endpoints).",
+    "vpc_endpoints": {
+      "gateway": [
+        "s3",
+        "dynamodb"
+      ],
+      "interface": []
+    },
+
+    "_comment_workloads": "Job submission, validation, and processing pipelines",
+
+    "_comment_inference_proxy": "Shared authenticated inference data plane, the one platform service that autoscales. min_replicas / max_replicas are the HorizontalPodAutoscaler bounds (exact integers, 1-50 and 1-100, max >= min; defaults 3 and 10); min_replicas is also the Deployment's create-time replica count, after which the HPA owns it. tls_proxy_cpu_request_millicores is the api-tls-proxy CPU request and HPA utilization denominator (exact integer 1-250, default 100; rendered as the Kubernetes quantity 100m). tls_proxy_cpu_target_utilization_percentage is that sidecar's ContainerResource CPU target (exact integer 1-100, default 70). These settings do not change application resources, application HPA signals, scaling behavior, the one-at-a-time disruption budget, or drain timing. See docs/INFERENCE.md and docs/CUSTOMIZATION.md.",
+    "inference_proxy": {
+      "min_replicas": 3,
+      "max_replicas": 10,
+      "tls_proxy_cpu_request_millicores": 100,
+      "tls_proxy_cpu_target_utilization_percentage": 70
+    },
+
+    "_comment_manifest_processor": "Authenticated API, direct manifest submission, and DynamoDB queue worker. replicas is the fixed Deployment size (each replica also runs the queue worker; claims are conditional so replicas compete safely). resource_limits are the application container's CPU/memory limits as Kubernetes quantities (at least the manifest's 500m / 1Gi requests). autoscaling is OFF by default: the API tier is I/O-bound, so CPU is a weak saturation signal; set autoscaling.enabled=true to ship a CPU HorizontalPodAutoscaler between replicas and max_replicas (1-100, >= replicas, default 6) at cpu_target_utilization_percentage (1-100, default 70) — the HPA then owns the replica count and the applier stops re-asserting it. central_queue_worker_enabled activates queued Jobs in each target region. Claims use unique pod owners, fencing generations, deterministic Kubernetes identities, and renewable leases; lease_renewal_seconds must be no more than half lease_seconds. poll_interval_seconds controls pickup cadence; batch_size bounds each pass; reconcile_limit bounds pending/running status checks. max_request_body_bytes is the hard request-size cap (1 MiB default). yaml_max_depth limits YAML nesting. See docs/CUSTOMIZATION.md.",
+    "manifest_processor": {
+      "image": "gco/manifest-processor:latest",
+      "replicas": 3,
+      "resource_limits": {
+        "cpu": "1000m",
+        "memory": "2Gi"
+      },
+      "autoscaling": {
+        "enabled": false,
+        "max_replicas": 6,
+        "cpu_target_utilization_percentage": 70
+      },
+      "validation_enabled": true,
+      "max_request_body_bytes": 1048576,
+      "yaml_max_depth": 50,
+      "central_queue_worker_enabled": true,
+      "central_queue_poll_interval_seconds": 10,
+      "central_queue_batch_size": 5,
+      "central_queue_reconcile_limit": 100,
+      "central_queue_lease_seconds": 300,
+      "central_queue_lease_renewal_seconds": 60
+    },
+
+    "_comment_queue_processor": "SQS-backed job submitter. enabled: master toggle (when false the exact built-in ScaledJob is pruned). polling_interval: how often KEDA checks SQS. max_concurrent_jobs: maximum active consumer Jobs. messages_per_job: target queued messages per active Job for KEDA scaling; each worker still receives at most one message. successful_jobs_history / failed_jobs_history: K8s Job history caps.",
+    "queue_processor": {
+      "enabled": true,
+      "polling_interval": 10,
+      "max_concurrent_jobs": 10,
+      "messages_per_job": 1,
+      "successful_jobs_history": 20,
+      "failed_jobs_history": 10
+    },
+
+    "_comment_job_validation_policy": "Shared validation policy applied by BOTH the REST manifest_processor (POST /api/v1/manifests) and the SQS queue_processor (gco jobs submit-sqs). CDK wires these values into both services at deploy time so a single change applies uniformly. An attacker holding sqs:SendMessage cannot bypass checks the REST path enforces. allowed_namespaces: namespaces a submitted manifest may target. resource_quotas: per-manifest caps applied before admission. trusted_registries / trusted_dockerhub_orgs: image source allowlist. manifest_security_policy.block_*: hardening flags rejecting privileged or host-namespace pods. allowed_kinds: K8s resource kinds the gateway will accept. See docs/CUSTOMIZATION.md (Security Policy Configuration).",
+    "job_validation_policy": {
+      "allowed_namespaces": [
+        "gco-jobs"
+      ],
+      "resource_quotas": {
+        "max_cpu_per_manifest": "384",
+        "max_memory_per_manifest": "4096Gi",
+        "max_gpu_per_manifest": 16
+      },
+      "require_accelerator_toleration": true,
+      "trusted_registries": [
+        "docker.io",
+        "gcr.io",
+        "quay.io",
+        "registry.k8s.io",
+        "k8s.gcr.io",
+        "public.ecr.aws",
+        "nvcr.io"
+      ],
+      "trusted_dockerhub_orgs": [
+        "nvidia",
+        "pytorch",
+        "rayproject",
+        "tensorflow",
+        "huggingface",
+        "amazon",
+        "bitnami",
+        "vllm",
+        "lmsysorg",
+        "gco"
+      ],
+      "manifest_security_policy": {
+        "block_privileged": true,
+        "block_privilege_escalation": true,
+        "block_host_network": true,
+        "block_host_pid": true,
+        "block_host_ipc": true,
+        "block_host_path": true,
+        "block_added_capabilities": true,
+        "block_run_as_root": false
+      },
+      "allowed_kinds": [
+        "Job",
+        "CronJob",
+        "Deployment",
+        "StatefulSet",
+        "DaemonSet",
+        "Service",
+        "ConfigMap",
+        "Pod",
+        "TrainJob"
+      ]
+    },
+
+    "_comment_resource_quota": "K8s ResourceQuota / LimitRange values applied to the gco-jobs namespace. max_*: namespace-wide ceilings on aggregate requests. container_max_*: per-container ceilings (LimitRange max), sized by default to one full accelerator-node slice (p5.48xlarge / trn2.48xlarge: 192 vCPU, 2 TiB, 8 GPUs) so full-node distributed-training pods are admissible out of the box. Values are validated at synth: each must parse as a Kubernetes quantity and every container_max_* must fit inside its max_* ceiling. Defaults live in gco/stacks/constants.py (DEFAULT_RESOURCE_QUOTA); keep this block in lockstep.",
+    "resource_quota": {
+      "max_cpu": "400",
+      "max_memory": "4096Gi",
+      "max_gpu": "32",
+      "max_pods": "50",
+      "container_max_cpu": "192",
+      "container_max_memory": "2048Gi",
+      "container_max_gpu": "8"
+    },
+
+    "_comment_resource_thresholds": "Health monitor thresholds that drive the /api/v1/health regional capacity report. cpu_threshold / memory_threshold / gpu_threshold are utilization percentages above which the region is reported as 'busy'; set any to -1 to disable that dimension. The 80 defaults leave headroom above the platform baseline: on right-sized EKS Auto Mode nodes an idle cluster running the observability stack already sits near 65-70% memory, which a 60 threshold misreported as unhealthy. pending_pods_threshold counts pods in Pending state. pending_requested_cpu_vcpus / pending_requested_memory_gb / pending_requested_gpus sum unscheduled resource requests across pending pods.",
+    "resource_thresholds": {
+      "cpu_threshold": 80,
+      "memory_threshold": 80,
+      "gpu_threshold": -1,
+      "pending_pods_threshold": 10,
+      "pending_requested_cpu_vcpus": 100,
+      "pending_requested_memory_gb": 200,
+      "pending_requested_gpus": -1
+    },
+
+    "_comment_images": "ECR image registry. removal_policy: 'retain' keeps repos when the stack is destroyed (production default); 'destroy' wipes them. empty_on_delete: only honored with removal_policy='destroy'; if false, non-empty repos block stack deletion. lifecycle.keep_tagged: number of most-recent tagged images retained. lifecycle.expire_untagged_days: untagged image TTL in days. See https://docs.aws.amazon.com/AmazonECR/latest/userguide/LifecyclePolicies.html.",
+    "images": {
+      "removal_policy": "retain",
+      "empty_on_delete": false,
+      "lifecycle": {
+        "keep_tagged": 20,
+        "expire_untagged_days": 7
+      }
+    },
+
+    "_comment_volcano_image_mirror": "Optional credential-free fix for Volcano's docker.io-only images (volcanosh/vc-*), which on a cold cluster pull slowly / hit Docker Hub rate limits and can stall Volcano's helm install. When enabled, the regional stack redirects Volcano's basic.image_registry to <account>.dkr.ecr.<region>.<url-suffix>/<ecr_namespace> (which defaults to <project_name>/dockerhub and must start with <project_name>/ so it inherits the project's <project_name>/* node-pull access, replication, and trusted-registry allow-list), and 'gco stacks deploy' auto-mirrors the pinned images into that namespace before the regional Helm install (or run 'gco images mirror --region <region>' manually). The copy preserves the full multi-arch manifest list (docker buildx imagetools / Finch --all-platforms / skopeo). Unlike an ECR pull-through cache this needs no Docker Hub secret; it is a static mirror you refresh when the Volcano chart version changes. See docs/IMAGE_MIRROR.md.",
+    "volcano_image_mirror": {
+      "enabled": true
+    },
+
+    "_comment_storage": "Optional storage backends (disabled by default; flip enabled then 'gco stacks deploy-all').",
+
+    "_comment_fsx_lustre": "FSx for Lustre filesystem mounted into job pods. enabled: master toggle. storage_capacity_gib: provisioned size. deployment_type: SCRATCH_1, SCRATCH_2 (recommended), or PERSISTENT_*. file_system_type_version: Lustre version. per_unit_storage_throughput: only relevant for PERSISTENT_* (MB/s/TiB). data_compression_type: NONE or LZ4. import_path / export_path: optional S3 data-repo URIs. auto_import_policy: which S3 events trigger metadata sync (NONE, NEW, NEW_CHANGED, NEW_CHANGED_DELETED). See docs/CUSTOMIZATION.md (Configure FSx Storage) and https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html.",
+    "fsx_lustre": {
+      "enabled": false,
+      "storage_capacity_gib": 1200,
+      "deployment_type": "SCRATCH_2",
+      "file_system_type_version": "2.15",
+      "per_unit_storage_throughput": 200,
+      "data_compression_type": "LZ4",
+      "import_path": null,
+      "export_path": null,
+      "auto_import_policy": "NEW_CHANGED_DELETED"
+    },
+
+    "_comment_s3_access_logs": "Retention (days) for S3 server-access-log buckets. Logs older than this are expired by a bucket lifecycle rule. See https://docs.aws.amazon.com/AmazonS3/latest/userguide/enable-server-access-logging.html.",
+    "s3_access_logs": {
+      "retention_days": 90
+    },
+
+    "_comment_workload_metrics": "CloudWatch metrics namespace job/inference workload pods (the gco-service-account Pod Identity role) may publish to via cloudwatch:PutMetricData. The IAM grant is namespace-conditioned, so pods can write metrics to exactly this namespace and nothing else. Change it if your training code emits to its own namespace; redeploy regional stacks to apply.",
+    "workload_metrics": {
+      "cloudwatch_namespace": "GCO/Workloads"
+    },
+
+    "_comment_regional_shared_bucket": "Teardown behavior for each region's always-on general-purpose bucket (and its access-logs bucket and KMS key). 'destroy' (default): a regional stack destroy deletes the bucket and every object in it — including artifacts jobs just produced. 'retain': bucket, access logs, and KMS key all survive the destroy (they become unmanaged and keep billing until deleted manually). Interim copy-out before a destroy under 'destroy': gco storage sync regional-shared:<region> ./checkpoints --prefix <prefix>. See docs/REGIONAL_SHARED_BUCKET.md (Removal policy).",
+    "regional_shared_bucket": {
+      "removal_policy": "destroy"
+    },
+
+    "_comment_addons": "Optional add-on services (toggle enabled, then deploy-all to provision)",
+
+    "_comment_valkey": "ElastiCache Serverless Valkey (Redis-compatible) cache. enabled: master toggle. max_data_storage_gb / max_ecpu_per_second: serverless usage caps (cost ceiling). snapshot_retention_limit: days of automatic backups retained. See docs/CUSTOMIZATION.md (Configure Valkey Cache) and https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/WhatIs.html.",
+    "valkey": {
+      "enabled": false,
+      "max_data_storage_gb": 5,
+      "max_ecpu_per_second": 5000,
+      "snapshot_retention_limit": 1
+    },
+
+    "_comment_mission_memory": "Mission memory - recall across mission sessions, enabled by default. When enabled, GCOGlobalStack adds a DynamoDB table ({project}-mission-memory) with a vector index over embedded mission directives; completed missions write one memory item (directive embedding + model-written lessons/followups) and later missions retrieve the most similar past sessions into their sampling prompts. Memory is SHARED INSTITUTIONAL MEMORY: items are keyed by session only, so every operator in the account sees every operator's mission lessons. Cost is negligible (PAY_PER_REQUEST table with one small item per completed mission plus one embedding call at session end); set enabled=false to opt out. retention_days: DynamoDB TTL window for memory items. dimensions: embedding vector width - MUST match the bedrock.embedding_model_id output width and is a ONE-WAY DOOR (immutable after index creation, as are the COSINE distance function and the index projection; changing any of them means deleting and recreating the index, orphaning existing embeddings). top_k: how many similar past missions retrieval feeds into the sampling prompt. Retrieval and writes are best-effort and never fail a mission. See docs/MISSION.md (Mission memory).",
+    "mission_memory": {
+      "enabled": true,
+      "retention_days": 365,
+      "dimensions": 1024,
+      "distance_function": "COSINE",
+      "top_k": 3
+    },
+    "_comment_vector_store": "Globally replicated vector store for workload RAG - an OPT-IN add-on (enabled=false by default; replicated storage and writes carry per-region cost). When enabled, GCOGlobalStack creates a DynamoDB GLOBAL table ({project}-vector-store, primary in the global region) with a vector index whose definition and data replicate to every replica region automatically, an S3-triggered ingest Lambda that embeds documents dropped under corpus_prefix on the cluster-shared bucket (txt/md are chunked; jsonl is pre-chunked), and per-cluster read wiring (gco-vector-store ConfigMap + SearchVectors grants on the LOCAL replica). dimensions and distance_function are ONE-WAY DOORS (immutable after index creation) and dimensions must match the embedding_model_id output width. embedding_model_id is deliberately independent of bedrock.embedding_model_id (mission memory); CHANGING IT REQUIRES RE-INGESTING THE CORPUS - vectors from different models are not comparable. replica_regions: explicit replica list; empty means follow deployment_regions.regional (minus the global region, which hosts the primary). corpus_prefix: watched S3 prefix. Deleting an S3 object does NOT delete its items. Query with `gco vector search`; load with `gco vector ingest` (or --demo). Complementary to aurora_pgvector, not a replacement: pgvector gives SQL (joins, range predicates, transactions); this gives managed global replication with equality-only inline filters. See lambda/vector-ingest/README.md.",
+    "vector_store": {
+      "enabled": false,
+      "dimensions": 1024,
+      "distance_function": "COSINE",
+      "embedding_model_id": "amazon.titan-embed-text-v2:0",
+      "replica_regions": [],
+      "corpus_prefix": "vector-corpus/"
+    },
+    "_comment_aurora_pgvector": "Aurora Serverless v2 PostgreSQL with pgvector. enabled: master toggle. min_acu / max_acu: Aurora Capacity Unit range; min_acu=0 enables scale-to-zero. backup_retention_days: automated backup TTL. deletion_protection: blocks accidental cluster deletion when true. See docs/CUSTOMIZATION.md (Configure Aurora pgvector) and https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html.",
+    "aurora_pgvector": {
+      "enabled": false,
+      "min_acu": 0,
+      "max_acu": 16,
+      "backup_retention_days": 7,
+      "deletion_protection": false
+    },
+
+    "_comment_analytics_environment": "SageMaker Studio / HyperPod / Canvas analytics stack. enabled: master toggle (off by default). hyperpod.enabled / canvas.enabled: opt-in subfeatures. cognito.domain_prefix: optional custom Cognito UI domain (null = auto). cognito.removal_policy / efs.removal_policy: 'destroy' wipes user pools and EFS on stack delete (dev default); 'retain' preserves them. studio.user_profile_name_prefix: optional Studio user-profile name prefix. See docs/ANALYTICS.md and https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated.html.",
+    "analytics_environment": {
+      "enabled": false,
+      "hyperpod": {
+        "enabled": false
+      },
+      "canvas": {
+        "enabled": false
+      },
+      "cognito": {
+        "domain_prefix": null,
+        "removal_policy": "destroy"
+      },
+      "efs": {
+        "removal_policy": "destroy"
+      },
+      "studio": {
+        "user_profile_name_prefix": null
+      }
+    },
+
+    "_comment_cluster_observability": "Self-hosted in-cluster observability (kube-prometheus-stack: Prometheus + Alertmanager + Grafana) installed on every regional EKS cluster via the Helm installer. enabled: master toggle, ON BY DEFAULT (set false to opt out). Grafana uses native auth (no self sign-up, no anonymous) and is reachable privately via 'gco monitoring open' (kubectl port-forward to a ClusterIP service — no public endpoint; the EKS API is PRIVATE, so a VPN/SSM/bastion path is required). grafana/prometheus/alertmanager.persistence_size: EBS PVC sizes. prometheus.retention: TSDB retention window. grafana.admin_password_rotation_schedule: cron for the in-cluster CronJob that rotates the chart-generated Grafana admin password (default monthly, 04:00 on the 1st). mlflow: MLflow tracking server sub-toggle, ON BY DEFAULT and effective only while observability is enabled (it shares the monitoring namespace, gp3 StorageClass, and tunnel access path); run artifacts go to the cluster-shared S3 bucket via IRSA, run metadata to an EBS PVC of mlflow.persistence_size, and access is 'gco monitoring open --service mlflow' (ClusterIP only, no ingress, no app-level auth — the authenticated tunnel is the boundary). This is complementary to the CloudWatch gco-monitoring stack; see docs/MONITORING.md.",
+    "cluster_observability": {
+      "enabled": true,
+      "grafana": {
+        "persistence_size": "10Gi",
+        "admin_user": "admin",
+        "admin_password_rotation_schedule": "0 4 1 * *"
+      },
+      "prometheus": {
+        "persistence_size": "50Gi",
+        "retention": "15d"
+      },
+      "alertmanager": {
+        "enabled": true,
+        "persistence_size": "5Gi"
+      },
+      "mlflow": {
+        "enabled": true,
+        "persistence_size": "10Gi"
+      }
+    },
+
+    "_comment_cost_monitoring": "Cost monitoring and cost analytics pipeline. enabled: master toggle, ON BY DEFAULT (requires cluster_observability.enabled — OpenCost reads usage data from the in-cluster Prometheus). When enabled: OpenCost is installed per region via the Helm installer with a Grafana cost dashboard; the monitoring stack provisions the cost report S3 bucket (Hive-partitioned Parquet under reports/region=<region>/date=<date>/), a Glue database/table, and an Athena workgroup for cross-region queries; and the cost-monitor service on each regional cluster writes scheduled allocation reports and serves ad-hoc reports through the GCO API (/api/v1/cost/*). reports.interval_minutes: scheduled report cadence. reports.retention_days: S3 expiration for report objects. reports.transition_to_infrequent_access_days: S3 STANDARD_IA transition (must be < retention_days). athena.query_results_retention_days: S3 expiration for Athena query results. See docs/COST_MONITORING.md.",
+    "cost_monitoring": {
+      "enabled": true,
+      "reports": {
+        "interval_minutes": 60,
+        "retention_days": 365,
+        "transition_to_infrequent_access_days": 90
+      },
+      "athena": {
+        "query_results_retention_days": 30
+      }
+    },
+
+    "_comment_tracing": "Distributed tracing for the four GCO API services (health-monitor, manifest-processor, inference-proxy, cost-monitor). Each service runs the OpenTelemetry SDK and exports spans straight to the AWS X-Ray OTLP endpoint (https://xray.<region>.amazonaws.com/v1/traces) as gzip-compressed protobuf, signed with SigV4 by the service's own IAM role, which is granted xray:PutTraceSegments and xray:PutSpans; no collector or agent runs. enabled (default true) renders GCO_TRACING_ENABLED into those Deployments; false leaves the SDK inert and drops the X-Ray grants and the Transaction Search resource. sample_ratio (a number from 0 to 1, default 0.05) is head sampling: a new trace is recorded with that probability, every GCO hop makes the same decision from the propagated W3C traceparent trace ID, an upstream caller's sampled flag is ignored, and health, readiness and metrics endpoints are never traced. enable_transaction_search (default true, used only while enabled) makes each regional stack switch on CloudWatch Transaction Search in its Region, which the X-Ray OTLP endpoint requires: it writes the gco-transaction-search-xray-access CloudWatch Logs resource policy and sets the X-Ray trace segment destination to CloudWatch Logs, so spans land in the aws/spans log group. Transaction Search is an account-level setting, configured per Region and shared with every other traced workload in the account, so a Region where it is already on is left untouched and GCO never turns it off or removes the policy when a stack is destroyed (turn it off in the CloudWatch console once nothing uses it); set false when your organization manages it. Cost: span ingestion into aws/spans is billed at CloudWatch pricing (1% of spans are also indexed as trace summaries at no charge), so spend scales with request volume times sample_ratio. The run-scoped tracing_overrides CDK context (a JSON object deep-merged over this block) changes it for one deploy; release validation uses it to raise sample_ratio to 1.0. Add xray to vpc_endpoints.interface to keep span export on PrivateLink. See docs/MONITORING.md.",
+    "tracing": {
+      "enabled": true,
+      "sample_ratio": 0.05,
+      "enable_transaction_search": true
+    },
+
+    "_comment_helm": "Helm chart installation toggles. Each key maps to one or more charts in lambda/helm-installer/charts.yaml; flip enabled=false to skip a chart. Charts install in dependency order with kueue last (its mutating webhook intercepts every Job/Deployment). Cross-scheduler coexistence is documented in docs/SCHEDULERS.md.",
+    "helm": {
+      "_comment_keda": "KEDA — Kubernetes Event-Driven Autoscaling. MANDATORY platform component (no toggle): it backs GCO's built-in SQS queue processor and is the metrics bridge (keda-metrics-apiserver serves external.metrics.k8s.io) that lets autoscalers consume GPU/CloudWatch metrics. KEDA is always installed and is intentionally not listed below — see docs/KEDA.md.",
+      "_comment_aws_efa_device_plugin": "AWS EFA device plugin — exposes Elastic Fabric Adapter as a schedulable resource (vpc.amazonaws.com/efa) for HPC/ML jobs that need low-latency multi-node networking. Upstream: https://github.com/aws/eks-charts/tree/master/stable/aws-efa-k8s-device-plugin.",
+      "aws_efa_device_plugin": {
+        "enabled": true
+      },
+      "_comment_aws_neuron_device_plugin": "AWS Neuron device plugin — exposes Trainium / Inferentia chips as schedulable resources (aws.amazon.com/neuron). Upstream: https://github.com/aws-neuron/neuron-helm-charts.",
+      "aws_neuron_device_plugin": {
+        "enabled": true
+      },
+      "_comment_volcano": "Volcano — batch scheduler purpose-built for AI/ML and HPC: gang scheduling, fair-share queues, priority. Pods opt in via schedulerName: volcano. See docs/VOLCANO.md.",
+      "volcano": {
+        "enabled": true
+      },
+      "_comment_kuberay": "KubeRay operator — runs Ray clusters and Ray Jobs as Kubernetes resources for distributed Python / ML workloads. See docs/KUBERAY.md.",
+      "kuberay": {
+        "enabled": true
+      },
+      "_comment_kubeflow_trainer": "Kubeflow Trainer v2 — distributed-training operator (TrainJob against ClusterTrainingRuntime blueprints; supersedes the legacy training-operator's PyTorchJob/TFJob/MPIJob). Installs the trainer controller, its JobSet dependency, and the torch-distributed runtime. TrainJob manifests submit through the standard GCO job pipeline. On by default; set enabled: false to opt out. See docs/DISTRIBUTED_TRAINING.md.",
+      "kubeflow_trainer": {
+        "enabled": true
+      },
+      "_comment_cert_manager": "cert-manager — issues and rotates the ALB-facing GCO API workload certificates and cluster webhook certificates. Enabled by default; disabling the bundled chart requires an existing compatible cert-manager installation or API workloads fail closed without TLS Secrets. Upstream: https://cert-manager.io/docs/.",
+      "cert_manager": {
+        "enabled": true
+      },
+      "_comment_slurm": "Slurm-on-Kubernetes via the Slinky operator. Off by default. One block configures the whole cluster: partitions (merged over the shipped cpu, gpu and disabled gpu-efa templates; each is an autoscaled NodeSet on a GCO node pool, min_nodes 0 by default), accounting (on, in-cluster MariaDB with nightly S3 dumps, or accounting.external for your own database), the login pod, storage (home on EFS, scratch on FSx when enabled) and autoscaling knobs; every key is validated at synth (gco/slurm_config.py). Needs cluster_observability for autoscaling; the default partitions fit the default resource_quota, enlarging them may need a higher quota. See docs/SLURM_OPERATOR.md.",
+      "slurm": {
+        "enabled": false
+      },
+      "_comment_yunikorn": "Apache YuniKorn — alternative batch scheduler with hierarchical queues. Pods opt in via schedulerName: yunikorn, so it coexists cleanly with Volcano and the default scheduler. Off by default. See docs/YUNIKORN.md.",
+      "yunikorn": {
+        "enabled": false
+      },
+      "_comment_argocd": "Argo CD — self-managed GitOps controller installed from the upstream argo-cd chart in namespaced mode: no ClusterRoles, and it deploys only into gco-jobs and gco-inference through the fenced gco-tenants AppProject (quotas, limits, NetworkPolicies and RBAC are never syncable). Off by default. source_repos is the AppProject's allowed repositories (glob patterns; [\"*\"] admits any). Setting gitops.repo_url to a Git URL adds the root Application gco-gitops-root, which syncs revision/path (path may use {region} and {cluster_name} for per-cluster overlays); sync_policy manual leaves syncs to a human, automated syncs with self-heal (prune off). repo_server sizes the manifest-generation tier: replicas is the fixed count (exact integer 1-50, default 1); set repo_server.autoscaling.enabled=true to hand the count to a CPU HorizontalPodAutoscaler between replicas and max_replicas (1-100, >= replicas, default 5) at cpu_target_utilization_percentage of the repo-server container's CPU request in charts.yaml (1-100, default 70). The application controller and the UI server keep one replica (one cluster is one controller shard; the UI is reached through a port-forward to one pod). Open the UI with `gco gitops open` and read the admin password with `gco gitops password`. See docs/GITOPS.md.",
+      "argocd": {
+        "enabled": false,
+        "source_repos": ["*"],
+        "gitops": {
+          "repo_url": "",
+          "revision": "HEAD",
+          "path": ".",
+          "sync_policy": "manual"
+        },
+        "repo_server": {
+          "replicas": 1,
+          "autoscaling": {
+            "enabled": false,
+            "max_replicas": 5,
+            "cpu_target_utilization_percentage": 70
+          }
+        }
+      },
+      "_comment_crossplane": "Crossplane — self-managed control plane for platform APIs (v2: namespaced composite resources compose any Kubernetes resource) plus the Crossview dashboard, both installed from their upstream charts. Off by default. GCO installs the go-templating composition function, lets Crossplane compose the tenant workload kinds and gives Crossview a read-only view; no provider packages ship (AWS resources come from the ACK EKS Capability). Open the dashboard with `gco crossplane open`. See docs/CROSSPLANE.md.",
+      "crossplane": {
+        "enabled": false
+      },
+      "_comment_kueue": "Kueue — job-queueing layer for fair sharing across teams. Must install last because its mutating webhook intercepts every Job/Deployment. See docs/KUEUE.md.",
+      "kueue": {
+        "enabled": true
+      }
+    },
+
+    "_comment_pcs": "AWS Parallel Computing Service (PCS): a second Slurm backend behind the same `gco slurm` CLI, /api/v1/slurm/* API and slurm_* MCP tools as the Slinky cluster (helm.slurm); both may be on in one Region and callers pick one with backend= when they are. Off by default. mode managed (the default) makes each regional stack create the PCS cluster and everything around it from the managed block: cluster_name (null = <project_name>-pcs), slurm_version (25.11 or 26.05; both serve the API's OpenAPI v0.0.44), size (SMALL/MEDIUM/LARGE), accounting (slurmdbd, purge_days -1 = never), scale_down_idle_seconds, storage (home: efs mounts the regional EFS at /home through a PCS-only access point, scratch: auto mounts FSx for Lustre at /scratch when fsx_lustre is on), login (one always-on node reached over SSM by `gco slurm shell` and `gco slurm output`), node_groups (the PCS equivalent of partitions: instance_types of one architecture, min/max_nodes, purchase_option ONDEMAND/SPOT/CAPACITY_BLOCK/INTERRUPTIBLE_CAPACITY_RESERVATION or derived from capacity_reservation {type: odcr|capacity_block|interruptible, id}, ami sample|dlami|ami-..., efa and efa_interfaces, placement_group, availability_zones (exactly one for EFA, a placement group or a reservation), slurm_custom_settings, gres_custom_settings), queues (exactly one default: true), metrics, lifecycle_logs (node lifecycle-action logs to CloudWatch /aws/pcs/<cluster id>/lifecycle), cluster-level slurm/slurmdbd/cgroup custom settings and removal_policy (destroy or retain). mode existing points GCO at a cluster you already run (cluster_id from `aws pcs list-clusters`; it must sit in the regional VPC or the peered endpoint_cidr with tcp/6820 open from the EKS cluster security group and slurmRest STANDARD on Slurm 25.11 or 26.05; `gco stacks pcs preflight` checks). identity is the POSIX user the API submits as (PCS has no user impersonation): name/uid/gid/gids/dir/shell/gecos, default ec2-user 1000:1000, must exist on the nodes. pcs_regions {<region>: {...}} deep-merges per-Region overrides; `gco stacks pcs enable|disable` flips enabled and `--enable pcs` on deploy turns it on for one run. Every key is validated at synth (gco/pcs_config.py). See docs/PCS.md.",
+    "pcs": {
+      "enabled": false
+    },
+    "_comment_hyperpod": "Amazon SageMaker HyperPod as resilient GPU capacity for a Region: an EKS-orchestrated HyperPod cluster (AWS::SageMaker::Cluster) whose instance groups join the regional EKS cluster as nodes, labelled gco.aws/capacity-provider=hyperpod and tainted gco.aws/hyperpod=true:NoSchedule so only work that asks for HyperPod lands there. Off by default. cluster_name (null = <project_name>-hyperpod), node_recovery (Automatic reboots or replaces faulty nodes; None only labels them), availability_zone (null = the first EKS-supported private subnet; set it to match a Training Plan or Capacity Block), instance_groups [{name, instance_type (ml.* types), instance_count, threads_per_core (1 or 2), deep_health_checks (off by default; InstanceStress and/or InstanceConnectivity, which SageMaker accepts only for multi-node-GPU families and which hold a new instance for about two hours), training_plan_arn (reserved capacity from `gco capacity find-training-plans`), data_volume_size_gb (an additional EBS volume at /opt/sagemaker; null attaches none, SageMaker sizes the root volume)}], queue (nominal cpu/memory/gpu quotas of the Kueue ClusterQueue gco-hyperpod-queue fronting the nodes; jobs reach them through the gco-hyperpod LocalQueue) and removal_policy (destroy or retain). GCO installs HyperPod's EKS dependencies itself (the aws-hyperpod namespace, health-monitoring agent, deep-health-check and job-auto-restart RBAC, the NVIDIA device plugin for the HyperPod nodes) and the HYPERPOD_LINUX access entry the nodes join with. hyperpod_regions {<region>: {...}} deep-merges per-Region overrides; `gco stacks hyperpod enable|disable` flips enabled and `--enable hyperpod` on deploy turns it on for one run. Every key is validated at synth (gco/hyperpod_config.py). See docs/HYPERPOD.md.",
+    "hyperpod": {
+      "enabled": false
+    },
+    "_comment_inference_monitor": "Long-running controller that reconciles InferenceEndpoint desired state into Deployments, Services, autoscaling objects, and supporting configuration. Direct per-endpoint Ingresses are forbidden; reconciliation removes any legacy ones so inference stays behind the shared authenticated proxy. reconcile_interval: seconds between reconciliation passes (also drives the leader-election lease duration). unhealthy_threshold_seconds: how long an endpoint may stay NotReady before the monitor emits an explicit degraded-state warning while the proxy returns 503. See docs/INFERENCE.md.",
+    "inference_monitor": {
+      "reconcile_interval": 15,
+      "unhealthy_threshold_seconds": 300
+    },
+
+    "_comment_mcp_server": "MCP (Model Context Protocol) server IAM role provisioning. enabled: when true, the regional stack creates a least-privilege role and exports its ARN as the McpServerRoleArn CFN output. Operators set GCO_MCP_ROLE_ARN to that exported value when launching the MCP server. See gco_mcp/README.md and https://modelcontextprotocol.io/.",
+    "mcp_server": {
+      "enabled": true
+    },
+
+    "_comment_drift_detection": "CloudFormation drift detection schedule. enabled: master toggle. schedule_hours: EventBridge rate (hours) at which the drift-detection Lambda runs and publishes findings to SNS. See docs/RUNBOOKS.md and https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/detect-drift-stack.html.",
+    "drift_detection": {
+      "enabled": true,
+      "schedule_hours": 24
+    },
+    "_comment_historical": "Historical capacity surface - an OPTIONAL ADD-ON to the global stack (not a separate stack), enabled by default. When enabled, GCOGlobalStack adds a DynamoDB time-series table plus an EventBridge-scheduled Lambda that snapshots spot scores, prices, AZ coverage, and capacity-block availability. Set enabled=false to opt out. retention_days: DynamoDB TTL window for snapshots. poll_interval_minutes: schedule cadence. capacity_block_duration_hours: short Capacity Block probe duration (default 24 = 1 day, soonest-available). capacity_block_long_duration_hours: long Capacity Block probe duration in hours (default 1512 = 63 days) so history tracks extended-term block availability; set 0 to disable the long probe. spot_score_target_capacities: Spot Placement Score target capacities snapshotted per instance pool; a subset of the supported set 1/10/50 (capacity 1 keeps the original spot_score field, N>1 writes spot_score_at_N; see cli/capacity/history.py). watch_instance_types: instance types to snapshot. enabled_regions: regions to poll (empty = all deployed regions). Cost is ~0 within the Lambda free tier; see lambda/capacity-poller/README.md.",
+    "historical": {
+      "enabled": true,
+      "retention_days": 90,
+      "poll_interval_minutes": 15,
+      "capacity_block_duration_hours": 24,
+      "capacity_block_long_duration_hours": 1512,
+      "spot_score_target_capacities": [1, 10, 50],
+      "watch_instance_types": ["g4dn.12xlarge", "g4dn.16xlarge", "g4dn.2xlarge", "g4dn.4xlarge", "g4dn.8xlarge", "g4dn.metal", "g4dn.xlarge", "g5.12xlarge", "g5.16xlarge", "g5.24xlarge", "g5.2xlarge", "g5.48xlarge", "g5.4xlarge", "g5.8xlarge", "g5.xlarge", "g5g.16xlarge", "g5g.2xlarge", "g5g.4xlarge", "g5g.8xlarge", "g5g.metal", "g5g.xlarge", "g6.12xlarge", "g6.16xlarge", "g6.24xlarge", "g6.2xlarge", "g6.48xlarge", "g6.4xlarge", "g6.8xlarge", "g6.xlarge", "g6e.12xlarge", "g6e.16xlarge", "g6e.24xlarge", "g6e.2xlarge", "g6e.48xlarge", "g6e.4xlarge", "g6e.8xlarge", "g6e.xlarge", "g6f.2xlarge", "g6f.4xlarge", "g6f.large", "g6f.xlarge", "g7.12xlarge", "g7.24xlarge", "g7.2xlarge", "g7.48xlarge", "g7.4xlarge", "g7.8xlarge", "g7e.12xlarge", "g7e.24xlarge", "g7e.2xlarge", "g7e.48xlarge", "g7e.4xlarge", "g7e.8xlarge", "gr6.4xlarge", "gr6.8xlarge", "gr6f.4xlarge", "inf1.24xlarge", "inf1.2xlarge", "inf1.6xlarge", "inf1.xlarge", "inf2.24xlarge", "inf2.48xlarge", "inf2.8xlarge", "inf2.xlarge", "p3dn.24xlarge", "p4d.24xlarge", "p4de.24xlarge", "p5.48xlarge", "p5.4xlarge", "p5e.48xlarge", "p5en.48xlarge", "p6-b200.48xlarge", "p6-b300.48xlarge", "trn1.2xlarge", "trn1.32xlarge", "trn1n.32xlarge", "trn2.3xlarge", "trn2.48xlarge"],
+      "enabled_regions": []
+    },
+
+    "_comment_cdk_flags": "CDK feature flags (do not modify unless upgrading CDK)",
+    "@aws-cdk/aws-apigateway:authorizerChangeDeploymentLogicalId": true,
+    "@aws-cdk/aws-apigateway:disableCloudWatchRole": true,
+    "@aws-cdk/aws-apigateway:requestValidatorUniqueId": true,
+    "@aws-cdk/aws-autoscaling:generateLaunchTemplateInsteadOfLaunchConfig": true,
+    "@aws-cdk/aws-cloudfront:defaultSecurityPolicyTLSv1.2_2021": true,
+    "@aws-cdk/aws-codedeploy:removeAlarmsFromDeploymentGroup": true,
+    "@aws-cdk/aws-codepipeline:crossAccountKeyAliasStackSafeResourceName": true,
+    "@aws-cdk/aws-ec2:launchTemplateDefaultUserData": true,
+    "@aws-cdk/aws-ec2:restrictDefaultSecurityGroup": true,
+    "@aws-cdk/aws-efs:denyAnonymousAccess": true,
+    "@aws-cdk/aws-events:eventsTargetQueueSameAccount": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/aws-kms:aliasNameRef": true,
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/aws-lambda:recognizeVersionProps": true,
+    "@aws-cdk/aws-opensearchservice:enableLogging": true,
+    "@aws-cdk/aws-rds:databaseProxyUniqueResourceName": true,
+    "@aws-cdk/aws-rds:lowercaseDbIdentifier": true,
+    "@aws-cdk/aws-s3:createDefaultLoggingPolicy": true,
+    "@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy": true,
+    "@aws-cdk/aws-sns-subscriptions:restrictSqsDescryption": true,
+    "@aws-cdk/aws-stepfunctions-tasks:enableLogging": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "_comment_defaultCrossStackReferences": "Strength of cross-stack references. Pinned to 'strong' (CDK's own default) to lock in producer-protecting behavior and silence the unset-flag warning — synthesized templates are unchanged from every prior GCO release. 'strong' means same-region references use Fn::ImportValue and cross-region references (GCOMonitoringStack consuming FSx/Aurora identifiers from the regional stacks via cross_region_references=True) use a pair of ExportWriter/ExportReader custom resources, whose CloudFormation response bodies are capped at 4096 bytes. Migrating to 'weak' would swap all of that for Fn::GetStackOutput — no custom resources, no size cap, no deadly embrace — but it is NOT a drop-in edit: existing deployments must go 'strong' -> 'both' -> deploy every stack in every Region -> 'weak' -> deploy again, and Fn::GetStackOutput availability outside the commercial 'aws' partition must be confirmed first. Do not change this value without that migration.",
+    "@aws-cdk/core:defaultCrossStackReferences": "strong",
+    "@aws-cdk/core:enablePartitionLiterals": true,
+    "@aws-cdk/core:includePrefixInUniqueNameGeneration": true,
+    "@aws-cdk/core:stackRelativeExports": true,
+    "@aws-cdk/core:target": "aws-cdk-lib",
+    "@aws-cdk/core:validateSnapshotRemovalPolicy": true,
+    "@aws-cdk/customresources:installLatestAwsSdkDefault": false,
+    "aws-cdk:enableDiffNoFail": true
+  }
+}

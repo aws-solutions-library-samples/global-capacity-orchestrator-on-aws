@@ -10,6 +10,15 @@ metadata:
   namespace: gco-jobs
 spec:
   backoffLimit: 0
+  # A preempted or evicted pod is not a failure of the step: when nodes are
+  # full, GCO's own gco-platform-critical pods preempt pods at the default
+  # priority. With backoffLimit 0 that first disruption would fail the Job;
+  # this rule has the Job start a new pod instead.
+  podFailurePolicy:
+    rules:
+    - action: Ignore
+      onPodConditions:
+      - type: DisruptionTarget
   template:
     spec:
       securityContext:

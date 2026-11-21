@@ -12,6 +12,7 @@ get_job_store), including ClientError propagation across store operations.
 """
 
 import json
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -63,6 +64,25 @@ class TestTemplateStore:
             store = TemplateStore(table_name="custom-table", region="eu-west-1")
             assert store.table_name == "custom-table"
             assert store.region == "eu-west-1"
+
+    def test_dynamodb_calls_have_bounded_timeouts_and_retries(self):
+        """Template routes run inside the manifest API; botocore's 60 s defaults do not."""
+        with patch("boto3.resource") as resource:
+            TemplateStore(table_name="t", region="us-east-1")
+        client_config = resource.call_args.kwargs["config"]
+        assert client_config.connect_timeout == 3
+        assert client_config.read_timeout == 10
+        assert client_config.retries == {"max_attempts": 3, "mode": "standard"}
+
+    @pytest.mark.parametrize("store_class", [TemplateStore, WebhookStore, JobStore])
+    def test_every_store_uses_the_one_bounded_config(self, store_class):
+        with patch("boto3.resource") as resource:
+            store_class(table_name="t", region="us-east-1")
+        assert resource.call_args.args == ("dynamodb",)
+        assert resource.call_args.kwargs == {
+            "region_name": "us-east-1",
+            "config": sys.modules[store_class.__module__]._DYNAMODB_CONFIG,
+        }
 
     def test_list_templates_empty(self, template_store, mock_dynamodb):
         """Test listing templates when none exist."""
@@ -264,6 +284,15 @@ class TestWebhookStore:
             store = WebhookStore()
             assert store.table_name == "gco-webhooks"
 
+    def test_dynamodb_calls_have_bounded_timeouts_and_retries(self):
+        """Delivery lookups run inside the health API; botocore's 60 s defaults do not."""
+        with patch("boto3.resource") as resource:
+            WebhookStore(table_name="t", region="us-east-1")
+        client_config = resource.call_args.kwargs["config"]
+        assert client_config.connect_timeout == 3
+        assert client_config.read_timeout == 10
+        assert client_config.retries == {"max_attempts": 3, "mode": "standard"}
+
     def test_list_webhooks_empty(self, webhook_store, mock_dynamodb):
         """Test listing webhooks when none exist."""
         mock_dynamodb.scan.return_value = {"Items": []}
@@ -292,6 +321,35 @@ class TestWebhookStore:
         assert len(result) == 1
         assert "secret" not in result[0]
         mock_dynamodb.query.assert_called_once()
+
+    def test_namespace_listing_follows_every_query_page(self, webhook_store, mock_dynamodb):
+        """A namespace past 1 MB of webhooks spans several Query pages."""
+
+        def item(webhook_id: str) -> dict:
+            return {
+                "webhook_id": webhook_id,
+                "url": f"https://example.com/{webhook_id}",
+                "events": '["job.failed"]',
+                "namespace": "team-a",
+            }
+
+        mock_dynamodb.query.side_effect = [
+            {"Items": [item("wh-1")], "LastEvaluatedKey": {"webhook_id": "wh-1"}},
+            {"Items": [item("wh-2")], "LastEvaluatedKey": {"webhook_id": "wh-2"}},
+            {"Items": [item("wh-3")]},
+        ]
+
+        result = webhook_store.get_webhooks_for_event("job.failed", namespace="team-a")
+
+        assert [webhook["id"] for webhook in result] == ["wh-1", "wh-2", "wh-3"]
+        calls = mock_dynamodb.query.call_args_list
+        assert [call.kwargs.get("ExclusiveStartKey") for call in calls] == [
+            None,
+            {"webhook_id": "wh-1"},
+            {"webhook_id": "wh-2"},
+        ]
+        assert {call.kwargs["IndexName"] for call in calls} == {"namespace-index"}
+        assert {call.kwargs["ExpressionAttributeValues"][":ns"] for call in calls} == {"team-a"}
 
     def test_get_webhook_found(self, webhook_store, mock_dynamodb):
         """Test getting an existing webhook."""
@@ -1930,7 +1988,8 @@ class TestJobStore:
             limit=2,
         )
 
-        assert [job["job_id"] for job in jobs] == ["newer", "older"]
+        # Scan order, not newest first (see test_pages_keep_scan_order_across_the_cursor).
+        assert [job["job_id"] for job in jobs] == ["older", "newer"]
         assert cursor is None
         assert partial is False
         assert mock_dynamodb.scan.call_count == 2
@@ -1950,6 +2009,36 @@ class TestJobStore:
                 "#status": "status",
                 "#namespace": "namespace",
             }
+
+    def test_pages_keep_scan_order_across_the_cursor(self, job_store, mock_dynamodb):
+        """Concatenated pages are exactly the scan; no page is re-sorted.
+
+        Each page used to be sorted newest first while the cursor followed
+        scan order, so page 1 looked newest-first even when page 2 held a
+        newer job, as job "c" does here.
+        """
+
+        def job(job_id, submitted_at):
+            return {"job_id": job_id, "status": "queued", "submitted_at": submitted_at}
+
+        mock_dynamodb.scan.side_effect = [
+            {
+                "Items": [
+                    job("a", "2026-01-01T00:00:00.000000Z"),
+                    job("b", "2026-01-02T00:00:00.000000Z"),
+                    job("c", "2026-01-03T00:00:00.000000Z"),
+                ],
+                "ScannedCount": 3,
+            },
+            {"Items": [job("c", "2026-01-03T00:00:00.000000Z")], "ScannedCount": 1},
+        ]
+
+        first, cursor, _ = job_store.list_jobs_page(limit=2)
+        second, end, _ = job_store.list_jobs_page(limit=2, cursor=cursor)
+
+        assert [entry["job_id"] for entry in first + second] == ["a", "b", "c"]
+        assert end is None
+        assert mock_dynamodb.scan.call_args_list[1].kwargs["ExclusiveStartKey"] == {"job_id": "b"}
 
     @pytest.mark.parametrize(
         ("second_item", "expected_key"),
@@ -2106,6 +2195,101 @@ class TestJobStore:
 # =============================================================================
 # Central Queue Worker Ordering Tests
 # =============================================================================
+
+
+class TestTimestampFormat:
+    """Store timestamps keep a fixed width, so their string order is their time order.
+
+    DynamoDB compares them as strings (``lease_expires_at > :now``,
+    ``lease_expires_at <= :now``) and sorts the work index by them.
+    ``isoformat()`` drops a zero fraction, and ``...:10Z`` sorts after
+    ``...:10.300000Z``: an expired whole-second lease still renewed, and could
+    not be recovered, for the rest of that second.
+    """
+
+    FIXED_WIDTH = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z"
+
+    @staticmethod
+    def _frozen(moment):
+        from datetime import datetime
+
+        class Frozen(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return moment
+
+        return patch("gco.services.template_store.datetime", Frozen)
+
+    @staticmethod
+    def _at(second, microsecond=0):
+        from datetime import UTC, datetime
+
+        return datetime(2026, 1, 1, 0, 0, second, microsecond, tzinfo=UTC)
+
+    def test_a_whole_second_keeps_its_fraction(self):
+        from gco.services.template_store import _claim_lease_expiry_iso, _utc_now_iso
+
+        with self._frozen(self._at(10)):
+            assert _utc_now_iso() == "2026-01-01T00:00:10.000000Z"
+            assert _claim_lease_expiry_iso(30) == "2026-01-01T00:00:40.000000Z"
+
+    def test_string_order_is_time_order(self):
+        from gco.services.template_store import _utc_now_iso
+
+        instants = [self._at(9, 999999), self._at(10), self._at(10, 300000), self._at(11)]
+        rendered = []
+        for instant in instants:
+            with self._frozen(instant):
+                rendered.append(_utc_now_iso())
+        assert sorted(rendered) == rendered
+
+        lease_expires_at, now = rendered[1], rendered[2]
+        assert not lease_expires_at > now  # renew_claim refuses the expired lease
+        assert lease_expires_at <= now  # requeue_expired_jobs recovers it
+
+    def test_claim_and_renew_write_and_compare_fixed_width_values(self):
+        import re
+
+        with patch("boto3.resource") as resource:
+            table = resource.return_value.Table.return_value
+            store = JobStore(table_name="jobs", region="us-east-1", claim_lease_seconds=60)
+        table.get_item.return_value = {
+            "Item": {
+                "job_id": "job-1",
+                "status": "queued",
+                "target_region": "us-east-1",
+                "updated_at": "2026-01-01T00:00:00.000000Z",
+                "claim_generation": 0,
+                "status_history": "[]",
+            }
+        }
+        table.update_item.return_value = {"Attributes": {"job_id": "job-1"}}
+
+        with self._frozen(self._at(10)):
+            store.claim_job("job-1", "us-east-1", "worker-1")
+            store.renew_claim("job-1", "us-east-1", "worker-1", "token", 1)
+
+        for call in table.update_item.call_args_list:
+            values = call.kwargs["ExpressionAttributeValues"]
+            for key in (":now", ":lease_expires_at", ":work_sort"):
+                assert re.fullmatch(self.FIXED_WIDTH, values[key]), (key, values[key])
+        assert values[":lease_expires_at"] == "2026-01-01T00:01:10.000000Z"
+
+    def test_submission_sort_keys_use_the_fixed_width(self):
+        with patch("boto3.resource") as resource:
+            table = resource.return_value.Table.return_value
+            store = JobStore(table_name="jobs", region="us-east-1")
+        with self._frozen(self._at(10)):
+            store.submit_job(
+                job_id="job-1",
+                manifest={"metadata": {"name": "j"}},
+                target_region="us-east-1",
+                priority=40,
+            )
+        item = table.put_item.call_args.kwargs["Item"]
+        assert item["submitted_at"] == "2026-01-01T00:00:10.000000Z"
+        assert item["priority_sort"] == "060#2026-01-01T00:00:10.000000Z#job-1"
+        assert item["work_sort"] == item["priority_sort"]
 
 
 class TestCentralQueueWorkerOrdering:

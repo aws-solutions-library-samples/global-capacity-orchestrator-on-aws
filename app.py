@@ -39,8 +39,8 @@ from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
 from gco.stacks.regional_stack import GCORegionalStack
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-16T16:57:50Z
-# Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad
+# Generated at (UTC): 2026-11-19T06:05:34Z
+# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
 # Flowchart(s) generated from this file:
 #   * ``main`` -> ``diagrams/code_diagrams/app.main.html``
 #     (PNG: ``diagrams/code_diagrams/app.main.png``)
@@ -159,6 +159,7 @@ def main() -> None:
         certificate_regions=regional_regions,
         backend_tls_config=config.get_backend_tls_config(),
         max_request_body_bytes=manifest_processor_config.get("max_request_body_bytes", 1_048_576),
+        monitoring_region=monitoring_region,
         env=cdk.Environment(account=account, region=api_gateway_region),
         description="Global API Gateway with IAM authentication",
     )
@@ -184,10 +185,9 @@ def main() -> None:
 
         # Every region gets an IAM-authenticated API bridge so the centralized
         # aggregator can reach the private ALB through a VPC-attached Lambda.
-        # In commercial ``aws``, ``regional_api_enabled`` controls whether
-        # other account principals may invoke the bridge directly. Other
-        # partitions enable that IAM-authenticated workload ingress
-        # automatically. Neither mode disables the aggregator's required path.
+        # Region-pinned calls use the same bridge (the workload ingress outside
+        # ``aws``); callers other than the aggregator need their own
+        # identity-based execute-api:Invoke permission.
         regional_api_stack = GCORegionalApiGatewayStack(
             app,
             f"{project_name}-regional-api-{region}",
@@ -254,14 +254,7 @@ def main() -> None:
         # ARN is now a cross-stack reference on the API gateway side.
         analytics_api_config = AnalyticsApiConfig(
             user_pool_arn=analytics_stack.cognito_pool.user_pool_arn,
-            user_pool_client_id=analytics_stack.cognito_client.user_pool_client_id,
             presigned_url_lambda=analytics_stack.presigned_url_lambda,
-            studio_domain_name=analytics_stack.studio_domain.domain_name or "",
-            callback_url=(
-                f"https://{api_gateway_stack.api.rest_api_id}."
-                f"execute-api.{api_gateway_region}."
-                f"{api_gateway_stack.url_suffix}/prod/studio/callback"
-            ),
         )
         api_gateway_stack.set_analytics_config(analytics_api_config)
         api_gateway_stack.add_stack_dependency(analytics_stack)

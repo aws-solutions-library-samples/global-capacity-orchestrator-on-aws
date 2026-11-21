@@ -43,9 +43,12 @@ SERVICE_DOCKERFILE_DIR = "dockerfiles"
 _DOCKERFILE_PREFIX = "Dockerfile."
 
 #: Image names double as ``gco/<name>`` ECR repository suffixes and CI cache
-#: scopes, so they must be short DNS-style labels (same shape ``cli.images``
-#: accepts for user images).
-_IMAGE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+#: scopes, so they must be short DNS-style labels: a lowercase letter, then
+#: lowercase letters and digits joined by single hyphens, at most 63
+#: characters. ECR rejects a repository path segment that ends in a hyphen or
+#: holds two in a row. ``cli.images.ImageManager`` applies the same rule to the
+#: names of user images.
+IMAGE_NAME_RE = re.compile(r"^(?=.{1,63}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
 
 @dataclass(frozen=True)
@@ -73,11 +76,11 @@ def _validated_name(name: str, source: Path) -> str:
     cache scopes, so a name that is not a short DNS-style label has to fail
     here rather than downstream in a registry or a workflow expression.
     """
-    if not _IMAGE_NAME_RE.match(name):
+    if not IMAGE_NAME_RE.fullmatch(name):
         raise ValueError(
             f"{source}: '{name}' is not a valid image name. Service Dockerfiles must be "
             f"named {_DOCKERFILE_PREFIX}<name> and container Lambdas must live in "
-            f"lambda/<name>/, where <name> matches {_IMAGE_NAME_RE.pattern} (it becomes the "
+            f"lambda/<name>/, where <name> matches {IMAGE_NAME_RE.pattern} (it becomes the "
             "ECR repository suffix, the image tag and the CI cache scope)."
         )
     return name

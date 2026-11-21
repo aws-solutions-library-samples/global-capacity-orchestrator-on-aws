@@ -1,6 +1,7 @@
 name: "Upload Artifact (with retry)"
 description: |
-  Wraps `actions/upload-artifact@v7.0.1` with retry-on-failure. The GitHub Actions
+  Wraps `actions/upload-artifact` (the release pinned below) with
+  retry-on-failure. The GitHub Actions
   artifact backend occasionally returns 5xx or 403s during the finalize step,
   even after the bytes are fully uploaded. Those errors are transient — a
   retry typically succeeds within seconds — but the default `upload-artifact`
@@ -8,7 +9,7 @@ description: |
   upload step up to 3 times with a 30-second backoff so a flaky finalize
   doesn't fail an otherwise-green CI run.
 
-  Behaviour matches `actions/upload-artifact@v7.0.1` for every successful path;
+  Behaviour matches the pinned `actions/upload-artifact` for every successful path;
   the only observable difference is on transient failures.
 
 inputs:
@@ -27,7 +28,7 @@ inputs:
     required: false
     default: "warn"
   overwrite:
-    description: "Whether to overwrite an existing artifact with the same name."
+    description: "Whether the first attempt overwrites an existing artifact with the same name (retries always overwrite)."
     required: false
     default: "false"
   include-hidden-files:
@@ -55,6 +56,12 @@ runs:
       shell: bash
       run: sleep 30
 
+    # Retries always overwrite. A finalize error can arrive after the backend
+    # has recorded the artifact, and upload-artifact v4+ then refuses a second
+    # upload under the same name (409 "an artifact with this name already
+    # exists"), so a non-overwriting retry could never succeed. The artifact
+    # being replaced is this step's own first attempt: every caller's name is
+    # unique within its run (tests/test_supply_chain_integrity.py checks).
     - name: Upload (attempt 2 of 3)
       id: try2
       if: steps.try1.outcome == 'failure'
@@ -65,7 +72,7 @@ runs:
         path: ${{ inputs.path }}
         retention-days: ${{ inputs.retention-days }}
         if-no-files-found: ${{ inputs.if-no-files-found }}
-        overwrite: ${{ inputs.overwrite }}
+        overwrite: true
         include-hidden-files: ${{ inputs.include-hidden-files }}
 
     - name: Wait before retry 2
@@ -81,5 +88,5 @@ runs:
         path: ${{ inputs.path }}
         retention-days: ${{ inputs.retention-days }}
         if-no-files-found: ${{ inputs.if-no-files-found }}
-        overwrite: ${{ inputs.overwrite }}
+        overwrite: true
         include-hidden-files: ${{ inputs.include-hidden-files }}

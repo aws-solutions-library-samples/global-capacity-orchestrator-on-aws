@@ -16,6 +16,7 @@ charts.yaml entry ships the private/native-auth hardening defaults.
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -744,3 +745,131 @@ def test_no_daemonset_manifest_is_marked_do_not_disrupt() -> None:
         "DaemonSet(s) carry karpenter.sh/do-not-disrupt, which blocks graceful "
         f"node termination on every node they run on: {offenders}"
     )
+
+
+# --- DCGM exporter placement ---------------------------------------------------
+#
+# The exporter must run on every NVIDIA GPU node, whichever pool launched it,
+# and on nothing else. The pools label their nodes differently (workload-type
+# gpu, inference, gpu-efa, gpu-efa-mooncake, reserved-capacity) and the EFA
+# pools add a second taint, so these checks derive the answer from the
+# NodePool manifests rather than from a list kept here.
+
+_NVIDIA_GPU_LABEL = "eks.amazonaws.com/instance-gpu-manufacturer"
+
+
+def _stubbed_manifest_documents(path: Path) -> list[dict[str, Any]]:
+    text = re.sub(r"\{\{[A-Z0-9_]+\}\}", "placeholder", path.read_text(encoding="utf-8"))
+    return [doc for doc in yaml.safe_load_all(text) if isinstance(doc, dict)]
+
+
+def _shipped_nodepools() -> list[dict[str, Any]]:
+    return [
+        doc
+        for path in sorted(_MANIFESTS_DIR.glob("4*-nodepool-*.yaml"))
+        for doc in _stubbed_manifest_documents(path)
+        if doc.get("kind") == "NodePool"
+    ]
+
+
+def _guaranteed_node_labels(nodepool: dict[str, Any]) -> dict[str, str]:
+    """Labels every node of the pool carries: template labels and one-value ``In`` requirements."""
+    template = nodepool["spec"]["template"]
+    labels = dict((template.get("metadata") or {}).get("labels") or {})
+    for requirement in template["spec"].get("requirements", []):
+        values = requirement.get("values") or []
+        if requirement.get("operator") == "In" and len(values) == 1:
+            labels[requirement["key"]] = values[0]
+    return labels
+
+
+def _tolerates(tolerations: list[dict[str, Any]], taint: dict[str, str]) -> bool:
+    for toleration in tolerations:
+        if toleration.get("effect") not in (None, taint["effect"]):
+            continue
+        operator = toleration.get("operator", "Equal")
+        if operator == "Exists" and toleration.get("key") in (None, taint["key"]):
+            return True
+        if (
+            operator == "Equal"
+            and toleration.get("key") == taint["key"]
+            and toleration.get("value") == taint.get("value")
+        ):
+            return True
+    return False
+
+
+@pytest.fixture
+def dcgm_pod_spec() -> dict[str, Any]:
+    (daemonset,) = [
+        doc
+        for doc in _stubbed_manifest_documents(_MANIFESTS_DIR / "50-dcgm-exporter.yaml")
+        if doc["kind"] == "DaemonSet"
+    ]
+    return daemonset["spec"]["template"]["spec"]
+
+
+def test_dcgm_exporter_runs_on_every_nvidia_gpu_pool_and_nowhere_else(dcgm_pod_spec) -> None:
+    pools = _shipped_nodepools()
+    nvidia_pools = {
+        pool["metadata"]["name"]
+        for pool in pools
+        if _guaranteed_node_labels(pool).get(_NVIDIA_GPU_LABEL) == "nvidia"
+    }
+    assert nvidia_pools == {
+        "gpu-x86-pool",
+        "gpu-arm-pool",
+        "gpu-inference-pool",
+        "gpu-efa-pool",
+        "mooncake-efa-pool",
+    }
+    # A nodeSelector alone: no affinity term could widen or narrow it.
+    assert "affinity" not in dcgm_pod_spec
+    selector = dcgm_pod_spec["nodeSelector"]
+    for pool in pools:
+        name = pool["metadata"]["name"]
+        labels = _guaranteed_node_labels(pool)
+        selected = all(labels.get(key) == value for key, value in selector.items())
+        assert selected == (name in nvidia_pools), name
+        if not selected:
+            continue
+        for taint in pool["spec"]["template"]["spec"].get("taints", []):
+            assert _tolerates(dcgm_pod_spec["tolerations"], taint), (name, taint)
+
+
+def test_dcgm_exporter_tolerates_reserved_nvidia_efa_capacity(dcgm_pod_spec) -> None:
+    """``gco nodepools`` reservations taint NVIDIA nodes the same way the shipped pools do."""
+    from cli.nodepools import InstanceTypeFacts, _reservation_nodepool
+
+    nodepool = _reservation_nodepool(
+        "reserved-p5",
+        [InstanceTypeFacts("p5.48xlarge", 192, "nvidia", "catalog")],
+        max_nodes=2,
+        fallback_on_demand=False,
+        efa=True,
+        template_labels={"workload-type": "reserved-capacity", "project": "gco"},
+        disruption={},
+    )
+    taints = nodepool["spec"]["template"]["spec"]["taints"]
+    assert {taint["key"] for taint in taints} == {"nvidia.com/gpu", "vpc.amazonaws.com/efa"}
+    for taint in taints:
+        assert _tolerates(dcgm_pod_spec["tolerations"], taint), taint
+
+
+def test_dcgm_exporter_header_names_the_pinned_image_tag(dcgm_pod_spec) -> None:
+    """The header's "Pinned to" note names the tag the DaemonSet runs."""
+    (image,) = {container["image"] for container in dcgm_pod_spec["containers"]}
+    header = (_MANIFESTS_DIR / "50-dcgm-exporter.yaml").read_text(encoding="utf-8")
+    pinned = re.findall(r"Pinned to the plain-semver ``([^`]+)`` tag", header)
+    assert pinned == [image.rsplit(":", 1)[1]], (pinned, image)
+
+
+def test_dcgm_exporter_tolerates_only_the_nvidia_pools_taints(dcgm_pod_spec) -> None:
+    """No blanket toleration: the selector, not a wildcard, decides placement."""
+    assert sorted(
+        (toleration["key"], toleration["operator"], toleration["effect"])
+        for toleration in dcgm_pod_spec["tolerations"]
+    ) == [
+        ("nvidia.com/gpu", "Exists", "NoSchedule"),
+        ("vpc.amazonaws.com/efa", "Exists", "NoSchedule"),
+    ]

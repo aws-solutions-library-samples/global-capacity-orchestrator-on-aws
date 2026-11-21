@@ -25,12 +25,18 @@ boundary. Two invariants must hold:
    against numeric literals, comprehensions over ``obs["..."]`` lists —
    and asserts the result is a numeric or boolean value.
 
+Example tests pin the size bounds: ``10 ** 10 ** 8``, ``'x' * 10 ** 12``,
+``'%0999999999d' % 1``, ``f"{1:>999999999}"`` and callbacks such as
+``key=obs.update`` are rejected at parse time, and bounded arithmetic still
+evaluates.
+
 Settings cap ``max_examples=100`` and ``deadline=2000`` so the file runs
 well under five seconds wall-clock.
 """
 
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -268,6 +274,132 @@ class TestPredicateRejectsForbiddenSource:
             mp.setattr(predicate_module, "evaluate_predicate", _tripwire)
             with pytest.raises(PredicateRejected):
                 parse_predicate(src)
+
+
+class TestPredicateRejectsUnboundedWork:
+    """Operators that turn a few characters into unbounded work are rejected.
+
+    Every source here validated before the size bounds existed, and
+    evaluating it pinned a CPU or exhausted memory inside the MCP server.
+    """
+
+    @pytest.mark.parametrize(
+        ("src", "reason"),
+        [
+            ("10 ** 10 ** 8 > 0", "exponent_not_bounded"),
+            ("9 ** 9 ** 9 ** 9 > 0", "exponent_not_bounded"),
+            ("(10 ** 64) ** 64 > 0", "exponent_not_bounded"),
+            ("2 ** 65 > 0", "exponent_not_bounded"),
+            ("2 ** -65 > 0", "exponent_not_bounded"),
+            ("2 ** obs['n'] > 0", "exponent_not_bounded"),
+            ("2 ** True > 0", "exponent_not_bounded"),
+            ("int('9' * 1000) ** 64 > 0", "exponent_not_bounded"),
+            ("len('x' * 10 ** 12) > 0", "repetition_not_bounded"),
+            ("len('x' * 1001) > 0", "repetition_not_bounded"),
+            ("len('x' * -1) == 0", "repetition_not_bounded"),
+            ("len('x' * True) == 1", "repetition_not_bounded"),
+            ("len(obs['xs'] * obs['n']) > 0", "repetition_not_bounded"),
+            ("len('x' * 1000 * 1000) > 0", "repetition_not_bounded"),
+            ("len(1000 * 'x' * 1000) > 0", "repetition_not_bounded"),
+            ("len(str([['x' * 1000] * 1000] * 1000)) > 0", "repetition_not_bounded"),
+            ("len('%0999999999d' % 1) > 0", "string_formatting_not_allowed"),
+            ("len(('%0999' + '999999d') % 1) > 0", "string_formatting_not_allowed"),
+            ("any(x % 1 for x in ['%0999999999d'])", "string_formatting_not_allowed"),
+            ("obs['step'] % 10 == 0", "string_formatting_not_allowed"),
+            ('len(f"{1:>999999999}") > 0', "format_spec_not_bounded"),
+            ('len(f"{1:.1001f}") > 0', "format_spec_not_bounded"),
+            ('len(f"{1:{obs}}") > 0', "format_spec_not_bounded"),
+        ],
+    )
+    def test_rejected_before_evaluation(self, src: str, reason: str) -> None:
+        with pytest.raises(PredicateRejected) as exc_info:
+            parse_predicate(src)
+        assert exc_info.value.reason == reason
+        assert exc_info.value.lineno == 1
+
+    def test_source_longer_than_the_cap_is_rejected(self) -> None:
+        assert predicate_module._MAX_SOURCE_CHARS == 4096
+        at_limit = "'" + "x" * 4094 + "'"
+        assert evaluate_predicate(parse_predicate(at_limit), {}) == "x" * 4094
+        with pytest.raises(PredicateRejected) as exc_info:
+            parse_predicate(at_limit + " ")
+        assert exc_info.value.reason == "source_too_long"
+        assert exc_info.value.lineno is None
+
+    def test_tree_deeper_than_the_cap_is_rejected_instead_of_recursing(self) -> None:
+        # 500 additions fit in the source cap; the recursive validator
+        # raised RecursionError on them before the depth bound existed.
+        assert predicate_module._MAX_DEPTH == 100
+        with pytest.raises(PredicateRejected) as exc_info:
+            parse_predicate("1" + " + 1" * 500)
+        assert exc_info.value.reason == "expression_too_deep"
+        # Expression -> 98 UnaryOp -> Constant is exactly 100 levels.
+        assert evaluate_predicate(parse_predicate("-" * 98 + "1"), {}) == 1
+        with pytest.raises(PredicateRejected) as exc_info:
+            parse_predicate("-" * 99 + "1")
+        assert exc_info.value.reason == "expression_too_deep"
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "sorted(['metric_history'], key=obs.update)",
+            "min(['tool_results'], key=obs.pop)",
+            "max(['k'], key=obs.setdefault)",
+            "sorted([1], key=obs.clear)",
+            "obs.events",
+            "obs.value",
+        ],
+    )
+    def test_obs_attributes_other_than_read_only_methods_are_rejected(self, src: str) -> None:
+        with pytest.raises(PredicateRejected) as exc_info:
+            parse_predicate(src)
+        assert exc_info.value.reason == "attribute_not_allowed"
+
+    def test_read_only_method_callback_does_not_mutate_the_observation(self) -> None:
+        obs = {"xs": ["b", "a"], "a": 2, "b": 1}
+        parsed = parse_predicate("sorted(obs['xs'], key=obs.get) == ['b', 'a']")
+        assert evaluate_predicate(parsed, obs) is True
+        assert obs == {"xs": ["b", "a"], "a": 2, "b": 1}
+
+    @pytest.mark.parametrize(
+        ("src", "expected"),
+        [
+            ("2 ** 10", 1024),
+            ("2 ** -1", 0.5),
+            ("(-2) ** 64 > 0", True),
+            ("obs['n'] ** 2", 9),
+            ("[0] * 3", [0, 0, 0]),
+            ("3 * 'ab'", "ababab"),
+            ("- - 2 * 'ab'", "abab"),
+            ("+2 * 'ab'", "abab"),
+            ("-len(obs['xs']) * 1001", -2002),
+            ("'-' * 1000 == '-' * 1000", True),
+            ("obs['loss'] * 0.5", 0.25),
+            ("obs['xs'] * 2", [1, 2, 1, 2]),
+            ("[len(obs['xs']) * 2] * 3", [4, 4, 4]),
+            ("float(obs['loss']) * 100 * 2", 100.0),
+            ("int('9' * 3) * int('9' * 3)", 998001),
+            ("sum(obs['xs']) * 1001", 3003),
+            ("int(obs['step']) % 7", 6),
+            ("len(obs['xs']) % 2", 0),
+            ("f'{obs[\"loss\"]:>10.3f}'", "     0.500"),
+            ("f'{obs[\"n\"]:%}'", "300.000000%"),
+        ],
+    )
+    def test_bounded_arithmetic_still_evaluates(self, src: str, expected: object) -> None:
+        obs = {"n": 3, "loss": 0.5, "xs": [1, 2], "step": "20"}
+        assert evaluate_predicate(parse_predicate(src), obs) == expected
+
+    def test_format_spec_that_is_not_a_joined_string_is_checked_as_one_part(self) -> None:
+        def validate(spec: ast.expr) -> None:
+            value = ast.FormattedValue(value=ast.Constant(1), conversion=-1, format_spec=spec)
+            tree = ast.Expression(body=ast.JoinedStr(values=[value]))
+            predicate_module._PredicateValidator().visit(ast.fix_missing_locations(tree))
+
+        validate(ast.Constant(">5"))
+        with pytest.raises(PredicateRejected) as exc_info:
+            validate(ast.Name(id="obs", ctx=ast.Load()))
+        assert exc_info.value.reason == "format_spec_not_bounded"
 
 
 class TestPredicateAcceptsSafeSource:

@@ -48,7 +48,8 @@ import os
 import secrets
 import uuid
 from collections.abc import Iterator
-from urllib.parse import urlparse
+from typing import Any
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 import boto3
 import pytest
@@ -271,3 +272,22 @@ def create_job_queue(
         },
     )["QueueUrl"]
     return {"queue_url": queue_url, "dlq_url": dlq_url, "dlq_arn": dlq_arn}
+
+
+def new_cluster_allocations(handler: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """An OpenCost allocation answer for a cluster that started in the newest window.
+
+    The cost monitor's scheduled pass asks for the most recent completed
+    window first, then backfills earlier ones it finds missing. A real new
+    cluster has no allocations before it existed, so the backfill writes
+    nothing; a stub that answered every window with the same payload would
+    make every pass write several reports. The first window ``handler``'s
+    server is asked for is that newest window: windows ending at or after it
+    get ``payload``, earlier ones an empty answer.
+    """
+    window = parse_qs(urlsplit(handler.path).query).get("window", [""])[0]
+    end = window.rsplit(",", 1)[-1]
+    first = getattr(handler.server, "first_window_end", None)
+    if first is None:
+        handler.server.first_window_end = first = end
+    return payload if end >= first else {"code": 200, "data": [{}]}

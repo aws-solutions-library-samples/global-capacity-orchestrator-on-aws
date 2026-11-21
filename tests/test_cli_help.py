@@ -9,12 +9,18 @@ accidentally raises at import time or fails Click's option validation
 before the help screen renders.
 """
 
+import re
+import shlex
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
 from cli.main import cli
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -523,6 +529,177 @@ class TestStacksHelpExtended:
         """Test stacks fsx disable help."""
         result = runner.invoke(cli, ["stacks", "fsx", "disable", "--help"])
         assert result.exit_code == 0
+
+
+def _parse_gco_command_line(line: str) -> click.Context:
+    """Parse one ``gco ...`` example through every group level, invoking nothing."""
+    ctx = cli.make_context("gco", shlex.split(line.split(" #", 1)[0])[1:])
+    while isinstance(ctx.command, click.Group):
+        rest = [*ctx._protected_args, *ctx.args]
+        if not rest:
+            break
+        name, command, rest = ctx.command.resolve_command(ctx, rest)
+        assert command is not None and name is not None
+        ctx = command.make_context(name, rest, parent=ctx)
+    return ctx
+
+
+def _stacks_help_examples() -> list[tuple[str, str]]:
+    from cli.commands.stacks_cmd import stacks
+
+    examples: list[tuple[str, str]] = []
+    pending: list[tuple[str, click.Command]] = [("gco stacks", stacks)]
+    while pending:
+        path, command = pending.pop()
+        for raw in (command.help or "").splitlines():
+            if raw.strip().startswith("gco "):
+                examples.append((path, raw.strip()))
+        if isinstance(command, click.Group):
+            pending.extend((f"{path} {name}", sub) for name, sub in command.commands.items())
+    return examples
+
+
+def _documented_stacks_examples() -> list[tuple[str, str]]:
+    """``gco ... stacks ...`` lines in the docs' code blocks, synopses excepted."""
+    examples: list[tuple[str, str]] = []
+    for doc in ("docs/CLI.md", "docs/EKS_CAPABILITIES.md"):
+        in_block = False
+        for number, raw in enumerate(
+            (PROJECT_ROOT / doc).read_text(encoding="utf-8").splitlines(), 1
+        ):
+            if raw.strip().startswith("```"):
+                in_block = not in_block
+                continue
+            line = raw.strip()
+            if not in_block or not re.search(r"^gco (-\S+ (\S+ )?)*stacks\b", line):
+                continue
+            # Usage synopses and shell pipelines are not single command lines.
+            if "[OPTIONS]" in line or "|" in line or "$(" in line or line.endswith("\\"):
+                continue
+            examples.append((f"{doc}:{number}", line))
+    return examples
+
+
+class TestStacksExamplesParse:
+    """Every ``gco stacks`` example in the help text and the docs is valid CLI syntax.
+
+    Root options such as ``-o/--output`` belong before ``stacks``; Click
+    rejects them after a subcommand.
+    """
+
+    def test_help_examples_are_collected(self):
+        assert len(_stacks_help_examples()) > 50
+
+    @pytest.mark.parametrize(("where", "line"), _stacks_help_examples())
+    def test_help_example_parses(self, where, line):
+        _parse_gco_command_line(line)
+
+    def test_documented_examples_are_collected(self):
+        assert len(_documented_stacks_examples()) > 50
+
+    @pytest.mark.parametrize(("where", "line"), _documented_stacks_examples())
+    def test_documented_example_parses(self, where, line):
+        _parse_gco_command_line(line)
+
+    def test_an_output_option_after_the_subcommand_is_rejected(self):
+        with pytest.raises(click.NoSuchOption):
+            _parse_gco_command_line("gco stacks capabilities status --output json")
+
+
+_INLINE_GCO_COMMAND = re.compile(r"`(gco [^`]+)`")
+
+
+def _documented_gco_examples() -> list[tuple[str, str]]:
+    """``gco ...`` lines in the code blocks and inline code of every scanned Markdown file."""
+    from tests.test_markdown_links import markdown_files
+
+    examples: list[tuple[str, str]] = []
+    for path in markdown_files():
+        where = path.relative_to(PROJECT_ROOT).as_posix()
+        in_block = False
+        for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if raw.strip().startswith("```"):
+                in_block = not in_block
+                continue
+            if in_block and raw.strip().startswith("gco "):
+                examples.append((f"{where}:{number}", raw.strip()))
+            examples.extend(
+                (f"{where}:{number}", match.group(1)) for match in _INLINE_GCO_COMMAND.finditer(raw)
+            )
+    return examples
+
+
+def _output_option_misplaced(line: str) -> bool:
+    """Whether Click refuses the root ``-o``/``--output`` where *line* puts it.
+
+    Synopsis brackets and alternatives are flattened first, so
+    ``gco x status [--output json]`` is checked like an example. Any other
+    parse failure (a placeholder, a pipeline) is not this check's concern.
+    """
+    flattened = line.replace("[", " ").replace("]", " ").replace("|", " ")
+    try:
+        _parse_gco_command_line(flattened)
+    except click.NoSuchOption as exc:
+        return exc.option_name in ("-o", "--output")
+    except click.ClickException, click.exceptions.Exit, ValueError:
+        # Exit: an eager option such as --help or --version ends the parse.
+        return False
+    return False
+
+
+class TestRootOutputOptionPlacement:
+    """``-o/--output`` is the root ``gco`` group's option and goes before the subcommand.
+
+    Click refuses it after a subcommand ("No such option") unless that
+    subcommand defines an ``--output`` of its own, as ``gco mission status``
+    and ``gco vector search`` do, so an example that puts it there fails when
+    copied.
+    """
+
+    def test_documented_examples_are_collected(self):
+        assert len(_documented_gco_examples()) > 1000
+
+    def test_no_documented_example_puts_the_output_option_after_a_subcommand(self):
+        misplaced = [
+            f"{where}: {line}"
+            for where, line in _documented_gco_examples()
+            if _output_option_misplaced(line)
+        ]
+        assert misplaced == []
+
+    def test_help_examples_put_the_output_option_first(self):
+        """Every ``gco ...`` example in the help of every command of the tree."""
+        pending: list[tuple[str, click.Command]] = [("gco", cli)]
+        examples: list[tuple[str, str]] = []
+        while pending:
+            path, command = pending.pop()
+            examples.extend(
+                (path, raw.strip())
+                for raw in (command.help or "").splitlines()
+                if raw.strip().startswith("gco ")
+            )
+            if isinstance(command, click.Group):
+                pending.extend((f"{path} {name}", sub) for name, sub in command.commands.items())
+        with_output = [line for _, line in examples if re.search(r"(-o|--output) json", line)]
+        assert len(with_output) > 10
+        misplaced = [f"{path}: {line}" for path, line in examples if _output_option_misplaced(line)]
+        assert misplaced == []
+
+    @pytest.mark.parametrize(
+        ("line", "misplaced"),
+        [
+            ("gco crossplane status --output json", True),
+            ("gco gitops status [--region REGION] [--output json]", True),
+            ("gco jobs policy -r us-east-1 -o json | jq .policy", True),
+            ("gco -o json crossplane status", False),
+            ("gco [-o json] slurm status -r REGION [--backend slinky|pcs]", False),
+            ("gco mission status mission-abc123 --output table", False),
+            ("gco jobs logs <job-name> -o json", True),
+            ("gco no-such-command --output json", False),
+        ],
+    )
+    def test_the_check_tells_a_misplaced_option_from_a_valid_one(self, line, misplaced):
+        assert _output_option_misplaced(line) is misplaced
 
 
 class TestFilesHelpExtended:

@@ -79,11 +79,12 @@ from gco.stacks.constants import (
     cross_region_aggregator_role_name,
     validated_request_body_limit,
 )
+from gco.stacks.control_plane_alarms import add_api_alarms, create_alert_topic
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-16T16:57:50Z
-# Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad
+# Generated at (UTC): 2026-11-19T06:05:34Z
+# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
 # Flowchart(s) generated from this file:
 #   * ``GCOApiGatewayGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.png``)
@@ -110,30 +111,15 @@ class AnalyticsApiConfig:
 
     Attributes:
         user_pool_arn: Full ARN of the Cognito user pool that authenticates
-            Studio logins. Shape:
+            Studio logins (the ``/studio/login`` authorizer). Shape:
             ``arn:aws:cognito-idp:<region>:<account>:userpool/<pool-id>``.
-        user_pool_client_id: Client id of the Studio user-pool client
-            (SRP auth). Used by the CLI's ``gco analytics studio login``
-            flow and surfaced to API Gateway outputs for discoverability.
         presigned_url_lambda: The ``analytics-presigned-url`` Lambda
             function created by ``GCOAnalyticsStack._create_presigned_url_lambda``.
             Consumed by the ``/studio/login`` ``LambdaIntegration``.
-        studio_domain_name: SageMaker Studio domain name. Carried through
-            as context for the Lambda integration; the Lambda itself also
-            reads this value from its ``STUDIO_DOMAIN_NAME`` environment
-            variable set by the analytics stack.
-        callback_url: Concrete OAuth redirect target
-            (``https://<api>/prod/studio/callback``) used when the
-            Cognito hosted UI is enabled. The ``/studio/callback`` route
-            is wired as a stub here so the URL is reachable immediately
-            after deploy.
     """
 
     user_pool_arn: str
-    user_pool_client_id: str
     presigned_url_lambda: lambda_.IFunction
-    studio_domain_name: str
-    callback_url: str
 
 
 class GCOApiGatewayGlobalStack(Stack):
@@ -142,6 +128,13 @@ class GCOApiGatewayGlobalStack(Stack):
 
     This stack creates the single authenticated entry point for all GCO
     API requests. All requests must be signed with AWS credentials.
+
+    ``monitoring_region`` is ``deployment_regions.monitoring``. When it is
+    not this stack's Region, the monitoring stack cannot alarm on this API and
+    its Lambdas (CloudWatch alarms see only their own Region's metrics), so
+    this stack creates those alarms with an alert topic of its own
+    (``gco/stacks/control_plane_alarms.py``). ``None`` leaves them to the
+    monitoring stack.
 
     Attributes:
         secret: Secrets Manager secret containing the backend HMAC signing key
@@ -163,6 +156,7 @@ class GCOApiGatewayGlobalStack(Stack):
         certificate_regions: list[str] | None = None,
         backend_tls_config: dict[str, Any] | None = None,
         max_request_body_bytes: int = DEFAULT_MAX_REQUEST_BODY_BYTES,
+        monitoring_region: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -257,6 +251,11 @@ class GCOApiGatewayGlobalStack(Stack):
 
         # Export API endpoint
         self._create_outputs()
+
+        # Alarm on the API and its Lambdas here when the monitoring stack is
+        # in another Region, where their metrics never arrive.
+        if monitoring_region is not None and monitoring_region != self.region:
+            self._create_api_alarms()
 
         # Wire /studio/* routes when analytics is explicitly enabled at
         # construction time. Most deployments take the mutator path
@@ -766,8 +765,8 @@ class GCOApiGatewayGlobalStack(Stack):
         # Grant Secrets Manager permission to invoke the rotation Lambda
         rotation_lambda.grant_invoke(iam.ServicePrincipal("secretsmanager.amazonaws.com"))
 
-        # cdk-nag suppression: CDK's grant methods generate Resource: * for
-        # the rotation function's execution role.
+        # Every statement on the secret names its ARN; Resource: * is only on
+        # the two statements that take no resource.
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         acknowledge_nag_findings(
@@ -776,11 +775,12 @@ class GCOApiGatewayGlobalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The secret rotation Lambda needs secretsmanager:GetSecretValue "
-                        "and PutSecretValue on the rotation secret. CDK's grant methods "
-                        "generate Resource: * for the rotation function's execution role "
-                        "because the secret ARN includes a random suffix not known at "
-                        "synth time."
+                        "Resource: * is on two statements that take no resource: "
+                        "xray:PutTraceSegments and xray:PutTelemetryRecords, which active "
+                        "tracing adds, and secretsmanager:GetRandomPassword, which CDK's "
+                        "rotation schedule grants every rotation function (this one "
+                        "generates its key with Python's secrets module). Every "
+                        "statement on the signing-key secret names that secret's ARN."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
@@ -1151,22 +1151,19 @@ class GCOApiGatewayGlobalStack(Stack):
             cloud_watch_role_removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # Add resource policy to restrict to account
-        api.add_to_resource_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                principals=[iam.AnyPrincipal()],
-                actions=["execute-api:Invoke"],
-                resources=["execute-api:/*"],
-                conditions={"StringEquals": {"aws:PrincipalAccount": self.account}},
-            )
-        )
-
-        # Allow Cognito-authorized requests on /studio/* paths. The Cognito
-        # authorizer on the method handles authentication; the resource
-        # policy just needs to not block the request before it reaches the
-        # authorizer. Cognito tokens don't carry aws:PrincipalAccount so
-        # the account-scoped statement above would reject them.
+        # The resource policy grants nothing to IAM callers. For an
+        # IAM-authorized method and a caller in this account, API Gateway
+        # allows the request when the caller's identity-based policy allows
+        # execute-api:Invoke and nothing denies it, so identity policies
+        # decide who in the account may call. Callers in other accounts are
+        # refused on those methods because no statement admits them there.
+        #
+        # Requests to the Cognito-authorized /studio/login route and the
+        # unauthenticated /studio/callback page carry no IAM identity, and
+        # API Gateway requires an explicit resource-policy Allow for them.
+        # This statement provides it for GET /studio/* only; the Cognito
+        # authorizer (login) and the static landing page (callback) decide
+        # what the request gets.
         api.add_to_resource_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -1337,6 +1334,25 @@ class GCOApiGatewayGlobalStack(Stack):
             export_name=f"{self.project_name}-backend-tls-root-ca-parameter",
         )
 
+    def _create_api_alarms(self) -> None:
+        """Create the API, proxy and rotation alarms and their alert topic here."""
+        topic = create_alert_topic(
+            self,
+            "AlertTopic",
+            display_name="GCO (Global Capacity Orchestrator on AWS) API Gateway Alerts",
+            output_id="ApiGatewayAlertTopicArn",
+        )
+        add_api_alarms(
+            self,
+            region=self.region,
+            api_name=self.api.rest_api_name,
+            proxy_function_name=(
+                self.proxy_lambda.function_name if self.proxy_lambda is not None else None
+            ),
+            rotation_function_name=self.rotation_lambda.function_name,
+            topic=topic,
+        )
+
     def set_analytics_config(self, config: AnalyticsApiConfig) -> None:
         """Attach a post-construction ``AnalyticsApiConfig`` and wire ``/studio/*`` routes.
 
@@ -1467,11 +1483,16 @@ class GCOApiGatewayGlobalStack(Stack):
             authorization_type=apigateway.AuthorizationType.COGNITO,
             authorizer=authorizer,
             request_validator=studio_request_validator,
+            # Every status the presigned-URL Lambda returns (202 while the
+            # caller's Studio profile is provisioning, 409 for a profile it
+            # cannot recover), plus the request validator's 400.
             method_responses=[
                 apigateway.MethodResponse(status_code="200"),
+                apigateway.MethodResponse(status_code="202"),
                 apigateway.MethodResponse(status_code="400"),
                 apigateway.MethodResponse(status_code="401"),
                 apigateway.MethodResponse(status_code="404"),
+                apigateway.MethodResponse(status_code="409"),
                 apigateway.MethodResponse(status_code="500"),
             ],
         )

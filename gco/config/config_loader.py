@@ -11,7 +11,7 @@ Configuration Sections:
 - kubernetes_version: EKS Kubernetes version
 - resource_thresholds: CPU/memory/GPU utilization thresholds
 - global_accelerator: Global Accelerator settings
-- alb_config: Application Load Balancer health check settings
+- gateway_health_check: Target-group health check of the platform ALB
 - inference_proxy: Shared inference TLS proxy CPU request and HPA target
 - manifest_processor: Manifest validation and resource limits
 - api_gateway: Throttling and logging configuration
@@ -27,11 +27,12 @@ Usage:
 from __future__ import annotations
 
 import copy
+import ipaddress
 import json
 import logging
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, cast
 
 import boto3
@@ -45,6 +46,25 @@ from gco.eks_capabilities_config import (
     merge_eks_capabilities_overrides,
     parse_eks_capabilities_overrides,
     validate_eks_capabilities_config,
+)
+from gco.enablement_overrides import HELM_CHART_CONFIG_KEYS
+from gco.fsx_lustre_config import (
+    FSX_AUTO_IMPORT_POLICIES,
+    FSX_CAPACITY_INCREMENT_GIB,
+    FSX_DATA_COMPRESSION_TYPES,
+    FSX_DEPLOYMENT_TYPES,
+    FSX_FILE_SYSTEM_TYPE_VERSIONS,
+    FSX_LUSTRE_CONTEXT_KEY,
+    FSX_LUSTRE_DEFAULTS,
+    FSX_LUSTRE_REGIONS_CONTEXT_KEY,
+    FSX_THROUGHPUT_CHOICES,
+    default_per_unit_storage_throughput,
+    valid_storage_capacity,
+)
+from gco.gateway_health_check_config import (
+    GATEWAY_HEALTH_CHECK_CONTEXT_KEY,
+    GatewayHealthCheckConfigError,
+    validate_gateway_health_check_config,
 )
 from gco.hyperpod_config import (
     HYPERPOD_FEATURE_KEY,
@@ -60,6 +80,7 @@ from gco.inference_proxy_config import (
     INFERENCE_PROXY_TLS_CPU_REQUEST_MILLICORES_DEFAULT,
     INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION_DEFAULT,
 )
+from gco.k8s_quantity import memory_bytes
 from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.models import ClusterConfig, ResourceThresholds
 from gco.pcs_config import (
@@ -70,7 +91,7 @@ from gco.pcs_config import (
     apply_pcs_overrides,
     validate_pcs_config,
 )
-from gco.resource_governance import parse_k8s_quantity
+from gco.resource_governance import parse_k8s_quantity, validated_resource_quota
 from gco.slurm_config import SlurmConfigError, validate_slurm_config
 from gco.stacks.constants import (
     CONTROL_PLANE_ONLY_CONTEXT_KEY,
@@ -81,8 +102,311 @@ from gco.stacks.constants import (
     validated_regional_deployment_regions,
     validated_request_body_limit,
 )
+from gco.unauthenticated_paths import UNAUTHENTICATED_PATHS
 
 logger = logging.getLogger(__name__)
+
+#: Top-level cdk.json blocks that no longer take effect, each with what to do
+#: instead. ``gco upgrade`` keeps an operator's cdk.json byte for byte, so a
+#: file that still carries one validates, with a warning naming the block;
+#: nothing reads its values.
+DEPRECATED_CONTEXT_KEYS: dict[str, str] = {
+    "alb_config": (
+        "it never configured the platform ALB. Remove it from cdk.json; set "
+        "gateway_health_check (interval_seconds, timeout_seconds, healthy_threshold, "
+        "unhealthy_threshold) to change the ALB target-group health check, which "
+        "defaults to the 15-second interval, 5-second timeout and thresholds of 2 "
+        "that have always been deployed."
+    ),
+}
+
+#: Keys inside known blocks that no longer take effect, by full path, each
+#: with what to do instead. Like :data:`DEPRECATED_CONTEXT_KEYS` they still
+#: validate, with a warning, and nothing reads them.
+DEPRECATED_BLOCK_KEYS: dict[str, str] = {
+    "manifest_processor.image": (
+        "nothing reads it: the regional stack builds the manifest processor image from "
+        "dockerfiles/Dockerfile.manifest-processor and deploys it from ECR. Remove it "
+        "from cdk.json."
+    ),
+    "global_accelerator.health_check_grace_period": (
+        "Global Accelerator endpoint groups have no grace period, so it never took "
+        "effect. Remove it from cdk.json."
+    ),
+    "global_accelerator.health_check_timeout": (
+        "Global Accelerator endpoint groups have no probe timeout setting, so it never "
+        "took effect. Remove it from cdk.json."
+    ),
+    "images.removal_policy": (
+        "no stack creates the <project_name>/* ECR repositories (the gco CLI creates them "
+        "through the ECR API), so destroying the stacks has never deleted them, whatever "
+        "this says. Remove it from cdk.json; delete a repository with "
+        "'gco images delete-repo <name> --force -y'."
+    ),
+    "images.empty_on_delete": (
+        "no stack deletes the <project_name>/* ECR repositories, so it never took effect "
+        "(it only gated a check before 'gco stacks destroy', which is gone). Remove it from "
+        "cdk.json; empty and delete a repository with 'gco images delete-repo <name> --force -y'."
+    ),
+    "images.lifecycle": (
+        "nothing applies it: 'gco images init' gives each new repository its own policy "
+        "(keep the 20 newest tagged images, expire untagged ones after 7 days). Remove it "
+        "from cdk.json; change a repository's policy with 'gco images lifecycle set'."
+    ),
+    "api_gateway.regional_api_enabled": (
+        "it no longer changes anything: the API resource policies admit no principal of the "
+        "account, so a caller reaches the global API and every regional API bridge with its "
+        "own execute-api:Invoke permission, whatever this says (docs/UPGRADING.md, API calls "
+        "need an IAM permission). Remove it from cdk.json."
+    ),
+}
+
+#: The charts of the ``helm`` block that take nothing but ``enabled``.
+#: ``helm.argocd`` and ``helm.slurm`` have their own validators
+#: (gco/argocd_config.py, gco/slurm_config.py).
+_SIMPLE_HELM_CHARTS = HELM_CHART_CONFIG_KEYS - {"argocd", "slurm"}
+
+#: Every key each cdk.json block may hold, for the blocks whose own validator
+#: does not reject unknown keys already (``fsx_lustre``, ``valkey``,
+#: ``aurora_pgvector``, ``tracing``, ``gateway_health_check``,
+#: ``inference_proxy``, ``vpc_endpoints``, ``eks_capabilities``, ``pcs``,
+#: ``hyperpod``, ``helm.argocd``, ``helm.slurm`` and
+#: ``job_validation_policy.manifest_security_policy`` do). A dotted path is a
+#: sub-block, listed after its parent. Each block must be an object when
+#: present, a key outside its set fails validation with the full path, and
+#: ``_comment*`` keys are always allowed. ``inference_monitor`` is read by
+#: the inference monitor's own manifest and is not listed.
+BLOCK_KEYS: dict[str, frozenset[str]] = {
+    "deployment_regions": frozenset({"global", "api_gateway", "monitoring", "regional"}),
+    "bedrock": frozenset(
+        {
+            "mission_default_model_id",
+            "capacity_advisor_default_model_id",
+            "claude_code_default_model_id",
+            "codex_default_model_id",
+            "codex",
+            "opencode_default_model_id",
+            "embedding_model_id",
+            "generation_reasoning",
+            # Retired keys gco/bedrock.py reports with rename instructions.
+            "default_model_id",
+            "thinking",
+        }
+    ),
+    "bedrock.codex": frozenset({"reasoning_effort"}),
+    "bedrock.generation_reasoning": frozenset({"effort"}),
+    "eks_cluster": frozenset(
+        {"endpoint_access", "public_access_cidrs", "developer_access", "network_policy_enforcement"}
+    ),
+    "global_accelerator": frozenset(
+        {
+            "name",
+            "health_check_interval",
+            "health_check_threshold",
+            "health_check_path",
+            "client_affinity",
+            "traffic_dial",
+            # Deprecated (DEPRECATED_BLOCK_KEYS): warned about and ignored.
+            "health_check_grace_period",
+            "health_check_timeout",
+        }
+    ),
+    "global_accelerator.traffic_dial": frozenset(
+        {
+            "enabled",
+            "mode",
+            "interval_minutes",
+            "lookback_minutes",
+            "min_dial_percentage",
+            "max_step_percentage",
+            "full_health_percentage",
+        }
+    ),
+    "backend_tls": frozenset(
+        {
+            "root_generation",
+            "root_validity_days",
+            "root_rotate_before_days",
+            "root_activation_delay_hours",
+            "root_overlap_days",
+            "leaf_validity_days",
+            "leaf_rotate_before_days",
+            "rotation_schedule_hours",
+            "trust_cache_ttl_seconds",
+            "trust_cache_max_stale_seconds",
+        }
+    ),
+    "api_gateway": frozenset(
+        {
+            "throttle_rate_limit",
+            "throttle_burst_limit",
+            "log_level",
+            "metrics_enabled",
+            "tracing_enabled",
+            "regional_api_enabled",  # deprecated (DEPRECATED_BLOCK_KEYS)
+        }
+    ),
+    "waf": frozenset({"per_ip_rate_limit"}),
+    "manifest_processor": frozenset(
+        {
+            "image",  # deprecated (DEPRECATED_BLOCK_KEYS)
+            "replicas",
+            "resource_limits",
+            "autoscaling",
+            "validation_enabled",
+            "max_request_body_bytes",
+            "yaml_max_depth",
+            "central_queue_worker_enabled",
+            "central_queue_poll_interval_seconds",
+            "central_queue_batch_size",
+            "central_queue_reconcile_limit",
+            "central_queue_lease_seconds",
+            "central_queue_lease_renewal_seconds",
+        }
+    ),
+    "manifest_processor.resource_limits": frozenset({"cpu", "memory"}),
+    "queue_processor": frozenset(
+        {
+            "enabled",
+            "polling_interval",
+            "max_concurrent_jobs",
+            "messages_per_job",
+            "successful_jobs_history",
+            "failed_jobs_history",
+        }
+    ),
+    "job_validation_policy": frozenset(
+        {
+            "allowed_namespaces",
+            "resource_quotas",
+            "require_accelerator_toleration",
+            "trusted_registries",
+            "trusted_dockerhub_orgs",
+            "manifest_security_policy",
+            "allowed_kinds",
+        }
+    ),
+    "job_validation_policy.resource_quotas": frozenset(
+        {"max_cpu_per_manifest", "max_memory_per_manifest", "max_gpu_per_manifest"}
+    ),
+    "resource_thresholds": frozenset(
+        {
+            "cpu_threshold",
+            "memory_threshold",
+            "gpu_threshold",
+            "pending_pods_threshold",
+            "pending_requested_cpu_vcpus",
+            "pending_requested_memory_gb",
+            "pending_requested_gpus",
+        }
+    ),
+    "images": frozenset(
+        {
+            "replication",
+            # Deprecated (DEPRECATED_BLOCK_KEYS): warned about and ignored.
+            "removal_policy",
+            "empty_on_delete",
+            "lifecycle",
+        }
+    ),
+    "images.replication": frozenset({"enabled", "destinations"}),
+    "volcano_image_mirror": frozenset({"enabled", "ecr_namespace"}),
+    "s3_access_logs": frozenset({"retention_days"}),
+    "workload_metrics": frozenset({"cloudwatch_namespace"}),
+    "regional_shared_bucket": frozenset({"removal_policy"}),
+    "mission_memory": frozenset(
+        {"enabled", "retention_days", "dimensions", "distance_function", "top_k"}
+    ),
+    "vector_store": frozenset(
+        {
+            "enabled",
+            "dimensions",
+            "distance_function",
+            "embedding_model_id",
+            "replica_regions",
+            "corpus_prefix",
+        }
+    ),
+    "analytics_environment": frozenset(
+        {"enabled", "hyperpod", "canvas", "cognito", "efs", "studio"}
+    ),
+    "analytics_environment.hyperpod": frozenset({"enabled"}),
+    "analytics_environment.canvas": frozenset({"enabled"}),
+    "analytics_environment.cognito": frozenset({"domain_prefix", "removal_policy"}),
+    "analytics_environment.efs": frozenset({"removal_policy"}),
+    "analytics_environment.studio": frozenset({"user_profile_name_prefix"}),
+    "cluster_observability": frozenset(
+        {"enabled", "grafana", "prometheus", "alertmanager", "mlflow"}
+    ),
+    "cluster_observability.grafana": frozenset(
+        {"persistence_size", "admin_user", "admin_password_rotation_schedule"}
+    ),
+    "cluster_observability.prometheus": frozenset({"persistence_size", "retention"}),
+    "cluster_observability.alertmanager": frozenset({"enabled", "persistence_size"}),
+    "cost_monitoring": frozenset({"enabled", "reports", "athena"}),
+    "cost_monitoring.reports": frozenset(
+        {"interval_minutes", "retention_days", "transition_to_infrequent_access_days"}
+    ),
+    "cost_monitoring.athena": frozenset({"query_results_retention_days"}),
+    "helm": HELM_CHART_CONFIG_KEYS,
+    **{f"helm.{chart}": frozenset({"enabled"}) for chart in sorted(_SIMPLE_HELM_CHARTS)},
+    "mcp_server": frozenset({"enabled"}),
+    "drift_detection": frozenset({"enabled", "schedule_hours"}),
+    "historical": frozenset(
+        {
+            "enabled",
+            "retention_days",
+            "poll_interval_minutes",
+            "capacity_block_duration_hours",
+            "capacity_block_long_duration_hours",
+            "spot_score_target_capacities",
+            "watch_instance_types",
+            "enabled_regions",
+        }
+    ),
+}
+
+#: Top-level context keys GCO reads besides the blocks above: scalars, blocks
+#: with their own validators, per-Region overlays, and the run-scoped keys the
+#: CLI and the release harnesses pass with ``--context``. A key in GCO's
+#: ``snake_case`` style outside this set and the blocks above draws a warning
+#: (it is most likely a typo) and is ignored. Keys CDK owns (``@aws-cdk/...``
+#: feature flags, ``aws:cdk:...``, lookups such as ``availability-zones:...``)
+#: and ``_comment*`` keys never match that style.
+OTHER_CONTEXT_KEYS = frozenset(
+    {
+        "project_name",
+        "kubernetes_version",
+        "tags",
+        "vpc_endpoint_cidrs",
+        "vpc_endpoints",
+        "inference_proxy",
+        "gateway_health_check",
+        "inference_monitor",
+        "eks_capabilities",
+        "eks_capabilities_overrides",
+        "fsx_lustre",
+        "fsx_lustre_regions",
+        "valkey",
+        "aurora_pgvector",
+        "tracing",
+        "tracing_overrides",
+        "pcs",
+        "pcs_regions",
+        "pcs_overrides",
+        "hyperpod",
+        "hyperpod_regions",
+        "hyperpod_overrides",
+        "resource_quota",
+        "feature_enabled_overrides",
+        "helm_enabled_overrides",
+        "gco_live_validation_disable_efs_automatic_backups",
+        "gco_live_validation_retain_provider_log_groups",
+    }
+)
+
+#: The style of GCO's own context keys (see :data:`OTHER_CONTEXT_KEYS`).
+_GCO_CONTEXT_KEY_STYLE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 #: ``manifest_processor.autoscaling`` defaults. Off: the API tier is I/O-bound
 #: (Kubernetes round trips), so CPU is a weak saturation signal; an operator who
@@ -270,12 +594,16 @@ def resolve_tracing_config(raw: object, overrides: object = None) -> dict[str, A
     parsed_overrides = parse_tracing_overrides(overrides)
     merged = _deep_merge(_deep_merge(TRACING_DEFAULTS, block), parsed_overrides)
 
-    unknown = sorted(str(key) for key in merged if key not in TRACING_DEFAULTS)
+    unknown = sorted(
+        str(key) for key in merged if key not in TRACING_DEFAULTS and not is_comment_key(key)
+    )
     if unknown:
         source = f" (after {TRACING_OVERRIDES_CONTEXT_KEY})" if parsed_overrides else ""
         raise ConfigValidationError(
-            f"{TRACING_CONTEXT_KEY}{source} contains unknown key(s): {', '.join(unknown)}; "
-            f"allowed keys: {', '.join(sorted(TRACING_DEFAULTS))}"
+            f"{TRACING_CONTEXT_KEY}{source} contains unknown key(s): "
+            + ", ".join(f"{TRACING_CONTEXT_KEY}.{key}" for key in unknown)
+            + "; allowed keys: "
+            + ", ".join(f"{TRACING_CONTEXT_KEY}.{key}" for key in sorted(TRACING_DEFAULTS))
         )
     for flag in ("enabled", "enable_transaction_search"):
         if type(merged[flag]) is not bool:
@@ -300,8 +628,255 @@ def resolve_tracing_config(raw: object, overrides: object = None) -> dict[str, A
     }
 
 
+#: ``valkey`` defaults (an ElastiCache Serverless cache per region, off).
+_VALKEY_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "max_data_storage_gb": 5,
+    "max_ecpu_per_second": 5000,
+    "snapshot_retention_limit": 1,
+}
+
+
+#: ``aurora_pgvector`` defaults (Aurora Serverless v2 + pgvector, off).
+_AURORA_PGVECTOR_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "min_acu": 0,
+    "max_acu": 16,
+    "backup_retention_days": 7,
+    "deletion_protection": False,
+}
+
+
 class ConfigValidationError(Exception):
     """Raised when configuration validation fails."""
+
+
+#: Keys starting with this prefix are documentation (JSON has no comments, so
+#: cdk.json carries ``_comment_<key>`` siblings). Nothing reads them, and the
+#: unknown-key checks skip them.
+COMMENT_KEY_PREFIX = "_comment"
+
+
+def is_comment_key(key: object) -> bool:
+    """Whether ``key`` is a ``_comment*`` documentation key."""
+    return isinstance(key, str) and key.startswith(COMMENT_KEY_PREFIX)
+
+
+def parse_bool_flag(value: object, key: str) -> bool:
+    """Parse a top-level context flag, which ``cdk --context key=value`` may set.
+
+    Accepts JSON booleans and the strings ``"true"`` / ``"false"`` in any
+    case, because ``--context`` passes every value as a string. Anything
+    else, including ``0``, ``1``, ``None`` and ``"yes"``, is an error naming
+    ``key``. Python truthiness is never used: ``bool("false")`` is ``True``.
+    A flag inside a cdk.json block goes through :func:`parse_block_flag`.
+
+    Raises:
+        ConfigValidationError: If ``value`` is not a boolean or one of the
+            two strings.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        folded = value.lower()
+        if folded == "true":
+            return True
+        if folded == "false":
+            return False
+    raise ConfigValidationError(f"{key} must be true or false, got {value!r}")
+
+
+def parse_block_flag(
+    value: object,
+    key: str,
+    warn: Callable[[str], None],
+    *,
+    off_deletes: str | None = None,
+    read_by_truthiness: bool = True,
+) -> bool:
+    """Parse a boolean flag inside a cdk.json block, such as ``valkey.enabled``.
+
+    A nested key can only come from cdk.json (``--context`` sets top-level
+    keys), and earlier releases read these flags by Python truthiness, so
+    every non-empty string, ``"false"`` included, meant on. A string is
+    therefore never reinterpreted on upgrade:
+
+    - JSON booleans are returned as they are.
+    - ``"true"`` in any case still reads as true, with a deprecation warning
+      passed to ``warn``.
+    - Every other string is an error that says how earlier releases read it
+      and what to write instead. Reading ``"false"`` as false would switch
+      off a feature that has been running, and for a storage feature
+      (``off_deletes`` names what switching it off deletes) that deletes its
+      data.
+    - Anything else (numbers, ``null``, lists) is an error naming ``key``.
+
+    ``read_by_truthiness=False`` is for a flag earlier releases did not read
+    by truthiness (a string failed the synth instead), so its error makes no
+    claim about how the deployment has been running.
+
+    Raises:
+        ConfigValidationError: If ``value`` is not a boolean or ``"true"``.
+    """
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        raise ConfigValidationError(f"{key} must be true or false (a JSON boolean), got {value!r}")
+    if value.lower() == "true":
+        warn(
+            f"{key} is the string {value!r}, read as true; write the JSON boolean true "
+            "instead (string flags in cdk.json blocks are deprecated)."
+        )
+        return True
+    problem = f"{key} must be true or false (a JSON boolean), not the string {value!r}."
+    if not read_by_truthiness:
+        raise ConfigValidationError(problem)
+    if value:
+        consequence = f", which deletes {off_deletes}" if off_deletes else ""
+        raise ConfigValidationError(
+            f"{problem} Earlier releases read every non-empty string here as true, so this "
+            f"setting has been on. Write true to keep it on, or false to turn it off{consequence}."
+        )
+    raise ConfigValidationError(
+        f"{problem} Earlier releases read an empty string here as false, so this setting "
+        "has been off. Write false to keep it off, or true to turn it on."
+    )
+
+
+def _is_ipv4_cidr(value: object) -> bool:
+    """Whether ``value`` is an IPv4 CIDR string with an explicit prefix (``a.b.c.d/n``)."""
+    if not isinstance(value, str) or "/" not in value:
+        return False
+    try:
+        ipaddress.IPv4Network(value, strict=False)
+    except ValueError:
+        return False
+    return True
+
+
+def _check_block_keys(path: str, block: Mapping[str, Any], allowed: Iterable[str]) -> None:
+    """Reject keys of ``block`` (at cdk.json ``path``) outside ``allowed``.
+
+    ``_comment*`` keys are documentation and always allowed. The message
+    names every unknown key and every allowed key with its full path.
+    """
+    known = set(allowed)
+    unknown = sorted(str(key) for key in block if not is_comment_key(key) and key not in known)
+    if unknown:
+        raise ConfigValidationError(
+            f"{path} contains unknown key(s): "
+            + ", ".join(f"{path}.{key}" for key in unknown)
+            + "; allowed keys: "
+            + ", ".join(f"{path}.{key}" for key in sorted(known))
+        )
+
+
+def _object_or_empty(path: str, value: object) -> dict[str, Any]:
+    """Return ``value`` as a block, ``{}`` when absent; anything but an object is an error."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigValidationError(
+            f"{path} must be an object, got {type(value).__name__}: {value!r}"
+        )
+    return value
+
+
+def _require_int(path: str, value: object, minimum: int, maximum: int | None = None) -> int:
+    """Return ``value`` if it is an integer (never a boolean) inside the inclusive range."""
+    if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
+        bounds = (
+            f"between {minimum} and {maximum}" if maximum is not None else f"of at least {minimum}"
+        )
+        raise ConfigValidationError(f"{path} must be an integer {bounds}, got {value!r}")
+    return value
+
+
+def _require_choice(path: str, value: object, choices: Iterable[str]) -> str:
+    """Return ``value`` if it is one of the (case-sensitive) string ``choices``."""
+    allowed = sorted(choices)
+    if not isinstance(value, str) or value not in allowed:
+        raise ConfigValidationError(f"{path} must be one of {', '.join(allowed)}, got {value!r}")
+    return value
+
+
+#: ``helm`` charts whose ``enabled`` toggle the regional stack ignores: the
+#: mandatory platform components, which always install. Lockstep with
+#: ``gco.stacks.regional_stack._MANDATORY_CHART_KEYS``.
+_MANDATORY_HELM_CHARTS = frozenset({"aws_load_balancer_controller", "keda"})
+
+#: What switching a ``helm`` chart off deletes besides its Helm release, for
+#: the charts whose uninstall first deletes custom resources cluster-wide
+#: (``CHART_CUSTOM_RESOURCE_API_GROUPS`` in lambda/helm-installer/handler.py).
+#: ``helm.argocd`` and ``helm.slurm`` never read a string as true, so their
+#: messages need none.
+_HELM_CHART_OFF_DELETES: dict[str, str] = {
+    "kueue": "every Kueue queue and workload object",
+    "crossplane": "every Crossplane composite resource with the resources it composed",
+}
+
+#: Enabled flags inside cdk.json blocks that the regional and global stacks
+#: read from the raw context instead of through a ConfigLoader getter, each
+#: with what switching it off deletes (``None``: nothing that holds data), for
+#: :func:`parse_block_flag`'s message. ConfigLoader validates each one and the
+#: stacks read each one with :func:`read_block_flag`, so both read a value the
+#: same way. Earlier releases read all of them by truthiness.
+STACK_BLOCK_FLAGS: dict[str, str | None] = {
+    "images.replication.enabled": None,
+    "queue_processor.enabled": None,
+    "drift_detection.enabled": "the drift-detection SNS topic and its subscriptions",
+    "mcp_server.enabled": None,
+    "volcano_image_mirror.enabled": None,
+    **{
+        f"helm.{chart}.enabled": (
+            f"the {chart} Helm release and {_HELM_CHART_OFF_DELETES[chart]}"
+            if chart in _HELM_CHART_OFF_DELETES
+            else f"the {chart} Helm release"
+        )
+        for chart in sorted(HELM_CHART_CONFIG_KEYS - _MANDATORY_HELM_CHARTS)
+    },
+}
+
+#: Flags of :data:`STACK_BLOCK_FLAGS` whose blocks have their own validators
+#: (gco/argocd_config.py, gco/slurm_config.py), which have always required a
+#: JSON boolean: a string there failed the synth instead of reading as true.
+_OWN_VALIDATOR_STACK_BLOCK_FLAGS = frozenset({"helm.argocd.enabled", "helm.slurm.enabled"})
+
+
+def _reported_by_config_loader(_message: str) -> None:
+    """The ``warn`` of the stacks' reads: ConfigLoader has reported the same value."""
+
+
+def read_block_flag(
+    block: object,
+    path: str,
+    *,
+    default: bool,
+    warn: Callable[[str], None] = _reported_by_config_loader,
+) -> bool:
+    """Read the :data:`STACK_BLOCK_FLAGS` flag at cdk.json ``path`` from its raw block.
+
+    ``block`` is the raw value at the parent path (``None`` when absent). An
+    absent block or key reads as ``default``; a present value goes through
+    :func:`parse_block_flag` with the arguments the loader validates it with.
+    The stacks keep the default ``warn``, because ConfigLoader has already
+    warned about a deprecated ``"true"`` string.
+
+    Raises:
+        ConfigValidationError: If ``block`` is not an object, or the flag is
+            neither a JSON boolean nor the string ``"true"``.
+    """
+    parent, _, key = path.rpartition(".")
+    fields = _object_or_empty(parent, block)
+    if key not in fields:
+        return default
+    return parse_block_flag(
+        fields[key],
+        path,
+        warn,
+        off_deletes=STACK_BLOCK_FLAGS[path],
+        read_by_truthiness=path not in _OWN_VALIDATOR_STACK_BLOCK_FLAGS,
+    )
 
 
 class ConfigLoader:
@@ -316,19 +891,121 @@ class ConfigLoader:
 
     def __init__(self, app: App):
         self.app = app
+        #: Non-fatal findings of the validation (deprecated keys, keys that
+        #: take no effect), in the order they were found. Each is also logged
+        #: at WARNING, which ``cdk synth`` prints.
+        self.warnings: list[str] = []
         self._validate_configuration()
 
-    def _validate_configuration(self) -> None:
-        """Validate the entire configuration"""
-        # Check if we have any context at all (might be running outside CDK)
-        project_name = self.app.node.try_get_context("project_name")
-        if project_name is None:
-            # Running outside CDK context, skip validation
+    def _warn(self, message: str) -> None:
+        """Record and log one validation warning (each distinct message once)."""
+        if message not in self.warnings:
+            self.warnings.append(message)
+            logger.warning("%s", message)
+
+    def _context_at(self, path: str) -> object:
+        """The raw value at a dotted cdk.json path (``None`` when any part is absent)."""
+        head, *rest = path.split(".")
+        value: object = self.app.node.try_get_context(head)
+        for part in rest:
+            value = value.get(part) if isinstance(value, dict) else None
+        return value
+
+    def _validate_block_shapes(self) -> None:
+        """Check the shape of every block in :data:`BLOCK_KEYS` before anything reads it.
+
+        A block present in cdk.json must be an object holding only its known
+        keys; the error names the full path. Earlier releases read a scalar
+        such as ``"cluster_observability": false`` as an absent block, so its
+        defaults (observability on) applied, and crashed on others, such as
+        ``"cost_monitoring": {"reports": 30}``. ``tags`` must map tag names to
+        strings. A deprecated key (:data:`DEPRECATED_BLOCK_KEYS`) and an
+        unknown top-level key in GCO's style draw a warning.
+
+        Raises:
+            ConfigValidationError: If a block is not an object, holds an
+                unknown key, or a tag value is not a string.
+        """
+        for path, allowed in BLOCK_KEYS.items():
+            raw = self._context_at(path)
+            if raw is not None:
+                _check_block_keys(path, _object_or_empty(path, raw), allowed)
+        for path, advice in DEPRECATED_BLOCK_KEYS.items():
+            parent, _, key = path.rpartition(".")
+            block = self._context_at(parent)
+            if isinstance(block, dict) and key in block:
+                self._warn(f"{path} is deprecated and ignored: {advice}")
+        for name, value in _object_or_empty("tags", self.app.node.try_get_context("tags")).items():
+            if not isinstance(value, str):
+                raise ConfigValidationError(f"tags.{name} must be a string, got {value!r}")
+        self._warn_unknown_context_keys()
+
+    def _validate_stack_block_flags(self) -> None:
+        """Validate the enabled flags the stacks read from the raw context.
+
+        These are the :data:`STACK_BLOCK_FLAGS`: ``images.replication``,
+        ``queue_processor``, ``drift_detection``, ``mcp_server``,
+        ``volcano_image_mirror`` and the optional ``helm`` charts. Earlier
+        releases read them by truthiness, so
+        a string is never reinterpreted (:func:`parse_block_flag`): ``"true"``
+        reads as true with a deprecation warning, and every other string fails
+        with what to write instead. ``helm.argocd.enabled`` and
+        ``helm.slurm.enabled`` are left to their blocks' own validators, which
+        have always required a JSON boolean.
+
+        Raises:
+            ConfigValidationError: If one of the flags is neither a JSON
+                boolean nor the string ``"true"``.
+        """
+        for path in STACK_BLOCK_FLAGS:
+            if path not in _OWN_VALIDATOR_STACK_BLOCK_FLAGS:
+                parent = path.rpartition(".")[0]
+                read_block_flag(self._context_at(parent), path, default=False, warn=self._warn)
+
+    def _warn_unknown_context_keys(self) -> None:
+        """Warn about each top-level key in GCO's style that GCO does not read.
+
+        Such a key is most likely a misspelt block (``cluster_observabilty``),
+        whose settings would silently not apply. Only a warning: the CDK CLI
+        and other tools may add context of their own.
+        """
+        get_all_context = getattr(self.app.node, "get_all_context", None)
+        if not callable(get_all_context):
             return
+        known = BLOCK_KEYS.keys() | OTHER_CONTEXT_KEYS | DEPRECATED_CONTEXT_KEYS.keys()
+        for key in sorted(str(name) for name in get_all_context()):
+            if _GCO_CONTEXT_KEY_STYLE.fullmatch(key) and key not in known:
+                self._warn(
+                    f"{key} is not a GCO cdk.json key and is ignored; check its spelling "
+                    "against docs/CUSTOMIZATION.md."
+                )
+
+    def _warn_deprecated_blocks(self) -> None:
+        """Warn about each deprecated top-level block present in the context.
+
+        A deprecated block is ignored: nothing reads it, and its values never
+        take effect. See :data:`DEPRECATED_CONTEXT_KEYS`.
+        """
+        for key, advice in DEPRECATED_CONTEXT_KEYS.items():
+            if self.app.node.try_get_context(key) is not None:
+                self._warn(f"{key} is deprecated and ignored: {advice}")
+
+    def _validate_configuration(self) -> None:
+        """Validate the entire configuration.
+
+        Validation always runs. ``project_name`` is optional and defaults to
+        ``gco`` (see :meth:`get_project_name`); an explicit value must match
+        :attr:`PROJECT_NAME_PATTERN`. An absent ``project_name`` used to skip
+        every check below, so a cdk.json without it synthesized whatever the
+        other blocks said.
+        """
+        # Block shapes first, so no getter below reads a scalar as a block
+        self._validate_block_shapes()
+        # The enabled flags the regional stack reads from the raw context
+        self._validate_stack_block_flags()
 
         # Validate required fields exist
         required_fields = [
-            "project_name",
             "kubernetes_version",
             "resource_thresholds",
         ]
@@ -339,6 +1016,18 @@ class ConfigLoader:
         # Validate project_name format before anything consumes it (#139).
         self._validate_project_name()
 
+        # kubernetes_version is a "<major>.<minor>" string: a JSON number
+        # such as 1.30 used to reach EKS as "1.3".
+        kubernetes_version = self.app.node.try_get_context("kubernetes_version")
+        if not isinstance(kubernetes_version, str) or not re.fullmatch(
+            r"[1-9][0-9]*\.(?:0|[1-9][0-9]*)", kubernetes_version
+        ):
+            raise ConfigValidationError(
+                'kubernetes_version must be a "<major>.<minor>" string such as "1.37", got '
+                f"{kubernetes_version!r}; write it in quotes, because a JSON number such as "
+                "1.30 is read as 1.3"
+            )
+
         # Check for deployment_regions
         deployment_regions = self.app.node.try_get_context("deployment_regions")
         if not isinstance(deployment_regions, dict) or not deployment_regions:
@@ -346,8 +1035,9 @@ class ConfigLoader:
                 "Required configuration field 'deployment_regions' must be a non-empty object"
             )
 
-        # Validate regions
+        # Validate regions, then the Region names the per-Region overlays use
         self._validate_regions()
+        self._validate_region_overlays()
 
         # Validate resource thresholds
         self._validate_resource_thresholds()
@@ -361,8 +1051,17 @@ class ConfigLoader:
         # Validate inference proxy TLS sidecar autoscaling settings
         self._validate_inference_proxy_config()
 
-        # Validate ALB config
-        self._validate_alb_config()
+        # Deprecated blocks (alb_config, ...) are ignored with a warning
+        self._warn_deprecated_blocks()
+
+        # Validate the platform ALB target-group health check
+        self._validate_gateway_health_check_config()
+
+        # Validate the optional data services: FSx for Lustre (and its
+        # per-region overlays), the Valkey cache and Aurora pgvector
+        self._validate_fsx_lustre_config()
+        self.get_valkey_config()
+        self.get_aurora_pgvector_config()
 
         # Validate manifest processor config
         self._validate_manifest_processor_config()
@@ -377,7 +1076,9 @@ class ConfigLoader:
         self._validate_eks_capabilities_config()
         # Validate the self-managed Argo CD block (helm.argocd)
         self._validate_argocd_config()
-        # Validate the Slurm cluster block (helm.slurm)
+        # Validate the gco-jobs quota (resource_quota), then the Slurm
+        # cluster block (helm.slurm), whose partitions must fit it
+        self.get_resource_quota()
         self._validate_slurm_config()
         # Validate the AWS PCS block (pcs / pcs_regions)
         self._validate_pcs_config()
@@ -406,12 +1107,20 @@ class ConfigLoader:
 
     #: Allowed ``project_name`` format (#139). ``project_name`` is the
     #: deployment's unique prefix and flows into S3 bucket names, the Cognito
-    #: hosted-UI domain prefix, SSM parameter paths, IAM role names, and
-    #: CloudFormation export names. The tightest of those constraints is S3 /
-    #: Cognito naming (lowercase letters, digits, hyphens; must start with a
-    #: letter), so require: a leading lowercase letter followed by 1–30
-    #: lowercase letters, digits, or hyphens (total length 2–31).
-    PROJECT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
+    #: hosted-UI domain prefix, ECR repository namespaces (``<project>/...``),
+    #: SSM parameter paths, IAM role names, CloudFormation stack and export
+    #: names, and the Global Accelerator name. Together they require a leading
+    #: lowercase letter, then lowercase letters and digits in runs joined by
+    #: single hyphens (ECR rejects a repository path segment that ends in a
+    #: hyphen or holds two in a row, and Cognito a prefix that ends in one),
+    #: 2-31 characters in all.
+    PROJECT_NAME_PATTERN = re.compile(r"^(?=.{2,31}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+
+    #: Global Accelerator names: at most 64 alphanumerics, periods and
+    #: hyphens, neither first nor last a period or hyphen (CreateAccelerator).
+    GLOBAL_ACCELERATOR_NAME_PATTERN = re.compile(
+        r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,62}[A-Za-z0-9])?$"
+    )
 
     def _validate_project_name(self) -> None:
         """Validate ``project_name`` format so misconfigurations fail at synth.
@@ -425,11 +1134,18 @@ class ConfigLoader:
         message up front.
         """
         project_name = self.app.node.try_get_context("project_name")
-        if not isinstance(project_name, str) or not self.PROJECT_NAME_PATTERN.match(project_name):
+        if project_name is None:
+            # Absent (or JSON null, which CDK normalizes to absent): the
+            # documented default ``gco`` applies.
+            return
+        if not isinstance(project_name, str) or not self.PROJECT_NAME_PATTERN.fullmatch(
+            project_name
+        ):
             raise ConfigValidationError(
                 f"Invalid project_name {project_name!r}. It must match "
-                f"{self.PROJECT_NAME_PATTERN.pattern} (start with a lowercase letter, then "
-                "2–31 total characters of lowercase letters, digits, or hyphens). "
+                f"{self.PROJECT_NAME_PATTERN.pattern} (2-31 characters: a lowercase letter, "
+                "then lowercase letters and digits, with single hyphens between them and "
+                "none at the end). "
                 "project_name is the deployment prefix for S3 buckets, the Cognito "
                 "domain, SSM paths, and CloudFormation exports, so it must be a valid "
                 "lowercase DNS-style label."
@@ -443,7 +1159,8 @@ class ConfigLoader:
                 region = deployment_regions[field]
                 if not isinstance(region, str) or region not in self.VALID_REGIONS:
                     raise ValueError(
-                        f"Invalid {field} region {region!r}; expected an AWS region with a "
+                        f"deployment_regions.{field} is not a valid region: {region!r}; "
+                        "expected an AWS region with a "
                         "CloudFormation endpoint known to the installed SDK"
                     )
             regional = validated_regional_deployment_regions(
@@ -461,6 +1178,42 @@ class ConfigLoader:
         except (RuntimeError, ValueError) as exc:
             raise ConfigValidationError(str(exc)) from exc
 
+    #: Top-level blocks keyed by Region whose entries patch a feature block
+    #: for that Region only.
+    REGION_OVERLAY_KEYS: tuple[str, ...] = (
+        FSX_LUSTRE_REGIONS_CONTEXT_KEY,
+        PCS_REGIONS_KEY,
+        HYPERPOD_REGIONS_KEY,
+    )
+
+    def _validate_region_overlays(self) -> None:
+        """Check the Region names of ``fsx_lustre_regions``, ``pcs_regions`` and ``hyperpod_regions``.
+
+        An entry for a name that is not an AWS Region (a typo such as
+        ``us-east1``) fails: it can never take effect. An entry for a real
+        Region outside ``deployment_regions.regional`` only warns: no stack
+        reads it today, which is expected while a Region is being staged
+        before it is added, or in a control-plane-only deployment. Each
+        feature's validator checks the entries' contents.
+        """
+        deployed = set(self.get_regions())
+        for key in self.REGION_OVERLAY_KEYS:
+            overlays = self.app.node.try_get_context(key)
+            if not isinstance(overlays, dict):
+                continue  # absent, or malformed and reported by the feature's validator
+            for region in sorted(str(name) for name in overlays if not is_comment_key(name)):
+                if region not in self.VALID_REGIONS:
+                    raise ConfigValidationError(
+                        f"{key}.{region} is not an AWS Region known to the installed SDK; "
+                        f"{key} is keyed by Region name, such as us-east-1"
+                    )
+                if region not in deployed:
+                    self._warn(
+                        f"{key}.{region} has no effect: {region} is not in "
+                        "deployment_regions.regional, so no regional stack reads it (expected "
+                        "while staging a Region before adding it)."
+                    )
+
     def _validate_resource_thresholds(self) -> None:
         """Validate resource threshold configuration"""
         thresholds_config = self.app.node.try_get_context("resource_thresholds")
@@ -468,12 +1221,14 @@ class ConfigLoader:
         required_thresholds = ["cpu_threshold", "memory_threshold", "gpu_threshold"]
         for threshold in required_thresholds:
             if threshold not in thresholds_config:
-                raise ConfigValidationError(f"Missing threshold configuration: {threshold}")
+                raise ConfigValidationError(f"resource_thresholds.{threshold} is required")
 
             value = thresholds_config[threshold]
-            if not isinstance(value, int) or (value != -1 and not 0 <= value <= 100):
+            # type() rather than isinstance(): a boolean is not a threshold.
+            if type(value) is not int or (value != -1 and not 0 <= value <= 100):
                 raise ConfigValidationError(
-                    f"{threshold} must be an integer between 0 and 100 (or -1 to disable), got {value}"
+                    f"resource_thresholds.{threshold} must be an integer between 0 and 100 "
+                    f"(or -1 to disable), got {value!r}"
                 )
 
         # Validate optional thresholds if present
@@ -485,9 +1240,10 @@ class ConfigLoader:
         ]:
             if opt_threshold in thresholds_config:
                 value = thresholds_config[opt_threshold]
-                if not isinstance(value, int) or (value != -1 and value < 0):
+                if type(value) is not int or (value != -1 and value < 0):
                     raise ConfigValidationError(
-                        f"{opt_threshold} must be a non-negative integer (or -1 to disable), got {value}"
+                        f"resource_thresholds.{opt_threshold} must be a non-negative integer "
+                        f"(or -1 to disable), got {value!r}"
                     )
 
     #: Health-check probe intervals Global Accelerator accepts. The API
@@ -511,7 +1267,11 @@ class ConfigLoader:
           Global Accelerator API accepts (UpdateEndpointGroup rejects others).
         - ``health_check_threshold``: integer 1-10 (the API ThresholdCount
           range).
-        - ``health_check_path``: must start with ``/``.
+        - ``health_check_path``: must start with ``/`` and, without its query
+          string, be one of the paths the services answer without
+          authentication (:data:`gco.unauthenticated_paths.UNAUTHENTICATED_PATHS`):
+          a probe of any other path gets an authentication error, so Global
+          Accelerator would mark every Region unhealthy.
         - ``client_affinity``: NONE or SOURCE_IP, case-insensitive.
         - ``traffic_dial``: see :meth:`_validate_traffic_dial_config`.
 
@@ -549,15 +1309,34 @@ class ConfigLoader:
                 f"1 and 10, got {threshold!r}"
             )
 
+        name = ga_config["name"]
+        if not isinstance(name, str) or not self.GLOBAL_ACCELERATOR_NAME_PATTERN.fullmatch(name):
+            raise ConfigValidationError(
+                "global_accelerator.name must be 1-64 letters, digits, periods or hyphens, "
+                f"not starting or ending with a period or hyphen, got {name!r}"
+            )
+
         path = ga_config["health_check_path"]
         if not isinstance(path, str) or not path.startswith("/"):
-            raise ConfigValidationError("health_check_path must start with '/'")
+            raise ConfigValidationError(
+                f"global_accelerator.health_check_path must start with '/', got {path!r}"
+            )
+        if path.partition("?")[0] not in UNAUTHENTICATED_PATHS:
+            raise ConfigValidationError(
+                f"global_accelerator.health_check_path {path!r} needs request authentication, "
+                "which a Global Accelerator health check cannot send, so every check would "
+                "fail and every Region would be marked unhealthy. Use a path the services "
+                "answer without authentication: "
+                + ", ".join(sorted(UNAUTHENTICATED_PATHS))
+                + " (the default is /api/v1/health)."
+            )
 
         allowed_affinity = {"NONE", "SOURCE_IP"}
         affinity = ga_config["client_affinity"]
         if not isinstance(affinity, str) or affinity.upper() not in allowed_affinity:
             raise ConfigValidationError(
-                f"client_affinity must be one of {sorted(allowed_affinity)}, got {affinity!r}"
+                f"global_accelerator.client_affinity must be one of {sorted(allowed_affinity)}, "
+                f"got {affinity!r}"
             )
 
         self._validate_traffic_dial_config(ga_config["traffic_dial"])
@@ -576,12 +1355,6 @@ class ConfigLoader:
         - ``full_health_percentage``: 1-100; the healthy fraction (percent)
           at or above which a region is restored toward 100.
         """
-        if not isinstance(dial_config, dict):
-            raise ConfigValidationError(
-                "global_accelerator.traffic_dial must be a mapping, got "
-                f"{type(dial_config).__name__}: {dial_config!r}"
-            )
-
         enabled = dial_config["enabled"]
         if not isinstance(enabled, bool):
             raise ConfigValidationError(
@@ -687,25 +1460,9 @@ class ConfigLoader:
                 f"got {config['max_replicas']} < {config['min_replicas']}"
             )
 
-    def _validate_alb_config(self) -> None:
-        """Validate ALB configuration"""
-        alb_config = self.app.node.try_get_context("alb_config")
-        if not alb_config:
-            raise ConfigValidationError("alb_config configuration is required")
-
-        required_fields = [
-            "health_check_interval",
-            "health_check_timeout",
-            "healthy_threshold",
-            "unhealthy_threshold",
-        ]
-        for field in required_fields:
-            if field not in alb_config:
-                raise ConfigValidationError(f"Missing alb_config configuration: {field}")
-
-            value = alb_config[field]
-            if not isinstance(value, int) or value <= 0:
-                raise ConfigValidationError(f"{field} must be a positive integer, got {value}")
+    def _validate_gateway_health_check_config(self) -> None:
+        """Validate the optional ``gateway_health_check`` block (see the getter)."""
+        self.get_gateway_health_check_config()
 
     def _validate_manifest_processor_config(self) -> None:
         """Validate manifest processor configuration.
@@ -721,18 +1478,16 @@ class ConfigLoader:
         if not mp_config:
             raise ConfigValidationError("manifest_processor configuration is required")
 
-        required_fields = [
-            "image",
-            "replicas",
-            "resource_limits",
-        ]
-        for field in required_fields:
+        for field in ("replicas", "resource_limits"):
             if field not in mp_config:
-                raise ConfigValidationError(f"Missing manifest_processor configuration: {field}")
+                raise ConfigValidationError(f"manifest_processor.{field} is required")
 
-        # Validate replicas
-        if not isinstance(mp_config["replicas"], int) or mp_config["replicas"] <= 0:
-            raise ConfigValidationError("manifest_processor replicas must be a positive integer")
+        # Validate replicas (type(), not isinstance(): a boolean is not a count)
+        if type(mp_config["replicas"]) is not int or mp_config["replicas"] <= 0:
+            raise ConfigValidationError(
+                "manifest_processor.replicas must be a positive integer, got "
+                f"{mp_config['replicas']!r}"
+            )
 
         try:
             validated_request_body_limit(
@@ -753,13 +1508,9 @@ class ConfigLoader:
                 "job_validation_policy configuration is required (shared between "
                 "manifest_processor and queue_processor)"
             )
-        if not isinstance(policy, dict):
-            raise ConfigValidationError("job_validation_policy must be an object")
         for policy_field in ("allowed_namespaces", "resource_quotas"):
             if policy_field not in policy:
-                raise ConfigValidationError(
-                    f"Missing job_validation_policy configuration: {policy_field}"
-                )
+                raise ConfigValidationError(f"job_validation_policy.{policy_field} is required")
 
         try:
             validate_manifest_security_policy(policy.get("manifest_security_policy", {}))
@@ -780,7 +1531,7 @@ class ConfigLoader:
         resource_limits = mp_config["resource_limits"]
         if "cpu" not in resource_limits or "memory" not in resource_limits:
             raise ConfigValidationError(
-                "manifest_processor resource_limits must contain 'cpu' and 'memory'"
+                "manifest_processor.resource_limits must contain 'cpu' and 'memory'"
             )
         for resource, request in _MANIFEST_PROCESSOR_CONTAINER_REQUESTS.items():
             quantity = resource_limits[resource]
@@ -808,16 +1559,9 @@ class ConfigLoader:
             autoscaling = {}
         if not isinstance(autoscaling, dict):
             raise ConfigValidationError("manifest_processor.autoscaling must be an object")
-        unknown_autoscaling = sorted(
-            str(key) for key in autoscaling if key not in _MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS
+        _check_block_keys(
+            "manifest_processor.autoscaling", autoscaling, _MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS
         )
-        if unknown_autoscaling:
-            raise ConfigValidationError(
-                "manifest_processor.autoscaling contains unknown key(s): "
-                + ", ".join(unknown_autoscaling)
-                + "; allowed keys: "
-                + ", ".join(sorted(_MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS))
-            )
         merged_autoscaling = {**_MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS, **autoscaling}
         if type(merged_autoscaling["enabled"]) is not bool:
             raise ConfigValidationError("manifest_processor.autoscaling.enabled must be a boolean")
@@ -857,25 +1601,28 @@ class ConfigLoader:
         ]
         for field in required_fields:
             if field not in api_gw_config:
-                raise ConfigValidationError(f"Missing api_gateway configuration: {field}")
+                raise ConfigValidationError(f"api_gateway.{field} is required")
 
-        # Validate throttle limits
+        # Validate throttle limits (type(), not isinstance(): a boolean is
+        # not a request rate)
         throttle_rate = api_gw_config["throttle_rate_limit"]
         throttle_burst = api_gw_config["throttle_burst_limit"]
 
-        if not isinstance(throttle_rate, int) or throttle_rate <= 0:
+        if type(throttle_rate) is not int or throttle_rate <= 0:
             raise ConfigValidationError(
-                f"throttle_rate_limit must be a positive integer, got {throttle_rate}"
+                f"api_gateway.throttle_rate_limit must be a positive integer, got {throttle_rate!r}"
             )
 
-        if not isinstance(throttle_burst, int) or throttle_burst <= 0:
+        if type(throttle_burst) is not int or throttle_burst <= 0:
             raise ConfigValidationError(
-                f"throttle_burst_limit must be a positive integer, got {throttle_burst}"
+                "api_gateway.throttle_burst_limit must be a positive integer, got "
+                f"{throttle_burst!r}"
             )
 
         if throttle_burst < throttle_rate:
             raise ConfigValidationError(
-                "throttle_burst_limit should be greater than or equal to throttle_rate_limit"
+                "api_gateway.throttle_burst_limit must be greater than or equal to "
+                "api_gateway.throttle_rate_limit"
             )
 
         # Validate log level
@@ -883,20 +1630,13 @@ class ConfigLoader:
         log_level = api_gw_config["log_level"]
         if log_level not in valid_log_levels:
             raise ConfigValidationError(
-                f"log_level must be one of {valid_log_levels}, got {log_level}"
+                f"api_gateway.log_level must be one of {valid_log_levels}, got {log_level!r}"
             )
 
         # Validate boolean flags
-        if not isinstance(api_gw_config["metrics_enabled"], bool):
-            raise ConfigValidationError("metrics_enabled must be a boolean")
-
-        if not isinstance(api_gw_config["tracing_enabled"], bool):
-            raise ConfigValidationError("tracing_enabled must be a boolean")
-
-        if "regional_api_enabled" in api_gw_config and not isinstance(
-            api_gw_config["regional_api_enabled"], bool
-        ):
-            raise ConfigValidationError("regional_api_enabled must be a boolean")
+        for flag in ("metrics_enabled", "tracing_enabled"):
+            if flag in api_gw_config and not isinstance(api_gw_config[flag], bool):
+                raise ConfigValidationError(f"api_gateway.{flag} must be a boolean")
 
     def _validate_eks_cluster_config(self) -> None:
         """Validate EKS cluster configuration"""
@@ -907,7 +1647,7 @@ class ConfigLoader:
             valid_access_modes = ["PRIVATE", "PUBLIC_AND_PRIVATE"]
             if eks_config["endpoint_access"] not in valid_access_modes:
                 raise ConfigValidationError(
-                    f"endpoint_access must be one of {valid_access_modes}, "
+                    f"eks_cluster.endpoint_access must be one of {valid_access_modes}, "
                     f"got {eks_config['endpoint_access']}"
                 )
         # The NetworkPolicy enforcement switch renders straight into a
@@ -922,7 +1662,31 @@ class ConfigLoader:
                 "eks_cluster.network_policy_enforcement must be a boolean, got "
                 f"{eks_config['network_policy_enforcement']!r}"
             )
+        if "public_access_cidrs" in eks_config:
+            self._validate_public_access_cidrs(eks_config["public_access_cidrs"])
         self._validate_vpc_endpoints_config()
+
+    @staticmethod
+    def _validate_public_access_cidrs(cidrs: object) -> None:
+        """``eks_cluster.public_access_cidrs`` must be a list of IPv4 CIDR strings.
+
+        The regional stack passes each entry to the EKS public-endpoint
+        allowlist. A single string used to be iterated character by
+        character, so ``"203.0.113.7/32"`` became the "CIDRs" ``"2"``,
+        ``"0"``, ``"3"``, ... and the deploy failed (or allowed the wrong
+        sources); the CLI (``gco stacks eks endpoint set --cidr``) has always
+        written a list.
+        """
+        entries = cidrs if isinstance(cidrs, list) else None
+        invalid = (
+            [cidrs] if entries is None else [cidr for cidr in entries if not _is_ipv4_cidr(cidr)]
+        )
+        if invalid:
+            raise ConfigValidationError(
+                "eks_cluster.public_access_cidrs must be a list of IPv4 CIDR strings such "
+                f'as ["203.0.113.0/24"], got {cidrs!r} (invalid: '
+                f"{', '.join(repr(cidr) for cidr in invalid)})"
+            )
 
     def _validate_vpc_endpoints_config(self) -> None:
         """Validate the optional ``vpc_endpoints`` block.
@@ -938,14 +1702,7 @@ class ConfigLoader:
             return
         if not isinstance(raw, dict):
             raise ConfigValidationError("vpc_endpoints must be an object")
-        unknown = sorted(str(key) for key in raw if key not in _VPC_ENDPOINTS_DEFAULTS)
-        if unknown:
-            raise ConfigValidationError(
-                "vpc_endpoints contains unknown key(s): "
-                + ", ".join(unknown)
-                + "; allowed keys: "
-                + ", ".join(sorted(_VPC_ENDPOINTS_DEFAULTS))
-            )
+        _check_block_keys("vpc_endpoints", raw, _VPC_ENDPOINTS_DEFAULTS)
         for key, allowed in (
             ("gateway", VPC_GATEWAY_ENDPOINT_SERVICES),
             ("interface", VPC_INTERFACE_ENDPOINT_SERVICES),
@@ -1069,11 +1826,31 @@ class ConfigLoader:
         try:
             validate_slurm_config(
                 self._raw_slurm_config(),
-                resource_quota=self.app.node.try_get_context("resource_quota") or {},
+                resource_quota=self.get_resource_quota(),
                 observability_enabled=self.get_cluster_observability_enabled(),
                 fsx_enabled=self._slurm_fsx_available_everywhere(),
             )
         except SlurmConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+
+    def get_resource_quota(self) -> dict[str, str]:
+        """The ``resource_quota`` block merged over its defaults, validated.
+
+        The same merge the regional stack renders into the ``gco-jobs``
+        ResourceQuota and LimitRange (see
+        :func:`gco.resource_governance.validated_resource_quota`), so the
+        Slurm partitions are checked against what deploys even when cdk.json
+        leaves the block out.
+
+        Raises:
+            ConfigValidationError: If the block is not an object, names an
+                unknown key, holds a value that is not a Kubernetes quantity,
+                or a per-container ceiling exceeds its namespace ceiling.
+        """
+        raw = self.app.node.try_get_context("resource_quota")
+        try:
+            return validated_resource_quota({} if raw is None else raw)
+        except ValueError as exc:
             raise ConfigValidationError(str(exc)) from exc
 
     def get_slurm_config(self) -> dict[str, Any]:
@@ -1089,7 +1866,7 @@ class ConfigLoader:
         try:
             return validate_slurm_config(
                 self._raw_slurm_config(),
-                resource_quota=self.app.node.try_get_context("resource_quota") or {},
+                resource_quota=self.get_resource_quota(),
                 observability_enabled=self.get_cluster_observability_enabled(),
                 fsx_enabled=self._slurm_fsx_available_everywhere(),
             )
@@ -1375,22 +2152,24 @@ class ConfigLoader:
                 f"{type(obs_ctx['enabled']).__name__}: {obs_ctx['enabled']!r}"
             )
 
-        # Non-empty-string checks for the size / retention knobs.
-        string_fields = (
-            ("grafana", "persistence_size"),
-            ("prometheus", "persistence_size"),
-            ("prometheus", "retention"),
-            ("alertmanager", "persistence_size"),
-        )
-        for sub_block, field in string_fields:
+        # The volume sizes render verbatim into the charts' PVC requests, so
+        # each must be a positive Kubernetes quantity string ("10Gi"); a typo
+        # such as "10GB" or "10 Gi" used to fail the Helm install in every
+        # Region. The Prometheus retention is a duration string.
+        for sub_block in ("grafana", "prometheus", "alertmanager", "mlflow"):
             sub_ctx = obs_ctx.get(sub_block)
-            if not isinstance(sub_ctx, dict) or field not in sub_ctx:
-                continue
-            value = sub_ctx[field]
-            if not isinstance(value, str) or not value.strip():
+            if isinstance(sub_ctx, dict) and "persistence_size" in sub_ctx:
+                self._validate_volume_size(
+                    f"cluster_observability.{sub_block}.persistence_size",
+                    sub_ctx["persistence_size"],
+                )
+        prometheus_ctx = obs_ctx.get("prometheus")
+        if isinstance(prometheus_ctx, dict) and "retention" in prometheus_ctx:
+            retention = prometheus_ctx["retention"]
+            if not isinstance(retention, str) or not retention.strip():
                 raise ConfigValidationError(
-                    f"cluster_observability.{sub_block}.{field} must be a non-empty "
-                    f"string, got {value!r}"
+                    "cluster_observability.prometheus.retention must be a non-empty "
+                    f"string, got {retention!r}"
                 )
 
         # `grafana.admin_password_rotation_schedule`: the cron for the in-cluster
@@ -1406,6 +2185,16 @@ class ConfigLoader:
                     f"a 5-field cron expression string, got {schedule!r}"
                 )
 
+        # `mlflow`: the tracking-server sub-toggle and its metadata volume.
+        # Earlier releases read `enabled` by truthiness (`"false"` meant on),
+        # so it goes through parse_block_flag and the getter returns the
+        # parsed boolean.
+        mlflow_ctx = _object_or_empty("cluster_observability.mlflow", obs_ctx.get("mlflow"))
+        _check_block_keys(
+            "cluster_observability.mlflow", mlflow_ctx, ("enabled", "persistence_size")
+        )
+        if "enabled" in mlflow_ctx:
+            self._parse_mlflow_enabled(mlflow_ctx["enabled"])
         # `alertmanager.enabled` must be a bool if the sub-block carries it.
         alertmanager_ctx = obs_ctx.get("alertmanager")
         if (
@@ -1418,6 +2207,20 @@ class ConfigLoader:
                 f"{type(alertmanager_ctx['enabled']).__name__}: "
                 f"{alertmanager_ctx['enabled']!r}"
             )
+
+    @staticmethod
+    def _validate_volume_size(path: str, value: object) -> None:
+        """A PVC size must be a positive Kubernetes quantity string such as ``"10Gi"``."""
+        try:
+            if not isinstance(value, str):
+                raise ValueError("it is not a string")
+            if memory_bytes(value) <= 0:
+                raise ValueError("it is not positive")
+        except ValueError as exc:
+            raise ConfigValidationError(
+                f"{path} must be a positive Kubernetes quantity string such as '10Gi', "
+                f"got {value!r} ({exc})"
+            ) from exc
 
     def _validate_cost_monitoring_config(self) -> None:
         """Validate the optional ``cost_monitoring`` block in cdk.json.
@@ -1646,6 +2449,12 @@ class ConfigLoader:
                     f"{distance!r}. This is immutable after index creation."
                 )
 
+    #: A Bedrock foundation-model id (``provider.model[:version]``), the shape
+    #: the ``foundation-model/<id>`` resource ARN and InvokeModel's modelId take.
+    BEDROCK_FOUNDATION_MODEL_ID_PATTERN = re.compile(
+        r"[a-z0-9-]{1,63}\.[a-z0-9-]{1,63}(?:[.:][a-z0-9-]{1,63})*"
+    )
+
     def _validate_vector_store_config(self) -> None:
         """Validate the optional ``vector_store`` block in cdk.json.
 
@@ -1705,9 +2514,14 @@ class ConfigLoader:
                 )
         if "embedding_model_id" in vector_store_ctx:
             model_id = vector_store_ctx["embedding_model_id"]
-            if not isinstance(model_id, str) or not model_id.strip():
+            if not isinstance(
+                model_id, str
+            ) or not self.BEDROCK_FOUNDATION_MODEL_ID_PATTERN.fullmatch(model_id.strip()):
                 raise ConfigValidationError(
-                    f"vector_store.embedding_model_id must be a non-empty string, got {model_id!r}"
+                    "vector_store.embedding_model_id must be a Bedrock foundation-model id such "
+                    f"as 'amazon.titan-embed-text-v2:0', got {model_id!r}; the stacks grant "
+                    "bedrock:InvokeModel on foundation-model/<id> and the ingest Lambda "
+                    "invokes it by that id"
                 )
         if "replica_regions" in vector_store_ctx:
             replica_regions = vector_store_ctx["replica_regions"]
@@ -1838,24 +2652,32 @@ class ConfigLoader:
         return self.app.node.try_get_context("kubernetes_version") or "1.37"
 
     def get_resource_thresholds(self) -> ResourceThresholds:
-        """Get resource thresholds configuration"""
-        thresholds_config = self.app.node.try_get_context("resource_thresholds") or {
-            "cpu_threshold": 80,
-            "memory_threshold": 80,
-            "gpu_threshold": -1,
-            "pending_pods_threshold": 10,
-            "pending_requested_cpu_vcpus": 100,
-            "pending_requested_memory_gb": 200,
-            "pending_requested_gpus": -1,
+        """Get resource thresholds configuration.
+
+        ``cpu_threshold``, ``memory_threshold`` and ``gpu_threshold`` are
+        required (see :meth:`_validate_resource_thresholds`). An omitted
+        ``pending_*`` key takes the :class:`ResourceThresholds` default, the
+        same value the health monitor falls back to: 10 pods, 100 vCPUs,
+        200 GB and 8 GPUs. The shipped cdk.json sets
+        ``pending_requested_gpus`` to -1 (disabled), so 8 applies only to a
+        file that leaves the key out.
+        """
+        thresholds_config = self.app.node.try_get_context("resource_thresholds") or {}
+        optional = {
+            key: thresholds_config[key]
+            for key in (
+                "pending_pods_threshold",
+                "pending_requested_cpu_vcpus",
+                "pending_requested_memory_gb",
+                "pending_requested_gpus",
+            )
+            if key in thresholds_config
         }
         return ResourceThresholds(
             cpu_threshold=thresholds_config["cpu_threshold"],
             memory_threshold=thresholds_config["memory_threshold"],
             gpu_threshold=thresholds_config["gpu_threshold"],
-            pending_pods_threshold=thresholds_config.get("pending_pods_threshold", 10),
-            pending_requested_cpu_vcpus=thresholds_config.get("pending_requested_cpu_vcpus", 100),
-            pending_requested_memory_gb=thresholds_config.get("pending_requested_memory_gb", 200),
-            pending_requested_gpus=thresholds_config.get("pending_requested_gpus", 8),
+            **optional,
         )
 
     def get_cluster_config(self, region: str) -> ClusterConfig:
@@ -1908,19 +2730,17 @@ class ConfigLoader:
                 "full_health_percentage": 95,
             },
         }
-        configured = self.app.node.try_get_context("global_accelerator") or {}
-        if not isinstance(configured, dict):
-            raise ConfigValidationError("global_accelerator must be a mapping")
+        configured = _object_or_empty(
+            "global_accelerator", self.app.node.try_get_context("global_accelerator")
+        )
         merged: dict[str, Any] = {**default_config, **configured}
 
         # Deep-merge the nested sub-block so a partial override does not drop
-        # the other defaults in the same sub-block. A non-mapping override is
-        # deliberately left in place for the validator to reject with a
-        # precise message.
-        override = configured.get("traffic_dial")
-        if isinstance(override, dict):
-            default_sub = cast(dict[str, Any], default_config["traffic_dial"])
-            merged["traffic_dial"] = {**default_sub, **override}
+        # the other defaults in the same sub-block.
+        merged["traffic_dial"] = {
+            **cast(dict[str, Any], default_config["traffic_dial"]),
+            **_object_or_empty("global_accelerator.traffic_dial", configured.get("traffic_dial")),
+        }
 
         return merged
 
@@ -1979,35 +2799,58 @@ class ConfigLoader:
             )
         return {**defaults, **configured}
 
-    def get_alb_config(self) -> dict[str, Any]:
-        """Get ALB configuration"""
-        return self.app.node.try_get_context("alb_config") or {
-            "health_check_interval": 30,
-            "health_check_timeout": 5,
-            "healthy_threshold": 2,
-            "unhealthy_threshold": 2,
-        }
+    def get_gateway_health_check_config(self) -> dict[str, int]:
+        """Return the platform ALB's target-group health check settings.
+
+        The ``gateway_health_check`` block merged over
+        :data:`gco.gateway_health_check_config.GATEWAY_HEALTH_CHECK_DEFAULTS`
+        (15-second interval, 5-second timeout, 2 consecutive results to flip
+        a target either way, the values the gateway manifest shipped with).
+        The regional stack renders them into the default
+        ``TargetGroupConfiguration`` of ``post-helm-gateway.yaml``, which
+        every platform target group inherits.
+
+        Keys:
+            - interval_seconds: seconds between probes of one target (5-300)
+            - timeout_seconds: seconds without a response that fail a probe
+              (2-120, less than ``interval_seconds``)
+            - healthy_threshold: consecutive passes that mark a target
+              healthy (2-10)
+            - unhealthy_threshold: consecutive failures that mark a target
+              unhealthy (2-10)
+
+        Raises:
+            ConfigValidationError: If the block is malformed.
+        """
+        try:
+            return validate_gateway_health_check_config(
+                self.app.node.try_get_context(GATEWAY_HEALTH_CHECK_CONTEXT_KEY)
+            )
+        except GatewayHealthCheckConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
 
     def get_manifest_processor_config(self) -> dict[str, Any]:
         """Get manifest processor configuration.
 
         Merges three cdk.json sections into a single runtime config:
 
-        - ``manifest_processor``: service-specific settings (replicas, image,
-          resource_limits, allowed_namespaces, validation_enabled,
-          max_request_body_bytes, yaml_max_depth)
-        - ``job_validation_policy``: shared validation policy (resource_quotas,
-          trusted_registries, trusted_dockerhub_orgs, manifest_security_policy,
-          allowed_kinds). Pulled in verbatim so the REST path reads the same
-          policy the SQS queue processor enforces.
+        - ``manifest_processor``: service-specific settings (replicas,
+          resource_limits, autoscaling, validation_enabled,
+          max_request_body_bytes, yaml_max_depth, the central queue worker)
+        - ``job_validation_policy``: shared validation policy
+          (allowed_namespaces, resource_quotas, trusted_registries,
+          trusted_dockerhub_orgs, manifest_security_policy, allowed_kinds).
+          Pulled in verbatim, with no defaults of its own: the stack and the
+          services read the same block, and an omitted trust list falls back
+          to the gco.job_admission defaults inside the services.
 
-        Note: The 'image' field is a placeholder default. In practice, the actual
-        image is built from dockerfiles/Dockerfile.manifest-processor and pushed
-        to ECR during CDK deployment. The {{MANIFEST_PROCESSOR_IMAGE}} placeholder
-        in manifests is replaced with the ECR image URI.
+        There is no image setting: the regional stack builds the image from
+        dockerfiles/Dockerfile.manifest-processor, pushes it to ECR, and
+        replaces the {{MANIFEST_PROCESSOR_IMAGE}} placeholder in the manifests
+        with its URI. A ``manifest_processor.image`` key, which earlier
+        releases required but never read, is reported as deprecated.
         """
         default_config = {
-            "image": "gco/manifest-processor:latest",  # Placeholder, replaced by ECR image
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
             "autoscaling": dict(_MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS),
@@ -2019,34 +2862,12 @@ class ConfigLoader:
             "central_queue_reconcile_limit": 100,
             "central_queue_lease_seconds": 300,
             "central_queue_lease_renewal_seconds": 60,
-            # allowed_namespaces, resource_quotas, trusted_registries,
-            # trusted_dockerhub_orgs, manifest_security_policy, and
-            # allowed_kinds are merged in below from job_validation_policy.
-            "allowed_namespaces": ["gco-jobs"],
-            "resource_quotas": {
-                "max_cpu_per_manifest": "10",
-                "max_memory_per_manifest": "32Gi",
-                "max_gpu_per_manifest": 4,
-            },
-            "trusted_registries": [
-                "docker.io",
-                "gcr.io",
-                "quay.io",
-                "registry.k8s.io",
-                "k8s.gcr.io",
-                "public.ecr.aws",
-                "nvcr.io",
-                "gco",
-            ],
-            "trusted_dockerhub_orgs": [
-                "nvidia",
-                "pytorch",
-                "rayproject",
-                "tensorflow",
-                "huggingface",
-                "amazon",
-                "bitnami",
-            ],
+            # The job_validation_policy keys (allowed_namespaces,
+            # resource_quotas, trusted_registries, ...) are merged in below,
+            # as written: job_validation_policy requires the first two, and the
+            # trust lists' defaults live in gco.job_admission
+            # (DEFAULT_TRUSTED_REGISTRIES / DEFAULT_TRUSTED_DOCKERHUB_ORGS),
+            # which both services apply when the stack renders an empty list.
         }
         context_config = self.app.node.try_get_context("manifest_processor") or {}
 
@@ -2103,11 +2924,11 @@ class ConfigLoader:
             - log_level: CloudWatch logging level (OFF, ERROR, INFO)
             - metrics_enabled: Enable CloudWatch metrics
             - tracing_enabled: Enable X-Ray tracing
-            - regional_api_enabled: In the commercial ``aws`` partition,
-              permit direct same-account callers to use the always-deployed
-              regional API bridges. Other partitions force this access on
-              because the bridges are the supported workload ingress without
-              Global Accelerator. Centralized aggregation always uses them.
+
+            A deprecated ``regional_api_enabled`` key is passed through
+            unread (:data:`DEPRECATED_BLOCK_KEYS`): callers reach the
+            regional API bridges with their own ``execute-api:Invoke``
+            permission whatever it says.
         """
         default_config = {
             "throttle_rate_limit": 1000,
@@ -2115,7 +2936,6 @@ class ConfigLoader:
             "log_level": "INFO",
             "metrics_enabled": True,
             "tracing_enabled": True,
-            "regional_api_enabled": False,
         }
         return {**default_config, **(self.app.node.try_get_context("api_gateway") or {})}
 
@@ -2156,104 +2976,210 @@ class ConfigLoader:
         }
         return {**default_config, **(self.app.node.try_get_context("eks_cluster") or {})}
 
+    #: Keys of the ``fsx_lustre`` block and of each ``fsx_lustre_regions``
+    #: overlay. ``node_group`` is deprecated: accepted for existing files,
+    #: warned about and ignored.
+    FSX_LUSTRE_KEYS = frozenset(
+        {
+            "enabled",
+            "storage_capacity_gib",
+            "deployment_type",
+            "file_system_type_version",
+            "per_unit_storage_throughput",
+            "data_compression_type",
+            "import_path",
+            "export_path",
+            "auto_import_policy",
+            "node_group",
+        }
+    )
+
+    def _validate_fsx_lustre_config(self) -> None:
+        """Validate ``fsx_lustre`` and every ``fsx_lustre_regions`` overlay.
+
+        Resolving the configuration is the validation: the global block is
+        checked on its own and each overlay merged over it, so an error names
+        the block (and Region) that holds the bad value.
+        """
+        self.get_fsx_lustre_config()
+        overlays = _object_or_empty(
+            FSX_LUSTRE_REGIONS_CONTEXT_KEY,
+            self.app.node.try_get_context(FSX_LUSTRE_REGIONS_CONTEXT_KEY),
+        )
+        for region in sorted(overlays):
+            self.get_fsx_lustre_config(str(region))
+
     def get_fsx_lustre_config(self, region: str | None = None) -> dict[str, Any]:
-        """Get FSx for Lustre configuration.
+        """Get the validated FSx for Lustre configuration.
 
         Args:
-            region: Optional region to get config for. If provided, checks for
-                    region-specific overrides first.
+            region: Optional region. When ``fsx_lustre_regions`` has an entry
+                for it, that entry is merged over the global block.
 
         Returns:
             FSx configuration dictionary with the following keys:
-            - enabled: Whether FSx is enabled
-            - storage_capacity_gib: Storage capacity in GiB (min 1200)
-            - deployment_type: SCRATCH_1, SCRATCH_2, PERSISTENT_1, PERSISTENT_2
-            - file_system_type_version: Lustre version (2.12 or 2.15, default: 2.15)
-              IMPORTANT: Use 2.15 for kernel 6.x compatibility (AL2023, Bottlerocket)
-            - per_unit_storage_throughput: Throughput for PERSISTENT types
-            - data_compression_type: LZ4 or NONE
-            - import_path: S3 path for data import
-            - export_path: S3 path for data export
-            - auto_import_policy: NEW, NEW_CHANGED, NEW_CHANGED_DELETED
-            - node_group: Node group configuration for FSx workloads
-              - instance_types: List of instance types
-              - min_size: Minimum nodes (default: 0)
-              - max_size: Maximum nodes (default: 10)
-              - desired_size: Desired nodes (default: 0, scales from zero)
-              - ami_type: AMI type - one of:
-                  AL2023_X86_64_STANDARD (default), AL2023_ARM_64_STANDARD,
-                  AL2023_X86_64_NVIDIA, AL2023_ARM_64_NVIDIA, AL2023_X86_64_NEURON
-              - capacity_type: ON_DEMAND (default) or SPOT
-              - disk_size: Root disk size in GB (default: 100)
-              - labels: Additional node labels (dict)
+            - enabled: Whether FSx is enabled (a real boolean; ``"true"`` /
+              ``"false"`` strings are parsed, anything else is an error)
+            - storage_capacity_gib: Storage capacity in GiB: 1200, 2400, then
+              multiples of 3600 (SCRATCH_1) or 2400 (the other types)
+            - deployment_type: SCRATCH_1, SCRATCH_2 (default), PERSISTENT_1,
+              PERSISTENT_2
+            - file_system_type_version: Lustre version 2.10, 2.12 or 2.15
+              (default 2.15, which kernel 6.x clients such as AL2023 and
+              Bottlerocket need; PERSISTENT_2 does not support 2.10)
+            - per_unit_storage_throughput: MB/s per TiB for the PERSISTENT
+              types (PERSISTENT_1: 50, 100 or 200, default 200;
+              PERSISTENT_2: 125, 250, 500 or 1000, default 250); ``None`` for
+              the SCRATCH types, which take no throughput setting (a
+              configured value is ignored for them)
+            - data_compression_type: LZ4 (default) or NONE
+            - import_path: S3 path (``s3://...``) for data import, or None
+            - export_path: S3 path for data export in the import bucket, or None
+            - auto_import_policy: NONE, NEW, NEW_CHANGED or NEW_CHANGED_DELETED
+              (default), used only with an import path
+
+        FSx workloads run on the EKS Auto Mode node pools, so there is no
+        node-group setting: a ``node_group`` key, which earlier releases
+        documented but never read, is reported as deprecated and ignored.
+
+        Raises:
+            ConfigValidationError: If a block is not an object, names an
+                unknown key, or holds a value FSx for Lustre rejects.
         """
-        default_config = {
-            "enabled": False,
-            "storage_capacity_gib": 1200,
-            "deployment_type": "SCRATCH_2",
-            "file_system_type_version": "2.15",  # Use 2.15 for kernel 6.x compatibility
-            "per_unit_storage_throughput": 200,
-            "data_compression_type": "LZ4",
-            "import_path": None,
-            "export_path": None,
-            "auto_import_policy": "NEW_CHANGED_DELETED",
-            "node_group": {
-                "instance_types": ["m5.large", "m5.xlarge", "m6i.large", "m6i.xlarge"],
-                "min_size": 0,
-                "max_size": 10,
-                "desired_size": 1,
-                "ami_type": "AL2023_X86_64_STANDARD",
-                "capacity_type": "ON_DEMAND",
-                "disk_size": 100,
-                "labels": {},
-            },
-        }
+        global_path = FSX_LUSTRE_CONTEXT_KEY
+        global_block = _object_or_empty(
+            global_path, self.app.node.try_get_context(FSX_LUSTRE_CONTEXT_KEY)
+        )
+        _check_block_keys(global_path, global_block, self.FSX_LUSTRE_KEYS)
+        # Which block set each key, so an error names the value's own path.
+        sources = dict.fromkeys(global_block, global_path)
+        merged: dict[str, Any] = {**FSX_LUSTRE_DEFAULTS, **global_block}
+        self._warn_fsx_node_group(global_path, global_block)
 
-        # Get global FSx config
-        global_ctx = self.app.node.try_get_context("fsx_lustre")
-        global_config: dict[str, Any] = global_ctx if isinstance(global_ctx, dict) else {}
-        merged_config: dict[str, Any] = {**default_config, **global_config}
-
-        # Ensure node_group has all required fields with defaults
-        if "node_group" in global_config:
-            global_node_group = global_config["node_group"]
-            if isinstance(global_node_group, dict):
-                default_node_group = cast(dict[str, Any], default_config["node_group"])
-                merged_config["node_group"] = {
-                    **default_node_group,
-                    **global_node_group,
-                }
-
-        # Check for region-specific override
         if region:
-            region_overrides_ctx = self.app.node.try_get_context("fsx_lustre_regions")
-            region_overrides: dict[str, Any] = (
-                region_overrides_ctx if isinstance(region_overrides_ctx, dict) else {}
+            overlays = _object_or_empty(
+                FSX_LUSTRE_REGIONS_CONTEXT_KEY,
+                self.app.node.try_get_context(FSX_LUSTRE_REGIONS_CONTEXT_KEY),
             )
-            if region in region_overrides:
-                region_config = region_overrides[region]
-                if isinstance(region_config, dict):
-                    # Preserve the fully merged default/global node group before
-                    # the top-level regional overlay replaces that nested value.
-                    # A regional node_group is a patch, not a wholesale reset.
-                    existing_node_group = merged_config.get("node_group")
-                    merged_config = {**merged_config, **region_config}
-                    # Handle nested node_group override
-                    if "node_group" in region_config:
-                        region_node_group = region_config["node_group"]
-                        if isinstance(region_node_group, dict):
-                            if isinstance(existing_node_group, dict):
-                                base_node_group = existing_node_group
-                            else:
-                                base_node_group = cast(dict[str, Any], default_config["node_group"])
-                            merged_config["node_group"] = {
-                                **base_node_group,
-                                **region_node_group,
-                            }
+            if region in overlays:
+                overlay_path = f"{FSX_LUSTRE_REGIONS_CONTEXT_KEY}.{region}"
+                overlay = _object_or_empty(overlay_path, overlays[region])
+                _check_block_keys(overlay_path, overlay, self.FSX_LUSTRE_KEYS)
+                sources.update(dict.fromkeys(overlay, overlay_path))
+                merged.update(overlay)
+                self._warn_fsx_node_group(overlay_path, overlay)
 
+        def path_of(key: str) -> str:
+            return f"{sources.get(key, global_path)}.{key}"
+
+        resolved = self._resolve_fsx_lustre(merged, path_of, self._warn)
         if self._feature_override_enabled("fsx_lustre"):
-            merged_config["enabled"] = True
-        return merged_config
+            resolved["enabled"] = True
+        return resolved
+
+    def _warn_fsx_node_group(self, path: str, block: Mapping[str, Any]) -> None:
+        """Report a deprecated ``node_group`` key in an FSx block (it is ignored)."""
+        if "node_group" in block:
+            self._warn(
+                f"{path}.node_group is deprecated and ignored: FSx workloads run on the "
+                "EKS Auto Mode node pools and nothing reads it. Remove it from cdk.json."
+            )
+
+    @staticmethod
+    def _resolve_fsx_lustre(
+        merged: Mapping[str, Any],
+        path_of: Callable[[str], str],
+        warn: Callable[[str], None],
+    ) -> dict[str, Any]:
+        """Validate one merged FSx block and return it normalized.
+
+        ``path_of(key)`` is the full cdk.json path of the value ``merged[key]``
+        came from; ``warn`` receives the deprecation warnings.
+        """
+        enabled = parse_block_flag(
+            merged["enabled"],
+            path_of("enabled"),
+            warn,
+            off_deletes="the FSx for Lustre file system and the data on it",
+        )
+        deployment_type = _require_choice(
+            path_of("deployment_type"), merged["deployment_type"], FSX_DEPLOYMENT_TYPES
+        )
+        capacity = _require_int(
+            path_of("storage_capacity_gib"), merged["storage_capacity_gib"], minimum=1200
+        )
+        if not valid_storage_capacity(deployment_type, capacity):
+            increment = FSX_CAPACITY_INCREMENT_GIB[deployment_type]
+            raise ConfigValidationError(
+                f"{path_of('storage_capacity_gib')} must be 1200, 2400 or a multiple of "
+                f"{increment} GiB for {deployment_type}, got {capacity}"
+            )
+        version = _require_choice(
+            path_of("file_system_type_version"),
+            merged["file_system_type_version"],
+            FSX_FILE_SYSTEM_TYPE_VERSIONS,
+        )
+        if deployment_type == "PERSISTENT_2" and version == "2.10":
+            raise ConfigValidationError(
+                f"{path_of('file_system_type_version')} 2.10 is not supported by "
+                "PERSISTENT_2; use 2.12 or 2.15"
+            )
+        throughput: int | None = None
+        choices = FSX_THROUGHPUT_CHOICES.get(deployment_type)
+        if choices is not None:
+            configured = merged["per_unit_storage_throughput"]
+            if configured is None:
+                throughput = default_per_unit_storage_throughput(deployment_type)
+            elif type(configured) is not int or configured not in choices:
+                raise ConfigValidationError(
+                    f"{path_of('per_unit_storage_throughput')} must be one of "
+                    f"{', '.join(str(choice) for choice in choices)} (MB/s per TiB) for "
+                    f"{deployment_type}, got {configured!r}"
+                )
+            else:
+                throughput = configured
+        compression = _require_choice(
+            path_of("data_compression_type"),
+            merged["data_compression_type"],
+            FSX_DATA_COMPRESSION_TYPES,
+        )
+        paths: dict[str, str | None] = {}
+        for key in ("import_path", "export_path"):
+            value = merged[key]
+            if value is not None and (
+                not isinstance(value, str) or not value.startswith("s3://") or len(value) < 6
+            ):
+                raise ConfigValidationError(
+                    f"{path_of(key)} must be an S3 URI (s3://bucket[/prefix]) or null, "
+                    f"got {value!r}"
+                )
+            paths[key] = value
+        if paths["export_path"] is not None:
+            export_bucket = paths["export_path"][5:].split("/", 1)[0]
+            if paths["import_path"] is None:
+                raise ConfigValidationError(
+                    f"{path_of('export_path')} needs an import_path: FSx exports to the "
+                    "bucket it imports from"
+                )
+            if paths["import_path"][5:].split("/", 1)[0] != export_bucket:
+                raise ConfigValidationError(
+                    f"{path_of('export_path')} must use the import_path bucket, got "
+                    f"{paths['export_path']!r} for import_path {paths['import_path']!r}"
+                )
+        auto_import_policy = _require_choice(
+            path_of("auto_import_policy"), merged["auto_import_policy"], FSX_AUTO_IMPORT_POLICIES
+        )
+        return {
+            "enabled": enabled,
+            "storage_capacity_gib": capacity,
+            "deployment_type": deployment_type,
+            "file_system_type_version": version,
+            "per_unit_storage_throughput": throughput,
+            "data_compression_type": compression,
+            "import_path": paths["import_path"],
+            "export_path": paths["export_path"],
+            "auto_import_policy": auto_import_policy,
+        }
 
     def _feature_override_enabled(self, feature_key: str) -> bool:
         """True when ``feature_enabled_overrides`` context forces this feature on."""
@@ -2263,52 +3189,112 @@ class ConfigLoader:
         return feature_key in overrides
 
     def get_valkey_config(self) -> dict[str, Any]:
-        """Get Valkey Serverless cache configuration.
+        """Get the validated Valkey Serverless cache configuration.
 
         Returns:
             Valkey configuration dictionary with the following keys:
             - enabled: Whether Valkey cache is enabled (default: False)
-            - max_data_storage_gb: Maximum data storage in GB (default: 5)
-            - max_ecpu_per_second: Maximum ECPUs per second (default: 5000)
-            - snapshot_retention_limit: Daily snapshots to retain (default: 1)
+            - max_data_storage_gb: Maximum data storage in GB, an integer of
+              at least 1, the cache's minimum (default: 5)
+            - max_ecpu_per_second: Maximum ECPUs per second, an integer of at
+              least 1000, the cache's minimum (default: 5000)
+            - snapshot_retention_limit: Daily snapshots to retain, an integer
+              of at least 0 (default: 1)
+
+        Raises:
+            ConfigValidationError: If the block is malformed.
         """
-        default_config: dict[str, Any] = {
-            "enabled": False,
-            "max_data_storage_gb": 5,
-            "max_ecpu_per_second": 5000,
-            "snapshot_retention_limit": 1,
+        path = "valkey"
+        block = _object_or_empty(path, self.app.node.try_get_context("valkey"))
+        _check_block_keys(path, block, _VALKEY_DEFAULTS)
+        merged = {**_VALKEY_DEFAULTS, **block}
+        resolved: dict[str, Any] = {
+            "enabled": parse_block_flag(
+                merged["enabled"],
+                f"{path}.enabled",
+                self._warn,
+                off_deletes="the Valkey cache and the data in it",
+            ),
+            "max_data_storage_gb": _require_int(
+                f"{path}.max_data_storage_gb", merged["max_data_storage_gb"], minimum=1
+            ),
+            "max_ecpu_per_second": _require_int(
+                f"{path}.max_ecpu_per_second", merged["max_ecpu_per_second"], minimum=1000
+            ),
+            "snapshot_retention_limit": _require_int(
+                f"{path}.snapshot_retention_limit", merged["snapshot_retention_limit"], minimum=0
+            ),
         }
-        valkey_ctx = self.app.node.try_get_context("valkey")
-        valkey_config: dict[str, Any] = valkey_ctx if isinstance(valkey_ctx, dict) else {}
-        merged = {**default_config, **valkey_config}
         if self._feature_override_enabled("valkey"):
-            merged["enabled"] = True
-        return merged
+            resolved["enabled"] = True
+        return resolved
 
     def get_aurora_pgvector_config(self) -> dict[str, Any]:
-        """Get Aurora Serverless v2 + pgvector vector database configuration.
+        """Get the validated Aurora Serverless v2 + pgvector configuration.
 
         Returns:
             Aurora pgvector configuration dictionary with the following keys:
             - enabled: Whether Aurora pgvector is enabled (default: False)
-            - min_acu: Minimum Aurora Capacity Units (default: 0, scales to zero)
-            - max_acu: Maximum Aurora Capacity Units (default: 16)
-            - backup_retention_days: Number of days to retain automated backups (default: 7)
-            - deletion_protection: Whether deletion protection is enabled (default: False)
+            - min_acu: Minimum Aurora Capacity Units, 0-256 in steps of 0.5
+              (default: 0, scales to zero)
+            - max_acu: Maximum Aurora Capacity Units, 1-256 in steps of 0.5
+              and at least min_acu (default: 16)
+            - backup_retention_days: Days to retain automated backups, 1-35
+              (default: 7)
+            - deletion_protection: Whether deletion protection is enabled
+              (default: False)
+
+        Raises:
+            ConfigValidationError: If the block is malformed.
         """
-        default_config: dict[str, Any] = {
-            "enabled": False,
-            "min_acu": 0,
-            "max_acu": 16,
-            "backup_retention_days": 7,
-            "deletion_protection": False,
+        path = "aurora_pgvector"
+        block = _object_or_empty(path, self.app.node.try_get_context("aurora_pgvector"))
+        _check_block_keys(path, block, _AURORA_PGVECTOR_DEFAULTS)
+        merged = {**_AURORA_PGVECTOR_DEFAULTS, **block}
+        capacities: dict[str, float] = {}
+        for key, minimum in (("min_acu", 0), ("max_acu", 1)):
+            value = merged[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not minimum <= value <= 256
+                or (value * 2) % 1 != 0
+            ):
+                raise ConfigValidationError(
+                    f"{path}.{key} must be a number from {minimum} to 256 in steps of 0.5 "
+                    f"(Aurora Serverless v2 capacity units), got {value!r}"
+                )
+            capacities[key] = value
+        if capacities["max_acu"] < capacities["min_acu"]:
+            raise ConfigValidationError(
+                f"{path}.max_acu ({merged['max_acu']}) must be at least "
+                f"{path}.min_acu ({merged['min_acu']})"
+            )
+        resolved: dict[str, Any] = {
+            "enabled": parse_block_flag(
+                merged["enabled"],
+                f"{path}.enabled",
+                self._warn,
+                off_deletes="the Aurora pgvector cluster and its data",
+            ),
+            "min_acu": merged["min_acu"],
+            "max_acu": merged["max_acu"],
+            "backup_retention_days": _require_int(
+                f"{path}.backup_retention_days", merged["backup_retention_days"], 1, 35
+            ),
+            # Earlier releases passed this value to the CDK construct as it
+            # was, and a string failed the synth there; nothing has been
+            # running on a string.
+            "deletion_protection": parse_block_flag(
+                merged["deletion_protection"],
+                f"{path}.deletion_protection",
+                self._warn,
+                read_by_truthiness=False,
+            ),
         }
-        aurora_ctx = self.app.node.try_get_context("aurora_pgvector")
-        aurora_config: dict[str, Any] = aurora_ctx if isinstance(aurora_ctx, dict) else {}
-        merged = {**default_config, **aurora_config}
         if self._feature_override_enabled("aurora_pgvector"):
-            merged["enabled"] = True
-        return merged
+            resolved["enabled"] = True
+        return resolved
 
     def get_analytics_config(self) -> dict[str, Any]:
         """Get optional analytics environment configuration.
@@ -2317,9 +3303,7 @@ class ConfigLoader:
         layered on top of the defaults below. Sub-blocks (``hyperpod``,
         ``cognito``, ``efs``, ``studio``) are deep-merged so a user who
         overrides a single nested key (e.g. ``cognito.domain_prefix``) does
-        not inadvertently wipe the sub-block's other defaults — mirroring the
-        nested-merge pattern used by ``get_fsx_lustre_config`` for its
-        ``node_group`` sub-block.
+        not inadvertently wipe the sub-block's other defaults.
 
         Returns:
             Analytics configuration dictionary with the following keys:
@@ -2444,7 +3428,25 @@ class ConfigLoader:
                 default_sub = cast(dict[str, Any], default_config[sub_block])
                 merged_config[sub_block] = {**default_sub, **override}
 
+        # Resolved before the validators run (the Slurm check asks whether
+        # observability is on), so the mlflow sub-block's shape is checked
+        # here rather than read through a scalar.
+        mlflow = {
+            **cast(dict[str, Any], default_config["mlflow"]),
+            **_object_or_empty("cluster_observability.mlflow", obs_config.get("mlflow")),
+        }
+        mlflow["enabled"] = self._parse_mlflow_enabled(mlflow["enabled"])
+        merged_config["mlflow"] = mlflow
         return merged_config
+
+    def _parse_mlflow_enabled(self, value: object) -> bool:
+        """Parse ``cluster_observability.mlflow.enabled`` (see :func:`parse_block_flag`)."""
+        return parse_block_flag(
+            value,
+            "cluster_observability.mlflow.enabled",
+            self._warn,
+            off_deletes="the MLflow tracking server and its run-metadata volume",
+        )
 
     def get_cluster_observability_enabled(self) -> bool:
         """Return whether in-cluster observability is enabled (default True).
@@ -2790,6 +3792,10 @@ class ConfigLoader:
         vector_store_ctx = self.app.node.try_get_context("vector_store")
         vector_store_config = vector_store_ctx if isinstance(vector_store_ctx, dict) else {}
         merged = {**default_config, **vector_store_config}
+        # The validator checks the stripped id, so every consumer (IAM
+        # resources, the ingest Lambda's environment, the job config) gets
+        # the same stripped value, as gco.bedrock does for its own ids.
+        merged["embedding_model_id"] = str(merged["embedding_model_id"]).strip()
         if self._feature_override_enabled("vector_store"):
             merged["enabled"] = True
         return merged

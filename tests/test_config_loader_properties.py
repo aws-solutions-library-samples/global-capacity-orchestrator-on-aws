@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from gco.config.config_loader import ConfigLoader, ConfigValidationError
@@ -34,6 +34,7 @@ from gco.inference_proxy_config import (
     INFERENCE_PROXY_MAX_REPLICAS_DEFAULT,
     INFERENCE_PROXY_MIN_REPLICAS_DEFAULT,
 )
+from gco.unauthenticated_paths import UNAUTHENTICATED_PATHS
 from tests.test_config_loader import MockApp
 
 _BASE_CONTEXT: dict[str, Any] = json.loads(
@@ -229,9 +230,16 @@ class TestGlobalAcceleratorProperties:
     @given(
         interval=st.sampled_from([10, 30]),
         threshold=st.integers(min_value=1, max_value=10),
-        path=st.text(
-            alphabet="abcdefghijklmnopqrstuvwxyz0123456789/-", min_size=0, max_size=20
-        ).map(lambda s: "/" + s),
+        # A path the services answer without authentication, with or without
+        # a query string (the middleware matches the path alone).
+        path=st.sampled_from(sorted(UNAUTHENTICATED_PATHS)).flatmap(
+            lambda base: st.one_of(
+                st.just(base),
+                st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789=&", max_size=12).map(
+                    lambda query: f"{base}?{query}"
+                ),
+            )
+        ),
         affinity=st.one_of(_mixed_case("none"), _mixed_case("source_ip")),
     )
     def test_valid_health_check_contracts_are_accepted(
@@ -253,6 +261,18 @@ class TestGlobalAcceleratorProperties:
         # The dial sub-block's defaults survive an override that never
         # mentions it.
         assert merged["traffic_dial"]["enabled"] is False
+
+    @settings(max_examples=40, deadline=None)
+    @given(
+        path=st.text(
+            alphabet="abcdefghijklmnopqrstuvwxyz0123456789/-", min_size=0, max_size=20
+        ).map(lambda s: "/" + s)
+    )
+    def test_a_path_that_needs_authentication_fails(self, path: str) -> None:
+        assume(path not in UNAUTHENTICATED_PATHS)
+        context = _context_with("global_accelerator", {"health_check_path": path})
+        with pytest.raises(ConfigValidationError, match="needs request authentication"):
+            ConfigLoader(MockApp(context))
 
     @settings(max_examples=40, deadline=None)
     @given(interval=st.integers(min_value=-100, max_value=200))

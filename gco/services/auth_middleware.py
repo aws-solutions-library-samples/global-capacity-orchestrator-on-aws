@@ -45,9 +45,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
+# Re-exported: callers and tests import the set from this module.
+from gco.unauthenticated_paths import UNAUTHENTICATED_PATHS as UNAUTHENTICATED_PATHS
+
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-28T07:34:51Z
-# Generated from Git commit: 95213a3dfe214f41ea8e3977b79711b1be061ac0
+# Generated at (UTC): 2026-11-19T00:26:15Z
+# Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03
 # Flowchart(s) generated from this file:
 #   * ``AuthenticationMiddleware.dispatch`` -> ``diagrams/code_diagrams/gco/services/auth_middleware.AuthenticationMiddleware_dispatch.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/auth_middleware.AuthenticationMiddleware_dispatch.png``)
@@ -92,9 +95,8 @@ SIGNATURE_MAX_AGE_SECONDS = _bounded_env_float("AUTH_SIGNATURE_MAX_AGE_SECONDS",
 _MAX_TRACKED_NONCES = 10_000
 
 # Endpoints that bypass authentication (health checks for load balancers and
-# Global Accelerator). /api/v1/health is included so GA can perform HTTP
-# health checks for intelligent routing without an HMAC envelope.
-UNAUTHENTICATED_PATHS = frozenset(["/healthz", "/readyz", "/metrics", "/api/v1/health"])
+# Global Accelerator) live in the FastAPI-free gco/unauthenticated_paths.py,
+# which ConfigLoader also reads; the name stays importable from here.
 
 
 def get_secrets_client() -> Any:

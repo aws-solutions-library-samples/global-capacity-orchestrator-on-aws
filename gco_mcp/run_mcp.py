@@ -70,6 +70,7 @@ from audit import (  # noqa: E402, F401
     _sanitize_arguments,
     audit_logged,
     audit_logger,
+    configure_audit_logging,
     emit_startup_log,
 )
 from iam import assume_mcp_role  # noqa: E402
@@ -78,6 +79,14 @@ from version import get_project_version  # noqa: E402
 
 # Re-export the project version for tests that check run_mcp._PROJECT_VERSION
 _PROJECT_VERSION = get_project_version()
+
+# Mission's global-stack resources (state table, memory index) are named after
+# cdk.json's project and live in its global Region. Read that cdk.json from the
+# root every gco child runs from, not from the server's working directory.
+import cli_runner as _cli_runner  # noqa: E402
+from mission import deployment as _mission_deployment  # noqa: E402
+
+_mission_deployment.configure(project_root=_cli_runner.PROJECT_ROOT)
 
 # --- Register all tools and resources ---
 
@@ -192,7 +201,6 @@ from tools.inference import (  # noqa: E402, F401
     list_endpoint_models,
     list_inference_endpoints,
     mooncake_topology_status,
-    populate_kv_cache,
     promote_canary,
     remove_inference_region,
     rollback_canary,
@@ -337,7 +345,7 @@ with _contextlib.suppress(ImportError):
     from tools.jobs import delete_job
 
 with _contextlib.suppress(ImportError):
-    from tools.inference import delete_inference
+    from tools.inference import delete_inference  # noqa: F401
 
 with _contextlib.suppress(ImportError):
     from tools.templates import delete_template  # noqa: F401
@@ -373,6 +381,9 @@ with _contextlib.suppress(ImportError):
 
 with _contextlib.suppress(ImportError):
     from tools.storage import upload_to_regional_bucket  # noqa: F401
+
+with _contextlib.suppress(ImportError):
+    from tools.inference import populate_kv_cache  # noqa: F401
 
 # Local-metrics, local-storage, semantic-progress, and Mission tools also use
 # import-time gates. The imports are no-ops when disabled; the explicit reload
@@ -494,11 +505,6 @@ if _IS_RELOAD and _DESTRUCTIVE_FLAG_ON:
     _importlib.reload(_jobs_mod)
     delete_job = _jobs_mod.delete_job
 
-    from tools import inference as _inf_mod
-
-    _importlib.reload(_inf_mod)
-    delete_inference = _inf_mod.delete_inference
-
     from tools import templates as _tpl_mod
 
     _importlib.reload(_tpl_mod)
@@ -539,10 +545,18 @@ if _IS_RELOAD and _DESTRUCTIVE_FLAG_ON:
     _importlib.reload(_slurm_mod)
     globals()["slurm_cancel"] = _slurm_mod.slurm_cancel
 
-# tools.models is reloaded if either the destructive flag (delete_model)
-# or the model-upload flag (models_upload) is set, so do it once here
-# regardless of which (or both) flipped.
+# tools.models and tools.inference each hold one destructive tool
+# (delete_model / delete_inference) and one model-upload tool (models_upload /
+# populate_kv_cache), so reload each once here regardless of which (or both)
+# flipped.
 if _IS_RELOAD and (_DESTRUCTIVE_FLAG_ON or _MODEL_UPLOAD_FLAG_ON):
+    from tools import inference as _inf_mod
+
+    _importlib.reload(_inf_mod)
+    for _name in ("delete_inference", "populate_kv_cache"):
+        if hasattr(_inf_mod, _name):
+            globals()[_name] = getattr(_inf_mod, _name)
+
     from tools import models as _models_mod
 
     _importlib.reload(_models_mod)
@@ -675,6 +689,7 @@ _PUBLIC_EXPORTS = [
     "cluster_health",
     "cluster_tunnel_command",
     "config_get",
+    "configure_audit_logging",
     "configure_mooncake_store",
     "cost_allocation_activate",
     "cost_allocation_status",
@@ -881,13 +896,31 @@ __all__ = [
 # =============================================================================
 
 
+def _configure_project_root() -> None:
+    """Make in-process CLI code read cdk.json from the root the gco children use.
+
+    The images tools and resources, the gco:// cluster context and the stack
+    progress totals build the CLI's configuration in this process, which
+    read cdk.json from the server's working directory: with
+    ``GCO_PROJECT_ROOT`` pointing elsewhere they used project ``gco`` and the
+    default Regions.
+    """
+    from cli.config import set_project_root
+
+    set_project_root(_cli_runner.PROJECT_ROOT)
+
+
 def _initialize_runtime() -> None:
     """Perform external startup effects exactly once per process invocation.
 
     Importing ``run_mcp`` is now safe for documentation tooling and tests: it
-    does not emit a startup audit record or mutate the ambient boto3 session by
-    assuming a role. Those effects happen only when the server is actually run.
+    does not attach the audit output handler, emit a startup audit record or
+    mutate the ambient boto3 session by assuming a role. Those effects happen
+    only when the server is actually run. The handler comes first so the
+    startup and role-assumption records are written.
     """
+    configure_audit_logging()
+    _configure_project_root()
     emit_startup_log()
     assume_mcp_role()
 

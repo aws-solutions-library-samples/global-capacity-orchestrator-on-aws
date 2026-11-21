@@ -4,11 +4,14 @@ Tests for Grafana admin credential rotation (cluster observability).
 Covers two things:
 
 1. ``gco/services/grafana_rotator.py`` — the rotation logic that reads the
-   current admin credential from the chart-generated Secret, resets the live
-   password through Grafana's admin HTTP API, then patches the Secret. The
-   Kubernetes client and ``requests`` are mocked so no cluster or network is
-   touched; the tests assert the API contract (URLs, basic auth, body) and that
-   the value written back to the Secret is exactly the one the API was reset to.
+   current admin credential from the chart-generated Secret, stages the new
+   password in it, resets the live password through Grafana's admin HTTP API,
+   then moves the new value into ``admin-password``. The Kubernetes client and
+   ``requests`` are mocked so no cluster or network is touched; the tests
+   assert the API contract (URLs, basic auth, body), that the value written
+   back to the Secret is exactly the one the API was reset to, and, against a
+   stateful fake Secret and Grafana, that a failure at any step leaves the
+   Secret holding the password Grafana accepts and the next run settles it.
 
 2. ``lambda/kubectl-applier-simple/manifests/post-helm-grafana-credential-rotation.yaml``
    — the gated CronJob + least-privilege RBAC that runs the rotator on a
@@ -22,6 +25,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 import yaml
+from kubernetes.client.exceptions import ApiException
 
 from gco.services import grafana_rotator
 
@@ -153,6 +157,146 @@ class TestRotatorUnits:
         ):
             assert grafana_rotator.main() == 0
         mock_rotate.assert_called_once()
+
+
+class FakeSecretApi:
+    """The Grafana Secret with merge-patch semantics (a ``None`` value deletes the key)."""
+
+    def __init__(self, password: str) -> None:
+        self.data = {
+            "admin-user": base64.b64encode(b"admin").decode(),
+            "admin-password": base64.b64encode(password.encode()).decode(),
+        }
+        self.patch_failures: list[bool] = []  # one entry per patch call; True fails it
+
+    def read_namespaced_secret(self, name: str, namespace: str) -> MagicMock:
+        return MagicMock(data=dict(self.data))
+
+    def patch_namespaced_secret(self, name: str, namespace: str, body: dict) -> None:
+        if self.patch_failures and self.patch_failures.pop(0):
+            raise ApiException(status=500, reason="etcdserver: request timed out")
+        for key, value in body["data"].items():
+            if value is None:
+                self.data.pop(key, None)
+            else:
+                self.data[key] = value
+
+    def password(self, key: str = "admin-password") -> str | None:
+        value = self.data.get(key)
+        return base64.b64decode(value).decode() if value else None
+
+
+class FakeGrafana:
+    """Grafana's admin API: GET /api/user authenticates, PUT resets the password."""
+
+    def __init__(self, password: str) -> None:
+        self.password = password
+        self.lose_reset_response = False
+
+    def get(self, url: str, auth: tuple[str, str], timeout: int, verify: object) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = 200 if auth[1] == self.password else 401
+        if resp.status_code == 401:
+            resp.raise_for_status.side_effect = requests.HTTPError("401 Unauthorized")
+        resp.json.return_value = {"id": 1}
+        return resp
+
+    def put(self, url: str, auth: tuple[str, str], json: dict, timeout: int, verify: object):
+        if auth[1] != self.password:
+            raise requests.HTTPError("401 Unauthorized")
+        self.password = json["password"]
+        if self.lose_reset_response:
+            raise requests.ConnectionError("connection reset after the request was sent")
+        return MagicMock()
+
+
+@pytest.fixture
+def grafana():
+    live = FakeGrafana("old-password")
+    with (
+        patch.object(grafana_rotator.requests, "get", live.get),
+        patch.object(grafana_rotator.requests, "put", live.put),
+        patch.object(grafana_rotator.time, "sleep") as sleep,
+    ):
+        live.sleep = sleep
+        yield live
+
+
+class TestRotationNeverLosesThePassword:
+    """Every failure leaves the Secret holding the password Grafana accepts."""
+
+    def test_a_failed_final_write_is_finished_by_the_next_run(self, grafana) -> None:
+        core = FakeSecretApi("old-password")
+        core.patch_failures = [False, True, True, True]  # stage ok, every promotion fails
+
+        with pytest.raises(ApiException):
+            grafana_rotator.rotate(core, NAMESPACE, SECRET_NAME, SERVICE_URL)
+
+        # Grafana moved on; the Secret still has the live password, staged.
+        assert grafana.password != "old-password"
+        assert core.password("admin-password-pending") == grafana.password
+        assert grafana.sleep.call_count == 2
+
+        grafana_rotator.rotate(core, NAMESPACE, SECRET_NAME, SERVICE_URL)
+
+        assert core.password() == grafana.password
+        assert "admin-password-pending" not in core.data
+
+    def test_a_transient_final_write_failure_is_retried(self, grafana) -> None:
+        core = FakeSecretApi("old-password")
+        core.patch_failures = [False, True, False]
+
+        grafana_rotator.rotate(core, NAMESPACE, SECRET_NAME, SERVICE_URL)
+
+        assert core.password() == grafana.password != "old-password"
+        assert "admin-password-pending" not in core.data
+
+    def test_a_reset_whose_response_is_lost_is_settled_in_the_same_run(self, grafana) -> None:
+        core = FakeSecretApi("old-password")
+        grafana.lose_reset_response = True
+
+        with pytest.raises(requests.ConnectionError):
+            grafana_rotator.rotate(core, NAMESPACE, SECRET_NAME, SERVICE_URL)
+
+        assert core.password() == grafana.password != "old-password"
+        assert "admin-password-pending" not in core.data
+
+    def test_a_reset_that_never_applied_discards_the_staged_password(self, grafana) -> None:
+        core = FakeSecretApi("old-password")
+        with (
+            patch.object(
+                grafana_rotator.requests, "put", side_effect=requests.ConnectionError("refused")
+            ),
+            pytest.raises(requests.ConnectionError),
+        ):
+            grafana_rotator.rotate(core, NAMESPACE, SECRET_NAME, SERVICE_URL)
+
+        assert core.password() == grafana.password == "old-password"
+        assert "admin-password-pending" not in core.data
+
+    def test_a_failed_staging_write_leaves_grafana_untouched(self, grafana) -> None:
+        core = FakeSecretApi("old-password")
+        core.patch_failures = [True]
+
+        with pytest.raises(ApiException):
+            grafana_rotator.rotate(core, NAMESPACE, SECRET_NAME, SERVICE_URL)
+
+        assert grafana.password == "old-password" == core.password()
+
+    def test_neither_password_working_fails_without_changing_anything(self, grafana) -> None:
+        core = FakeSecretApi("stale-password")
+        core.data["admin-password-pending"] = base64.b64encode(b"other-stale").decode()
+
+        with pytest.raises(grafana_rotator.RotationStateError, match="reset the admin password"):
+            grafana_rotator.rotate(core, NAMESPACE, SECRET_NAME, SERVICE_URL)
+        with (
+            patch.object(grafana_rotator.config, "load_incluster_config"),
+            patch.object(grafana_rotator.client, "CoreV1Api", return_value=core),
+        ):
+            assert grafana_rotator.main() == 1
+
+        assert grafana.password == "old-password"
+        assert core.password() == "stale-password"
 
 
 # ---------------------------------------------------------------------------

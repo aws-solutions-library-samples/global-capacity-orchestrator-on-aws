@@ -3,9 +3,10 @@
 Covers:
 - Create/Update events are no-ops (return SUCCESS immediately)
 - Delete event deletes all user profiles from the domain
-- Delete event deletes all EFS access points
-- Errors during deletion are logged but don't fail the custom resource
-  (always returns SUCCESS so stack destroy isn't blocked)
+- Delete event deletes every access point on the Studio EFS, after its
+  resource policy is removed (EFS requires them gone before DeleteFileSystem)
+- App, space and user-profile drain failures fail the custom resource;
+  EFS and security-group errors are logged and the handler returns SUCCESS
 - Delete event drains apps and spaces (skipping already-terminal ones,
   tolerating "does not exist" races, reporting timeouts)
 - Optional EFS-policy / security-group steps are skipped when EFS_ID /
@@ -96,6 +97,7 @@ class TestHandler:
         result = handler({"RequestType": "Update"}, None)
         assert result["Status"] == "SUCCESS"
 
+    @patch("analytics_cleanup_handler._delete_access_points", return_value=[])
     @patch("analytics_cleanup_handler._delete_sagemaker_security_groups", return_value=[])
     @patch("analytics_cleanup_handler._delete_sagemaker_managed_efs", return_value=[])
     @patch("analytics_cleanup_handler._get_sagemaker_home_efs_id", return_value="fs-sm-123")
@@ -112,14 +114,17 @@ class TestHandler:
         mock_get_sm_efs,
         mock_efs,
         mock_sgs,
+        mock_access_points,
     ):
         result = handler({"RequestType": "Delete"}, None)
         assert result["Status"] == "SUCCESS"
         mock_apps.assert_called_once_with("us-east-2", "d-test123")
         mock_spaces.assert_called_once_with("us-east-2", "d-test123")
         mock_profiles.assert_called_once_with("us-east-2", "d-test123")
+        mock_access_points.assert_called_once_with("us-east-2", "fs-abc123")
         mock_efs.assert_called_once_with("us-east-2", "d-test123")
 
+    @patch("analytics_cleanup_handler._delete_access_points", return_value=[])
     @patch("analytics_cleanup_handler._delete_sagemaker_security_groups", return_value=["err0"])
     @patch("analytics_cleanup_handler._delete_sagemaker_managed_efs", return_value=[])
     @patch("analytics_cleanup_handler._get_sagemaker_home_efs_id", return_value="")
@@ -136,6 +141,7 @@ class TestHandler:
         mock_get_sm_efs,
         mock_efs,
         mock_sgs,
+        mock_access_points,
     ):
         """Errors draining apps/spaces/user-profiles must fail the custom
         resource so CloudFormation doesn't proceed to a guaranteed-fail
@@ -144,6 +150,7 @@ class TestHandler:
         with pytest.raises(RuntimeError, match="Analytics cleanup failed"):
             handler({"RequestType": "Delete"}, None)
 
+    @patch("analytics_cleanup_handler._delete_access_points", return_value=["fsap-err"])
     @patch("analytics_cleanup_handler._delete_sagemaker_security_groups", return_value=["sg-err"])
     @patch("analytics_cleanup_handler._delete_sagemaker_managed_efs", return_value=["efs-err"])
     @patch("analytics_cleanup_handler._get_sagemaker_home_efs_id", return_value="")
@@ -160,13 +167,16 @@ class TestHandler:
         mock_get_sm_efs,
         mock_efs,
         mock_sgs,
+        mock_access_points,
     ):
-        """EFS and SG cleanup errors are best-effort and must not block the
-        domain delete — they're logged but the handler still returns SUCCESS.
+        """EFS, access-point and SG cleanup errors are best-effort and must not
+        block the domain delete — they're logged but the handler still returns
+        SUCCESS.
         """
         result = handler({"RequestType": "Delete"}, None)
         assert result["Status"] == "SUCCESS"
 
+    @patch("analytics_cleanup_handler._delete_access_points", return_value=[])
     @patch("analytics_cleanup_handler._delete_sagemaker_security_groups", return_value=[])
     @patch("analytics_cleanup_handler._delete_sagemaker_managed_efs", return_value=[])
     @patch("analytics_cleanup_handler._get_sagemaker_home_efs_id", return_value="")
@@ -183,6 +193,7 @@ class TestHandler:
         mock_get_sm_efs,
         mock_efs,
         mock_sgs,
+        mock_access_points,
         monkeypatch,
     ):
         """EFS_ID and VPC_ID are optional. When neither is configured (and
@@ -197,9 +208,52 @@ class TestHandler:
 
         assert result == {"Status": "SUCCESS", "PhysicalResourceId": "phys-42"}
         mock_efs_policy.assert_not_called()
+        mock_access_points.assert_not_called()
         mock_sgs.assert_not_called()
         mock_get_sm_efs.assert_called_once_with("us-east-2", "d-test123")
         mock_efs.assert_called_once_with("us-east-2", "d-test123")
+
+    def test_access_points_go_after_the_profiles_and_the_resource_policy(self):
+        """The Studio EFS's access points are deleted on every stack delete.
+
+        _delete_access_points had not been called since it was written, so
+        every per-user access point the presigned-URL Lambda created was
+        still on the file system when CloudFormation deleted it.
+        """
+        calls = []
+
+        def record(name, result=None):
+            def step(*args):
+                calls.append((name, *args))
+                return result if result is not None else []
+
+            return step
+
+        with (
+            patch.object(_module, "_delete_apps", side_effect=record("apps")),
+            patch.object(_module, "_delete_spaces", side_effect=record("spaces")),
+            patch.object(_module, "_delete_user_profiles", side_effect=record("profiles")),
+            patch.object(_module, "_delete_efs_resource_policy", side_effect=record("policy")),
+            patch.object(
+                _module, "_delete_access_points", side_effect=record("access-points", ["e"])
+            ),
+            patch.object(_module, "_get_sagemaker_home_efs_id", return_value=""),
+            patch.object(_module, "_delete_sagemaker_managed_efs", side_effect=record("sm-efs")),
+            patch.object(_module, "_delete_sagemaker_security_groups", return_value=[]),
+        ):
+            result = handler({"RequestType": "Delete"}, None)
+
+        # An access-point failure is logged, not fatal.
+        assert result["Status"] == "SUCCESS"
+        assert [call[0] for call in calls] == [
+            "apps",
+            "spaces",
+            "profiles",
+            "policy",
+            "access-points",
+            "sm-efs",
+        ]
+        assert ("access-points", "us-east-2", "fs-abc123") in calls
 
 
 # ---------------------------------------------------------------------------

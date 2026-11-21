@@ -259,6 +259,37 @@ class TestValidateManifestDepth:
         assert is_valid is True
 
 
+class TestWithinNestingDepth:
+    """``gco.job_admission.within_nesting_depth``, the check both submission paths share."""
+
+    def test_a_value_at_the_limit_passes_and_one_past_it_fails(self):
+        from gco.job_admission import within_nesting_depth
+
+        # _nested_list(4) puts its leaf at depth 5; _nested_list(5) at depth 6.
+        assert within_nesting_depth(_nested_list(4), 5) is True
+        assert within_nesting_depth(_nested_list(5), 5) is False
+        assert within_nesting_depth({"a": {}}, 1) is True
+        assert within_nesting_depth({"a": {"b": {}}}, 1) is False
+        assert within_nesting_depth("scalar", 0) is True
+
+    def test_matches_the_rest_processors_check(self, shallow_processor):
+        from gco.job_admission import within_nesting_depth
+
+        for depth in range(8):
+            for document in (_nested_dict(depth), _nested_list(depth)):
+                assert within_nesting_depth(document, 5) is shallow_processor._check_yaml_depth(
+                    document
+                )
+
+    def test_no_document_is_deep_enough_to_exhaust_the_stack(self):
+        """The walk is iterative: 150k levels is far past Python's recursion limit."""
+        from gco.job_admission import within_nesting_depth
+
+        document = _nested_list(150_000)
+        assert within_nesting_depth(document, 50) is False
+        assert within_nesting_depth(document, 200_000) is True
+
+
 # =============================================================================
 # Tests: NoAliasSafeLoader and safe_load_yaml utilities
 # =============================================================================

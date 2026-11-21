@@ -7,8 +7,10 @@ land in the workgroup-enforced ``athena-results/`` prefix, KMS-encrypted and
 lifecycle-expired.
 
 All SQL is assembled from validated identifiers and integer bounds only —
-user-supplied strings (namespace filters) are passed through Athena
-``ExecutionParameters``, never interpolated.
+user-supplied strings (namespace and region filters) are passed through
+Athena ``ExecutionParameters``, never interpolated into the query text.
+Athena substitutes each parameter as SQL, so a string travels as a quoted,
+escaped string literal (:func:`_sql_string_literal`).
 """
 
 from __future__ import annotations
@@ -47,6 +49,18 @@ class AthenaQueryError(RuntimeError):
     """Raised when an Athena query fails, is cancelled, or times out."""
 
 
+def _sql_string_literal(value: str) -> str:
+    """``value`` as one SQL string literal, for an Athena execution parameter.
+
+    Athena binds an execution parameter by substituting it as SQL: "for SQL
+    execution parameters to be treated as strings, they must be enclosed in
+    single quotes" (Athena user guide, parameterized queries). A bare
+    ``us-east-1`` would read as ``us - east - 1``. A quote inside the value is
+    doubled, so the value can never end the literal.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _database_name(project_name: str) -> str:
     """Glue database name — must mirror gco.stacks.constants.cost_glue_database_name."""
     return f"{project_name.replace('-', '_')}_cost"
@@ -80,8 +94,10 @@ class CostAnalytics:
     ) -> None:
         self._config = config or get_config()
         self.project_name = self._config.project_name
-        # Athena + Glue live in the monitoring region.
-        self.region = region or self._monitoring_region()
+        # Athena + Glue live in the monitoring region: cdk.json's
+        # deployment_regions.monitoring, the config file or
+        # GCO_MONITORING_REGION, as merged by the CLI config.
+        self.region = region or self._config.monitoring_region
         self.database = _database_name(self.project_name)
         self.workgroup = _workgroup_name(self.project_name)
         self.table = "allocation_reports"
@@ -89,21 +105,16 @@ class CostAnalytics:
         self.timeout_seconds = timeout_seconds
         self._athena = athena_client or boto3.client("athena", region_name=self.region)
 
-    def _monitoring_region(self) -> str:
-        from .config import _load_cdk_json
-
-        regions = _load_cdk_json() or {}
-        monitoring = regions.get("monitoring")
-        if isinstance(monitoring, str) and monitoring:
-            return monitoring
-        return str(self._config.default_region)
-
     # ------------------------------------------------------------------
     # Query execution plumbing
     # ------------------------------------------------------------------
 
     def run_query(self, sql: str, parameters: list[str] | None = None) -> QueryResult:
-        """Execute one query in the cost workgroup and return decoded rows."""
+        """Execute one query in the cost workgroup and return decoded rows.
+
+        ``parameters`` are SQL values for the query's ``?`` placeholders, in
+        order; a string must already be a literal (:func:`_sql_string_literal`).
+        """
         start_kwargs: dict[str, Any] = {
             "QueryString": sql,
             "QueryExecutionContext": {"Database": self.database},
@@ -181,7 +192,7 @@ class CostAnalytics:
         parameters: list[str] = []
         if region:
             clauses.append("region = ?")
-            parameters.append(region)
+            parameters.append(_sql_string_literal(region))
         where = " AND ".join(clauses)
         sql = (
             "SELECT namespace, "
@@ -224,7 +235,7 @@ class CostAnalytics:
         parameters: list[str] = []
         if namespace:
             clauses.append("namespace = ?")
-            parameters.append(namespace)
+            parameters.append(_sql_string_literal(namespace))
         where = " AND ".join(clauses)
         sql = (
             f"SELECT {bucket} AS period, "

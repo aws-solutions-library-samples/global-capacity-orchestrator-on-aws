@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-08-30T12:00:00Z">
-        <meta name="gco-source-commit" content="8cb8e766461f5b7f35205e12db980988598cf6d5">
-        <meta name="gco-flow-digest" content="e5afcae47f834a11">
+        <meta name="gco-generated-at" content="2026-11-19T12:23:38Z">
+        <meta name="gco-source-commit" content="e192bb01bb7807a52e11e262c0cb44173133f894">
+        <meta name="gco-flow-digest" content="a33c1250c7810797">
         <title>API Gateway Proxy Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -216,25 +216,29 @@ io16=>inputoutput: output: _error_response(503, 'Backend authentication is tempo
 e14=>end: end function return
 op22=>operation: http_method = event['httpMethod']
 op24=>operation: path = event['path']
-op26=>operation: query_string = event.get('multiValueQueryStringParameters') or event.get('queryStringParameters') or {}
-op28=>operation: headers = dict(event.get('headers') or {})
-cond31=>condition: if _pop_header(headers, 'X-GCO-Target-Region') is not None
-io38=>inputoutput: output: _error_response(400, "X-GCO-Target-Region is not supported by the global endpoint; use the target region's regional API endpoint if authorized for direct access")
-e36=>end: end function return
-op44=>operation: body = event.get('body') or ''
-cond47=>condition: if event.get('isBase64Encoded')
-io54=>inputoutput: output: _error_response(415, 'Base64-encoded request bodies are not supported')
-e52=>end: end function return
-op63=>operation: target_url = build_target_url(os.environ['GLOBAL_ACCELERATOR_ENDPOINT'], path, query_string)
-cond60=>condition: exception raised?
-cond65=>condition: except (KeyError, ValueError)
-io72=>inputoutput: output: _error_response(503, 'Global backend routing is temporarily unavailable')
-e70=>end: end function return
-op78=>operation: headers = sanitize_request_headers(headers)
-sub80=>subroutine: headers.update(caller_identity_headers(event))
-sub82=>subroutine: headers.update(build_signed_headers(signing_key, http_method, target_url, body))
-io87=>inputoutput: output: forward_request(target_url, http_method, headers, body, timeout=_get_request_timeout_seconds(context))
-e85=>end: end function return
+cond27=>condition: if has_dot_segment(path)
+io34=>inputoutput: output: _error_response(400, "The request path must not have a '.' or '..' segment")
+e32=>end: end function return
+op40=>operation: query_string = event.get('multiValueQueryStringParameters') or event.get('queryStringParameters') or {}
+op42=>operation: headers = dict(event.get('headers') or {})
+cond45=>condition: if _pop_header(headers, 'X-GCO-Target-Region') is not None
+io52=>inputoutput: output: _error_response(400, "X-GCO-Target-Region is not supported by the global endpoint; use the target region's regional API endpoint if authorized for direct access")
+e50=>end: end function return
+op58=>operation: body = event.get('body') or ''
+cond61=>condition: if event.get('isBase64Encoded')
+io68=>inputoutput: output: _error_response(415, 'Base64-encoded request bodies are not supported')
+e66=>end: end function return
+op77=>operation: target_url = build_target_url(os.environ['GLOBAL_ACCELERATOR_ENDPOINT'], path, query_string)
+cond74=>condition: exception raised?
+cond79=>condition: except (KeyError, ValueError)
+io86=>inputoutput: output: _error_response(503, 'Global backend routing is temporarily unavailable')
+e84=>end: end function return
+op92=>operation: sign = partial(build_signed_headers, signing_key, http_method, target_url, body)
+op94=>operation: headers = sanitize_request_headers(headers)
+sub96=>subroutine: headers.update(caller_identity_headers(event))
+sub98=>subroutine: headers.update(sign())
+io103=>inputoutput: output: forward_request(target_url, http_method, headers, body, timeout=_get_request_timeout_seconds(context), resign_headers=sign)
+e101=>end: end function return
 
 op2->op7
 op7->cond4
@@ -243,26 +247,30 @@ cond9(yes)->io16
 io16->e14
 cond9(no)->op22
 op22->op24
-op24->op26
-op26->op28
-op28->cond31
-cond31(yes)->io38
-io38->e36
-cond31(no)->op44
-op44->cond47
-cond47(yes)->io54
-io54->e52
-cond47(no)->op63
-op63->cond60
-cond60(yes)->cond65
-cond65(yes)->io72
-io72->e70
-cond65(no)->op78
-op78->sub80
-sub80->sub82
-sub82->io87
-io87->e85
-cond60(no)->op78
+op24->cond27
+cond27(yes)->io34
+io34->e32
+cond27(no)->op40
+op40->op42
+op42->cond45
+cond45(yes)->io52
+io52->e50
+cond45(no)->op58
+op58->cond61
+cond61(yes)->io68
+io68->e66
+cond61(no)->op77
+op77->cond74
+cond74(yes)->cond79
+cond79(yes)->io86
+io86->e84
+cond79(no)->op92
+op92->op94
+op94->sub96
+sub96->sub98
+sub98->io103
+io103->e101
+cond74(no)->op92
 cond4(no)->op22
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
@@ -273,17 +281,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-08-30T12:00:00Z -->
-        <!-- Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5 -->
+        <!-- Generated at (UTC): 2026-11-19T12:23:38Z -->
+        <!-- Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-08-30T12:00:00Z">2026-08-30T12:00:00Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T12:23:38Z">2026-11-19T12:23:38Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>8cb8e766461f5b7f35205e12db980988598cf6d5</code>
+            Source commit: <code>e192bb01bb7807a52e11e262c0cb44173133f894</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>e5afcae47f834a11</code>
+            Flow content SHA-256: <code>a33c1250c7810797</code>
           </p>
           <div id="canvas"></div>
         </div>

@@ -8,8 +8,10 @@ CloudFormation stacks — to a tagged release in one pass:
    the highest ``vMAJOR.MINOR.PATCH`` (or the tag named with ``--ref``).
 2. **Move the checkout.** ``git checkout --detach <tag>`` with ``cdk.json``
    preserved byte-for-byte: the deployment's configuration is the operator's,
-   not the release's, so it is snapshotted before the checkout and written back
-   afterwards.
+   not the release's, so it is snapshotted (and copied to
+   ``cdk.json.pre-upgrade-<UTC time>``) before the checkout and written back
+   afterwards, also when the checkout fails. The copy is kept only when
+   something fails.
 3. **Refresh the local install.** ``pip install -e '.[cdk,...]'`` (``cdk`` plus
    every extra already installed) when the running CLI is
    the editable install of this checkout, ``npm ci`` when the checkout carries
@@ -17,13 +19,15 @@ CloudFormation stacks — to a tagged release in one pass:
    container runtime and the image are both present.
 4. **Cycle the stacks.** Check that the checkout's deployable sources are
    readable by every user (the redeploy would refuse them otherwise, after the
-   teardown), then scale the workload tier to zero
+   teardown) and that the checked-out release's configuration loader accepts
+   the preserved ``cdk.json`` (printing its warnings), then scale the workload
+   tier to zero
    (:meth:`cli.stacks.StackManager.destroy_orchestrated` with
    ``keep_control_plane=True`` — the monitoring stack is first updated in place
    so it stops referencing the regional stacks), then run the ordinary
-   deploy-all: the global and API Gateway stacks are updated in place and the
-   regional stacks, their API bridges and the monitoring stack are recreated
-   from the new release.
+   deploy-all: the global, API Gateway and (when enabled) analytics stacks are
+   updated in place and the regional stacks, their API bridges and the
+   monitoring stack are recreated from the new release.
 
 Step 4 deletes every regional stack, and with it the data those stacks own
 (EFS and FSx file systems, Valkey, Aurora, in-cluster volumes, the
@@ -38,12 +42,14 @@ can be exercised without git, pip, or AWS.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess  # fixed argv only, never a shell string
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -52,8 +58,8 @@ from . import __version__
 from ._container_runtime import container_runtime_error_message, detect_container_runtime
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-29T11:35:23Z
-# Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657
+# Generated at (UTC): 2026-11-19T06:05:34Z
+# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
 # Flowchart(s) generated from this file:
 #   * ``run_stack_cycle`` -> ``diagrams/code_diagrams/cli/upgrade.run_stack_cycle.html``
 #     (PNG: ``diagrams/code_diagrams/cli/upgrade.run_stack_cycle.png``)
@@ -84,6 +90,50 @@ _REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 #: Wall-clock cap for one git/pip/npm/image-build subprocess.
 _TOOL_TIMEOUT_SECONDS = 1800.0
+
+#: Wall-clock cap for the configuration check (it imports the CDK library).
+CONFIGURATION_CHECK_TIMEOUT_SECONDS = 300.0
+
+#: Prefix of the one line of the configuration check's output that is its result.
+_CONFIGURATION_CHECK_MARKER = "gco-configuration-check: "
+
+#: Run by a fresh interpreter from the checkout root, so ``gco`` is the
+#: checked-out release's package (``-c`` puts the working directory first on
+#: the module path) whatever release the running CLI is. It reads the CDK
+#: context (cdk.json's, with the run's ``--context`` overrides) from stdin,
+#: loads it the way that release's CDK app does, and prints the loader's
+#: warnings, including those it logged before an error stopped it, and the
+#: error.
+_CONFIGURATION_CHECK = """
+import json
+import logging
+import sys
+
+warnings = []
+
+
+class Collect(logging.Handler):
+    def emit(self, record):
+        message = record.getMessage()
+        if message not in warnings:
+            warnings.append(message)
+
+
+loader_log = logging.getLogger("gco.config.config_loader")
+loader_log.addHandler(Collect(logging.WARNING))
+loader_log.propagate = False
+context = json.load(sys.stdin)
+
+import aws_cdk
+from gco.config.config_loader import ConfigLoader, ConfigValidationError
+
+try:
+    ConfigLoader(aws_cdk.App(context=context))
+    error = None
+except ConfigValidationError as exc:
+    error = str(exc)
+print(MARKER + json.dumps({"error": error, "warnings": warnings}))
+""".replace("MARKER", repr(_CONFIGURATION_CHECK_MARKER))
 
 Logger = Callable[[str], None]
 
@@ -274,14 +324,62 @@ def checkout_is_at(root: Path, tag: ReleaseTag) -> bool:
     return head == target
 
 
+def _back_up_preserved_files(root: Path, snapshots: Mapping[str, bytes]) -> dict[str, Path]:
+    """Write each snapshot next to its file before git touches anything.
+
+    The in-memory snapshot dies with the process, so a crash, or a restore
+    that cannot write, would otherwise lose the deployment's configuration.
+    Each copy gets a new name (``cdk.json.pre-upgrade-<UTC time>``), so an
+    older one an earlier failed run left behind is never overwritten.
+    """
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backups: dict[str, Path] = {}
+    for name, data in snapshots.items():
+        backup = root / f"{name}.pre-upgrade-{stamp}"
+        try:
+            with backup.open("xb") as handle:
+                handle.write(data)
+        except OSError as exc:
+            raise UpgradeError(
+                f"Could not write the backup {backup} before the checkout ({exc}); "
+                "nothing was changed."
+            ) from exc
+        backups[name] = backup
+    return backups
+
+
+def _restore_preserved_files(
+    root: Path, snapshots: Mapping[str, bytes], backups: Mapping[str, Path]
+) -> list[str]:
+    """Write back every snapshot whose file no longer holds its bytes; return their names."""
+    restored: list[str] = []
+    for name, data in snapshots.items():
+        path = root / name
+        try:
+            if path.is_file() and path.read_bytes() == data:
+                continue
+            path.write_bytes(data)
+        except OSError as exc:
+            raise UpgradeError(
+                f"Could not restore {name} after git checkout ({exc}). Your version is "
+                f"saved in {backups[name]}; copy it over {path} before running gco again."
+            ) from exc
+        restored.append(name)
+    return restored
+
+
 def checkout_release(root: Path, tag: ReleaseTag, *, log: Logger = _quiet) -> dict[str, Any]:
     """Detach the checkout onto ``tag`` while preserving the deployment's own files.
 
     ``cdk.json`` is tracked, but its contents (project name, Regions, feature
     toggles) describe this deployment rather than the release, so its exact
-    bytes are captured first, reset so git will switch branches, and written
-    back once the release is checked out. Any other local modification aborts
-    before the checkout — the operator decides what to do with real work.
+    bytes are captured first, copied to ``cdk.json.pre-upgrade-<UTC time>``,
+    reset so git will switch branches, and written back once the checkout
+    finishes, also when git fails (an untracked file the release adds makes
+    the checkout fail, and ``--untracked-files=no`` cannot see it coming).
+    The copy is deleted once the bytes are back, and kept, and named in the
+    error, when anything fails. Any other local modification aborts before the
+    checkout — the operator decides what to do with real work.
     """
     state = inspect_checkout(root)
     if state.dirty_paths:
@@ -296,20 +394,29 @@ def checkout_release(root: Path, tag: ReleaseTag, *, log: Logger = _quiet) -> di
         path = root / name
         if path.is_file():
             snapshots[name] = path.read_bytes()
-    if state.preserved_modified:
-        # git refuses to switch when a modified tracked file differs between the
-        # two commits; the bytes are safe in ``snapshots`` and come right back.
-        run_git(root, "checkout", "--quiet", "--", *state.preserved_modified)
+    backups = _back_up_preserved_files(root, snapshots)
 
-    log(f"Checking out {tag.name} (was {state.ref} at {state.head})...")
-    run_git(root, "checkout", "--quiet", "--detach", tag.name)
+    try:
+        if state.preserved_modified:
+            # git refuses to switch when a modified tracked file differs between
+            # the two commits; the bytes are safe in ``snapshots`` and come back
+            # in ``finally``.
+            run_git(root, "checkout", "--quiet", "--", *state.preserved_modified)
 
-    restored: list[str] = []
-    for name, data in snapshots.items():
-        path = root / name
-        if not path.is_file() or path.read_bytes() != data:
-            path.write_bytes(data)
-            restored.append(name)
+        log(f"Checking out {tag.name} (was {state.ref} at {state.head})...")
+        run_git(root, "checkout", "--quiet", "--detach", tag.name)
+    except UpgradeError as exc:
+        # ``finally`` writes the bytes back before this propagates; a restore
+        # that fails raises its own error, naming the copy, in its place.
+        kept = "".join(
+            f"\n{name} is written back as it was; a copy is kept at {backups[name]}"
+            for name in sorted(backups)
+        )
+        raise UpgradeError(f"{exc}{kept}") from exc
+    finally:
+        restored = _restore_preserved_files(root, snapshots, backups)
+    for backup in backups.values():
+        backup.unlink(missing_ok=True)
     return {
         "previous_ref": state.ref,
         "previous_head": state.head,
@@ -585,6 +692,70 @@ def require_container_runtime() -> str:
     return runtime
 
 
+@dataclass(frozen=True)
+class ConfigurationCheck:
+    """What the checked-out release's configuration loader made of cdk.json."""
+
+    #: The loader's warnings: deprecated keys, keys that take no effect, each
+    #: saying what to do instead.
+    warnings: tuple[str, ...] = ()
+    #: Why this cdk.json cannot be deployed with the checked-out release, or
+    #: ``None`` when it can.
+    error: str | None = None
+
+
+def check_preserved_configuration(
+    root: Path, overrides: Mapping[str, str] | None = None
+) -> ConfigurationCheck:
+    """Load ``root``'s cdk.json with the checked-out release's ``ConfigLoader``.
+
+    The upgrade keeps cdk.json byte for byte, so a value the new release
+    validates more strictly, or a key it no longer reads, is only found by its
+    own loader. The CDK app runs that loader on every synth, but the first
+    synth is inside the teardown. This runs it before: in a fresh interpreter
+    from the checkout (:data:`_CONFIGURATION_CHECK`), on cdk.json's context
+    plus ``overrides`` (the run's ``--context`` pairs, as the CLI passes them).
+    A cdk.json that is not JSON, a check that cannot run, and the loader's
+    error all come back as ``error``.
+    """
+    try:
+        document = json.loads((root / "cdk.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return ConfigurationCheck(error=f"cdk.json could not be read as JSON: {exc}")
+    context = document.get("context") if isinstance(document, dict) else None
+    merged = {**(context if isinstance(context, dict) else {}), **dict(overrides or {})}
+    release = "the checked-out release's configuration check"
+    try:
+        result = subprocess.run(  # fixed argv, no shell
+            [sys.executable, "-c", _CONFIGURATION_CHECK],
+            cwd=str(root),
+            input=json.dumps(merged),
+            capture_output=True,
+            text=True,
+            timeout=CONFIGURATION_CHECK_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return ConfigurationCheck(
+            error=f"{release} did not finish within {CONFIGURATION_CHECK_TIMEOUT_SECONDS:.0f}s"
+        )
+    for line in reversed(result.stdout.splitlines()):
+        if line.startswith(_CONFIGURATION_CHECK_MARKER):
+            report = json.loads(line.removeprefix(_CONFIGURATION_CHECK_MARKER))
+            warnings = tuple(str(warning) for warning in report["warnings"])
+            if report["error"] is None:
+                return ConfigurationCheck(warnings=warnings)
+            return ConfigurationCheck(
+                warnings=warnings,
+                error=f"the checked-out release rejects cdk.json: {report['error']}",
+            )
+    lines = (result.stderr or result.stdout).strip().splitlines()
+    detail = lines[-1] if lines else "no output"
+    return ConfigurationCheck(
+        error=f"{release} could not run (exit status {result.returncode}): {detail}"
+    )
+
+
 @dataclass
 class StackCycleResult:
     """Outcome of the teardown/redeploy half of the upgrade."""
@@ -613,6 +784,8 @@ def run_stack_cycle(
     on_stack_start: Callable[[str], None] | None = None,
     on_stack_complete: Callable[[str, bool], None] | None = None,
     log: Logger = _quiet,
+    warn: Logger | None = None,
+    cdk_context: Mapping[str, str] | None = None,
     sleep: Callable[[float], None] | None = None,
     max_attempts: int = 3,
     retry_wait_seconds: float = 30.0,
@@ -627,16 +800,25 @@ def run_stack_cycle(
     after it. The teardown's monitoring detach would catch it too, but only
     when the monitoring stack is deployed.
 
+    Then the preserved cdk.json is loaded with the checked-out release's
+    configuration loader (:func:`check_preserved_configuration`, with the
+    run's ``cdk_context`` overrides): each warning goes to ``warn`` (``log``
+    when not given), and a cdk.json that release rejects stops the upgrade
+    before the teardown, with the loader's message, instead of failing the
+    teardown's first synth.
+
     The teardown uses the same retry loop as ``gco stacks destroy-all``: a
     failed attempt clears the orphaned network interfaces that typically block
     VPC deletion, waits, and tries again. The redeploy is a single
-    ``deploy_orchestrated`` pass — global and API Gateway stacks update in
-    place, regional stacks and their bridges are recreated, monitoring is
-    updated back to the full topology.
+    ``deploy_orchestrated`` pass — global, API Gateway and analytics stacks
+    update in place, regional stacks and their bridges are recreated,
+    monitoring is updated back to the full topology.
 
     Raises:
         cli.stacks.AssetPermissionError: before any stack is touched, when a
             deployable source is owner-only.
+        UpgradeError: before any stack is touched, when the checked-out
+            release cannot deploy the preserved cdk.json.
     """
     import time
 
@@ -645,6 +827,17 @@ def run_stack_cycle(
 
     manager.ensure_asset_sources_readable()
 
+    log("Checking cdk.json with the checked-out release's configuration loader...")
+    configuration = check_preserved_configuration(Path(manager.project_root), cdk_context)
+    for warning in configuration.warnings:
+        (warn or log)(f"cdk.json: {warning}")
+    if configuration.error is not None:
+        raise UpgradeError(
+            f"Stopped before the teardown: {configuration.error.rstrip('.')}. No stack was "
+            "changed. Fix cdk.json (the upgrade kept it byte for byte), then run "
+            "'gco upgrade --skip-checkout' to cycle the stacks on this checkout."
+        )
+
     log("Phase 1/2: scaling the workload tier to zero (control plane stays)...")
     ok = False
     failed: list[str] = []
@@ -652,7 +845,7 @@ def run_stack_cycle(
         result.teardown_attempts = attempt
         if attempt > 1:
             log("Clearing orphaned network interfaces that can block VPC deletion...")
-            manager.cleanup_orphaned_network_interfaces()
+            manager.cleanup_orphaned_network_interfaces(keep_control_plane=True)
             log(f"Teardown attempt {attempt}/{max_attempts} in {retry_wait_seconds:.0f}s...")
             wait(retry_wait_seconds)
         ok, destroyed, failed = manager.destroy_orchestrated(

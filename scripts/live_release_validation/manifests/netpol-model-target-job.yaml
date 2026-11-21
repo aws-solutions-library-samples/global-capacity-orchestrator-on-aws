@@ -3,7 +3,9 @@ kind: Job
 metadata:
   # The network-posture action's stand-in for a managed model pod: a listener
   # in gco-inference on the model pods' only Service port, 8443, carrying the
-  # label the model ingress policies select. The file fixes the pod shape.
+  # label the model ingress policies select. The file fixes the pod shape. The
+  # action also runs it a second time without the gco.io/type label, as the
+  # gco-inference pod no allow rule selects (the default deny's target).
   name: gco-live-netpol-model-__RUN_TOKEN__
   namespace: gco-inference
   annotations:

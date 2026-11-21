@@ -24,8 +24,12 @@ leaves its tail chunks behind until the corpus is re-ingested.
 Failure posture: objects are isolated — one undecodable or oversized
 object never blocks the rest of the batch — but any per-object failure
 re-raises after the batch so the async-invoke retry/DLQ machinery
-engages (succeeded objects are idempotent on the retry). The summary of
-every invocation is logged as one JSON line for operability.
+engages (succeeded objects are idempotent on the retry). An object over
+``MAX_OBJECT_BYTES`` or ``MAX_CHUNKS_PER_OBJECT`` fails as ``too_large``
+before any Bedrock call, and no chunk is started with less than
+``TIME_RESERVE_MS`` of the invocation left (the object fails as
+``out_of_time``; its retry starts again from chunk 0), so the summary of
+every invocation is logged as one JSON line before Lambda's timeout.
 
 Only boto3/botocore and the standard library are used, matching every
 other GCO Lambda (no bundling step).
@@ -44,8 +48,8 @@ from typing import Any
 import boto3
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-11-18T16:59:04Z
+# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/vector-ingest/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/vector-ingest/handler.lambda_handler.png``)
@@ -61,6 +65,23 @@ logger.setLevel(logging.INFO)
 #: width. ~2000 chars keeps each chunk comfortably inside Titan's 8k-token
 #: input window while staying large enough to carry a coherent passage.
 MAX_CHUNK_CHARS = 2000
+
+#: Largest object read, in bytes (GetObject's ContentLength); a larger one is
+#: refused before its body is read. 500 chunks of 2000 characters are at most
+#: 4 MB of UTF-8 text, so a larger plain-text object could not pass
+#: MAX_CHUNKS_PER_OBJECT either, and reading it whole could exhaust the
+#: function's 512 MB.
+MAX_OBJECT_BYTES = 4 * 1024 * 1024
+
+#: Most chunks one object may have. Each chunk is one Bedrock InvokeModel and
+#: one DynamoDB PutItem in sequence; at an assumed 0.3 s per chunk, 500 chunks
+#: (about 1 MB of text) take 2.5 minutes, half the 5-minute function timeout.
+#: A longer document is refused before any Bedrock call: split it.
+MAX_CHUNKS_PER_OBJECT = 500
+
+#: No chunk is started with less invocation time left than this, so the
+#: summary line is logged and the failure raised before Lambda's timeout.
+TIME_RESERVE_MS = 30_000
 
 #: Object-key suffixes routed to the plain-text paragraph chunker.
 TEXT_SUFFIXES = (".txt", ".md")
@@ -78,6 +99,14 @@ DIMENSIONS_CAPABLE_MODEL_MARKERS = ("titan-embed-text-v2",)
 _s3_client: Any = None
 _dynamodb_client: Any = None
 _bedrock_client: Any = None
+
+
+class IngestStopped(Exception):
+    """An object was refused or cut short; ``status`` names why in the summary."""
+
+    def __init__(self, status: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def _get_s3_client() -> Any:
@@ -277,13 +306,33 @@ def _put_chunk_item(
     return doc_id
 
 
-def _ingest_object(bucket: str, key: str) -> dict[str, Any]:
-    """Fetch, chunk, embed, and store one S3 object."""
+def _remaining_ms(context: Any) -> int | None:
+    """Milliseconds left in the invocation, or None without a Lambda context."""
+    return None if context is None else int(context.get_remaining_time_in_millis())
+
+
+def _ingest_object(bucket: str, key: str, context: Any = None) -> dict[str, Any]:
+    """Fetch, chunk, embed, and store one S3 object.
+
+    Raises :class:`IngestStopped` (``too_large``) for an object over
+    ``MAX_OBJECT_BYTES`` or ``MAX_CHUNKS_PER_OBJECT`` before any Bedrock
+    call, and (``out_of_time``) when less than ``TIME_RESERVE_MS`` of the
+    invocation is left before a chunk.
+    """
     table_name = _require_env("VECTOR_STORE_TABLE_NAME")
     model_id = _require_env("EMBEDDING_MODEL_ID")
     dimensions = int(_require_env("EMBEDDING_DIMENSIONS"))
 
-    raw = _get_s3_client().get_object(Bucket=bucket, Key=key)["Body"].read()
+    response = _get_s3_client().get_object(Bucket=bucket, Key=key)
+    size = int(response.get("ContentLength", 0))
+    if size > MAX_OBJECT_BYTES:
+        response["Body"].close()
+        raise IngestStopped(
+            "too_large",
+            f"{key}: object is {size} bytes, over the {MAX_OBJECT_BYTES}-byte limit; "
+            "split it into smaller objects",
+        )
+    raw = response["Body"].read()
     content_sha256 = hashlib.sha256(raw).hexdigest()
     text = raw.decode("utf-8")
 
@@ -294,10 +343,23 @@ def _ingest_object(bucket: str, key: str) -> dict[str, Any]:
         records = _records_from_text_object(key, text)
     if not records:
         return {"key": key, "status": "empty", "chunks": 0}
+    if len(records) > MAX_CHUNKS_PER_OBJECT:
+        raise IngestStopped(
+            "too_large",
+            f"{key}: {len(records)} chunks, over the {MAX_CHUNKS_PER_OBJECT}-chunk limit; "
+            "split it into smaller objects",
+        )
 
     ingested_at = datetime.now(UTC).isoformat()
-    doc_ids = []
+    doc_ids: list[str] = []
     for record in records:
+        remaining = _remaining_ms(context)
+        if remaining is not None and remaining < TIME_RESERVE_MS:
+            raise IngestStopped(
+                "out_of_time",
+                f"{key}: stopped after {len(doc_ids)} of {len(records)} chunks with "
+                f"{remaining} ms of the invocation left",
+            )
         vector = embed_chunk(record["text"], model_id, dimensions)
         doc_ids.append(
             _put_chunk_item(
@@ -317,8 +379,9 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Process one S3 notification event, object by object.
 
     Every record is attempted (per-object isolation); a summary line is
-    logged either way; any failure re-raises afterwards so the async
-    retry/DLQ machinery sees the invocation as failed. Retries are safe:
+    logged either way, the time reserve keeping it ahead of Lambda's
+    timeout; any failure re-raises afterwards so the async retry/DLQ
+    machinery sees the invocation as failed. Retries are safe:
     ``doc_id`` is deterministic, so already-ingested objects overwrite
     in place.
     """
@@ -351,7 +414,10 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             continue
 
         try:
-            results.append(_ingest_object(bucket, key))
+            results.append(_ingest_object(bucket, key, context))
+        except IngestStopped as err:  # refused or cut short, re-raised below
+            logger.error("vector-ingest %s for s3://%s/%s: %s", err.status, bucket, key, err)
+            failures.append({"key": key, "status": err.status, "error": str(err)})
         except Exception as err:  # per-object isolation, re-raised below
             logger.exception("vector-ingest failed for s3://%s/%s", bucket, key)
             failures.append({"key": key, "status": "failed", "error": str(err)})

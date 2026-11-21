@@ -80,14 +80,14 @@ def templates_get(config: Any, name: Any, region: Any) -> None:
     formatter = get_output_formatter(config)
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
         query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="GET",
-            path=f"/api/v1/templates/{name}",
+            path=f"/api/v1/templates/{api_path_segment(name)}",
             region=query_region,
         )
 
@@ -196,14 +196,14 @@ def templates_delete(config: Any, name: Any, region: Any, yes: Any) -> None:
         confirm(f"Delete template '{name}'?", abort=True)
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
         query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="DELETE",
-            path=f"/api/v1/templates/{name}",
+            path=f"/api/v1/templates/{api_path_segment(name)}",
             region=query_region,
         )
 
@@ -227,6 +227,9 @@ def templates_run(
 ) -> None:
     """Create and run a job from a template.
 
+    A rendered manifest the API rejects (untrusted registry, namespace not
+    allowed, over a resource cap) exits 1 with each validation error.
+
     Examples:
         gco templates run gpu-template --name my-job --region us-east-1
         gco templates run gpu-template -n my-job -r us-east-1 -p image=custom:v1
@@ -241,13 +244,13 @@ def templates_run(
             parameters[k] = v
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
         result = aws_client.call_api(
             method="POST",
-            path=f"/api/v1/jobs/from-template/{template_name}",
+            path=f"/api/v1/jobs/from-template/{api_path_segment(template_name)}",
             region=region,
             body={
                 "name": name,
@@ -256,11 +259,10 @@ def templates_run(
             },
         )
 
-        if result.get("success"):
-            formatter.print_success(f"Job '{name}' created from template '{template_name}'")
-        else:
-            formatter.print_error("Failed to create job from template")
-
+        # The API answers 201 only when the job was created; a rejected
+        # manifest is a 400 whose ``errors`` list call_api puts in the
+        # exception message, reported below.
+        formatter.print_success(f"Job '{name}' created from template '{template_name}'")
         formatter.print(result)
 
     except Exception as e:

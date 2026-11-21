@@ -899,7 +899,9 @@ class TestIsolatedKubeconfigThroughRealProcesses:
     update-kubeconfig`` and kubectl used that file while the tunnel was pinned
     in ``~/.kube/config``. This runs the real session and submission plumbing
     with stand-in executables on PATH (only the SSM tunnel itself is faked), a
-    KUBECONFIG exported, and a home directory of its own.
+    KUBECONFIG exported, and a home directory of its own. The ``gco`` stand-in
+    is the harness's checkout CLI and is deliberately not on PATH: every ``gco``
+    process the session and the submission start must be that command.
     """
 
     def test_access_refresh_readiness_and_submit_direct_use_the_report_dir_kubeconfig(
@@ -907,14 +909,17 @@ class TestIsolatedKubeconfigThroughRealProcesses:
     ) -> None:
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
-        for name, script in (
-            ("aws", _AWS_STAND_IN),
-            ("kubectl", _KUBECTL_STAND_IN),
-            ("gco", _GCO_STAND_IN),
+        checkout_dir = tmp_path / "checkout"
+        checkout_dir.mkdir()
+        for directory, name, script in (
+            (bin_dir, "aws", _AWS_STAND_IN),
+            (bin_dir, "kubectl", _KUBECTL_STAND_IN),
+            (checkout_dir, "gco", _GCO_STAND_IN),
         ):
-            executable = bin_dir / name
+            executable = directory / name
             executable.write_text(script, encoding="utf-8")
             executable.chmod(0o700)
+        monkeypatch.setattr(drivers, "CHECKOUT_GCO_COMMAND", (str(checkout_dir / "gco"),))
         home = tmp_path / "home"
         home.mkdir()
         exported = tmp_path / "exported" / "kubeconfig"
@@ -938,7 +943,11 @@ class TestIsolatedKubeconfigThroughRealProcesses:
         assert parsed.spec.submission == SUBMIT_DIRECT
 
         with kube.cluster_session(
-            REPO_ROOT, "test-cluster", "us-east-1", kubeconfig_path=isolated
+            REPO_ROOT,
+            "test-cluster",
+            "us-east-1",
+            kubeconfig_path=isolated,
+            gco_command=drivers.CHECKOUT_GCO_COMMAND,
         ) as kubectl:
             evidence = drivers.submit_example(
                 parsed, parsed.path, repo_root=REPO_ROOT, region="us-east-1", kubectl=kubectl

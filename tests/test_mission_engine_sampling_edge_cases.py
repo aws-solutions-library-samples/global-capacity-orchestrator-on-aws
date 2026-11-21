@@ -180,7 +180,7 @@ async def test_engine_rejects_malformed_sampling_results_and_empty_rationale() -
 @pytest.mark.asyncio
 async def test_engine_accepts_sampled_script_and_scans_all_call_log_shapes() -> None:
     async def runner(
-        _script: str, _ctx: Any, _dispatch: Any
+        _script: str, _ctx: Any, _dispatch: Any, _session: Any
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         return _observation(), []
 
@@ -242,7 +242,7 @@ async def test_engine_preserves_runner_error_when_sandbox_import_fails(
 ) -> None:
     original_error = RuntimeError("runner exploded")
 
-    async def runner(_script: str, _ctx: Any, _dispatch: Any) -> Any:
+    async def runner(_script: str, _ctx: Any, _dispatch: Any, _session: Any) -> Any:
         raise original_error
 
     engine = _engine(sandbox_runner=runner)
@@ -269,7 +269,7 @@ async def test_engine_preserves_runner_error_when_sandbox_import_fails(
 async def test_engine_reraises_unknown_runner_exception() -> None:
     original_error = RuntimeError("runner exploded")
 
-    async def runner(_script: str, _ctx: Any, _dispatch: Any) -> Any:
+    async def runner(_script: str, _ctx: Any, _dispatch: Any, _session: Any) -> Any:
         raise original_error
 
     engine = _engine(sandbox_runner=runner)
@@ -577,7 +577,7 @@ async def test_factory_sandbox_import_fallback_and_runner_closure(
     monkeypatch.setattr(sandbox_module, "MissionSandbox", FakeSandbox)
     runner = engine_factory._build_sandbox_runner(scripted_session)
     assert runner is not None
-    assert await runner("pass", "ctx", _dispatcher) == (
+    assert await runner("pass", "ctx", _dispatcher, scripted_session) == (
         {"metrics": {"ok": 1}},
         [{"tool_name": "tool"}],
     )
@@ -988,7 +988,7 @@ def test_bedrock_configuration_reasoning_ftu_and_text_boundaries(
 
 @pytest.mark.asyncio
 async def test_engine_successful_script_and_remaining_defensive_branches() -> None:
-    async def runner(_script: str, _ctx: Any, _dispatch: Any) -> Any:
+    async def runner(_script: str, _ctx: Any, _dispatch: Any, _session: Any) -> Any:
         return _observation(metrics={"ok": 1}), [{"tool_name": "tool", "status": "ok"}]
 
     engine = _engine(sandbox_runner=runner)

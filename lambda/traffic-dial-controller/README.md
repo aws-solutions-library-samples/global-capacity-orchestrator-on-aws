@@ -79,8 +79,8 @@ Each scheduled run is phased:
    bypassing the step limit (dialing *up* is safe).
 5. **Enforcement** — in `enforce` mode changed dials are applied via
    `UpdateEndpointGroup` carrying *only* `TrafficDialPercentage`.
-6. **Publication** — every decision is emitted to CloudWatch and the full run
-   is stored in SSM for `gco capacity traffic-dial show`.
+6. **Publication** — every decision is emitted to CloudWatch and the run is
+   stored in SSM for `gco capacity traffic-dial show`.
 
 The generated [flowchart](../../diagrams/code_diagrams/README.md#lambda) for
 `lambda_handler` shows the same phases as a diagram.
@@ -104,19 +104,29 @@ The generated [flowchart](../../diagrams/code_diagrams/README.md#lambda) for
 
 - CloudWatch metrics in the `GCO/TrafficDial` namespace, one decision per
   region per run.
-- The `/{project}/traffic-dial/state` SSM parameter with the full last run;
-  overrides live under the same `/{project}/traffic-dial` tree. These are
+- The `/{project}/traffic-dial/state` SSM parameter with the last run. Each
+  stored decision omits `endpoint_group_arn` (`show` reads the ARNs from the
+  endpoint-group registry) and cuts its error text to 200 characters; the
+  function's return value keeps both. The parameter is written with
+  `Tier="Intelligent-Tiering"`: it stays a Standard parameter while it fits
+  in 4 KB (about 28 Regions without errors) and becomes an Advanced
+  parameter, which is charged and holds 8 KB, when it does not. A failed
+  write is logged as an error with the value's size, and `show` keeps
+  reporting the previous run (the table output prints its timestamp).
+  Overrides live under the same `/{project}/traffic-dial` tree. These are
   runtime parameters written outside CloudFormation; a fully successful
   `gco stacks destroy-all` purges the tree so a stale override cannot pin a
   region's dial in the account's next deployment.
 
 ## IAM permissions
 
-Read-only against Global Accelerator (`DescribeAccelerator`,
-`ListEndpointGroups`), CloudWatch `GetMetricData`/`PutMetricData`, and SSM
+Read-only against Global Accelerator (`DescribeAccelerator` on the
+accelerator, `ListEndpointGroups` on its listener), CloudWatch
+`GetMetricData`/`PutMetricData` (which take no resource; `PutMetricData` only
+in the `GCO/TrafficDial` namespace), and SSM
 `GetParameter`/`GetParametersByPath`/`PutParameter` under the project's
 `traffic-dial` tree. `globalaccelerator:UpdateEndpointGroup` is granted only
-when `mode` is `enforce`. The Global Accelerator control plane is homed in
+when `mode` is `enforce`, and only on the global stack's endpoint groups. The Global Accelerator control plane is homed in
 `us-west-2` in the commercial partition (same convention as
 `lambda/ga-registration`).
 

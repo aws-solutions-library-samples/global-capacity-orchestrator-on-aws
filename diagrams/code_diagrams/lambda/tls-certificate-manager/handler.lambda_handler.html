@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
-        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
-        <meta name="gco-flow-digest" content="08b63028a4008d70">
+        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
+        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
+        <meta name="gco-flow-digest" content="219c3d97699ae1fd">
         <title>Backend TLS Certificate Manager Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,40 +208,40 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op180=>operation: 'Handle scheduled reconciliation and CDK provider lifecycle events.'
-op182=>operation: config = ManagerConfig.from_event(event)
-cond185=>condition: if event.get('Action') == 'Rotate'
-sub189=>subroutine: LOGGER.info('Running scheduled backend TLS reconciliation')
-io194=>inputoutput: output: _reconcile(config)
-e192=>end: end function return
-op200=>operation: request_type = event.get('RequestType')
-op202=>operation: physical_id = event.get('PhysicalResourceId') or f'{config.project_name}-backend-tls-certificates'
-cond205=>condition: if request_type == 'Delete'
-sub209=>subroutine: _cleanup(config)
-io214=>inputoutput: output: {'PhysicalResourceId': physical_id}
-e212=>end: end function return
-cond221=>operation: raise ValueError(f'Unsupported certificate manager event: {request_type!r}') if  request_type not in {'Create', 'Update'}
-op231=>operation: newly_retired = _retired_regions_from_update(event, config) if request_type == 'Update' else ()
-op233=>operation: result = _reconcile(config, newly_retired)
-io238=>inputoutput: output: {'PhysicalResourceId': physical_id, 'Data': result}
-e236=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op579=>operation: 'Handle scheduled reconciliation and CDK provider lifecycle events.'
+op581=>operation: config = ManagerConfig.from_event(event)
+cond584=>condition: if event.get('Action') == 'Rotate'
+sub588=>subroutine: LOGGER.info('Running scheduled backend TLS reconciliation')
+io593=>inputoutput: output: _reconcile(config)
+e591=>end: end function return
+op599=>operation: request_type = event.get('RequestType')
+op601=>operation: physical_id = event.get('PhysicalResourceId') or f'{config.project_name}-backend-tls-certificates'
+cond604=>condition: if request_type == 'Delete'
+sub608=>subroutine: _cleanup(config)
+io613=>inputoutput: output: {'PhysicalResourceId': physical_id}
+e611=>end: end function return
+cond620=>operation: raise ValueError(f'Unsupported certificate manager event: {request_type!r}') if  request_type not in {'Create', 'Update'}
+op630=>operation: newly_retired = _retired_regions_from_update(event, config) if request_type == 'Update' else ()
+op632=>operation: result = _reconcile(config, newly_retired)
+io637=>inputoutput: output: {'PhysicalResourceId': physical_id, 'Data': result}
+e635=>end: end function return
 
-op180->op182
-op182->cond185
-cond185(yes)->sub189
-sub189->io194
-io194->e192
-cond185(no)->op200
-op200->op202
-op202->cond205
-cond205(yes)->sub209
-sub209->io214
-io214->e212
-cond205(no)->cond221
-cond221->op231
-op231->op233
-op233->io238
-io238->e236
+op579->op581
+op581->cond584
+cond584(yes)->sub588
+sub588->io593
+io593->e591
+cond584(no)->op599
+op599->op601
+op601->cond604
+cond604(yes)->sub608
+sub608->io613
+io613->e611
+cond604(no)->cond620
+cond620->op630
+op630->op632
+op632->io637
+io637->e635
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -251,17 +251,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
-        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
+        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
+            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
+            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>08b63028a4008d70</code>
+            Flow content SHA-256: <code>219c3d97699ae1fd</code>
           </p>
           <div id="canvas"></div>
         </div>

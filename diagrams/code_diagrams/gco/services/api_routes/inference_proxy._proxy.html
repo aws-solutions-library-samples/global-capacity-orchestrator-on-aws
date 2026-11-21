@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-10-25T13:00:05Z">
-        <meta name="gco-source-commit" content="de508a874e7ac267180e26a4c6fc56c1cd0878c2">
-        <meta name="gco-flow-digest" content="66030b5c8d2ed8ae">
+        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
+        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
+        <meta name="gco-flow-digest" content="8c3acd3771865ba8">
         <title>Managed inference reverse proxy (path allowlist, bounded I/O, streaming cleanup)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,63 +208,63 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op503=>operation: 'Forward one authenticated request to a managed in-cluster endpoint.'
-cond506=>operation: raise HTTPException(status_code=400, detail='Invalid inference path') if  any((part in {'.', '..'} for part in upstream_path.split('/')))
-op516=>operation: service_name, namespace, configured_health_path = await _resolve_upstream(endpoint_name)
-op518=>operation: upstream_path = _validate_upstream_path(upstream_path, request.method, configured_health_path)
-op520=>operation: encoded_suffix = quote(upstream_path, safe='/:@-._~')
-op522=>operation: upstream_path_value = f'/{encoded_suffix}' if encoded_suffix else '/'
-op524=>operation: upstream_url = f'https://{service_name}.{namespace}.svc.cluster.local:8443{upstream_path_value}'
-op526=>operation: body = await request.body()
-op528=>operation: timeout = httpx2.Timeout(connect=_bounded_timeout('INFERENCE_PROXY_CONNECT_TIMEOUT_SECONDS', 5.0, 0.1, 30.0), read=_bounded_timeout('INFERENCE_PROXY_READ_TIMEOUT_SECONDS', 300.0, 1.0, 900.0), write=_bounded_timeout('INFERENCE_PROXY_WRITE_TIMEOUT_SECONDS', 30.0, 1.0, 300.0), pool=_bounded_timeout('INFERENCE_PROXY_POOL_TIMEOUT_SECONDS', 5.0, 0.1, 30.0))
-op533=>operation: client = _new_upstream_client()
-cond530=>condition: exception raised?
-cond535=>condition: except internal_tls.InternalTLSError as exc
-sub539=>subroutine: logger.error('Inference upstream TLS trust is unavailable: %s', exc)
-sub541=>subroutine: raise HTTPException(status_code=502, detail='Inference endpoint is unavailable') from exc
-op546=>operation: response: httpx2.Response | None = None
-op549=>operation: upstream_request = client.build_request(request.method, upstream_url, params=list(request.query_params.multi_items()), headers=_request_headers(request), content=body, timeout=timeout)
+        <div><textarea id="code" style="width: 100%;" rows="11">op3093=>operation: 'Forward one authenticated request to a managed in-cluster endpoint.'
+cond3096=>operation: raise HTTPException(status_code=400, detail='Invalid inference path') if  any((part in {'.', '..'} for part in upstream_path.split('/')))
+op3106=>operation: service_name, namespace, configured_health_path = await _resolve_upstream(endpoint_name)
+op3108=>operation: upstream_path = _validate_upstream_path(upstream_path, request.method, configured_health_path)
+op3110=>operation: encoded_suffix = quote(upstream_path, safe='/:@-._~')
+op3112=>operation: upstream_path_value = f'/{encoded_suffix}' if encoded_suffix else '/'
+op3114=>operation: upstream_url = f'https://{service_name}.{namespace}.svc.cluster.local:8443{upstream_path_value}'
+op3116=>operation: body = await request.body()
+op3118=>operation: timeout = httpx2.Timeout(connect=_bounded_timeout('INFERENCE_PROXY_CONNECT_TIMEOUT_SECONDS', 5.0, 0.1, 30.0), read=_bounded_timeout('INFERENCE_PROXY_READ_TIMEOUT_SECONDS', 300.0, 1.0, 900.0), write=_bounded_timeout('INFERENCE_PROXY_WRITE_TIMEOUT_SECONDS', 30.0, 1.0, 300.0), pool=_bounded_timeout('INFERENCE_PROXY_POOL_TIMEOUT_SECONDS', 5.0, 0.1, 30.0))
+op3123=>operation: client = _new_upstream_client()
+cond3120=>condition: exception raised?
+cond3125=>condition: except internal_tls.InternalTLSError as exc
+sub3129=>subroutine: logger.error('Inference upstream TLS trust is unavailable: %s', exc)
+sub3131=>subroutine: raise HTTPException(status_code=502, detail='Inference endpoint is unavailable') from exc
+op3136=>operation: response: httpx2.Response | None = None
+op3139=>operation: upstream_request = client.build_request(request.method, upstream_url, params=list(request.query_params.multi_items()), headers=_request_headers(request), content=body, timeout=timeout)
 response = await client.send(upstream_request, stream=True)
 return _UpstreamStreamingResponse(response, client)
-cond548=>condition: exception raised?
-cond551=>condition: except httpx2.TimeoutException as exc
-op555=>operation: await _release_upstream(response, client)
-sub557=>subroutine: raise HTTPException(status_code=504, detail='Inference endpoint timed out') from exc
-cond559=>condition: except httpx2.HTTPError as exc
-op563=>operation: await _release_upstream(response, client)
-sub565=>subroutine: logger.warning('Inference upstream request failed: service=%s namespace=%s error_type=%s error=%s', service_name, namespace, type(exc).__name__, exc)
-sub567=>subroutine: raise HTTPException(status_code=502, detail='Inference endpoint is unavailable') from exc
-cond569=>condition: except BaseException
-op573=>operation: await _release_upstream(response, client)
-sub575=>subroutine: raise
+cond3138=>condition: exception raised?
+cond3141=>condition: except httpx2.TimeoutException as exc
+op3145=>operation: await _release_upstream(response, client)
+sub3147=>subroutine: raise HTTPException(status_code=504, detail='Inference endpoint timed out') from exc
+cond3149=>condition: except httpx2.HTTPError as exc
+op3153=>operation: await _release_upstream(response, client)
+sub3155=>subroutine: logger.warning('Inference upstream request failed: service=%s namespace=%s error_type=%s error=%s', service_name, namespace, type(exc).__name__, exc)
+sub3157=>subroutine: raise HTTPException(status_code=502, detail='Inference endpoint is unavailable') from exc
+cond3159=>condition: except BaseException
+op3163=>operation: await _release_upstream(response, client)
+sub3165=>subroutine: raise
 
-op503->cond506
-cond506->op516
-op516->op518
-op518->op520
-op520->op522
-op522->op524
-op524->op526
-op526->op528
-op528->op533
-op533->cond530
-cond530(yes)->cond535
-cond535(yes)->sub539
-sub539->sub541
-cond535(no)->op546
-op546->op549
-op549->cond548
-cond548(yes)->cond551
-cond551(yes)->op555
-op555->sub557
-cond551(no)->cond559
-cond559(yes)->op563
-op563->sub565
-sub565->sub567
-cond559(no)->cond569
-cond569(yes)->op573
-op573->sub575
-cond530(no)->op546
+op3093->cond3096
+cond3096->op3106
+op3106->op3108
+op3108->op3110
+op3110->op3112
+op3112->op3114
+op3114->op3116
+op3116->op3118
+op3118->op3123
+op3123->cond3120
+cond3120(yes)->cond3125
+cond3125(yes)->sub3129
+sub3129->sub3131
+cond3125(no)->op3136
+op3136->op3139
+op3139->cond3138
+cond3138(yes)->cond3141
+cond3141(yes)->op3145
+op3145->sub3147
+cond3141(no)->cond3149
+cond3149(yes)->op3153
+op3153->sub3155
+sub3155->sub3157
+cond3149(no)->cond3159
+cond3159(yes)->op3163
+op3163->sub3165
+cond3120(no)->op3136
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -274,17 +274,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-10-25T13:00:05Z -->
-        <!-- Generated from Git commit: de508a874e7ac267180e26a4c6fc56c1cd0878c2 -->
+        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-10-25T13:00:05Z">2026-10-25T13:00:05Z</time>
+            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>de508a874e7ac267180e26a4c6fc56c1cd0878c2</code>
+            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>66030b5c8d2ed8ae</code>
+            Flow content SHA-256: <code>8c3acd3771865ba8</code>
           </p>
           <div id="canvas"></div>
         </div>

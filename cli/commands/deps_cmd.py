@@ -305,28 +305,19 @@ def scan(ctx: click.Context, nodepools_only: bool, report_file: Path | None) -> 
     NodePool policy checks (offline always; live EC2 comparison when AWS
     credentials resolve).
 
-    With the global ``-o json``, prints a machine-readable envelope
-    (``has_drift``, ``scan_complete``, ``report_markdown``) instead of
-    the bare report — this is the shape the MCP ``deps_scan`` tool
-    returns.
+    With the global ``-o json`` or ``-o yaml``, prints a machine-readable
+    envelope (``has_drift``, ``scan_complete``, ``report_markdown``) instead
+    of the bare report — this is the shape the MCP ``deps_scan`` tool
+    returns. ``--report`` still writes the Markdown report to its file.
     """
     repo_root = _repo_root()
-    json_output = bool(ctx.obj) and getattr(ctx.obj, "output_format", "table") == "json"
+    output_format = getattr(ctx.obj, "output_format", "table") if ctx.obj else "table"
+    machine_output = output_format in ("json", "yaml")
 
     if nodepools_only:
         envelope = _run_nodepools_check(repo_root)
     else:
-        envelope = _run_full_scan(repo_root, stream=not json_output)
-
-    if json_output:
-        from ..output import emit_structured_document
-
-        emit_structured_document(
-            envelope,
-            output_format="json",
-            rendered=json.dumps(envelope, indent=2),
-        )
-        return
+        envelope = _run_full_scan(repo_root, stream=not machine_output)
 
     if nodepools_only:
         offline = cast("dict[str, object]", envelope["offline"])
@@ -334,15 +325,28 @@ def scan(ctx: click.Context, nodepools_only: bool, report_file: Path | None) -> 
         report_markdown = str(offline.get("report_markdown", ""))
         if online.get("report_markdown"):
             report_markdown += "\n" + str(online["report_markdown"])
+    else:
+        report_markdown = str(envelope["report_markdown"])
+
+    if report_file is not None:
+        report_file.write_text(report_markdown, encoding="utf-8")
+
+    if machine_output:
+        from ..output import emit_structured_document
+
+        emit_structured_document(envelope, output_format=output_format)
+        if report_file is not None:
+            click.echo(f"report:        {report_file}", err=True)
+        return
+
+    if nodepools_only:
         click.echo(f"offline policy check: {offline['status']}", err=True)
         click.echo(f"online EC2 catalog:   {online['status']}", err=True)
     else:
-        report_markdown = str(envelope["report_markdown"])
         click.echo(f"has_drift:     {envelope['has_drift']}", err=True)
         click.echo(f"scan_complete: {envelope['scan_complete']}", err=True)
 
     if report_file is not None:
-        report_file.write_text(report_markdown, encoding="utf-8")
         click.echo(f"report:        {report_file}", err=True)
     else:
         click.echo(report_markdown)

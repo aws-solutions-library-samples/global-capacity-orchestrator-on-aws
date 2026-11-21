@@ -198,6 +198,12 @@ def project_name(cdk_json_path: Path | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Errors DescribeCapacityReservations answers for an id it does not know.
+_UNKNOWN_RESERVATION_CODES = frozenset(
+    {"InvalidCapacityReservationId.NotFound", "InvalidCapacityReservationId.Malformed"}
+)
+
+
 def _error_text(exc: Exception) -> str:
     if isinstance(exc, ClientError):
         error = exc.response.get("Error", {})
@@ -705,14 +711,30 @@ def _managed_mode_checks(checker: _Checker, config: Mapping[str, Any], *, projec
     if reservations:
 
         def describe_reservations() -> dict[str, dict[str, Any]]:
+            ec2 = checker.client("ec2")
+
+            def describe(ids: list[str]) -> list[Any]:
+                response = ec2.describe_capacity_reservations(CapacityReservationIds=ids)
+                return list(response.get("CapacityReservations") or [])
+
             ids = sorted({r["id"] for _g, r in reservations})
-            response = checker.client("ec2").describe_capacity_reservations(
-                CapacityReservationIds=ids
-            )
-            return {
-                str(item.get("CapacityReservationId")): dict(item)
-                for item in response.get("CapacityReservations") or []
-            }
+            try:
+                items = describe(ids)
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") not in _UNKNOWN_RESERVATION_CODES:
+                    raise
+                # EC2 fails the whole call for one unknown id instead of
+                # omitting it: describe one by one, so the unknown ids are
+                # reported missing (FAIL) and the others are still checked.
+                items = []
+                for reservation_id in ids:
+                    try:
+                        items.extend(describe([reservation_id]))
+                    except ClientError as single_exc:
+                        code = single_exc.response.get("Error", {}).get("Code")
+                        if code not in _UNKNOWN_RESERVATION_CODES:
+                            raise
+            return {str(item.get("CapacityReservationId")): dict(item) for item in items}
 
         described_reservations = checker.guarded("capacity-reservations", describe_reservations)
         if described_reservations is not None:

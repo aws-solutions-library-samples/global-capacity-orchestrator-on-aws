@@ -132,6 +132,68 @@ def _record_target_stack_absence(
     return proof
 
 
+def _helper_errors(outcomes: list[dict[str, Any]]) -> list[str]:
+    """One line for each teardown helper step that reported errors.
+
+    ``destroy_orchestrated`` runs its sweeps (the EBS volumes the CSI driver
+    left, the add-on and traffic-dial parameters written at runtime) best
+    effort: a failure shows only in the outcome it hands
+    ``on_cleanup_complete``, never in the result it returns.
+    """
+    errors: list[str] = []
+    for outcome in outcomes:
+        details = outcome.get("details")
+        reported = details.get("errors") if isinstance(details, dict) else None
+        if reported:
+            errors.append(
+                f"{outcome.get('name')}: {json.dumps(to_jsonable(reported), sort_keys=True)}"
+            )
+    return errors
+
+
+def _post_absence_sweeps(ctx: RunContext, *, source: str) -> list[dict[str, Any]]:
+    """Run the sweeps a teardown runs once its stacks are gone; fail on any error.
+
+    ``destroy_orchestrated`` deletes a destroyed cluster's leftover EBS volumes
+    and its add-on parameters (``/<project>/addons/<region>``) once the regional
+    stacks are absent, the traffic-dial parameters once every stack is, and the
+    shared bastion IAM role and instance profile. A run interrupted after the
+    stacks were deleted never reached them, and on resume, with the stacks
+    absent, the orchestrator is not called again. The sweeps act only on exact
+    derived names and are idempotent, so they run on every resume that finds
+    the stacks gone.
+    """
+    manager = ctx.stack_manager
+    outcomes: list[dict[str, Any]] = []
+    for region in ctx.deployment_regions:
+        stack_name = f"{ctx.config.project_name}-{region}"
+        outcomes.append(
+            {
+                "name": "dynamic-pvs",
+                "details": manager._cleanup_cluster_volumes(stack_name, region=region),
+            }
+        )
+        outcomes.append(
+            {
+                "name": "addon-parameters",
+                "details": manager._cleanup_addon_parameters(stack_name, region=region),
+            }
+        )
+    outcomes.append(
+        {"name": "traffic-dial-parameters", "details": manager._cleanup_traffic_dial_parameters()}
+    )
+    outcomes.append({"name": "bastion-iam", "details": manager._cleanup_bastion_iam()})
+    recorded = [{"source": source, "at": utc_now(), **to_jsonable(item)} for item in outcomes]
+    ctx.checkpoint.state.setdefault("post_absence_sweeps", []).extend(copy.deepcopy(recorded))
+    ctx.persist()
+    errors = _helper_errors(recorded)
+    if errors:
+        raise RuntimeError(
+            "Teardown sweeps after stack absence reported errors: " + "; ".join(errors)
+        )
+    return recorded
+
+
 def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
     """Retry exact-owned teardown, preserving every structured attempt."""
     if not ctx.checkpoint.deployment_attempted:
@@ -146,6 +208,7 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
             source="destroy-already-destroyed-initial-absence",
         )
         _checkpoint_retained_kms_keys(ctx)
+        sweeps = _post_absence_sweeps(ctx, source="destroy-already-destroyed")
         retained_cleanup = _retained_resource_cleanup(ctx)
         final_absence = _verify_target_stack_absence(ctx)
         if not final_absence["all_absent"]:
@@ -166,6 +229,7 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
             "stack_absence_proof": absence_proof,
             "stack_absence_completion_proof": completion_proof,
             "stack_absence": final_absence,
+            "post_absence_sweeps": sweeps,
             "retained_cleanup": retained_cleanup,
             "attempts": ctx.checkpoint.state.get("destroy_attempts", []),
             "workload_cleanup_attempts": ctx.checkpoint.state.get("workload_cleanup_attempts", []),
@@ -191,6 +255,7 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
         _checkpoint_new_ecr_repositories(ctx)
         _checkpoint_new_ecr_images(ctx)
         _checkpoint_retained_kms_keys(ctx)
+        sweeps = _post_absence_sweeps(ctx, source="destroy-resume")
         retained_cleanup = _retained_resource_cleanup(ctx)
         final_absence = _verify_target_stack_absence(ctx)
         if not final_absence["all_absent"]:
@@ -213,6 +278,7 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
             "stack_absence_proof": absence_proof,
             "stack_absence_completion_proof": completion_proof,
             "stack_absence": final_absence,
+            "post_absence_sweeps": sweeps,
             "retained_cleanup": retained_cleanup,
             "attempts": ctx.checkpoint.state.get("destroy_attempts", []),
             "workload_cleanup_attempts": ctx.checkpoint.state.get("workload_cleanup_attempts", []),
@@ -328,6 +394,12 @@ def destroy_deployment(ctx: RunContext) -> dict[str, Any]:
                 "log_cleanup_helper": helper_authority,
             }
             if overall:
+                helper_errors = _helper_errors(helper_outcomes)
+                if helper_errors:
+                    attempt["helper_errors"] = helper_errors
+                    raise RuntimeError(
+                        "Teardown helper steps reported errors: " + "; ".join(helper_errors)
+                    )
                 absence_before_cleanup = _verify_target_stack_absence(ctx)
                 attempt["stack_absence_before_retained_cleanup"] = absence_before_cleanup
                 if not absence_before_cleanup["all_absent"]:

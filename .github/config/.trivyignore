@@ -32,13 +32,15 @@
 # minutes before publication, so this appeared on an unchanged buildx binary.
 #
 # Not clearable by a stable pin bump: re-checked 2026-11-01 against the now
-# current stable Buildx v0.38.1 (2026-10-20), which this repository pins.
+# current stable Buildx v0.38.1 (2026-10-20), which this repository pinned then.
 # Upstream published go-archive v0.3.0 on 2026-07-30 (v0.3.3 by 2026-08-05),
 # but Buildx has not adopted it — v0.38.1 still links v0.2.0, verified with
 # `go version -m` on the published linux-amd64 binary (checksum matched the
 # release's checksums.txt), and the CI-pinned Trivy v0.76.1 still reports it
 # there. The advisory range is `< 0.3.0`, so neither the v0.37.1 -> v0.38.0
-# nor the v0.38.0 -> v0.38.1 bump clears or worsens the finding.
+# nor the v0.38.0 -> v0.38.1 bump clears or worsens the finding. Still true
+# of v0.38.2, pinned since 2026-11-20 for CVE-2026-95839: Trivy reports
+# go-archive v0.2.0 in its checksum-matched linux-amd64 binary.
 #
 # Low runtime risk: the flagged path is tar extraction. buildx is a
 # build-time CLI plugin that extracts contexts and cache artifacts authored by
@@ -243,7 +245,7 @@ CVE-2026-97689 exp:2026-12-14
 # Trivy reports the x/net copy under each Go binary's gobinary target in
 # security:trivy:container-scan:
 #   * Dockerfile.dev: kubectl v1.37.2 (x/net v0.57.0) and the docker-buildx
-#     plugin v0.38.1 (x/net v0.59.0)
+#     plugin v0.38.2 (x/net v0.59.0)
 #   * lambda/helm-installer: kubectl v1.37.2 (as above)
 # The stdlib half is fixed everywhere: the 2026-11-01 bumps moved kubectl to
 # v1.37.2, Buildx to v0.38.1 and the Docker CLI to 29.9.2, all built with
@@ -266,7 +268,8 @@ CVE-2026-97689 exp:2026-12-14
 #
 # Not clearable by a pin bump, re-checked 2026-11-01: Kubernetes v1.37.2
 # (2026-10-14) is the newest 1.37 patch and still links x/net v0.57.0; Buildx
-# v0.38.1 (2026-10-20) is the newest Buildx release and links v0.59.0.
+# v0.38.1 (2026-10-20) is the newest Buildx release and links v0.59.0. Buildx
+# v0.38.2, pinned since 2026-11-20, links v0.59.0 too.
 #
 # Low runtime risk: the flaw reaches clients only from the HTTP/2 peer itself,
 # which for these clients is a TLS endpoint they chose to call (the Kubernetes
@@ -293,7 +296,7 @@ CVE-2026-78669 exp:2026-12-14
 # methods. Trivy reports the x/net module under each Go binary's gobinary
 # target in security:trivy:container-scan:
 #   * Dockerfile.dev: kubectl v1.37.2 (x/net v0.57.0) and the docker-buildx
-#     plugin v0.38.1 (x/net v0.59.0)
+#     plugin v0.38.2 (x/net v0.59.0)
 #   * lambda/helm-installer: kubectl v1.37.2 (as above) and helm v4.3.1
 #     (x/net v0.60.0, so this id reaches helm where CVE-2026-78669 did not)
 #
@@ -307,7 +310,8 @@ CVE-2026-78669 exp:2026-12-14
 # newest Kubernetes 1.37 patch (dl.k8s.io/release/stable-1.37.txt) and links
 # x/net v0.57.0; Buildx v0.38.2 (2026-11-03) is the newest stable release and,
 # per `go version -m` on its published linux-amd64 binary, still links x/net
-# v0.59.0, so the v0.38.1 -> v0.38.2 bump would not clear it; helm v4.3.1
+# v0.59.0, so the v0.38.1 -> v0.38.2 bump (made 2026-11-20 for
+# CVE-2026-95839) does not clear it; helm v4.3.1
 # (2026-10-15) is still the newest Helm 4 release and links v0.60.0.
 #
 # Not reachable: the vulnerable parser is not compiled into any of the three.
@@ -383,8 +387,8 @@ CVE-2026-56851 exp:2026-12-14
 #     aws-lambda-rie (go1.26.9)
 #   * lambda/tls-certificate-manager: the base image's aws-lambda-rie
 # The dev image no longer carries it: the 2026-11-01 bumps moved the Docker
-# CLI to 29.9.2, kubectl to v1.37.2 and the docker-buildx plugin to v0.38.1,
-# all built with go1.26.10 (`go version -m` on the checksum-matched release
+# CLI to 29.9.2, kubectl to v1.37.2 and the docker-buildx plugin to v0.38.1
+# (v0.38.2 since 2026-11-20), all built with go1.26.10 (`go version -m` on the checksum-matched release
 # artifacts; the CI-pinned Trivy v0.76.1 reports none of them). The helm
 # release artifact, matched to the sha256 anchor in
 # lambda/helm-installer/Dockerfile, carries go1.27.2; the aws-lambda-rie in
@@ -418,3 +422,37 @@ CVE-2026-56851 exp:2026-12-14
 # Advisories: https://pkg.go.dev/vuln/GO-2026-6809
 #             https://go.dev/issue/82345
 CVE-2026-111943 exp:2026-12-21
+# -----------------------------------------------------------------------------
+# CVE-2026-97054 (GO-2026-6859): Go's net/http HTTP/1 server can crash on a
+# MaxBytesReader header race. Fixed in Go 1.26.11 and 1.27.4. Reported by
+# security:trivy:container-scan as `stdlib` in Go binaries we do not build:
+# kubectl, docker and docker-buildx in the dev image (Dockerfile.dev), helm,
+# kubectl and aws-lambda-rie in lambda/helm-installer, and aws-lambda-rie in
+# lambda/tls-certificate-manager (the emulator ships in the
+# public.ecr.aws/lambda/python:3.14 base image).
+#
+# Not introduced by any change of ours: the Go advisory was published
+# 2026-11-11 and reached the Trivy DB on 2026-11-19 between two Security runs
+# on PR #542 (green at 01:10Z, failing at 06:10Z on images whose binaries did
+# not change in between).
+#
+# Not clearable by a pin bump today, checked 2026-11-19 against the newest
+# upstream releases: kubectl v1.37.2 (2026-10-28) and aws-lambda-rie v1.38
+# (2026-10-30) predate the Go fix. helm v4.3.2 (2026-11-13) and buildx
+# v0.39.0 (2026-11-11) are newer, but tool bumps are batched in the scheduled
+# dependency sweep, which must confirm with `go version -m` that each binary
+# links a fixed Go before dropping this entry.
+#
+# Low runtime risk: the flaw is in Go's HTTP/1 server. kubectl, helm, docker
+# and buildx run here as HTTP clients. aws-lambda-rie serves the Lambda runtime
+# API only when an image runs outside AWS Lambda (local testing); in Lambda the
+# service's own runtime API is used and the emulator does not start.
+#
+# Clears when every listed binary links Go >= 1.26.11 (or >= 1.27.4): bump
+# KUBECTL_VERSION, DOCKER_VERSION and BUILDX_VERSION in Dockerfile.dev, the
+# helm and kubectl download URLs and checksums in lambda/helm-installer's
+# Dockerfile, and pull a Lambda base image whose aws-lambda-rie links a fixed
+# Go; confirm with `trivy image`, then drop this id.
+# Advisory: https://pkg.go.dev/vuln/GO-2026-6859
+#           https://go.dev/issue/82563
+CVE-2026-97054 exp:2026-12-15

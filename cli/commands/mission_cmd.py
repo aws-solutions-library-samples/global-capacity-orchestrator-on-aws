@@ -71,6 +71,28 @@ def _check_feature_flag() -> None:
         raise SystemExit(2)
 
 
+def configure_mission_deployment() -> None:
+    """Point Mission's global-stack resources at this CLI's project and global Region.
+
+    The state table, the mission-memory index and their SSM parameters are
+    named after cdk.json ``project_name`` and live in the global Region.
+    Mission resolves both through ``mission.deployment``; this passes the
+    CLI's merged configuration (cdk.json, config file, ``GCO_*`` variables)
+    so ``gco mission`` and ``gco swarm`` reach the same deployment as every
+    other command. A group invoked without the root ``gco`` group (tests)
+    has no configuration object and keeps Mission's own resolution.
+    """
+    from ..config import GCOConfig
+
+    context = click.get_current_context(silent=True)
+    config = context.find_object(GCOConfig) if context is not None else None
+    if config is None:
+        return
+    from mission import deployment
+
+    deployment.configure(project_name=config.project_name, global_region=config.global_region)
+
+
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
@@ -162,6 +184,20 @@ def _make_stub_dispatcher() -> Any:
     return make_stub_dispatcher()
 
 
+def _cadence_from_options(
+    cadence: str, cadence_n: int | None, cadence_t: int | None, cadence_event: str | None
+) -> dict[str, Any]:
+    """Build the checkpoint-cadence dict from the ``--cadence*`` options."""
+    cadence_dict: dict[str, Any] = {"kind": cadence}
+    if cadence_n is not None:
+        cadence_dict["n"] = cadence_n
+    if cadence_t is not None:
+        cadence_dict["t"] = cadence_t
+    if cadence_event is not None:
+        cadence_dict["event_name"] = cadence_event
+    return cadence_dict
+
+
 # ---------------------------------------------------------------------------
 # Click group
 # ---------------------------------------------------------------------------
@@ -182,6 +218,7 @@ def mission_cmd() -> None:
     and exits with code 2.
     """
     _check_feature_flag()
+    configure_mission_deployment()
 
 
 # ---------------------------------------------------------------------------
@@ -212,14 +249,17 @@ def mission_cmd() -> None:
 @click.option(
     "--tool-allowlist",
     multiple=True,
-    help="Tool name to allowlist; pass multiple times. Optional with --allow-all-tools.",
+    help=(
+        "Tool name to allowlist; pass multiple times. Optional with --allow-all-tools. "
+        "The mission_* control tools and the swarm_* tools are refused."
+    ),
 )
 @click.option(
     "--allow-all-tools",
     is_flag=True,
     help=(
         "Resolve the session's tool allowlist to every registered MCP tool "
-        "(minus the mission_* control tools). Makes --tool-allowlist optional; "
+        "(minus the mission_* and swarm_* tools). Makes --tool-allowlist optional; "
         "mutually exclusive with it."
     ),
 )
@@ -375,13 +415,7 @@ def mission_start(
     }
 
     # Build the cadence dict.
-    cadence_dict: dict[str, Any] = {"kind": cadence}
-    if cadence_n is not None:
-        cadence_dict["n"] = cadence_n
-    if cadence_t is not None:
-        cadence_dict["t"] = cadence_t
-    if cadence_event is not None:
-        cadence_dict["event_name"] = cadence_event
+    cadence_dict = _cadence_from_options(cadence, cadence_n, cadence_t, cadence_event)
 
     # Resolve the effective allowlist before any persistence. The explicit
     # path keeps the thin CLI behaviour (no live-registry per-name check); the
@@ -591,7 +625,8 @@ def _resolve_cli_allowlist(*, allow_all_tools: bool, tool_allowlist: tuple[str, 
     The all-tools branch populates the registry on demand and resolves the
     effective list from it. The explicit branch preserves the thin CLI path
     (no per-name registry check) but enforces at-least-one, emitting the
-    existing ``empty`` rejection when no name is supplied. On any
+    existing ``empty`` rejection when no name is supplied, and rejects the
+    loop-management tools (``control_tool_not_allowed``). On any
     :class:`MissionValidationError` the structured envelope is emitted and the
     process exits 1 — before the caller builds or persists a session.
     """
@@ -613,6 +648,12 @@ def _resolve_cli_allowlist(*, allow_all_tools: bool, tool_allowlist: tuple[str, 
         return resolved
     if not tool_allowlist:
         _emit_error("validation_error", {"field": "tool_allowlist", "reason": "empty"})
+        sys.exit(1)
+    # A session must not drive Mission or swarm sessions from its own loop.
+    try:
+        mission_validation.reject_control_tools(list(tool_allowlist))
+    except MissionValidationError as exc:
+        _emit_error(exc.code, exc.details)
         sys.exit(1)
     return list(tool_allowlist)
 
@@ -1263,14 +1304,17 @@ def mission_scaffold_criteria_cmd(
 @click.option(
     "--tool-allowlist",
     multiple=True,
-    help="Tool name to allowlist; pass multiple times. Optional with --allow-all-tools.",
+    help=(
+        "Tool name to allowlist; pass multiple times. Optional with --allow-all-tools. "
+        "The mission_* control tools and the swarm_* tools are refused."
+    ),
 )
 @click.option(
     "--allow-all-tools",
     is_flag=True,
     help=(
         "Resolve the session's tool allowlist to every registered MCP tool "
-        "(minus the mission_* control tools). Makes --tool-allowlist optional; "
+        "(minus the mission_* and swarm_* tools). Makes --tool-allowlist optional; "
         "mutually exclusive with it."
     ),
 )
@@ -1344,6 +1388,20 @@ def mission_scaffold_criteria_cmd(
     help="Checkpoint cadence kind.",
 )
 @click.option(
+    "--cadence-n", type=int, default=None, help="Cadence n parameter (every_n_iterations)."
+)
+@click.option(
+    "--cadence-t",
+    type=int,
+    default=None,
+    help="Cadence t parameter in seconds (every_t_seconds).",
+)
+@click.option(
+    "--cadence-event",
+    default=None,
+    help="Cadence event_name parameter (on_event).",
+)
+@click.option(
     "--dry-run",
     "dry_run",
     is_flag=True,
@@ -1368,6 +1426,9 @@ def mission_run_cmd(
     save_criteria: str | None,
     stagnation_threshold: int,
     cadence: str,
+    cadence_n: int | None,
+    cadence_t: int | None,
+    cadence_event: str | None,
     dry_run: bool,
 ) -> None:
     """Scaffold criteria and run a Mission session to completion in one call.
@@ -1423,6 +1484,29 @@ def mission_run_cmd(
         allow_all_tools=allow_all_tools, tool_allowlist=tool_allowlist
     )
 
+    # Validate everything the flags alone decide before the scaffold step,
+    # so a bad flag spends no sampling tokens and writes no --save-criteria
+    # file. Only the scaffolded criteria are validated afterwards.
+    budget: dict[str, Any] = {
+        "max_iterations": max_iterations,
+        "max_wall_clock_seconds": max_wall_clock,
+    }
+    cadence_dict = _cadence_from_options(cadence, cadence_n, cadence_t, cadence_event)
+    try:
+        directive_clean = mission_validation.validate_directive(directive)
+        budget_clean = mission_validation.validate_budget(budget, allowlist_resolved, {})
+        cadence_clean = mission_validation.validate_cadence(cadence_dict)
+    except MissionValidationError as exc:
+        _emit_error(exc.code, exc.details)
+        sys.exit(1)
+
+    if not isinstance(stagnation_threshold, int) or stagnation_threshold <= 0:
+        _emit_error(
+            "validation_error",
+            {"field": "stagnation-threshold", "reason": "must_be_positive_int"},
+        )
+        sys.exit(1)
+
     # ---- Step 1: scaffold criteria. -------------------------------------
     # Resolve the sampling state once; reuse it for both the scaffold
     # call and the persisted session's ``use_sampling`` field so the
@@ -1470,27 +1554,11 @@ def mission_run_cmd(
             encoding="utf-8",
         )
 
-    # ---- Step 2: validate everything and persist the session. -----------
-    budget: dict[str, Any] = {
-        "max_iterations": max_iterations,
-        "max_wall_clock_seconds": max_wall_clock,
-    }
-    cadence_dict: dict[str, Any] = {"kind": cadence}
-
+    # ---- Step 2: validate the criteria and persist the session. ---------
     try:
-        directive_clean = mission_validation.validate_directive(directive)
         criteria_clean = mission_validation.validate_criteria(criteria)
-        budget_clean = mission_validation.validate_budget(budget, allowlist_resolved, {})
-        cadence_clean = mission_validation.validate_cadence(cadence_dict)
     except MissionValidationError as exc:
         _emit_error(exc.code, exc.details)
-        sys.exit(1)
-
-    if not isinstance(stagnation_threshold, int) or stagnation_threshold <= 0:
-        _emit_error(
-            "validation_error",
-            {"field": "stagnation-threshold", "reason": "must_be_positive_int"},
-        )
         sys.exit(1)
 
     session_id = f"mission-{secrets.token_hex(8)}"
@@ -1543,7 +1611,7 @@ def mission_run_cmd(
 _MEMORY_UNAVAILABLE_HINT = (
     "Mission memory is not available. The table and vector index ship with the "
     "global stack (mission_memory.enabled in cdk.json, on by default): run "
-    "'gco stacks deploy gco-global', or wait for the vector index to finish "
+    "'gco stacks deploy {global_stack}', or wait for the vector index to finish "
     "backfilling after the first deployment. See docs/MISSION.md."
 )
 
@@ -1557,7 +1625,11 @@ def _build_memory_store() -> Any:
 
 def _exit_memory_unavailable(err: Exception) -> None:
     """Print the deployment hint and a structured envelope, then exit 1."""
-    click.echo(_MEMORY_UNAVAILABLE_HINT, err=True)
+    from mission import deployment
+
+    # The global stack of the project the memory store read (<project>-global).
+    global_stack = f"{deployment.project_name()}-global"
+    click.echo(_MEMORY_UNAVAILABLE_HINT.format(global_stack=global_stack), err=True)
     _emit_error("mission_memory_unavailable", {"message": str(err)})
     raise SystemExit(1)
 

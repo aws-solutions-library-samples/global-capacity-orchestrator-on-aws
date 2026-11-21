@@ -152,13 +152,7 @@ class _FakeProcess:
             raise self.kill_error
 
 
-class TestArgumentAndTextGuards:
-    def test_traversal_skips_flags_and_detects_backslash_segment(self) -> None:
-        assert long_task._argv_has_traversal(["--cache=../outside", "safe"]) is None
-        value = "root\\..\\" + "x" * 150
-
-        assert long_task._argv_has_traversal(["gco", "--flag", value]) == (2, value[:100])
-
+class TestTextGuards:
     def test_bounded_text_handles_normal_tiny_and_split_utf8_budgets(self) -> None:
         assert long_task._bounded_text("short", 10) == "short"
         assert long_task._bounded_text("abcdef", 3) == "..."
@@ -335,9 +329,11 @@ class TestMockedRunnerLifecycle:
         }
         assert observed["argv"] == ("/fake/gco", "--output", "table", "images")
         assert observed["kwargs"] == {
+            "stdin": asyncio.subprocess.DEVNULL,
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,
             "cwd": str(long_task.cli_runner.PROJECT_ROOT),
+            "env": None,  # no GCO_MCP_ROLE_ARN: the child inherits the server's environment
         }
         assert writer.tool == "images"
         assert writer.argv == ["gco", "images"]
@@ -644,6 +640,73 @@ class TestResidualCleanupBranches:
         assert process.terminate_calls == 1
 
 
+class TestRepeatedCancellation:
+    async def test_second_cancel_during_the_grace_wait_still_records_cancelled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A second cancel while gco is still stopping CDK must not leave the
+        task record reading ``running`` (it would later surface as orphaned)."""
+
+        class SlowToStopProcess(_FakeProcess):
+            def __init__(self) -> None:
+                super().__init__(stdout=_ChunkStream([]), stderr=_ChunkStream([]), exit_code=143)
+                self.wait_started = asyncio.Event()
+                self.terminated = asyncio.Event()
+                self.exited = asyncio.Event()
+
+            async def wait(self) -> int:
+                self.wait_calls += 1
+                self.wait_started.set()
+                await self.exited.wait()  # gco is still stopping CDK
+                self.returncode = self.exit_code
+                return self.exit_code
+
+            def terminate(self) -> None:
+                super().terminate()
+                self.terminated.set()
+
+        process = SlowToStopProcess()
+
+        async def fake_spawn(*_argv: str, **_kwargs: object) -> SlowToStopProcess:
+            return process
+
+        monkeypatch.setattr(long_task, "TaskStatusWriter", _WriterSpy)
+        monkeypatch.setattr(long_task, "_try_get_task_id", lambda _ctx: None)
+        monkeypatch.setattr(long_task, "make_task_id", lambda _tool: "twice-cancelled")
+        monkeypatch.setattr(long_task.asyncio, "create_subprocess_exec", fake_spawn)
+
+        runner = asyncio.create_task(
+            long_task._run_long_task(
+                ["command"],
+                ctx=_Context(),
+                progress=_Progress(),
+                is_stack_op=True,
+            )
+        )
+        await process.wait_started.wait()
+        runner.cancel()
+        await process.terminated.wait()
+        runner.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await runner
+
+        writer = _WriterSpy.latest
+        assert writer is not None
+        assert process.kill_calls == 0
+        assert writer.finishes == [
+            {
+                "state": "cancelled",
+                "exit_code": None,
+                "error": long_task._PARTIAL_STATE_DISCLAIMER,
+            }
+        ]
+        # Let the abandoned wait/coordination tasks finish before the loop closes.
+        process.exited.set()
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+
 class TestCancellationBeforeHeartbeatExists:
     """Cancellation raised before ``heartbeat`` is ever assigned.
 
@@ -802,3 +865,54 @@ class TestHeartbeatActivityBranches:
 
         assert payload["status"] == "ok"
         assert payload["task_id"] == "heartbeat-branches"
+
+
+class TestCancelHeartbeatTask:
+    """Only the heartbeat's own cancellation is absorbed."""
+
+    def test_cancellation_of_the_waiting_task_propagates(self) -> None:
+        """The waiter is cancelled while the heartbeat is still stopping.
+
+        Suppressing ``CancelledError`` around ``await task`` returned normally
+        here, so the cancelled caller carried on.
+        """
+
+        async def scenario() -> None:
+            release = asyncio.Event()
+
+            async def slow_to_stop() -> None:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    await release.wait()
+                    raise
+
+            heartbeat = asyncio.create_task(slow_to_stop())
+            await asyncio.sleep(0)
+            waiter = asyncio.create_task(long_task._cancel_heartbeat_task(heartbeat))
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            release.set()
+            await asyncio.wait({heartbeat})
+            assert heartbeat.cancelled()
+
+        asyncio.run(scenario())
+
+    def test_heartbeat_cancellation_and_failure_are_absorbed(self) -> None:
+        async def scenario() -> None:
+            sleeping = asyncio.create_task(asyncio.sleep(3600))
+            await asyncio.sleep(0)
+            await long_task._cancel_heartbeat_task(sleeping)
+            assert sleeping.cancelled()
+
+            async def broken() -> None:
+                raise RuntimeError("heartbeat failed")
+
+            failed = asyncio.create_task(broken())
+            await asyncio.sleep(0)
+            await long_task._cancel_heartbeat_task(failed)
+            assert isinstance(failed.exception(), RuntimeError)
+
+        asyncio.run(scenario())

@@ -1,36 +1,19 @@
 # Valkey ConfigMap — provides the cache endpoint to pods via configMapKeyRef
 # Only applied when Valkey is enabled (cdk.json valkey.enabled = true).
 # The handler automatically skips this file when placeholders are unreplaced.
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: gco-valkey
-  namespace: gco-system
-  labels:
-    app: gco
-    project: gco
-data:
-  endpoint: "{{VALKEY_ENDPOINT}}"
-  port: "{{VALKEY_PORT}}"
+#
+# Published in gco-jobs only: its allow-vpc-egress rule (03-network-policies
+# .yaml) is the one path to the cache's in-VPC endpoint. gco-system and
+# gco-inference egress stops at DNS, HTTPS and the Pod Identity Agent, so a pod
+# there that read this ConfigMap could never connect; no platform service uses
+# Valkey. Releases that published copies in those two namespaces are swept by
+# the applier (_LEGACY_REMOVED_RESOURCES in handler.py).
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gco-valkey
   namespace: gco-jobs
-  labels:
-    app: gco
-    project: gco
-data:
-  endpoint: "{{VALKEY_ENDPOINT}}"
-  port: "{{VALKEY_PORT}}"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: gco-valkey
-  namespace: gco-inference
   labels:
     app: gco
     project: gco

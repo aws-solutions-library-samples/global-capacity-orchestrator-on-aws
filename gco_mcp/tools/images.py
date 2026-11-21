@@ -13,6 +13,7 @@ import asyncio
 import json
 from typing import Any
 
+import cli_runner
 from audit import audit_logged
 
 # FastMCP's Progress / Context dependencies inject real instances per
@@ -85,6 +86,8 @@ async def images_tags(name: str) -> str:
 async def images_describe(name: str, tag: str) -> str:
     """`gco images describe` — full ECR details for a single image tag.
 
+    Returns ``{}`` when the repository has no such tag.
+
     Args:
         name: Repository name (without the ``gco/`` prefix).
         tag: Image tag.
@@ -124,6 +127,10 @@ async def images_replication_status() -> str:
 @audit_logged
 async def images_orphans(threshold_days: int = 30) -> str:
     """`gco images orphans` — list gco/* tags older than ``threshold_days`` with no references.
+
+    A tag an inference endpoint or a job in any Region names, by tag or by
+    digest, is in use. Fails when the inference endpoints or a Region's jobs
+    cannot be read, instead of reporting tags that may be in use.
 
     Args:
         threshold_days: Age threshold in days. Defaults to 30.
@@ -195,8 +202,9 @@ async def images_init(name: str, retain: bool = False) -> str:
 
     Args:
         name: Repository name (without the ``gco/`` prefix).
-        retain: When True, mark the repository with ``gco:retain=true`` so it
-            survives stack destroys.
+        retain: When True, tag the repository ``gco:retain=true``. A marker
+            only: no GCO stack deletes project repositories, so every one
+            survives a stack destroy with or without it.
     """
     return await asyncio.to_thread(lambda: json.dumps(_get_manager().init(name, retain=retain)))
 
@@ -311,14 +319,20 @@ if is_enabled(FLAG_IMAGE_PUBLISH):
         `gco images build` — build a container image and push to ECR.
 
         Args:
-            context: Build context directory.
-            name: Image name (lowercase letters, digits, dashes; max 63 chars).
+            context: Build context directory, relative to the project root
+                (an absolute path must also be inside it).
+            name: Image name (lowercase letters and digits joined by single dashes,
+                starting with a letter; max 63 chars).
             tag: Image tag (defaults to git short SHA, else ``latest``).
             dockerfile: Path to the Dockerfile, relative to ``context``.
             platform: ``--platform`` argument for the build.
-            retain: When True, mark the repository with ``gco:retain=true``
-                so it survives stack destroys.
+            retain: When True, tag the repository ``gco:retain=true``. A
+                marker only: no GCO stack deletes project repositories, so
+                every one survives a stack destroy with or without it.
         """
+        rejected = cli_runner.reject_paths_outside_project_root(context=context)
+        if rejected is not None:
+            return rejected
         argv = ["gco", "images", "build", context, "--name", name]
         if tag:
             argv += ["--tag", tag]
@@ -343,11 +357,13 @@ if is_enabled(FLAG_IMAGE_PUBLISH):
         `gco images push` — push an already-built local image to the project ECR repo.
 
         Args:
-            name: Image name (lowercase letters, digits, dashes; max 63 chars).
+            name: Image name (lowercase letters and digits joined by single dashes,
+                starting with a letter; max 63 chars).
             tag: Image tag.
             local_image: Source image reference on the local container runtime.
-            retain: When True, mark the repository with ``gco:retain=true``
-                so it survives stack destroys.
+            retain: When True, tag the repository ``gco:retain=true``. A
+                marker only: no GCO stack deletes project repositories, so
+                every one survives a stack destroy with or without it.
         """
         argv = [
             "gco",

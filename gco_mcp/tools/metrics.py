@@ -177,6 +177,34 @@ async def metrics_cloudwatch_get(
 # =============================================================================
 
 
+def _job_log_text(raw: str, job_name: str) -> str:
+    """Return the log text inside ``gco --output json jobs logs`` output.
+
+    ``gco jobs logs`` prints the log as plain text, which the CLI's root
+    output group wraps as ``{"status": "ok", "output": "<log>"}`` in JSON
+    mode (``{"status": "ok"}`` for an empty log). Splitting that document
+    instead of the log hid every JSON-key match and left one line for regex
+    matching. An ``{"error": ...}`` payload is a retrieval failure; text that
+    is not such a document is used as-is.
+    """
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return raw
+    if isinstance(payload, dict) and "error" in payload:
+        message = str(payload["error"])
+        kind = "unknown_job" if "not found" in message.lower() else "unreachable"
+        raise MetricReaderError(
+            ErrorCode.LOG_RETRIEVAL_FAILED,
+            {"kind": kind, "job_name": job_name, "message": message},
+        )
+    if isinstance(payload, dict) and payload.get("status") == "ok":
+        output = payload.get("output", "")
+        if isinstance(output, str):
+            return output
+    return raw
+
+
 @mcp.tool(tags={"safe", "metrics"})
 @audit_logged
 async def metrics_from_job_logs(
@@ -272,21 +300,7 @@ async def metrics_from_job_logs(
             str(clamped),
         )
 
-        # Translate an ``{"error": ...}`` CLI payload into a retrieval failure
-        # . Plain log text is not JSON and is used as-is.
-        try:
-            payload = json.loads(raw)
-        except ValueError:
-            payload = None
-        if isinstance(payload, dict) and "error" in payload:
-            message = str(payload["error"])
-            kind = "unknown_job" if "not found" in message.lower() else "unreachable"
-            raise MetricReaderError(
-                ErrorCode.LOG_RETRIEVAL_FAILED,
-                {"kind": kind, "job_name": job_name, "message": message},
-            )
-
-        lines = raw.splitlines()
+        lines = _job_log_text(raw, job_name).splitlines()
 
         if pattern is not None:
             candidates: list[object] = list(logs.extract_by_regex(lines, pattern))
@@ -381,18 +395,21 @@ async def metrics_from_shared_storage_file(
     max_bytes: int = _MAX_BYTES_DEFAULT,
     output_name: str | None = None,
 ) -> dict[str, Any]:
-    """[read-only] Read a named field from a shared-storage metrics file.
+    """[read-only] Read a named field from a metrics file on the cluster's shared file system.
 
-    Reads a small metrics file from shared storage (EFS / the cluster shared
-    bucket) through the existing read-only ``gco files`` path and surfaces a
-    named field as a metric in the canonical ``{"metrics": {...}}`` shape,
+    Reads a small metrics file from the region's shared EFS file system
+    through ``gco files download``, which copies it out through a short-lived
+    helper pod, so kubectl access to a reachable cluster endpoint is needed.
+    It does not read S3 buckets. The value is returned as a metric in the
+    canonical ``{"metrics": {...}}`` shape,
     dispatching on ``format``. Sequence-bearing formats (a list, a CSV column, a
     Hugging Face ``log_history``, a JSONL stream, a Parquet column) are reduced
     to one Numeric_Value via the aggregation mode. The metric key defaults to
     ``field`` when ``output_name`` is omitted.
 
     Args:
-        path: Shared-storage path to the metrics file.
+        path: Path of the metrics file on the shared file system (as seen
+            by a pod that mounts it, for example ``outputs/run-1/metrics.json``).
         region: AWS region of the storage.
         field: Field/column/key name to read (dot-path for document formats).
         format: One of json, csv, hf_trainer_state, jsonl, yaml, parquet,

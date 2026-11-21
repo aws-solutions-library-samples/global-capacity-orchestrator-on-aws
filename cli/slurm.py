@@ -26,6 +26,7 @@ from typing import Any
 from gco.slurm_config import SLURM_LOGIN_NAME, SLURM_NAMESPACE
 
 from . import cluster_ui
+from .kubectl_helpers import kubectl_context_flags
 
 #: The Slinky LoginSet GCO deploys and its namespace; ``shell`` and ``output``
 #: exec into its Deployment (the operator names it after the LoginSet) because
@@ -212,13 +213,19 @@ def _directive_value(field: str, value: str) -> Any:
 
 
 def memory_mb(value: str) -> int:
-    """Slurm's ``--mem`` (``4000``, ``4G``, ``512M``, ``1T``) in MiB."""
+    """Slurm's ``--mem`` (``4000``, ``4G``, ``512M``, ``1T``) in MiB.
+
+    Converts the way sbatch does (``str_to_mbytes``): a ``K`` size rounds up
+    to whole MiB, and zero stays zero, Slurm's "all of each node's memory",
+    which :func:`submission_body` refuses because the API cannot request it.
+    """
     match = re.fullmatch(r"(\d+)([KkMmGgTt]?)", value.strip())
     if match is None:
         raise SlurmCliError(f"invalid memory {value!r}: use MiB, or a K/M/G/T suffix such as 64G")
     amount, unit = int(match[1]), match[2].upper() or "M"
-    factor = {"K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 * 1024}[unit]
-    return max(int(amount * factor), 1)
+    if unit == "K":
+        return -(-amount // 1024)
+    return amount * {"M": 1, "G": 1024, "T": 1024 * 1024}[unit]
 
 
 def submission_body(
@@ -234,6 +241,13 @@ def submission_body(
         if value is None or (key == "exclusive" and value is False):
             continue
         body[key] = value
+    if body.get("memory_mb") == 0:
+        # slurmrestd would need memory_per_node 0; the API sends only a size.
+        raise SlurmCliError(
+            "--mem=0 asks Slurm for all of each node's memory, which the GCO API cannot "
+            "request; give an explicit size such as --mem 64G (gco slurm nodes lists "
+            "each node's memory)"
+        )
     env: dict[str, str] = {}
     for item in environment:
         name, separator, value = item.partition("=")
@@ -502,9 +516,14 @@ def login_exec_command(
     interactive: bool = False,
     server: str | None = None,
     tls_server_name: str | None = None,
+    context: str | None = None,
 ) -> list[str]:
-    """``kubectl exec`` into the login Deployment with the tunnel's flags."""
-    cmd = ["kubectl", "exec"]
+    """``kubectl exec`` into the login Deployment with the tunnel's flags.
+
+    ``context`` is the kubeconfig context
+    :func:`cli.kubectl_helpers.update_kubeconfig` returned for the cluster.
+    """
+    cmd = ["kubectl", *kubectl_context_flags(context), "exec"]
     if interactive:
         cmd.append("-it")
     cmd += [

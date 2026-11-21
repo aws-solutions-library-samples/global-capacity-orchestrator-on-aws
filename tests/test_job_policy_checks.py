@@ -16,8 +16,10 @@ which would train people to ignore the check.
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -406,6 +408,60 @@ class TestFetching:
         client.get_job_validation_policy.side_effect = lambda region: side_effect(region)
         results = fetch_region_policies(client, ["us-east-1", "us-east-2"])
         assert [entry.ok for entry in results] == [True, False]
+
+    def test_slow_region_is_unreachable_at_the_deadline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One hung region must not stall the answer for the others."""
+        monkeypatch.setattr("cli.job_policy.FETCH_TIMEOUT_SECONDS", 0.2)
+        release = threading.Event()
+        client = MagicMock()
+
+        def side_effect(region: str) -> dict[str, Any]:
+            if region == "us-east-2":
+                release.wait(30)
+            return {"policy": _policy_document()}
+
+        client.get_job_validation_policy.side_effect = side_effect
+        started = time.monotonic()
+        try:
+            results = fetch_region_policies(client, ["us-east-1", "us-east-2", "eu-west-1"])
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+
+        assert elapsed < 5
+        assert [entry.region for entry in results] == ["us-east-1", "us-east-2", "eu-west-1"]
+        assert [entry.status for entry in results] == [FETCH_OK, FETCH_UNREACHABLE, FETCH_OK]
+        assert results[1].reason == "timed out after 0.2s"
+        assert results[1].ok is False
+
+    def test_reads_run_on_daemon_threads(self) -> None:
+        """An abandoned read must not hold the process open at exit either."""
+        client = MagicMock()
+        daemon_flags: list[bool] = []
+
+        def side_effect(region: str) -> dict[str, Any]:
+            daemon_flags.append(threading.current_thread().daemon)
+            return {"policy": _policy_document()}
+
+        client.get_job_validation_policy.side_effect = side_effect
+        fetch_region_policies(client, ["us-east-1", "us-east-2"])
+        assert daemon_flags == [True, True]
+
+    def test_unexpected_read_failure_is_an_error_for_that_region(self) -> None:
+        """A read that raises past fetch_region_policy is an error, not a timeout."""
+
+        def fake_fetch(aws_client: Any, region: str) -> RegionPolicy:
+            if region == "us-east-2":
+                raise AttributeError("'str' object has no attribute 'get'")
+            return RegionPolicy(region=region, status=FETCH_OK)
+
+        with patch("cli.job_policy.fetch_region_policy", side_effect=fake_fetch):
+            results = fetch_region_policies(MagicMock(), ["us-east-1", "us-east-2"])
+
+        assert [entry.status for entry in results] == [FETCH_OK, FETCH_ERROR]
+        assert results[1].reason == "AttributeError: 'str' object has no attribute 'get'"
 
     def test_empty_region_list(self) -> None:
         assert fetch_region_policies(MagicMock(), []) == []

@@ -297,6 +297,57 @@ class TestSubmitManifestsEndpoint:
                 )
                 assert "At least one manifest" in response.text
 
+    def test_a_configmap_without_data_reaches_the_processor(self, mock_manifest_processor):
+        """A ConfigMap needs no ``data``: ``binaryData`` alone, or nothing at all, is valid.
+
+        The request model used to demand ``spec`` or ``data``, so this route
+        answered 400 for manifests the API server accepts, while the validate
+        route, which does not build the model, passed them.
+        """
+        from fastapi.testclient import TestClient
+
+        from gco.models import ManifestSubmissionResponse, ResourceStatus
+        from gco.services.manifest_api import app
+
+        configmaps = [
+            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "empty"}},
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "blob"},
+                "binaryData": {"payload": "AAEC"},
+            },
+        ]
+        mock_manifest_processor.process_manifest_submission = AsyncMock(
+            return_value=ManifestSubmissionResponse(
+                success=True,
+                cluster_id="test-cluster",
+                region="us-east-1",
+                resources=[
+                    ResourceStatus("v1", "ConfigMap", name, "gco-jobs", "created")
+                    for name in ("empty", "blob")
+                ],
+            )
+        )
+        with (
+            patch(
+                "gco.services.manifest_api.create_manifest_processor_from_env",
+                return_value=mock_manifest_processor,
+            ),
+            patch("gco.services.manifest_api.ManifestProcessorMetrics"),
+            patch("gco.services.manifest_api.get_template_store", return_value=MagicMock()),
+            patch("gco.services.manifest_api.get_webhook_store", return_value=MagicMock()),
+            patch("gco.services.manifest_api.get_job_store", return_value=MagicMock()),
+            TestClient(app, raise_server_exceptions=False) as client,
+        ):
+            response = client.post(
+                "/api/v1/manifests", json={"manifests": configmaps, "namespace": "gco-jobs"}
+            )
+
+        assert response.status_code == 200, response.text
+        (submission,) = mock_manifest_processor.process_manifest_submission.call_args.args
+        assert submission.manifests == configmaps
+
 
 class TestValidateManifestsEndpoint:
     """Tests for POST /api/v1/manifests/validate endpoint."""
@@ -613,6 +664,27 @@ class TestStatusEndpointWithProcessor:
                 data = response.json()
                 assert data["service"] == "GCO Manifest Processor API"
                 assert "environment" in data
+
+    def test_status_reports_the_cap_defaults_the_processors_enforce(
+        self, mock_manifest_processor, monkeypatch
+    ):
+        """Regression: /status reported 10 / 32Gi / 4 when the variables were unset."""
+        from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
+
+        for name in ("MAX_CPU_PER_MANIFEST", "MAX_MEMORY_PER_MANIFEST", "MAX_GPU_PER_MANIFEST"):
+            monkeypatch.delenv(name, raising=False)
+        with patch(
+            "gco.services.manifest_api.create_manifest_processor_from_env",
+            return_value=mock_manifest_processor,
+        ):
+            from fastapi.testclient import TestClient
+
+            from gco.services.manifest_api import app
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                environment = client.get("/api/v1/status", headers={}).json()["environment"]
+        for key in ("max_cpu_per_manifest", "max_memory_per_manifest", "max_gpu_per_manifest"):
+            assert environment[key] == str(DEFAULT_MANIFEST_RESOURCE_CAPS[key])
 
 
 class TestListJobsEndpoint:
@@ -1350,3 +1422,310 @@ class TestParseJobToDict:
 
         assert result["metadata"]["name"] == "running-job"
         assert result["status"]["active"] == 1
+
+
+def _on_event_loop() -> bool:
+    """True only on the event loop's own thread; worker threads have no running loop."""
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+class TestKubernetesCallsRunOffTheEventLoop:
+    """No route calls the synchronous Kubernetes client on the event loop.
+
+    A blocking call there stalls every request the worker is serving, the
+    health probes included, for as long as the API server takes to answer.
+    The processor here is real; its client methods record whether they ran with
+    an event loop in their thread, which is true only on the loop itself, and
+    each route is driven through every client call it makes.
+    """
+
+    SANDBOXED_JOB = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {"name": "sandboxed", "namespace": "gco-jobs"},
+        "spec": {
+            "template": {
+                "spec": {
+                    # Makes validation read the RuntimeClass from the cluster.
+                    "runtimeClassName": "isolated-sandbox",
+                    "restartPolicy": "Never",
+                    "containers": [{"name": "main", "image": "python:3.14"}],
+                }
+            }
+        },
+    }
+
+    @pytest.fixture
+    def harness(self):
+        import json
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
+
+        from fastapi.testclient import TestClient
+        from kubernetes import client as k8s
+        from kubernetes.client.rest import ApiException
+
+        from gco.services.manifest_api import app
+        from gco.services.manifest_processor import ManifestProcessor
+
+        calls: list[tuple[str, bool]] = []
+
+        def responds(label, answer):
+            def side_effect(*args, **kwargs):
+                calls.append((label, _on_event_loop()))
+                return answer(*args, **kwargs)
+
+            return side_effect
+
+        created = datetime(2026, 1, 1, tzinfo=UTC)
+        containers = [k8s.V1Container(name="main", image="python:3.14")]
+        job = k8s.V1Job(
+            metadata=k8s.V1ObjectMeta(
+                name="train", namespace="gco-jobs", uid="job-uid", creation_timestamp=created
+            ),
+            spec=k8s.V1JobSpec(
+                template=k8s.V1PodTemplateSpec(spec=k8s.V1PodSpec(containers=containers))
+            ),
+            status=k8s.V1JobStatus(active=1),
+        )
+        job_json = json.dumps(
+            {
+                "apiVersion": "batch/v1",
+                "kind": "Job",
+                "metadata": {"name": "train", "namespace": "gco-jobs", "uid": "job-uid"},
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "restartPolicy": "Never",
+                            "containers": [{"name": "main", "image": "python:3.14"}],
+                        }
+                    }
+                },
+            }
+        ).encode()
+        pod = k8s.V1Pod(
+            metadata=k8s.V1ObjectMeta(
+                name="train-abcde",
+                namespace="gco-jobs",
+                labels={"job-name": "train"},
+                creation_timestamp=created,
+            ),
+            spec=k8s.V1PodSpec(node_name="node-1", containers=containers),
+            status=k8s.V1PodStatus(phase="Running"),
+        )
+        node = k8s.V1Node(metadata=k8s.V1ObjectMeta(name="node-1", labels={}))
+
+        def log_response(*_args, **_kwargs):
+            return SimpleNamespace(data=b"step=1\n", release_conn=lambda: None)
+
+        with patch("gco.services.manifest_processor.config"):
+            processor = ManifestProcessor("test-cluster", "us-east-1", {})
+        processor.core_v1 = MagicMock()
+        processor.batch_v1 = MagicMock()
+        processor.custom_objects = MagicMock()
+        processor.node_v1 = MagicMock()
+        empty = SimpleNamespace(items=[])
+        for api, method, answer in (
+            ("core_v1", "list_namespace", lambda *a, **k: empty),
+            ("core_v1", "list_namespaced_pod", lambda *a, **k: SimpleNamespace(items=[pod])),
+            ("core_v1", "read_namespaced_pod", lambda *a, **k: pod),
+            ("core_v1", "read_node", lambda *a, **k: node),
+            ("core_v1", "list_namespaced_event", lambda *a, **k: empty),
+            ("core_v1", "read_namespaced_pod_log", log_response),
+            ("core_v1", "list_namespaced_resource_quota", lambda *a, **k: empty),
+            ("core_v1", "list_namespaced_limit_range", lambda *a, **k: empty),
+            (
+                "batch_v1",
+                "read_namespaced_job",
+                lambda *a, **k: (
+                    SimpleNamespace(data=job_json, release_conn=lambda: None)
+                    if k.get("_preload_content") is False
+                    else job
+                ),
+            ),
+            ("batch_v1", "list_namespaced_job", lambda *a, **k: SimpleNamespace(items=[job])),
+            ("batch_v1", "delete_namespaced_job", lambda *a, **k: None),
+            ("custom_objects", "list_cluster_custom_object", lambda *a, **k: {"items": []}),
+            (
+                "custom_objects",
+                "get_namespaced_custom_object",
+                lambda *a, **k: {
+                    "containers": [{"name": "main", "usage": {"cpu": "1m", "memory": "1Mi"}}]
+                },
+            ),
+            ("node_v1", "read_runtime_class", lambda *a, **k: object()),
+        ):
+            getattr(getattr(processor, api), method).side_effect = responds(
+                f"{api}.{method}", answer
+            )
+
+        def missing(*_args, **_kwargs):
+            raise ApiException(status=404)
+
+        api_resource = MagicMock(namespaced=True)
+        api_resource.get.side_effect = responds("dynamic.get", missing)
+        api_resource.create.side_effect = responds("dynamic.create", lambda *a, **k: None)
+        api_resource.delete.side_effect = responds("dynamic.delete", lambda *a, **k: None)
+        processor._get_api_resource = MagicMock(
+            side_effect=responds("dynamic.discover", lambda *a, **k: api_resource)
+        )
+
+        template_store = MagicMock()
+        template_store.get_template.return_value = {
+            "name": "tpl",
+            "manifest": json.loads(job_json),
+            "parameters": {},
+        }
+        with (
+            patch(
+                "gco.services.manifest_api.create_manifest_processor_from_env",
+                return_value=processor,
+            ),
+            patch("gco.services.manifest_api.ManifestProcessorMetrics"),
+            patch("gco.services.manifest_api.get_template_store", return_value=template_store),
+            patch("gco.services.manifest_api.get_webhook_store", return_value=MagicMock()),
+            patch("gco.services.manifest_api.get_job_store", return_value=MagicMock()),
+            TestClient(app, raise_server_exceptions=False) as http,
+        ):
+            yield http, calls
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body", "status", "expected_calls"),
+        [
+            ("GET", "/api/v1/jobs", None, 200, {"batch_v1.list_namespaced_job"}),
+            (
+                "GET",
+                "/api/v1/jobs/gco-jobs/train",
+                None,
+                200,
+                {
+                    "batch_v1.read_namespaced_job",
+                    "core_v1.list_namespaced_pod",
+                    "core_v1.read_node",
+                },
+            ),
+            (
+                "GET",
+                "/api/v1/jobs/gco-jobs/train/logs",
+                None,
+                200,
+                {
+                    "batch_v1.read_namespaced_job",
+                    "core_v1.list_namespaced_pod",
+                    "core_v1.read_namespaced_pod_log",
+                },
+            ),
+            (
+                "GET",
+                "/api/v1/jobs/gco-jobs/train/events",
+                None,
+                200,
+                {
+                    "core_v1.list_namespaced_event",
+                    "core_v1.list_namespaced_pod",
+                    "batch_v1.read_namespaced_job",
+                    "custom_objects.list_cluster_custom_object",
+                },
+            ),
+            (
+                "GET",
+                "/api/v1/jobs/gco-jobs/train/pods",
+                None,
+                200,
+                {"core_v1.list_namespaced_pod", "core_v1.read_node"},
+            ),
+            (
+                "GET",
+                "/api/v1/jobs/gco-jobs/train/pods/train-abcde/logs",
+                None,
+                200,
+                {"core_v1.read_namespaced_pod", "core_v1.read_namespaced_pod_log"},
+            ),
+            (
+                "GET",
+                "/api/v1/jobs/gco-jobs/train/metrics",
+                None,
+                200,
+                {"core_v1.list_namespaced_pod", "custom_objects.get_namespaced_custom_object"},
+            ),
+            (
+                "DELETE",
+                "/api/v1/jobs/gco-jobs/train?expected_uid=job-uid",
+                None,
+                200,
+                {"batch_v1.read_namespaced_job", "batch_v1.delete_namespaced_job"},
+            ),
+            (
+                "DELETE",
+                "/api/v1/jobs",
+                {"namespace": "gco-jobs"},
+                200,
+                {"batch_v1.list_namespaced_job", "batch_v1.delete_namespaced_job"},
+            ),
+            (
+                "POST",
+                "/api/v1/jobs/gco-jobs/train/retry",
+                None,
+                201,
+                {"batch_v1.read_namespaced_job", "dynamic.discover", "dynamic.create"},
+            ),
+            (
+                "POST",
+                "/api/v1/jobs/from-template/tpl",
+                {"name": "from-tpl", "namespace": "gco-jobs"},
+                201,
+                {"dynamic.discover", "dynamic.get", "dynamic.create"},
+            ),
+            (
+                "POST",
+                "/api/v1/manifests",
+                {"manifests": [SANDBOXED_JOB]},
+                200,
+                {"node_v1.read_runtime_class", "dynamic.discover", "dynamic.get", "dynamic.create"},
+            ),
+            (
+                "POST",
+                "/api/v1/manifests/validate",
+                {"manifests": [SANDBOXED_JOB]},
+                200,
+                {"node_v1.read_runtime_class"},
+            ),
+            (
+                "GET",
+                "/api/v1/manifests/gco-jobs/settings?api_version=v1&kind=ConfigMap",
+                None,
+                404,
+                {"dynamic.discover", "dynamic.get"},
+            ),
+            (
+                "DELETE",
+                "/api/v1/manifests/gco-jobs/settings?api_version=v1&kind=ConfigMap",
+                None,
+                200,
+                {"dynamic.discover", "dynamic.delete"},
+            ),
+            ("GET", "/api/v1/health", None, 200, {"core_v1.list_namespace"}),
+            (
+                "GET",
+                "/api/v1/policy",
+                None,
+                200,
+                {"core_v1.list_namespaced_resource_quota", "core_v1.list_namespaced_limit_range"},
+            ),
+        ],
+    )
+    def test_route_makes_its_kubernetes_calls_in_worker_threads(
+        self, harness, method, path, body, status, expected_calls
+    ):
+        http, calls = harness
+        response = http.request(method, path, json=body)
+
+        assert response.status_code == status, response.text
+        assert expected_calls <= {label for label, _ in calls}
+        assert sorted({label for label, on_loop in calls if on_loop}) == []

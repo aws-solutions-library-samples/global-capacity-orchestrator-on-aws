@@ -20,8 +20,9 @@
 #   4. Optional --min-uptime N: the service must still be serving N seconds
 #      after boot (guards "boots then crash-loops on unreachable deps").
 #   5. `docker stop` (SIGTERM, then SIGKILL after --stop-timeout) exits with
-#      --expect-stop-exit: 0 for the uvicorn services' graceful shutdown,
-#      143 for inference-monitor which has no SIGTERM handler today.
+#      --expect-stop-exit (default 0). Every service job expects 0: the
+#      uvicorn services shut down gracefully, and inference-monitor's SIGTERM
+#      handler ends the pass at an endpoint boundary and releases its Lease.
 #
 # Kubernetes-dependent behavior (RBAC, reconciliation, NetworkPolicy) is out
 # of scope here — integration:kind:cluster-e2e owns it. This script owns the

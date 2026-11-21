@@ -19,6 +19,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
   - [Cursor](#cursor)
   - [Other MCP Clients](#other-mcp-clients)
 - [Feature Flags](#feature-flags)
+  - [IAM role (GCO_MCP_ROLE_ARN)](#iam-role-gco_mcp_role_arn)
 - [Available Tools](#available-tools)
   - [Job Management](#job-management)
   - [Queue Management](#queue-management)
@@ -72,7 +73,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 156 tools by default (up to 216 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 155 tools by default (up to 216 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -494,7 +495,7 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 |------|---------|-------------|----------------|
 | `GCO_ENABLE_ALL_TOOLS` | `false` | All flagged tools below | Umbrella switch. Setting this to `true` enables every gated tool at once and overrides any per-flag value (even per-flag values explicitly set to `false`). Use sparingly — prefer per-flag opt-in for production clients. |
 | `GCO_ENABLE_CAPACITY_PURCHASE` | `false` | `reserve_capacity`, `create_reservation` | Reserve capacity that incurs AWS charges — either purchasing a fixed-term [Capacity Block](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html) (`reserve_capacity`, not cancellable once committed) or creating an [On-Demand Capacity Reservation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-reservations.html) (`create_reservation`, billed until cancelled via `cancel_reservation`). |
-| `GCO_ENABLE_MODEL_UPLOAD` | `false` | `models_upload`, `upload_to_regional_bucket` | Uploads local model data to central or regional S3. Both tools require a source confined beneath `GCO_STORAGE_LOCAL_ROOT` and build a private descriptor-backed snapshot that rejects symlinks, special files, cross-filesystem entries, and pre-existing hard links; transfers can be many GB and incur network and storage costs. |
+| `GCO_ENABLE_MODEL_UPLOAD` | `false` | `models_upload`, `upload_to_regional_bucket`, `populate_kv_cache` | Uploads local model data to central or regional S3 (`populate_kv_cache` writes an endpoint's KV-cache cold-tier prefix in the regional bucket). Every tool requires a source confined beneath `GCO_STORAGE_LOCAL_ROOT` and builds a private descriptor-backed snapshot that rejects symlinks, special files, cross-filesystem entries, and pre-existing hard links; transfers can be many GB and incur network and storage costs. |
 | `GCO_ENABLE_IMAGE_PUBLISH` | `false` | `images_build`, `images_push`, `images_mirror` | Builds, publishes, and mirrors container images to ECR. `images_build` / `images_push` run a long-running build (FastMCP background task) and push binaries that get replicated across every deployed region; `images_mirror` copies third-party images (Volcano's docker.io images) into the project's `gco/*` ECR. |
 | `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` | `false` | `deploy_stack`, `deploy_all`, `bootstrap_cdk`, `addons_install` | Creates or updates [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) stacks or starts Helm add-on re-convergence. A full `deploy_all` runs 30-60 minutes wall-clock and can provision EKS clusters, NodePools, and storage that incur ongoing charges. |
 | `GCO_ENABLE_INFRASTRUCTURE_DESTROY` | `false` | `destroy_stack`, `destroy_all` | Tears down CloudFormation stacks. Cancellation mid-flight can leave partial state behind that has to be cleaned up by hand. |
@@ -598,20 +599,87 @@ These environment variables tune the MCP server's behaviour but **do not gate an
 | Variable | Values | Default | What It Does |
 |----------|--------|---------|--------------|
 | `GCO_MCP_TOOL_SEARCH` | `off` \| `bm25` \| `regex` \| `code_mode` | `bm25` | Selects the catalog-replacement transform. `bm25` (default) replaces `list_tools()` with a BM25-ranked `search_tools` plus a small set of always-visible entry-point tools. `regex` swaps in a regex-based search. `code_mode` is experimental and exposes Code Mode meta-tools (`search` / `get_schemas` / `execute`). `off` returns the legacy full catalog. An unknown value falls back to `bm25`. |
-| `GCO_STORAGE_LOCAL_ROOT` | Directory path | — | Shared confinement root for `models_upload`, `upload_to_regional_bucket`, and `sync_storage_bucket`. Relative paths resolve beneath this root; lexical traversal and symlink escapes fail closed. Short uploads additionally use a same-filesystem descriptor-backed snapshot and reject descendant symlinks, special files, and pre-existing hard links. Required when model upload or local storage sync is enabled. POSIX hosts with `/dev/fd` only for short uploads. |
+| `GCO_STORAGE_LOCAL_ROOT` | Directory path | — | Shared confinement root for `models_upload`, `upload_to_regional_bucket`, `populate_kv_cache`, and `sync_storage_bucket`. Relative paths resolve beneath this root; lexical traversal and symlink escapes fail closed. Short uploads additionally use a same-filesystem snapshot built with descriptor-relative no-follow opens and reject descendant symlinks, special files, and pre-existing hard links. Required when model upload or local storage sync is enabled. POSIX hosts only. On hosts without `/dev/fd` directory traversal (macOS) the CLI gets the snapshot's path, so the root and the directories above it must not be modifiable by other users (owned by you or root, not group- or world-writable unless sticky). |
 | `GCO_METRICS_LOCAL_ROOT` | Directory path | — | Confinement root for `metrics_from_local_file`; required when `GCO_ENABLE_LOCAL_METRICS=true`. |
+| `GCO_MCP_ROLE_ARN` | IAM role ARN | — | Least-privilege role the server assumes at startup with the ambient credentials (the regional stack's `McpServerRoleArn` output; what it grants: [IAM role](#iam-role-gco_mcp_role_arn)). The role applies to the default boto3 session in the server and to every process the server starts: `gco`, kubectl, and what those run (the AWS CLI, CDK). Children get it through the AWS SDKs' container credentials provider: the server serves the role's current credentials on a `127.0.0.1` endpoint that requires a random token, and sets `AWS_CONTAINER_CREDENTIALS_FULL_URI` and `AWS_CONTAINER_AUTHORIZATION_TOKEN` for the child. The child does not inherit the server's credential variables (`AWS_ACCESS_KEY_ID`, `AWS_SESSION_TOKEN`, web identity, other container credentials), and its `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE` and `BOTO_CONFIG` point at private copies that keep every profile's name and settings such as `region` but no credential settings, so a profile a child selects cannot supply other credentials. The role's credentials refresh before they expire, in the server and in children, so a deploy that outlasts one role session keeps working. Code that builds its own `boto3.Session()` in the server (Mission's Bedrock sampling and embeddings, the capacity checks in Mission's environment snapshot) still uses the ambient credentials. Startup fails if the role cannot be assumed. |
+| `GCO_MCP_ROLE_SESSION_NAME` | String | `gco-mcp-server` | Session name for `GCO_MCP_ROLE_ARN`. |
+| `GCO_MCP_ROLE_DURATION_SECONDS` | Whole seconds | `3600` | Lifetime of each role session; the server assumes the role again before it ends. A value that is not a whole number stops startup. |
+| `GCO_PROJECT_ROOT` | Directory path | the checkout, else the nearest directory at or above the working directory with `cdk.json`, else the working directory | The project every `gco` child runs from. The server's in-process tools and resources (`images_*`, `images://`, the cluster context behind `gco://`, deploy progress totals) read the same `cdk.json`, so they use its project name, Regions and ECR prefix. For clients that cannot set a working directory. |
+| `GCO_MCP_AUDIT_LOG` | File path | — (stderr) | Where the server writes its audit records: one JSON object per line for each tool call (`status` is `success`, `error` or `cancelled`), resource read, startup and role assumption. Unset, they go to stderr, which MCP clients keep in their server log (stdout carries the protocol). A path appends to that file and creates it with mode `0600`. |
+| `GCO_MCP_AUDIT_LOG_LEVEL` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` | `INFO` | Lowest level written to the audit output. Records are logged at `INFO` and role-assumption failures at `ERROR`, so `WARNING` or higher keeps only those failures. An unknown name keeps `INFO`. The in-memory Mission audit replay is not affected. |
 | `GCO_TASK_STATUS_DIR` | Directory path | `~/.gco/tasks` | Private directory for bounded long-task status and log artifacts. |
 | `GCO_DISABLE_TASK_STATUS` | Boolean | `false` | Disable disk-backed long-task status/log emission when set to `1`, `true`, or `yes`. |
 | `FASTMCP_DOCKET_URL` | URL | `memory://` | Controls where FastMCP's background-task store lives. The default `memory://` keeps task state in-process for the lifetime of the server. Set to e.g. `redis://localhost:6379` to persist task state across restarts and share it with other consumers. |
 
+### IAM role (`GCO_MCP_ROLE_ARN`)
+
+Each regional stack creates `McpServerRole` and exports its ARN as the `McpServerRoleArn` output (set `mcp_server.enabled` to `false` in `cdk.json` to skip it). With `GCO_MCP_ROLE_ARN` set to that ARN, the server and every `gco` and `kubectl` process it starts run as the role. The role grants what the tools registered without a `GCO_ENABLE_*` flag call, derived from their code in [`gco/stacks/mcp_role_permissions.py`](../gco/stacks/mcp_role_permissions.py), and nothing else:
+
+| Access | Scope | Used by |
+|--------|-------|---------|
+| `execute-api:Invoke` | `/api/v1/*` and `/inference/*` on the `prod` stage of the APIs in `deployment_regions.api_gateway` and in every workload Region (the global API and the regional bridges) | Jobs, queue, templates, webhooks, inference, Slurm, DAG runs, cost reports and health, which the GCO API authorizes and validates itself |
+| `sqs:SendMessage`, `sqs:GetQueueAttributes` | `<project>-jobs-<region>` in every workload Region; `GetQueueAttributes` also on the dead-letter queues | `submit_job_sqs`, `queue_status`, `capacity_status` |
+| CloudFormation `DescribeStacks`, `ListStackResources`, `GetTemplate` | `<project>-*` stacks | Stack discovery behind most tools, `stack_status`, `stack_outputs`, `stack_diff`, the storage inventory |
+| SSM `GetParameter`, `GetParameters`, `GetParametersByPath` | `/<project>/*`, and the public `/aws/service/sagemaker-hyperpod/*` tree | Bucket identities, the model bucket name, `addons_status`, `hyperpod_preflight` |
+| EKS `DescribeCluster`, `ListCapabilities`, `DescribeCapability` | `<project>-*` clusters | Kubeconfig, `cluster_tunnel_command`, endpoint drift, `eks_capabilities_status` |
+| Kubernetes, through an EKS access entry | `AmazonEKSViewPolicy` cluster-wide (no Secrets, exec, port-forward or writes) and the `gco:mcp-server-read` group, which `02-rbac.yaml` binds to reading nodes and NodePools | `nodepools_list`, `nodepools_describe`, `cost_workloads`, the Kubernetes resources |
+| S3 `ListBucket` | The model bucket | `list_models` |
+| CloudWatch metric reads, Logs Insights `StartQuery` on `/aws/containerinsights/<project>-*/application` and `GetQueryResults` | Metrics have no resource-level permissions | `metrics_cloudwatch_get`, `capacity_status`, the `get_job_logs` fallback |
+| EC2 capacity and zone describes, Spot placement scores, Pricing, SageMaker training plans and HyperPod clusters, PCS clusters, Service Quotas listings (applied and default quotas), Bedrock `InvokeModel` | Resource-level wherever the API has it | The capacity tools, `recommend_region`, `hyperpod_status`, `hyperpod_preflight`, `ai_recommend`, `capacity_predict`, the zone lookups behind `stack_synth` and `list_stacks` |
+| Cost Explorer reads | No resource-level permissions | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_allocation_status`, `fleet_status` |
+| ECR reads | `<project>/*` repositories; the repository and registry listings are account-wide | `images_list`, `images_tags`, `images_describe`, `images_orphans`, `images_mirror_plan`, `images_mirror_status`, `images_replication_get`, `images_replication_status`, `images_lifecycle_get` |
+| EFS and FSx describes, DynamoDB `Query` on `<project>-capacity-history`, Cognito user pool metadata | Describes and listings; no Cognito users | `list_file_systems`, `files_get`, `files_access_points`, `capacity_history_*`, `analytics_status`, `analytics_doctor` |
+| DynamoDB `Scan` and `GetItem` | `<project>-inference-endpoints` in the global Region | `images_orphans` (the images every inference endpoint names), `list_inference_endpoints` and `fleet_status` (`Scan`); `inference_status`, `mooncake_topology_status`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models` and the `gco://inference/{endpoint_name}` resource (`GetItem`) |
+
+No statement lets the role assume or pass a role, so it cannot use the CDK bootstrap roles that deploy, destroy and bootstrap need, and it writes no stack, image, model, bucket object or inference endpoint record. Every gated tool that deploys, destroys, builds, pushes, uploads, deletes or buys capacity, and these default tools, need your own credentials (unset `GCO_MCP_ROLE_ARN`) or a role you extend with the permission:
+
+- `setup_cluster_access`: creates an EKS access entry for the caller with cluster-admin (AmazonEKSClusterAdminPolicy); the role has its own read-only entry.
+- `monitoring_users_list`: reads the Grafana admin Secret and port-forwards to Grafana.
+- `monitoring_user_add`: reads the Grafana admin Secret and port-forwards to Grafana.
+- `list_storage_contents`: starts, execs into and deletes a helper pod.
+- `metrics_from_shared_storage_file`: starts, execs into and deletes a helper pod.
+- `analytics_users_list`: reads the Cognito users of the analytics user pool.
+- `analytics_login_url`: signs in to the analytics user pool (AdminInitiateAuth).
+- `analytics_user_add`: creates a Cognito user.
+- `cost_allocation_activate`: changes the account's cost allocation tag settings.
+- `cost_k8s_namespaces`: queries Athena over the monitoring stack's cost report bucket.
+- `cost_k8s_regions`: queries Athena over the monitoring stack's cost report bucket.
+- `cost_k8s_trend`: queries Athena over the monitoring stack's cost report bucket.
+- `cost_k8s_top`: queries Athena over the monitoring stack's cost report bucket.
+- `images_init`: creates an ECR repository.
+- `images_lifecycle_set`: writes an ECR lifecycle policy.
+- `images_replication_sync`: writes the registry's ECR replication configuration.
+- `deploy_inference`: creates the endpoint's record in the inference endpoints table (DynamoDB PutItem).
+- `deploy_disaggregated_inference`: creates the endpoint's record in the inference endpoints table (DynamoDB PutItem).
+- `scale_inference`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `update_inference_image`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `stop_inference`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `start_inference`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `add_inference_region`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `remove_inference_region`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `set_mooncake_topology`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `configure_mooncake_store`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `canary_deploy`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `promote_canary`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `rollback_canary`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+
+The access entry is on the role's own Region's cluster. In a multi-Region deployment the kubectl-backed tools reach the other Regions' clusters only with your own credentials (or that Region's `McpServerRoleArn`); the GCO API tools work everywhere.
+
+The trust policy names the account, which leaves the decision to IAM: a principal can assume the role only when its own identity policy allows `sts:AssumeRole` on the role's ARN. Grant that to the people and hosts that run the MCP server.
+
 ### Breaking Changes in This Version
 
-Three tools that previously accepted broader access are now gated or additionally confined:
+These tools previously accepted broader access and are now gated or additionally confined:
 
 - `upload_to_regional_bucket` now requires `GCO_ENABLE_MODEL_UPLOAD=true` and a source beneath `GCO_STORAGE_LOCAL_ROOT`.
 - `models_upload` remains gated by `GCO_ENABLE_MODEL_UPLOAD` and now also requires a source beneath `GCO_STORAGE_LOCAL_ROOT`.
-- Both short-upload tools fail closed unless they can create a private descriptor-backed, same-filesystem snapshot. Descendant symlinks, special files, and pre-existing hard links are rejected rather than followed.
+- `populate_kv_cache` used to register by default and upload any host path. It now registers only with `GCO_ENABLE_MODEL_UPLOAD=true` and requires a source beneath `GCO_STORAGE_LOCAL_ROOT`, like `upload_to_regional_bucket`, which writes the same regional bucket.
+- The short-upload tools fail closed unless they can create a private same-filesystem snapshot. Descendant symlinks, special files, and pre-existing hard links are rejected rather than followed. On macOS, which cannot walk an open directory through `/dev/fd`, every upload used to fail with `No such file or directory: '/dev/fd/<n>/<name>'`; the CLI now gets the snapshot's path there, which requires a `GCO_STORAGE_LOCAL_ROOT` that other users cannot modify.
 - `delete_job` and `delete_inference` remain gated behind `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`.
+- Local path arguments must resolve inside the project root the server runs `gco` from (`GCO_PROJECT_ROOT`, else the checkout, else the server's working directory). This covers `manifest_path` (`submit_job_sqs`, `submit_job_api`, `check_job_policy`, `queue_submit`, `templates_create`, `dag_validate`, `dag_run`), `slurm_submit`'s `script_path`, `images_build`'s `context`, the `deploy_*` tools' `outputs_file`, and every step manifest a DAG file names (reported as `steps[<i>].manifest`). An absolute path anywhere on the host used to be accepted; it now returns `code: path_outside_project_root`. Move the files under the project, or point `GCO_PROJECT_ROOT` (or the client's `cwd`) at a directory that contains them. When the server runs from `/` with no checkout, every absolute path is inside that root, so set `GCO_PROJECT_ROOT` to get confinement.
+- With `GCO_MCP_ROLE_ARN` set, the role now applies to the `gco` and kubectl processes behind almost every tool; they used to run with the operator's ambient credentials. The role the regional stack creates now grants what the default tools call ([IAM role](#iam-role-gco_mcp_role_arn)), including `execute-api:Invoke` on the GCO APIs and read-only Kubernetes access through its own EKS access entry. The default tools listed there, and the gated tools that deploy, destroy, build, push, upload, delete or buy capacity, fail with `AccessDenied` or `Forbidden` under it: unset `GCO_MCP_ROLE_ARN` for them, or extend the role.
+- Mission `predicate` criteria are size-bounded (see [Size bounds](../docs/MISSION.md#size-bounds)): at most 4096 characters and 100 levels of nesting, `**` only with a constant exponent of at most 64, `*` on a possible list or string only with an int literal of at most 1000, `%` only as modulo on a number, f-string widths of at most 1000, and no attribute of `obs` other than its read-only methods (`obs.events` used to validate and then failed at evaluation; `key=obs.update` mutated the observation). `mission_start` and `swarm_start` reject such a predicate with `validation_error`; a session saved before the upgrade reports it as `inconclusive` with `predicate_rejected_post_load: <reason>`. Rewrite it with subscripts (`obs["events"]`) and `int()`/`float()` around the operands (`int(obs["step"]) % 10 == 0`).
+- Prompts, chat messages, and other free text containing `..` are no longer refused. A name or ID that the CLI puts into an API request path (jobs, pods, namespaces, templates, webhooks, queue jobs, and `invoke_inference`'s `api_path`) is still refused when it has a `..` segment (`code: path_traversal_segment`).
 
 If your client relied on uploads, set the model-upload gate and an absolute confinement root. If it relied on deletes, set the destructive-operations gate. A client that needs both can use:
 
@@ -667,7 +735,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
-| `queue_list` | List jobs in the global queue (filter by status, namespace, region) | safe | — |
+| `queue_list` | List jobs in the global queue one page at a time (filter by status, namespace, region; `cursor` reads the next page) | safe | — |
 | `queue_get` | Fetch a single job record from the global queue | safe | — |
 | `queue_stats` | Aggregate queue stats per region | safe | — |
 | `queue_submit` | Submit a manifest to the global queue | low-risk | — |
@@ -723,7 +791,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `set_mooncake_topology` | Resize a disaggregated endpoint's prefill/decode replica counts | low-risk | — |
 | `configure_mooncake_store` | Update shared-store, cold-tier, offload, and buffer settings | low-risk | — |
 | `mooncake_topology_status` | Show a disaggregated endpoint's per-role topology status | safe | — |
-| `populate_kv_cache` | Upload data into an endpoint's Mooncake KV-cache cold tier | low-risk | — |
+| `populate_kv_cache` | Upload a confined local file or directory into an endpoint's Mooncake KV-cache cold tier | data-upload | `GCO_ENABLE_MODEL_UPLOAD` |
 | `delete_inference` | Delete an endpoint (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Cost Tracking
@@ -782,7 +850,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `list_file_systems` | List EFS and FSx file systems | safe | — |
 | `list_storage_buckets` | Discover user-facing GCO S3 buckets and their stable aliases | safe | — |
 | `files_get` | Get EFS or FSx file-system details for a region | safe | — |
-| `files_access_points` | List EFS access points | safe | — |
+| `files_access_points` | List the access points of one EFS file system (`file_system_id` and `region` are required) | safe | — |
 | `upload_to_regional_bucket` | Upload a confined local file or directory to a region's shared S3 bucket | data-upload | `GCO_ENABLE_MODEL_UPLOAD` |
 | `sync_storage_bucket` | Incrementally download from or upload to a GCO S3 bucket or prefix | low-risk | `GCO_ENABLE_LOCAL_STORAGE_SYNC` |
 
@@ -792,12 +860,24 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 SSM parameters and CloudFormation resources published by the deployment.
 Dedicated access-log buckets are intentionally excluded.
 
-Both short upload tools (`models_upload` and `upload_to_regional_bucket`) require
-`GCO_ENABLE_MODEL_UPLOAD=true` and `GCO_STORAGE_LOCAL_ROOT`. Their source path
+The short upload tools (`models_upload`, `upload_to_regional_bucket`, and
+`populate_kv_cache`) require `GCO_ENABLE_MODEL_UPLOAD=true` and
+`GCO_STORAGE_LOCAL_ROOT`. Their source path
 may be absolute or root-relative, but must already exist and resolve beneath
 that root; the wrapper passes the resolved absolute path to the CLI. Traversal,
 symlink escapes, special files, missing roots, and unsupported hosts fail
-closed.
+closed. Each upload, like `sync_storage_bucket`, may run for up to an hour
+before the server stops the CLI.
+
+The snapshot is a private `.gco-mcp-upload-<pid>-<random>` directory of hard
+links under the root, removed when the upload ends. On Linux the CLI reads it
+through an inherited directory descriptor (`/dev/fd/<n>/<name>`); on hosts
+without that traversal (macOS) it gets the snapshot's path, which is accepted
+only when other users cannot modify the root or any directory above it. A
+server killed mid-upload leaves its snapshot behind, and those hard links made
+every later upload of the same files fail as hard-linked; the next upload now
+removes snapshots whose process no longer exists (and, for names without a
+process ID from earlier versions, snapshots older than two hours).
 
 `sync_storage_bucket` is deliberately opt-in because it reads from or writes to
 the MCP host and upload mode writes S3. A bucket or local tree may also be
@@ -850,8 +930,9 @@ direction deletes destination-only data. Downloads use size and modification
 time to skip current local files. Uploads map directory contents beneath the
 remote prefix, map a single file to `PREFIX/<file-name>`, and skip only
 same-size objects whose `gco-sync-sha256` metadata matches the local SHA-256;
-the same digest is sent as S3 `ChecksumSHA256`, and skipped objects are
-revalidated before success. Objects without the metadata upload once. Upload
+S3 verifies every upload against a checksum computed while planning (that
+digest as `ChecksumSHA256` below 8 MiB, a full-object `ChecksumCRC32` for
+multipart uploads), and skipped objects are revalidated before success. Objects without the metadata upload once. Upload
 preflight securely enumerates and opens sources without following symlinks and
 rejects non-regular files and unsafe names before the first PUT. Upload probes
 only the generated destination keys with `HeadObject` and does not require
@@ -874,7 +955,7 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 |------|-------------|-----------|----------|
 | `metrics_cloudwatch_get` | Read one CloudWatch datapoint as a canonical metric | safe | — |
 | `metrics_from_job_logs` | Extract a scalar from the tail of a job's logs by JSON key or regex | safe | — |
-| `metrics_from_shared_storage_file` | Read a named field from a shared-storage metrics file (JSON, CSV, HF Trainer state, JSONL, YAML, Parquet, tfevents) | safe | — |
+| `metrics_from_shared_storage_file` | Read a named field from a metrics file on the cluster's shared EFS file system, copied out through a helper pod (JSON, CSV, HF Trainer state, JSONL, YAML, Parquet, tfevents; not S3) | safe | — |
 | `metrics_from_local_file` | Read a named field from a local metrics file confined to `GCO_METRICS_LOCAL_ROOT` | safe | `GCO_ENABLE_LOCAL_METRICS` |
 | `metrics_semantic_progress` | Score how close a Mission is to its directive against a fixed rubric (LLM-as-judge); returns `{"metrics": {"progress_score": <0.0-1.0>}}` | safe | `GCO_ENABLE_SEMANTIC_PROGRESS` |
 
@@ -927,7 +1008,7 @@ A region's Slurm cluster(s), reached through the GCO API's `/api/v1/slurm/*` rou
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
 | `dag_validate` | Validate a DAG manifest without submitting | safe | — |
-| `dag_run` | Submit a DAG pipeline for execution | low-risk | — |
+| `dag_run` | Run a DAG pipeline end-to-end (long-running: progress, task status, background-task mode; `dry_run` only validates) | low-risk | — |
 
 ### NodePools
 
@@ -957,11 +1038,11 @@ A region's Slurm cluster(s), reached through the GCO API's `/api/v1/slurm/*` rou
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
 | `monitoring_status` | Show the cluster observability toggle + config from `cdk.json` | safe | — |
-| `monitoring_users_list` | List Grafana users via the admin API | safe | — |
+| `monitoring_users_list` | List Grafana users via the admin API; `region` and `via_ssm` (an SSM-managed instance id) pick the cluster whose Grafana Secret it reads | safe | — |
 | `enable_monitoring` | Toggle cluster observability on in `cdk.json` | low-risk | — |
 | `disable_monitoring` | Toggle cluster observability off in `cdk.json` | low-risk | — |
-| `monitoring_user_add` | Add a Grafana user via the admin API | low-risk | — |
-| `monitoring_user_remove` | Remove a Grafana user (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
+| `monitoring_user_add` | Add a Grafana user via the admin API; takes `region` and `via_ssm` | low-risk | — |
+| `monitoring_user_remove` | Remove a Grafana user (irreversible); takes `region` and `via_ssm` | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Cluster
 
@@ -1059,7 +1140,7 @@ oversized status records fail closed.
 
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
-| `deps_scan` | Generate the monthly dependency-update report on demand (`gco deps scan`); `nodepools_only=true` runs just the accelerator-catalog / Karpenter NodePool freshness check | safe | — |
+| `deps_scan` | Generate the monthly dependency-update report on demand (`gco deps scan`); `nodepools_only=true` runs just the accelerator-catalog / Karpenter NodePool freshness check | low-risk | — |
 
 The full scan mirrors the `deps-scan` GitHub Actions workflow: it sweeps
 PyPI, npm, container registries, Helm repos, GitHub, and (when the server's
@@ -1068,7 +1149,10 @@ surfaces, returning the same Markdown report the rolling
 "[Automated] Dependency updates available" issue carries. It requires a GCO
 checkout, typically takes several minutes, and its Python surface
 pip-installs the project's extras into the server's active environment —
-exactly how CI runs it.
+exactly how CI runs it. Because that changes the server's environment, the
+tool is tagged `low-risk` rather than `safe`, so a swarm does not hand it to
+two children at once unless `allow_overlapping_mutating_tools` is set. The
+`nodepools_only` check installs nothing.
 
 ### Live State
 
@@ -1280,7 +1364,7 @@ gco_mcp/
 ├── feature_flags.py       — Feature-flag evaluation (FLAG_* constants, is_enabled)
 ├── audit.py               — Audit logging, sanitization, decorator
 ├── audit_middleware.py    — Context-spy middleware that captures client_messages and elicitations
-├── iam.py                 — IAM role assumption
+├── iam.py                 — IAM role assumption; role credentials for child processes
 ├── cli_runner.py          — _run_cli() subprocess wrapper
 ├── version.py             — Project version management
 ├── tools/                 — MCP tool definitions (one file per domain)
@@ -1317,6 +1401,7 @@ gco_mcp/
 │   ├── checkpoints.py       — Checkpoint cadence resolver
 │   ├── criteria_scaffold.py — Bedrock-driven criteria generation from directives
 │   ├── decide.py            — Pure deterministic verdict cascade
+│   ├── deployment.py        — Project name + global Region for the state table and memory
 │   ├── engine.py            — Five-phase iteration loop driver (MissionEngine)
 │   ├── final_report.py      — Final_Report builder (deterministic + sampled overlay)
 │   ├── predicate.py         — Restricted AST evaluator for predicate criteria
@@ -1348,7 +1433,7 @@ gco_mcp/
     └── tasks.py           — tasks://gco/{task_id} (FastMCP background task status)
 ```
 
-Long-running tools (`deploy_stack`, `destroy_stack`, `images_build`, etc.) use the MCP tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663 — FastMCP's `fastmcp-tasks` package, registered in `server.py`) rather than an in-house operation registry. The shared `tools/_long_task.py` helper drives `asyncio.create_subprocess_exec`, streams progress messages back through the FastMCP `Progress` dependency, and converts mid-flight cancellation into a structured result (with a partial-CloudFormation-state disclaimer for stack ops).
+Long-running tools (`deploy_stack`, `destroy_stack`, `images_build`, etc.) use the MCP tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663 — FastMCP's `fastmcp-tasks` package, registered in `server.py`) rather than an in-house operation registry. The shared `tools/_long_task.py` helper drives `asyncio.create_subprocess_exec`, streams progress messages back through the FastMCP `Progress` dependency, and converts mid-flight cancellation into a structured result (with a partial-CloudFormation-state disclaimer for stack ops). Cancelling sends SIGTERM to `gco` and gives it 45 seconds to exit before killing it. That is longer than the 30 seconds `gco` gives each CDK process group to exit (all groups of a parallel run at once), so a cancelled deploy or destroy stops CDK instead of leaving it running without a parent. The task's status file then records `state: cancelled` with `gco`'s exit code (143 once it has stopped CDK).
 
 Most operational tools shell out to the `gco` CLI, while discovery, introspection, task-observability, and Mission tools use their dedicated in-process backends. The CLI-backed approach:
 
@@ -1360,6 +1445,8 @@ Most operational tools shell out to the `gco` CLI, while discovery, introspectio
 ```text
 LLM ←→ MCP Protocol (stdio) ←→ run_mcp.py ←→ gco CLI ←→ AWS APIs
 ```
+
+Arguments reach the CLI as separate argv elements (no shell). Before the call, each tool checks the arguments that are paths: a local file or directory must resolve, symlinks included, inside the project root, and a name or ID that the CLI puts into an API request path must not contain a `..` segment. Free text such as prompts and chat messages is passed through unchanged. Secrets go through the child's environment instead of its command line, which every local user can read: `analytics_login_url` sets `GCO_STUDIO_PASSWORD`, `monitoring_user_add` sets `GCO_GRAFANA_USER_PASSWORD`, and `webhooks_create` sets `GCO_WEBHOOK_URL` and `GCO_WEBHOOK_SECRET` (webhook URLs often embed a token). The audit log redacts password, secret, token and key arguments and records a URL argument as its scheme and host only. Child processes get `/dev/null` as stdin, never the server's stdin (the client's message stream under the stdio transport): a CLI prompt reads end-of-file and fails at once, `destroy_stack`/`destroy_all` with `yes=False` stop before destroying anything, and `analytics_login_url` with neither a `password` argument nor `GCO_STUDIO_PASSWORD` returns `code: password_required` without running the CLI. See [How Tools Work](tools/README.md#how-tools-work).
 
 ## Examples
 
@@ -1504,7 +1591,7 @@ Here's a `~/.kiro/settings/mcp.json` that wires up the GCO MCP server alongside 
 
 If a tool you expect to see is missing from your client's tool list, check these in order:
 
-1. **Feature flag not set.** Many tools are disabled by default. The most common cause of a "missing" tool is that the feature flag gating it isn't set in the client's `env` block. See [Feature Flags](#feature-flags) for the flag-to-tool mapping. If you're looking for `delete_job`, `delete_inference`, or any other destructive operation, set `GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true`. For `deploy_stack` / `destroy_stack`, set `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` / `GCO_ENABLE_INFRASTRUCTURE_DESTROY`. For `reserve_capacity`, set `GCO_ENABLE_CAPACITY_PURCHASE`. For `models_upload`, set `GCO_ENABLE_MODEL_UPLOAD`. For `images_build` / `images_push`, set `GCO_ENABLE_IMAGE_PUBLISH`. For `sync_storage_bucket`, set `GCO_ENABLE_LOCAL_STORAGE_SYNC=true` and configure `GCO_STORAGE_LOCAL_ROOT`.
+1. **Feature flag not set.** Many tools are disabled by default. The most common cause of a "missing" tool is that the feature flag gating it isn't set in the client's `env` block. See [Feature Flags](#feature-flags) for the flag-to-tool mapping. If you're looking for `delete_job`, `delete_inference`, or any other destructive operation, set `GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true`. For `deploy_stack` / `destroy_stack`, set `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` / `GCO_ENABLE_INFRASTRUCTURE_DESTROY`. For `reserve_capacity`, set `GCO_ENABLE_CAPACITY_PURCHASE`. For `models_upload`, `upload_to_regional_bucket`, or `populate_kv_cache`, set `GCO_ENABLE_MODEL_UPLOAD` and configure `GCO_STORAGE_LOCAL_ROOT`. For `images_build` / `images_push`, set `GCO_ENABLE_IMAGE_PUBLISH`. For `sync_storage_bucket`, set `GCO_ENABLE_LOCAL_STORAGE_SYNC=true` and configure `GCO_STORAGE_LOCAL_ROOT`.
 2. **Tool search mode is hiding it.** The default `GCO_MCP_TOOL_SEARCH=bm25` replaces the full tool listing with a search-based catalog and a small set of always-visible entry-point tools (`find_examples`, `find_docs`, `list_jobs`, `submit_job_sqs`, `list_inference_endpoints`, `check_capacity`, `task_status`). Every other tool is reachable through the synthetic `search_tools` tool — ask your agent to call `search_tools` with a query that matches the tool you want, and it will surface the candidates. To disable the search catalog and see the full list directly, set `GCO_MCP_TOOL_SEARCH=off` (legacy listing).
 
 ### Tools returning errors
@@ -1512,6 +1599,7 @@ If a tool you expect to see is missing from your client's tool list, check these
 - Check AWS credentials: `aws sts get-caller-identity`
 - Verify infrastructure is deployed: `gco stacks list`
 - Check the tool's error message — it includes the CLI's stderr output
+- A failed call returns `{"error": ..., "exit_code": N}`. When the command printed a JSON document before exiting non-zero, as the status and preflight commands do when a check fails (`addons_status`, `eks_capabilities_status`, `hyperpod_status`, `hyperpod_preflight`, `analytics_doctor`), the parsed document is also under `output`, so the per-item results stay readable
 - That stderr never carries AWS SDK debug output: `GCO_VERBOSE=true` on the host adds GCO's debug lines and SDK info messages only, and the CLI's `--debug-aws` has no environment or config spelling, so a tool result cannot carry signing material or credentials (see [Verbose and debug output](../docs/CLI.md#verbose-and-debug-output))
 
 ### Timeout on long operations

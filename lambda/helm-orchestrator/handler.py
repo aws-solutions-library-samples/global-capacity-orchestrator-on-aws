@@ -32,6 +32,14 @@ Keeping the heavy lifting in Step Functions (one task per chart, with per-chart
 retry) also means no single Lambda invocation is bound by the 15-minute Lambda
 limit.
 
+The execution input is bounded by Step Functions' 256 KiB input limit, checked
+before anything is written. Its replay copy for ``gco stacks addons install``
+lives at ``/<project>/addons/<region>/_input``: the canonical JSON, compressed
+with zlib and base64-encoded because SSM refuses a value containing ``{{``.
+An encoding larger than one SSM value (8 KiB, the Advanced-tier limit) is
+stored in parts ``_input.<sha256[:16]>.<k>``, and ``_input`` then holds the
+header ``chunked:v1:<n>:<sha256>`` (see ``_replay_input_writes``).
+
 Environment Variables:
     STATE_MACHINE_ARN: ARN of the helm-install state machine.
 """
@@ -43,6 +51,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import zlib
 from typing import Any
@@ -51,8 +60,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-27T04:10:54Z
-# Generated from Git commit: 590c275a9cd8dc0e0ba9f8ea74acefb63754df46
+# Generated at (UTC): 2026-11-19T16:50:06Z
+# Generated from Git commit: 682ef1b5797ef18690cfc2a021264ed06b70f252
 # Flowchart(s) generated from this file:
 #   * ``on_event`` -> ``diagrams/code_diagrams/lambda/helm-orchestrator/handler.on_event.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/helm-orchestrator/handler.on_event.png``)
@@ -63,7 +72,13 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# Largest SSM parameter value (the Advanced tier's limit); SSM has no larger tier.
 _SSM_PARAMETER_MAX_BYTES = 8 * 1024
+# Step Functions refuses an execution input over 256 KiB of UTF-8.
+_EXECUTION_INPUT_MAX_BYTES = 256 * 1024
+# ``_input`` value naming the parts of a replay input too large for one parameter.
+_CHUNKED_INPUT_HEADER = re.compile(r"chunked:v1:(?P<count>[1-9][0-9]*):(?P<sha256>[0-9a-f]{64})")
+_CHUNK_NAME_DIGEST_CHARS = 16
 _MAX_EXECUTION_NAME_GENERATIONS = 100
 _STOP_CONFIRMATION_SECONDS = 10
 _STOP_CONFIRMATION_POLL_SECONDS = 0.2
@@ -108,12 +123,108 @@ def _encode_replay_input(execution_input_json: str) -> str:
     The raw execution input embeds ``{{PLACEHOLDER}}`` image-replacement keys,
     and SSM rejects any String value containing ``{{}}`` ("Parameter value
     can't nest another parameter"). Base64 is brace-free by construction and
-    zlib keeps the highly repetitive JSON inside the 8 KiB Advanced-tier bound.
+    zlib shrinks the repetitive JSON, usually into one parameter value.
     Consumers (``gco stacks addons install`` and live release validation)
     reverse this exact encoding before use.
     """
     compressed = zlib.compress(execution_input_json.encode("utf-8"), 9)
     return base64.b64encode(compressed).decode("ascii")
+
+
+def _replay_input_part_name(input_name: str, digest: str, index: int) -> str:
+    """Name of part ``index`` (from 1) of an encoded replay input with SHA-256 ``digest``."""
+    return f"{input_name}.{digest[:_CHUNK_NAME_DIGEST_CHARS]}.{index}"
+
+
+def _replay_input_writes(input_name: str, encoded_input: str) -> list[tuple[str, str]]:
+    """Return the ``(name, value)`` String parameters that store ``encoded_input``, in order.
+
+    An encoding that fits one parameter value is written to ``input_name``
+    unchanged, the only form earlier releases wrote and read. A larger one is
+    split into consecutive parts of at most 8 KiB (base64 is ASCII, so the
+    character count is the byte count), each written to
+    ``<input_name>.<sha256[:16]>.<k>`` for k = 1..n, and only then is
+    ``input_name`` written with the header ``chunked:v1:<n>:<sha256>``, the
+    SHA-256 taken over the whole encoded string. The part names come from the
+    content, so a write that stops part-way never changes the parts the
+    current ``_input`` names. The header cannot be mistaken for an older form:
+    raw JSON starts with ``{``, and ``:`` is outside the base64 alphabet.
+    """
+    if len(encoded_input) <= _SSM_PARAMETER_MAX_BYTES:
+        return [(input_name, encoded_input)]
+    digest = hashlib.sha256(encoded_input.encode("ascii")).hexdigest()
+    parts = [
+        encoded_input[start : start + _SSM_PARAMETER_MAX_BYTES]
+        for start in range(0, len(encoded_input), _SSM_PARAMETER_MAX_BYTES)
+    ]
+    writes = [
+        (_replay_input_part_name(input_name, digest, index), part)
+        for index, part in enumerate(parts, start=1)
+    ]
+    writes.append((input_name, f"chunked:v1:{len(parts)}:{digest}"))
+    return writes
+
+
+def _replay_input_part_names(input_name: str, stored_value: str | None) -> list[str]:
+    """Return the part names a stored chunked header refers to; [] for any other value."""
+    header = _CHUNKED_INPUT_HEADER.fullmatch(stored_value or "")
+    if header is None:
+        return []
+    count = int(header["count"])
+    return [
+        _replay_input_part_name(input_name, header["sha256"], index)
+        for index in range(1, count + 1)
+    ]
+
+
+def _is_parameter_not_found(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, ClientError)
+        and exc.response.get("Error", {}).get("Code") == "ParameterNotFound"
+    )
+
+
+def _stored_replay_input(ssm_client: Any, input_name: str) -> str | None:
+    """Return the current ``_input`` value, or None when there is none or it cannot be read.
+
+    It is read only to find the parts of a previous chunked input, deleted once
+    the new value is written, so a failed read is logged and never fails the
+    deployment.
+    """
+    try:
+        value = ssm_client.get_parameter(Name=input_name)["Parameter"]["Value"]
+    except Exception as exc:  # best-effort: only the stale-part cleanup needs it
+        if not _is_parameter_not_found(exc):
+            logger.warning(
+                "Could not read the previous replay input %s: %s",
+                input_name,
+                _bounded_error_text(exc),
+            )
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _delete_replay_input_parts(ssm_client: Any, names: list[str]) -> None:
+    """Delete parts no longer named by ``_input``, logging failures instead of raising.
+
+    A part left behind is never read, and teardown removes it with the rest of
+    the add-on bookkeeping: ``gco stacks destroy-all``
+    (``StackManager._cleanup_addon_parameters`` in cli/stacks.py, called by
+    ``destroy_orchestrated``) and the live-validation teardown
+    (``_post_absence_sweeps`` in scripts/live_release_validation/actions/
+    destroy.py) delete every parameter under ``/<project>/addons/<region>``
+    found by a recursive GetParametersByPath, whatever its name.
+    """
+    for name in names:
+        try:
+            ssm_client.delete_parameter(Name=name)
+        except Exception as exc:  # best-effort: a stale part is harmless
+            if not _is_parameter_not_found(exc):
+                logger.warning(
+                    "Could not delete the stale replay-input part %s: %s",
+                    name,
+                    _bounded_error_text(exc),
+                )
 
 
 def _bounded_error_text(exc: BaseException) -> str:
@@ -274,12 +385,14 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         execution_input["EndpointGroupArn"] = endpoint_group_arn
     execution_input_json = _canonical_json(execution_input)
     execution_input_bytes = execution_input_json.encode("utf-8")
-    # No raw-JSON size gate here: what SSM stores is the zlib+base64 encoding,
-    # whose own bound is enforced below before any write. Gating on the raw
-    # bytes rejected deployments whose encoded form fit comfortably — caught
-    # live by example-job validation run ex241-edf33111-r2, where enabling
-    # every optional chart pushed the raw input to 8771 bytes while its
-    # encoded form stayed under half the Advanced-tier limit.
+    # The input's real bound is StartExecution's, so it is checked before the
+    # fence or any parameter is touched. The SSM replay copy has no bound of
+    # its own: an encoding over one parameter value is stored in parts.
+    if len(execution_input_bytes) > _EXECUTION_INPUT_MAX_BYTES:
+        raise ValueError(
+            f"Convergence execution input is {len(execution_input_bytes)} bytes; "
+            f"Step Functions accepts at most {_EXECUTION_INPUT_MAX_BYTES} bytes (256 KiB)"
+        )
 
     project = str(props["ProjectName"])
     region = str(props["Region"])
@@ -293,26 +406,23 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         fence_name=fence_name,
     )
 
-    # Persist the exact replay input before convergence can mutate the cluster.
-    # The value is zlib+base64 encoded because SSM rejects raw ``{{}}`` tokens;
-    # ``input_sha256`` below is always computed over the raw canonical JSON.
-    # Intelligent-Tiering selects an Advanced parameter only when the payload
-    # exceeds the Standard tier's 4 KiB limit, while retaining the 8 KiB bound
-    # enforced above.
-    encoded_input = _encode_replay_input(execution_input_json)
-    if len(encoded_input) > _SSM_PARAMETER_MAX_BYTES:
-        raise ValueError(
-            f"Encoded convergence replay input is {len(encoded_input)} bytes; "
-            f"SSM Parameter Store supports at most {_SSM_PARAMETER_MAX_BYTES} bytes"
-        )
+    # Persist the exact replay input before convergence can mutate the cluster:
+    # zlib+base64 because SSM rejects raw ``{{}}`` tokens, in parts when it
+    # exceeds one value (``_replay_input_writes``). ``input_sha256`` below is
+    # always computed over the raw canonical JSON. Intelligent-Tiering selects
+    # an Advanced parameter only for a value over the Standard tier's 4 KiB.
+    input_name = f"{parameter_root}/_input"
+    writes = _replay_input_writes(input_name, _encode_replay_input(execution_input_json))
+    previous_input = _stored_replay_input(ssm, input_name)
     try:
-        ssm.put_parameter(
-            Name=f"{parameter_root}/_input",
-            Value=encoded_input,
-            Type="String",
-            Tier="Intelligent-Tiering",
-            Overwrite=True,
-        )
+        for name, value in writes:
+            ssm.put_parameter(
+                Name=name,
+                Value=value,
+                Type="String",
+                Tier="Intelligent-Tiering",
+                Overwrite=True,
+            )
     except Exception as exc:
         logger.error("Replay-input persistence failed", exc_info=True)
         raise RuntimeError(
@@ -361,6 +471,20 @@ def on_event(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
         ) from exc
 
     logger.info("Started and recorded execution %s (fire-and-forget)", execution_arn)
+
+    # Delete the parts of a previous chunked input that the new value does not
+    # reuse (a retry of the same input reuses them all). This runs last, once
+    # the execution is started and recorded, so a slow or throttled delete
+    # cannot delay either.
+    current_parts = {name for name, _value in writes if name != input_name}
+    _delete_replay_input_parts(
+        ssm,
+        [
+            name
+            for name in _replay_input_part_names(input_name, previous_input)
+            if name not in current_parts
+        ],
+    )
 
     return {
         "PhysicalResourceId": physical_id,

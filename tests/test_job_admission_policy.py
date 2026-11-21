@@ -27,7 +27,10 @@ from gco.job_admission import (
     check_tolerations,
     hyperpod_routing,
     parse_cpu_millicores,
+    parse_gpu_count,
     parse_memory_bytes,
+    resource_totals,
+    trainjob_validation_pod_specs,
     weighted_pod_specs,
 )
 
@@ -247,6 +250,108 @@ class TestQuantityParsersMatchTheGate:
     def test_memory(self, value: str, expected: int) -> None:
         assert parse_memory_bytes(value) == expected
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(None, 0), ("", 0), ("  ", 0), (1, 1), ("2", 2), (4.0, 4)],
+    )
+    def test_gpu(self, value: object, expected: int) -> None:
+        assert parse_gpu_count(value) == expected
+
+    @pytest.mark.parametrize("parse", [parse_cpu_millicores, parse_memory_bytes, parse_gpu_count])
+    def test_absent_values_count_as_zero(self, parse: Any) -> None:
+        assert parse(None) == 0
+
+
+def _job_with_resources(resources: Any, *, multiplier_kind: str = "Job") -> dict[str, Any]:
+    """A trusted-image Job whose one container carries ``resources`` verbatim."""
+    container: dict[str, Any] = {"name": "trainer", "image": "docker.io/pytorch/pytorch:latest"}
+    if resources is not ...:
+        container["resources"] = resources
+    return {
+        "apiVersion": "batch/v1",
+        "kind": multiplier_kind,
+        "metadata": {"name": "train", "namespace": "gco-jobs"},
+        "spec": {"template": {"spec": {"containers": [container]}}},
+    }
+
+
+class TestResourceCapsAcceptWhatTheApiServerAccepts:
+    """Regression: the gate refused quantities the API server takes.
+
+    ``cpu: 1`` written as a YAML number failed with ``'int' object has no
+    attribute 'strip'`` and ``"0.5"`` CPU with ``invalid literal for int()``,
+    so a valid manifest was rejected at the front door.
+    """
+
+    @pytest.fixture
+    def policy(self, processor: Any) -> JobValidationPolicy:
+        result: JobValidationPolicy = processor.job_validation_policy()
+        return result
+
+    @pytest.mark.parametrize(
+        "resources",
+        [
+            {"limits": {"cpu": 1, "memory": 2147483648}},
+            {"requests": {"cpu": 0.5, "memory": "512Mi"}},
+            {"limits": {"cpu": "1.5", "memory": "1.5Gi"}},
+            {"limits": {"cpu": "1e0", "memory": "1e9"}},
+            {"limits": {"nvidia.com/gpu": 1}},
+            None,
+            {"requests": None, "limits": None},
+            ...,  # no resources key at all
+        ],
+    )
+    def test_admits(self, resources: Any, policy: JobValidationPolicy) -> None:
+        assert check_resource_caps(_job_with_resources(resources), policy) == (True, "")
+
+    @pytest.mark.parametrize(
+        ("resources", "fragment"),
+        [
+            ({"limits": {"nvidia.com/gpu": "0.5"}}, "nvidia.com/gpu: '0.5' is not a whole number"),
+            ({"limits": {"cpu": -400000}}, "cpu: -400000 is negative"),
+            ({"limits": {"cpu": True}}, "cpu: True is not a Kubernetes quantity"),
+            ({"limits": {"memory": "2Gib"}}, "memory: '2Gib' is not a Kubernetes quantity"),
+        ],
+    )
+    def test_rejects_invalid_quantities_naming_the_container(
+        self, resources: Any, fragment: str, policy: JobValidationPolicy
+    ) -> None:
+        ok, message = check_resource_caps(_job_with_resources(resources), policy)
+        assert ok is False
+        assert message.startswith("Resource limit validation error: container 'trainer' ")
+        assert fragment in message
+
+    def test_a_cap_breach_names_the_key_that_sets_the_caps(
+        self, policy: JobValidationPolicy
+    ) -> None:
+        ok, message = check_resource_caps(_job_with_resources({"limits": {"cpu": 500}}), policy)
+        assert ok is False
+        assert "CPU 500000m exceeds max" in message
+        assert "update job_validation_policy.resource_quotas in cdk.json" in message
+
+
+class TestResourceTotals:
+    def test_sums_every_container_kind_weighted_by_view(self) -> None:
+        spec = {
+            "containers": [{"resources": {"limits": {"cpu": "1", "memory": "1Gi"}}}],
+            "initContainers": [{"resources": {"requests": {"cpu": 0.5}}}],
+            "ephemeralContainers": [{"resources": {"limits": {"nvidia.com/gpu": 2}}}],
+        }
+        assert resource_totals([(spec, 3)]) == (4500, 3 * 2**30, 6)
+
+    def test_null_container_lists_count_as_empty(self) -> None:
+        spec = {"containers": None, "initContainers": None, "ephemeralContainers": None}
+        assert resource_totals([(spec, 1)]) == (0, 0, 0)
+
+    def test_a_limit_wins_over_a_request(self) -> None:
+        spec = {"containers": [{"resources": {"requests": {"cpu": 8}, "limits": {"cpu": 2}}}]}
+        assert resource_totals([(spec, 1)]) == (2000, 0, 0)
+
+    def test_an_invalid_quantity_names_the_container_type_and_field(self) -> None:
+        spec = {"initContainers": [{"name": "setup", "resources": {"limits": {"memory": "lots"}}}]}
+        with pytest.raises(ValueError, match=r"^initContainer 'setup' memory: 'lots' is not"):
+            resource_totals([(spec, 1)])
+
 
 def _hyperpod_toleration() -> dict[str, str]:
     return {"key": "gco.aws/hyperpod", "operator": "Equal", "value": "true", "effect": "NoSchedule"}
@@ -330,7 +435,7 @@ class TestHyperpodRouting:
     def test_only_a_manifest_whose_every_pod_spec_selects_hyperpod_is_routed(self) -> None:
         selecting = {"nodeSelector": {"gco.aws/capacity-provider": "hyperpod"}, "containers": []}
         other = {"nodeSelector": {"gco.aws/capacity-provider": "karpenter"}, "containers": []}
-        manifest: dict[str, Any] = {"kind": "TrainJob", "metadata": {}}
+        manifest: dict[str, Any] = {"kind": "Job", "metadata": {}}
         assert hyperpod_routing(manifest, [selecting, selecting]) == "selector"
         assert hyperpod_routing(manifest, [selecting, other]) is None
         assert hyperpod_routing(manifest, [{"containers": []}]) is None
@@ -340,6 +445,107 @@ class TestHyperpodRouting:
         assert hyperpod_routing(manifest, []) is None
         assert hyperpod_routing({"kind": "Job"}, [selecting]) == "selector"
         assert hyperpod_routing({"kind": "Job", "metadata": {"labels": "oops"}}, [other]) is None
+
+    @staticmethod
+    def _trainjob(*patches: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """A two-node, one-GPU-per-node TrainJob; each patch maps replicated job names to pod specs."""
+        return {
+            "apiVersion": "trainer.kubeflow.org/v1alpha1",
+            "kind": "TrainJob",
+            "metadata": {"name": "t", "namespace": "gco-jobs"},
+            "spec": {
+                "runtimeRef": {"name": "torch-distributed"},
+                "trainer": {
+                    "image": "docker.io/pytorch/pytorch:latest",
+                    "numNodes": 2,
+                    "resourcesPerNode": {"limits": {"nvidia.com/gpu": "1"}},
+                },
+                "runtimePatches": [
+                    {
+                        "manager": f"example.com/patch-{index}",
+                        "trainingRuntimeSpec": {
+                            "template": {
+                                "spec": {
+                                    "replicatedJobs": [
+                                        {
+                                            "name": name,
+                                            "template": {"spec": {"template": {"spec": pod_spec}}},
+                                        }
+                                        for name, pod_spec in patch.items()
+                                    ]
+                                }
+                            }
+                        },
+                    }
+                    for index, patch in enumerate(patches)
+                ],
+            },
+        }
+
+    _HYPERPOD_SELECTOR = {"nodeSelector": {"gco.aws/capacity-provider": "hyperpod"}}
+
+    def test_a_trainjob_is_routed_by_its_merged_pod_templates(self, monkeypatch) -> None:
+        """Trainer merges the runtime patches naming one replicated job into one pod template.
+
+        Here the node selector sits in one patch and the toleration in another:
+        one pod that selects and tolerates HyperPod. Judged view by view (each
+        patch, and the synthetic trainer spec, which has no scheduling fields),
+        the TrainJob was not routed, so the accelerator rule asked for an
+        ``nvidia.com/gpu`` toleration that HyperPod nodes have no taint for.
+        """
+        import importlib
+
+        import gco.services.queue_processor as qp
+        from cli.capacity.placement import manifest_placement
+
+        manifest = self._trainjob(
+            {"node": self._HYPERPOD_SELECTOR}, {"node": {"tolerations": [_hyperpod_toleration()]}}
+        )
+        assert hyperpod_routing(manifest, trainjob_validation_pod_specs(manifest)) == "selector"
+        assert check_tolerations(manifest) == (True, None)
+        monkeypatch.delenv("REQUIRE_ACCELERATOR_TOLERATION", raising=False)
+        qp = importlib.reload(qp)
+        assert qp.validate_manifest(manifest) == (True, "")
+        assert manifest_placement([manifest]).routing == "selector"
+
+        # Routed, so the HyperPod taint is what it must tolerate.
+        untolerated = self._trainjob({"node": self._HYPERPOD_SELECTOR})
+        ok, message = check_tolerations(untolerated)
+        assert not ok
+        assert "gco.aws/hyperpod=true:NoSchedule" in (message or "")
+        assert qp.validate_manifest(untolerated) == (False, message)
+
+    def test_every_pod_template_a_trainjob_patches_must_select_hyperpod(self) -> None:
+        selector = self._HYPERPOD_SELECTOR
+        views = trainjob_validation_pod_specs
+
+        def route(manifest: dict[str, Any]) -> str | None:
+            return hyperpod_routing(manifest, views(manifest))
+
+        # Another replicated job is another pod.
+        assert route(self._trainjob({"node": selector, "dataset-initializer": {}})) is None
+        # A later patch's value wins; a null is pruned by the API server.
+        karpenter = {"nodeSelector": {"gco.aws/capacity-provider": "karpenter"}}
+        assert route(self._trainjob({"node": selector}, {"node": karpenter})) is None
+        assert route(self._trainjob({"node": karpenter}, {"node": selector})) == "selector"
+        pruned = {"nodeSelector": {"gco.aws/capacity-provider": None, "zone": "a"}}
+        assert route(self._trainjob({"node": selector}, {"node": pruned})) == "selector"
+        # No patch, or nothing a pod template can be read from.
+        assert route(self._trainjob()) is None
+        for runtime_patches in (
+            "not-a-list",
+            [{"manager": "m"}],
+            [{"manager": "m", "trainingRuntimeSpec": {"template": "not-a-dict"}}],
+            [{"manager": "m", "trainingRuntimeSpec": {"template": {"spec": {}}}}],
+        ):
+            manifest = self._trainjob()
+            manifest["spec"]["runtimePatches"] = runtime_patches
+            assert route(manifest) is None, runtime_patches
+        malformed = self._trainjob({"node": selector}, {"node": {"nodeSelector": "oops"}})
+        jobs = malformed["spec"]["runtimePatches"][1]["trainingRuntimeSpec"]["template"]["spec"]
+        jobs["replicatedJobs"].append("not-a-dict")
+        assert route(malformed) == "selector"
+        assert route({"kind": "TrainJob", "spec": "not-a-dict"}) is None
 
     def test_the_sqs_path_routes_the_same_way(self, monkeypatch) -> None:
         import importlib
@@ -362,6 +568,89 @@ class TestHyperpodRouting:
         tolerating = self._selecting(_gpu_job(tolerations=[_hyperpod_toleration()]))
         assert qp.validate_manifest(tolerating)[0] is True
         assert check_tolerations(tolerating)[0] is True
+
+
+def _gpu_toleration() -> dict[str, str]:
+    return {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+
+
+def _other_toleration() -> dict[str, str]:
+    return {"key": "example.com/dedicated", "operator": "Exists", "effect": "NoSchedule"}
+
+
+class TestTrainJobTolerationsAreMergedLikeTrainer:
+    """A TrainJob's pods carry the tolerations Trainer builds, not every patch's.
+
+    Kubeflow Trainer v2.3.0 applies ``spec.runtimePatches`` in order as
+    strategic merge patches onto the runtime's JobSet spec (replicated jobs
+    merge by name). ``PodSpec.tolerations`` has no patch merge key
+    (``+listType=atomic``), so a later patch that sets tolerations for a
+    replicated job replaces the earlier list; the patch type marshals with
+    ``omitempty``, so an empty list sets nothing. Both submission paths
+    unioned every patch's tolerations and accepted a TrainJob whose pod would
+    not carry the toleration they had checked.
+    """
+
+    _trainjob = staticmethod(TestHyperpodRouting._trainjob)
+
+    @staticmethod
+    def _verdicts(monkeypatch, manifest: dict[str, Any]) -> tuple[tuple[bool, Any], ...]:
+        """(REST, SQS) verdicts; the SQS path spells "valid" as (True, "")."""
+        import importlib
+
+        import gco.services.queue_processor as qp
+
+        monkeypatch.delenv("REQUIRE_ACCELERATOR_TOLERATION", raising=False)
+        qp = importlib.reload(qp)
+        rest = check_tolerations(manifest)
+        sqs = qp.validate_manifest(manifest)
+        return rest, (sqs[0], sqs[1] or None)
+
+    def test_a_later_patch_replaces_the_gpu_toleration(self, monkeypatch) -> None:
+        manifest = self._trainjob(
+            {"node": {"tolerations": [_gpu_toleration()]}},
+            {"node": {"tolerations": [_other_toleration()]}},
+        )
+        rest, sqs = self._verdicts(monkeypatch, manifest)
+        assert rest[0] is False
+        assert "nvidia.com/gpu=true:NoSchedule" in (rest[1] or "")
+        assert sqs == rest
+
+    def test_the_last_list_set_for_the_pod_template_is_the_one_judged(self, monkeypatch) -> None:
+        last_wins = self._trainjob(
+            {"node": {"tolerations": [_other_toleration()]}},
+            {"node": {"tolerations": [_gpu_toleration()]}},
+        )
+        assert self._verdicts(monkeypatch, last_wins) == ((True, None), (True, None))
+        # An empty list (or null) is dropped by the patch type and replaces nothing.
+        for unset in ([], None):
+            kept = self._trainjob(
+                {"node": {"tolerations": [_gpu_toleration()]}},
+                {"node": {"tolerations": unset, "nodeSelector": {"zone": "a"}}},
+            )
+            assert self._verdicts(monkeypatch, kept) == ((True, None), (True, None)), unset
+
+    def test_the_hyperpod_toleration_replaced_by_a_later_patch_is_missing(
+        self, monkeypatch
+    ) -> None:
+        selector = {"gco.aws/capacity-provider": "hyperpod"}
+        manifest = self._trainjob(
+            {"node": {"nodeSelector": selector, "tolerations": [_hyperpod_toleration()]}},
+            {"node": {"tolerations": [_gpu_toleration()]}},
+        )
+        rest, sqs = self._verdicts(monkeypatch, manifest)
+        assert rest[0] is False
+        assert "gco.aws/hyperpod=true:NoSchedule" in (rest[1] or "")
+        assert sqs == rest
+
+    def test_a_toleration_outside_the_runtime_patches_reaches_no_pod(self, monkeypatch) -> None:
+        """The TrainJob CRD has no other tolerations field and prunes unknown ones."""
+        manifest = self._trainjob()
+        manifest["spec"]["podTemplateOverrides"] = [{"spec": {"tolerations": [_gpu_toleration()]}}]
+        rest, sqs = self._verdicts(monkeypatch, manifest)
+        assert rest[0] is False
+        assert "nvidia.com/gpu=true:NoSchedule" in (rest[1] or "")
+        assert sqs == rest
 
 
 class TestNoKubernetesImport:

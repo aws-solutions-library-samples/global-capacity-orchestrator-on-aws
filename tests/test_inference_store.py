@@ -517,10 +517,14 @@ class _ConditionalInterleavingTable:
             )
         if valid and ":expected_deletion_generation" in values:
             region = kwargs["ExpressionAttributeNames"]["#r"]
+            status = item.get("region_status", {}).get(region, {})
             valid = (
                 item.get("desired_state") == "deleted"
                 and item.get("deletion_generation") == values[":expected_deletion_generation"]
-                and item.get("region_status", {}).get(region, {}).get("state") != "deleted"
+                and not (
+                    status.get("state") == "deleted"
+                    and status.get("deletion_generation") == values[":expected_deletion_generation"]
+                )
             )
         elif valid and ":deleted" in values:
             valid = item.get("desired_state") != values[":deleted"]

@@ -26,7 +26,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import boto3
 import pytest
 
-from tests._floci import floci_test_markers, unique_name
+from tests._floci import floci_test_markers, new_cluster_allocations, unique_name
 
 pytestmark = floci_test_markers()
 
@@ -128,7 +128,7 @@ class _OpenCostStub(BaseHTTPRequestHandler):
     }
 
     def do_GET(self):  # http.server API
-        body = json.dumps(self.payload).encode()
+        body = json.dumps(new_cluster_allocations(self, self.payload)).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

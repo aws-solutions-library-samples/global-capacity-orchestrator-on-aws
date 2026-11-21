@@ -13,9 +13,42 @@ from ..capacity import get_capacity_checker
 from ..capacity.blocks import group_rejections
 from ..capacity.history import METRIC_FIELDS
 from ..config import GCOConfig
-from ..output import confirm, format_capacity_table, get_output_formatter
+from ..output import confirm, format_capacity_table, get_output_formatter, interactive_echo
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
+
+_CONFIRMATION_HELP = (
+    "Skip the confirmation prompt; required when stdin is not a terminal (scripts, CI)"
+)
+
+
+def _stdin_is_interactive() -> bool:
+    """Whether a person on a terminal can answer a confirmation prompt."""
+    stdin = sys.stdin
+    return stdin is not None and stdin.isatty()
+
+
+def _confirm_request(question: str, *, yes: bool, dry_run: bool, request: str) -> None:
+    """Ask before a request that changes the account; ``request`` says what it does.
+
+    A dry run changes nothing and ``--yes`` answers in advance. Without a
+    terminal on stdin nobody can answer, and a prompt reading an open pipe
+    would wait forever, so the command stops before calling EC2 instead.
+    A declined prompt aborts with exit status 1.
+    """
+    if yes or dry_run:
+        return
+    if not _stdin_is_interactive():
+        raise click.UsageError(
+            f"{request} and stdin is not a terminal, so it cannot be "
+            "confirmed; pass --yes to confirm it, or --dry-run to check it first"
+        )
+    confirm(question, abort=True)
+
+
+def _confirm_charges(question: str, *, yes: bool, dry_run: bool) -> None:
+    """Ask before a request that starts charges (see :func:`_confirm_request`)."""
+    _confirm_request(question, yes=yes, dry_run=dry_run, request="this request incurs charges")
 
 
 @click.group()
@@ -38,7 +71,10 @@ def capacity(config: Any) -> None:
 @click.option(
     "--enrich-historical",
     is_flag=True,
-    help="Append historical capacity context (requires historical.enabled)",
+    help=(
+        "Append historical capacity context (requires historical.enabled); "
+        "JSON/YAML output becomes one {estimates, historical} document"
+    ),
 )
 @pass_config
 def check_capacity(
@@ -60,11 +96,19 @@ def check_capacity(
 
         if config.output_format == "table":
             print(format_capacity_table(estimates))
+            if enrich_historical:
+                _print_historical_enrichment(formatter, instance_type, region)
+        elif enrich_historical:
+            # One machine document; `historical` is null when the history
+            # cannot be read, and the reason goes to stderr.
+            formatter.print(
+                {
+                    "estimates": estimates,
+                    "historical": _historical_statistics(formatter, instance_type, region),
+                }
+            )
         else:
             formatter.print(estimates)
-
-        if enrich_historical:
-            _print_historical_enrichment(formatter, instance_type, region)
 
     except Exception as e:
         formatter.print_error(f"Failed to check capacity: {e}")
@@ -123,7 +167,9 @@ def spot_prices(config: Any, instance_type: Any, region: Any, days: Any) -> None
 
         if not prices:
             formatter.print_warning(f"No spot price data for {instance_type} in {region}")
-            return
+            if config.output_format == "table":
+                return
+            # JSON/YAML keep the list shape: an empty result is `[]`.
 
         formatter.print(
             prices,
@@ -270,8 +316,9 @@ def instance_info(config: Any, instance_type: Any, region: Any) -> None:
 def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
     """Show comprehensive resource utilization across regions.
 
-    Displays pending/running workloads, GPU/CPU utilization, queue depth,
-    and active job counts for one or all GCO clusters.
+    Displays the SQS job-queue depth, the running (active) Job count the
+    health monitor publishes, and GPU/CPU utilization for one or all GCO
+    clusters.
 
     Examples:
         gco capacity status
@@ -368,7 +415,8 @@ def recommend_region(
     Analyzes capacity across all deployed EKS regions and recommends
     the best region. When --instance-type is provided, uses weighted
     multi-signal scoring that factors in spot placement scores, pricing,
-    queue depth, GPU utilization, and running job counts.
+    queue depth, GPU utilization, and running job counts; Regions that do
+    not offer the type are left out, and the command fails when none does.
 
     Without --instance-type, uses a simpler composite score based on
     queue depth, GPU utilization, and running jobs.
@@ -419,6 +467,44 @@ def recommend_region(
     except Exception as e:
         formatter.print_error(f"Failed to get recommendation: {e}")
         sys.exit(1)
+
+
+_AI_DISCLAIMER_LINES = (
+    "",
+    "  " + "=" * 70,
+    "  ⚠️  AI-POWERED RECOMMENDATION DISCLAIMER",
+    "  " + "-" * 70,
+    "  This recommendation is generated by an AI model and should be",
+    "  validated before making production decisions.",
+    "  ",
+    "  • Capacity availability can change rapidly",
+    "  • Spot instances may be interrupted at any time",
+    "  • Pricing data may not reflect real-time prices",
+    "  • AI recommendations are not guaranteed to be optimal",
+    "  " + "=" * 70,
+    "",
+)
+
+
+def _recommendation_to_dict(recommendation: Any, raw: bool) -> dict[str, Any]:
+    """Serialize a BedrockCapacityRecommendation for JSON/YAML output.
+
+    The model's raw response is long and only for debugging, so it is
+    included only with --raw, as in table mode.
+    """
+    document: dict[str, Any] = {
+        "recommended_region": recommendation.recommended_region,
+        "recommended_instance_type": recommendation.recommended_instance_type,
+        "recommended_capacity_type": recommendation.recommended_capacity_type,
+        "confidence": recommendation.confidence,
+        "cost_estimate": recommendation.cost_estimate,
+        "reasoning": recommendation.reasoning,
+        "alternative_options": recommendation.alternative_options,
+        "warnings": recommendation.warnings,
+    }
+    if raw:
+        document["raw_response"] = recommendation.raw_response
+    return document
 
 
 @capacity.command("ai-recommend")
@@ -505,20 +591,10 @@ def ai_recommend(
 
     formatter = get_output_formatter(config)
 
-    # Print disclaimer
-    print()
-    print("  " + "=" * 70)
-    print("  ⚠️  AI-POWERED RECOMMENDATION DISCLAIMER")
-    print("  " + "-" * 70)
-    print("  This recommendation is generated by an AI model and should be")
-    print("  validated before making production decisions.")
-    print("  ")
-    print("  • Capacity availability can change rapidly")
-    print("  • Spot instances may be interrupted at any time")
-    print("  • Pricing data may not reflect real-time prices")
-    print("  • AI recommendations are not guaranteed to be optimal")
-    print("  " + "=" * 70)
-    print()
+    # The disclaimer is for the person reading; in JSON/YAML mode it goes to
+    # stderr so stdout stays one document.
+    for line in _AI_DISCLAIMER_LINES:
+        interactive_echo(line)
 
     try:
         formatter.print_info("Gathering capacity data across regions...")
@@ -544,6 +620,10 @@ def ai_recommend(
             regions=list(region) if region else None,
             requirements=requirements if requirements else None,
         )
+
+        if config.output_format != "table":
+            formatter.print(_recommendation_to_dict(recommendation, raw))
+            return
 
         # Display recommendation
         print()
@@ -609,6 +689,18 @@ def ai_recommend(
         sys.exit(1)
 
 
+def _print_reservation_errors(errors: list[dict[str, Any]]) -> None:
+    """Name the Regions whose reservation listing EC2 refused."""
+    if errors:
+        print()
+        print(
+            f"  ⚠  EC2 refused the reservation lookup in {len(errors)} Region(s); "
+            "their reservations are missing:"
+        )
+        for error in errors:
+            print(f"     {error['region']}: {error['error_code']}: {error['error']}")
+
+
 @capacity.command("reservations")
 @click.option("--instance-type", "-i", help="Filter by instance type")
 @click.option("--region", "-r", help="Specific region (default: all deployed regions)")
@@ -635,6 +727,7 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
                 "total_reserved_instances": sum(r["total_instances"] for r in reservations),
                 "total_available_instances": sum(r["available_instances"] for r in reservations),
                 "reservations": reservations,
+                "errors": [],
             }
         else:
             result = checker.list_all_reservations(instance_type=instance_type)
@@ -645,6 +738,7 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
 
         reservations = result["reservations"]
         if not reservations:
+            _print_reservation_errors(result.get("errors") or [])
             formatter.print_info("No active capacity reservations found")
             return
 
@@ -668,6 +762,7 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
             f"  Total: {result['total_reserved_instances']} reserved, "
             f"{result['total_available_instances']} available"
         )
+        _print_reservation_errors(result.get("errors") or [])
         print()
 
     except Exception as e:
@@ -684,7 +779,7 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
     multiple=True,
     help="Region(s) to check; repeatable (default: all deployed regions)",
 )
-@click.option("--count", "-c", default=1, help="Minimum instances needed")
+@click.option("--count", "-c", default=1, help="Minimum instances needed in one region")
 @click.option(
     "--include-blocks/--no-blocks",
     default=True,
@@ -779,8 +874,17 @@ def reservation_check(
                 f"\n  Total: {odcr['total_available_instances']} available "
                 f"of {odcr['total_reserved_instances']} reserved"
             )
+            # --count is met per Region, so show each Region's share.
+            by_region = odcr.get("by_region") or []
+            if len(by_region) > 1:
+                for row in by_region:
+                    print(
+                        f"    {row['region']}: {row['available_instances']} available "
+                        f"of {row['reserved_instances']} reserved"
+                    )
         else:
             print("  No active ODCRs found for this instance type")
+        _print_reservation_errors(odcr.get("errors") or [])
 
         # Capacity Blocks section
         if include_blocks:
@@ -1193,7 +1297,7 @@ def list_training_plans(config: Any, instance_type: Any, regions: Any, status: A
     Examples:
         gco capacity training-plans
         gco capacity training-plans -r us-east-1 --status Active
-        gco capacity training-plans -i ml.p5.48xlarge --output json
+        gco -o json capacity training-plans -i ml.p5.48xlarge
     """
     from ..capacity import training_plans
 
@@ -1296,17 +1400,19 @@ def runai_capacity(
         "EC2 does not verify the offering exists until the real purchase."
     ),
 )
+@click.option("--yes", "-y", is_flag=True, help=_CONFIRMATION_HELP)
 @pass_config
-def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -> None:
+def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any, yes: Any) -> None:
     """Purchase a Capacity Block offering by its ID.
 
     Use 'gco capacity find-blocks' or 'gco capacity reservation-check' first to
     find available offerings and their IDs, then purchase with this command.
 
     ⚠️  WARNING: This command purchases capacity and incurs charges.
-    Use --dry-run to check the request and your permission first. EC2's dry
-    run does not look the offering up, so it cannot tell you whether the
-    offering still exists; only the purchase itself does.
+    It asks for confirmation first; pass --yes in scripts. Use --dry-run to
+    check the request and your permission first. EC2's dry run does not look
+    the offering up, so it cannot tell you whether the offering still exists;
+    only the purchase itself does.
 
     Examples:
         # First, find offerings:
@@ -1315,9 +1421,15 @@ def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -
         # Check the request and your permission without purchasing:
         gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1 --dry-run
 
-        # Purchase:
+        # Purchase (asks for confirmation; -y skips the prompt):
         gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1
     """
+    _confirm_charges(
+        f"Purchase Capacity Block {offering_id} in {region}? "
+        "You are charged for the block's whole term.",
+        yes=yes,
+        dry_run=dry_run,
+    )
     formatter = get_output_formatter(config)
     checker = get_capacity_checker(config)
 
@@ -1335,9 +1447,7 @@ def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -
 
         if config.output_format != "table":
             formatter.print(result)
-            return
-
-        if result["success"]:
+        elif result["success"]:
             if dry_run:
                 print()
                 print(
@@ -1372,7 +1482,9 @@ def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -
                     f"-c {result['reservation_id']} -i {result['instance_type']}"
                 )
                 print()
-        else:
+        if not result["success"]:
+            # JSON/YAML mode already printed the failure document; the exit
+            # status must say it failed there too, not only in table mode.
             formatter.print_error(
                 f"Failed: {result.get('error_code', 'Unknown')}: {result.get('error', '')}"
             )
@@ -1393,6 +1505,7 @@ def _print_find_reservations_report(result: dict[str, Any]) -> None:
         print(f"\n  ODCR search for {itype}")
     print("  " + "-" * 78)
     print(f"  Regions: {', '.join(result.get('regions_checked', []))}")
+    _print_reservation_errors(result.get("errors") or [])
 
     if req and not result.get("valid_instance_type", True):
         print()
@@ -1445,7 +1558,7 @@ def _print_find_reservations_report(result: dict[str, Any]) -> None:
     "--count",
     "-c",
     default=1,
-    help="Minimum available instances to consider the search satisfied",
+    help="Minimum available instances in one region to consider the search satisfied",
 )
 @click.option(
     "--state",
@@ -1574,6 +1687,7 @@ def _create_reservation_command(
         "EC2 does not check capacity or the Availability Zone until the real request."
     ),
 )
+@click.option("--yes", "-y", is_flag=True, help=_CONFIRMATION_HELP)
 @pass_config
 def create_reservation(
     config: Any,
@@ -1587,6 +1701,7 @@ def create_reservation(
     end_date: Any,
     ebs_optimized: Any,
     dry_run: Any,
+    yes: Any,
 ) -> None:
     """Create a new On-Demand Capacity Reservation (ODCR).
 
@@ -1595,15 +1710,22 @@ def create_reservation(
 
     ⚠️  WARNING: creating a reservation incurs On-Demand charges for the reserved
     capacity whether or not it is used, until the reservation is cancelled.
-    Use --dry-run to check the request and your permission first; EC2's dry
-    run does not check capacity or the Availability Zone.
+    It asks for confirmation first; pass --yes in scripts. Use --dry-run to
+    check the request and your permission first; EC2's dry run does not check
+    capacity or the Availability Zone.
 
     Examples:
         gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2 --dry-run
         gco capacity create-reservation -i p6-b200 -r us-east-1 -z us-east-1a -c 1
         gco capacity create-reservation -i p4d.24xlarge -r us-west-2 -z us-west-2b \\
-            --end-date 2026-08-01
+            --end-date 2026-08-01 --yes
     """
+    _confirm_charges(
+        f"Create an On-Demand Capacity Reservation for {count}x {instance_type} in "
+        f"{availability_zone}? Charges accrue until it is cancelled.",
+        yes=yes,
+        dry_run=dry_run,
+    )
     formatter = get_output_formatter(config)
     checker = get_capacity_checker(config)
 
@@ -1633,9 +1755,7 @@ def create_reservation(
 
         if config.output_format != "table":
             formatter.print(result)
-            return
-
-        if result["success"]:
+        elif result["success"]:
             if dry_run:
                 print()
                 print(
@@ -1680,7 +1800,9 @@ def create_reservation(
                     f"-c {result['reservation_id']} -i {result['instance_type']}"
                 )
                 print()
-        else:
+        if not result["success"]:
+            # JSON/YAML mode already printed the failure document; the exit
+            # status must say it failed there too, not only in table mode.
             formatter.print_error(
                 f"Failed: {result.get('error_code', 'Unknown')}: {result.get('error', '')}"
             )
@@ -1704,7 +1826,7 @@ def create_reservation(
         "EC2 does not verify the reservation exists until the real request."
     ),
 )
-@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.option("--yes", "-y", is_flag=True, help=_CONFIRMATION_HELP)
 @pass_config
 def cancel_reservation(
     config: Any, reservation_id: Any, region: Any, dry_run: Any, yes: Any
@@ -1723,8 +1845,12 @@ def cancel_reservation(
     formatter = get_output_formatter(config)
     checker = get_capacity_checker(config)
 
-    if not dry_run and not yes:
-        confirm(f"Cancel capacity reservation '{reservation_id}' in {region}?", abort=True)
+    _confirm_request(
+        f"Cancel capacity reservation '{reservation_id}' in {region}?",
+        yes=yes,
+        dry_run=dry_run,
+        request="cancelling releases the reserved capacity",
+    )
 
     try:
         if dry_run:
@@ -1740,9 +1866,7 @@ def cancel_reservation(
 
         if config.output_format != "table":
             formatter.print(result)
-            return
-
-        if result["success"]:
+        elif result["success"]:
             print()
             if dry_run:
                 print("  ✓ Dry run passed — you are authorized to cancel reservations")
@@ -1751,7 +1875,9 @@ def cancel_reservation(
             else:
                 print(f"  ✓ {result.get('message', 'Reservation cancelled.')}")
             print()
-        else:
+        if not result["success"]:
+            # JSON/YAML mode already printed the failure document; the exit
+            # status must say it failed there too, not only in table mode.
             formatter.print_error(
                 f"Failed: {result.get('error_code', 'Unknown')}: {result.get('error', '')}"
             )
@@ -1765,8 +1891,21 @@ def cancel_reservation(
 _HISTORY_DISABLED_HINT = (
     "The historical capacity surface is not enabled. It is an optional add-on to "
     "the global stack: set historical.enabled to true in cdk.json and run "
-    "'gco stacks deploy gco-global'. See lambda/capacity-poller/README.md."
+    "'gco stacks deploy {global_stack}'. See lambda/capacity-poller/README.md."
 )
+
+
+def _history_disabled_hint() -> str:
+    """:data:`_HISTORY_DISABLED_HINT` naming this deployment's global stack.
+
+    The stack is ``<project>-global``, from the CLI configuration the root
+    ``gco`` group stores on the context (loaded here when there is none).
+    """
+    from ..config import get_config
+
+    context = click.get_current_context(silent=True)
+    config = context.find_object(GCOConfig) if context is not None else None
+    return _HISTORY_DISABLED_HINT.format(global_stack=(config or get_config()).global_stack_name)
 
 
 def _history_disabled(exc: Exception) -> bool:
@@ -1777,23 +1916,36 @@ def _history_disabled(exc: Exception) -> bool:
     )
 
 
-def _print_historical_enrichment(formatter: Any, instance_type: str, region: str) -> None:
-    """Append a historical capacity summary to ``gco capacity check`` output."""
+def _historical_statistics(
+    formatter: Any, instance_type: str, region: str
+) -> dict[str, Any] | None:
+    """Read the 7-day historical summary for ``gco capacity check``.
+
+    Warns on stderr and returns None when the history cannot be read; the
+    enrichment is supplementary, so it never fails the command.
+    """
     from ..capacity.history import get_capacity_history_store
 
     try:
-        stats = get_capacity_history_store().get_statistics(instance_type, region)
+        stats: dict[str, Any] = get_capacity_history_store().get_statistics(instance_type, region)
     except Exception as e:  # supplementary to check; never fail the command
         if _history_disabled(e):
-            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            formatter.print_warning(_history_disabled_hint())
         else:
             formatter.print_warning(f"Historical enrichment unavailable: {e}")
-        return
+        return None
     if stats["sample_count"] == 0:
         formatter.print_warning(
             f"No historical samples for {instance_type} in {region} yet "
             "(the poller records one about every 15 minutes)."
         )
+    return stats
+
+
+def _print_historical_enrichment(formatter: Any, instance_type: str, region: str) -> None:
+    """Append a historical capacity summary to ``gco capacity check`` table output."""
+    stats = _historical_statistics(formatter, instance_type, region)
+    if stats is None or stats["sample_count"] == 0:
         return
     formatter.print_info(f"Historical context (last 7 days, {stats['sample_count']} samples):")
     spot_stats = stats["metrics"].get("spot_score")
@@ -1868,7 +2020,7 @@ def history_show(config: Any, instance_type: Any, region: Any, hours: Any) -> No
         formatter.print(trend, columns=["timestamp", *METRIC_FIELDS])
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            formatter.print_warning(_history_disabled_hint())
             return
         formatter.print_error(f"Failed to load capacity history: {e}")
         sys.exit(1)
@@ -1913,7 +2065,7 @@ def history_stats(config: Any, instance_type: Any, region: Any, hours: Any) -> N
             formatter.print(stats)
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            formatter.print_warning(_history_disabled_hint())
             return
         formatter.print_error(f"Failed to compute capacity statistics: {e}")
         sys.exit(1)
@@ -1955,7 +2107,7 @@ def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any, m
             formatter.print(patterns)
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            formatter.print_warning(_history_disabled_hint())
             return
         formatter.print_error(f"Failed to compute capacity patterns: {e}")
         sys.exit(1)
@@ -2071,7 +2223,7 @@ def predict_capacity(
         return
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            formatter.print_warning(_history_disabled_hint())
             return
         if is_bedrock_ftu_form_error(e):
             formatter.print_error(BEDROCK_FTU_REMEDIATION)
@@ -2169,17 +2321,18 @@ def traffic_dial_show(config: Any) -> None:
 def traffic_dial_set(config: Any, region: Any, percentage: Any, yes: Any) -> None:
     """Manually dial REGION to PERCENTAGE and pin it against the controller.
 
-    Applies UpdateEndpointGroup immediately and records an override parameter
-    so the scheduled controller leaves the region alone until
-    `gco capacity traffic-dial clear` removes it. Dial changes converge to the
-    accelerator's edge locations over a few minutes.
+    Records an override parameter, so the scheduled controller leaves the
+    region alone until `gco capacity traffic-dial clear` removes it, then
+    applies UpdateEndpointGroup. If the dial update fails, the override is
+    put back as it was. Dial changes converge to the accelerator's edge
+    locations over a few minutes.
     """
     from ..capacity.traffic_dial import TrafficDialError, get_traffic_dial_manager
 
     formatter = get_output_formatter(config)
-    if not yes and not confirm(f"Dial {region} to {percentage}% of its optimally routed traffic?"):
-        formatter.print_info("Aborted; no changes made.")
-        return
+    if not yes:
+        # A declined prompt aborts with exit status 1, like the other commands.
+        confirm(f"Dial {region} to {percentage}% of its optimally routed traffic?", abort=True)
 
     manager = get_traffic_dial_manager(config)
     try:

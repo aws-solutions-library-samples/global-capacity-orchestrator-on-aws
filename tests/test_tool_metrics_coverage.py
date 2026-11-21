@@ -221,6 +221,69 @@ def test_job_logs_no_candidates_is_no_match(monkeypatch: pytest.MonkeyPatch) -> 
     assert result["details"]["mode"] == "json_key"
 
 
+def test_job_logs_reads_the_log_inside_the_cli_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reader extracts from the log text, not from the lines of the CLI's JSON document.
+
+    ``_run_cli`` returns ``gco --output json jobs logs`` stdout, where the log
+    is one string value. Splitting that document found no JSON key and gave
+    regex mode a single line, so ``last`` returned the first value.
+    """
+    metrics_module = _import_metrics_tool_module()
+    log = "\n".join(
+        [
+            '{"step": 1, "loss": 2.50}',
+            "step 1 loss=2.50",
+            '{"step": 2, "loss": 1.25}',
+            "step 2 loss=1.25",
+            '{"step": 3, "loss": 0.75}',
+            "step 3 loss=0.75",
+        ]
+    )
+    _patch_job_logs(
+        metrics_module, monkeypatch, json.dumps({"status": "ok", "output": log}, indent=2)
+    )
+    by_key = asyncio.run(
+        metrics_module.metrics_from_job_logs(
+            job_name="sft-run", region="us-east-1", json_key="loss"
+        )
+    )
+    by_regex = asyncio.run(
+        metrics_module.metrics_from_job_logs(
+            job_name="sft-run", region="us-east-1", regex=r"loss=([0-9.]+)"
+        )
+    )
+    assert (by_key["metrics"], by_key["match_count"]) == ({"loss": 0.75}, 3)
+    assert (by_regex["metrics"], by_regex["match_count"]) == ({"value": 0.75}, 3)
+
+
+@pytest.mark.parametrize(
+    ("raw", "json_key", "expected"),
+    [
+        # An empty log: the root output group prints {"status": "ok"}.
+        (json.dumps({"status": "ok"}), "loss", None),
+        # Shapes the CLI does not produce are read as log text.
+        (json.dumps({"status": "ok", "output": 5}), "output", 5),
+        (json.dumps([{"loss": 1}]), "loss", None),
+        (json.dumps({"loss": 2}), "loss", 2),
+    ],
+    ids=["empty-log", "non-text-output", "json-list", "plain-json-line"],
+)
+def test_job_logs_other_payload_shapes(
+    monkeypatch: pytest.MonkeyPatch, raw: str, json_key: str, expected: float | None
+) -> None:
+    metrics_module = _import_metrics_tool_module()
+    _patch_job_logs(metrics_module, monkeypatch, raw)
+    result = asyncio.run(
+        metrics_module.metrics_from_job_logs(
+            job_name="sft-run", region="us-east-1", json_key=json_key
+        )
+    )
+    if expected is None:
+        assert result["code"] == ErrorCode.NO_MATCH
+    else:
+        assert result["metrics"] == {json_key: expected}
+
+
 def test_job_logs_generic_exception_maps_to_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-reader exception during retrieval maps to the unreachable catch-all."""
     metrics_module = _import_metrics_tool_module()

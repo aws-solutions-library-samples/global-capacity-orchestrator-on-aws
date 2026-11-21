@@ -31,6 +31,7 @@ from gco.stacks.api_gateway_global_stack import (
     AnalyticsApiConfig,
     GCOApiGatewayGlobalStack,
 )
+from gco.stacks.constants import LAMBDA_PYTHON_RUNTIME
 
 GA_DNS = "test-accelerator.awsglobalaccelerator.com"
 STUB_ACCOUNT = "123456789012"
@@ -39,9 +40,6 @@ STUB_USER_POOL_ID = "us-east-2_STUBPOOL01"
 STUB_USER_POOL_ARN = (
     f"arn:aws:cognito-idp:{STUB_REGION}:{STUB_ACCOUNT}:userpool/{STUB_USER_POOL_ID}"
 )
-STUB_CLIENT_ID = "1abcdefghijklmnopqrstu234"
-STUB_STUDIO_DOMAIN = "gco-analytics-us-east-2"
-STUB_CALLBACK_URL = "https://example.execute-api.us-east-2.amazonaws.com/prod/studio/callback"
 
 
 def _synth_absent() -> assertions.Template:
@@ -79,7 +77,7 @@ def _synth_present() -> assertions.Template:
     stub_lambda = lambda_.Function(
         stack,
         "StubPresignedUrlLambda",
-        runtime=lambda_.Runtime.PYTHON_3_13,
+        runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
         handler="index.handler",
         code=lambda_.Code.from_inline(
             "def handler(event, context):\n    return {'statusCode': 200}\n"
@@ -88,10 +86,7 @@ def _synth_present() -> assertions.Template:
 
     analytics_config = AnalyticsApiConfig(
         user_pool_arn=STUB_USER_POOL_ARN,
-        user_pool_client_id=STUB_CLIENT_ID,
         presigned_url_lambda=stub_lambda,
-        studio_domain_name=STUB_STUDIO_DOMAIN,
-        callback_url=STUB_CALLBACK_URL,
     )
     stack.set_analytics_config(analytics_config)
 
@@ -188,6 +183,23 @@ class TestAnalyticsApiConfigPresent:
             },
         )
 
+    def test_studio_login_declares_every_status_the_lambda_returns(
+        self, present_template: assertions.Template
+    ) -> None:
+        """``/studio/login`` documents the presigned-URL Lambda's 202 and 409.
+
+        The Lambda answers 202 while the caller's Studio profile provisions
+        and 409 for a profile it cannot recover; the method's responses (and
+        so docs/openapi/api-gateway-global.json) listed neither.
+        """
+        (login,) = [
+            method["Properties"]
+            for method in present_template.find_resources("AWS::ApiGateway::Method").values()
+            if method["Properties"].get("AuthorizationType") == "COGNITO_USER_POOLS"
+        ]
+        statuses = [response["StatusCode"] for response in login["MethodResponses"]]
+        assert statuses == ["200", "202", "400", "401", "404", "409", "500"]
+
     def test_cognito_authorizer_created(self, present_template: assertions.Template) -> None:
         """An authorizer of type ``COGNITO_USER_POOLS`` exists on the REST API."""
         present_template.resource_count_is("AWS::ApiGateway::Authorizer", 1)
@@ -261,7 +273,7 @@ class TestSetAnalyticsConfigMutator:
         stub_lambda = lambda_.Function(
             stack,
             "StubPresignedUrlLambda",
-            runtime=lambda_.Runtime.PYTHON_3_13,
+            runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="index.handler",
             code=lambda_.Code.from_inline(
                 "def handler(event, context):\n    return {'statusCode': 200}\n"
@@ -269,11 +281,35 @@ class TestSetAnalyticsConfigMutator:
         )
         cfg = AnalyticsApiConfig(
             user_pool_arn=STUB_USER_POOL_ARN,
-            user_pool_client_id=STUB_CLIENT_ID,
             presigned_url_lambda=stub_lambda,
-            studio_domain_name=STUB_STUDIO_DOMAIN,
-            callback_url=STUB_CALLBACK_URL,
         )
         stack.set_analytics_config(cfg)
         with pytest.raises(RuntimeError, match="already has an analytics_config"):
             stack.set_analytics_config(cfg)
+
+
+class TestResourcePolicy:
+    """The global API's resource policy admits nothing account-wide.
+
+    For an IAM-authorized method and a same-account caller, API Gateway allows
+    the request when either the caller's identity policy or the resource policy
+    allows it. A resource-policy Allow for every principal of the account let
+    principals without any ``execute-api:Invoke`` permission call every route.
+    Only the Cognito-authorized and unauthenticated ``GET /studio/*`` routes,
+    whose requests carry no IAM identity, need (and keep) an explicit Allow.
+    """
+
+    @pytest.mark.parametrize("template_name", ["absent_template", "present_template"])
+    def test_only_the_studio_get_routes_are_admitted(
+        self, template_name: str, request: pytest.FixtureRequest
+    ) -> None:
+        template: assertions.Template = request.getfixturevalue(template_name)
+        (rest_api,) = template.find_resources("AWS::ApiGateway::RestApi").values()
+        assert rest_api["Properties"]["Policy"]["Statement"] == [
+            {
+                "Action": "execute-api:Invoke",
+                "Effect": "Allow",
+                "Principal": {"AWS": "*"},
+                "Resource": "execute-api:/*/GET/studio/*",
+            }
+        ]

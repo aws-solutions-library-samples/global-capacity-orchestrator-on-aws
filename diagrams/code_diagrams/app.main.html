@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-10-16T16:57:50Z">
-        <meta name="gco-source-commit" content="3458f76ef1541be718c00458b8ecc8f7c770c6ad">
-        <meta name="gco-flow-digest" content="bf6d414787f2e6b8">
+        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
+        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
+        <meta name="gco-flow-digest" content="3933e809e952583a">
         <title>CDK app entry point (app.py::main)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -225,7 +225,7 @@ op28=>operation: manifest_processor_config = config.get_manifest_processor_confi
 cond31=>operation: cdk.Tags.of(app).add(key, value) while  key, value in tags.items()
 op40=>operation: account = os.environ.get('CDK_DEFAULT_ACCOUNT')
 op42=>operation: global_stack = GCOGlobalStack(app, f'{project_name}-global', config=config, env=cdk.Environment(account=account, region=global_region), description=f'{SOLUTION_DESCRIPTION_PREFIX} - Shared global resources for GCO (Global Capacity Orchestrator on AWS)')
-op44=>operation: api_gateway_stack = GCOApiGatewayGlobalStack(app, f'{project_name}-api-gateway', global_accelerator_dns=global_stack.get_accelerator_dns_name(), project_name=project_name, api_gateway_config=api_gateway_config, registry_region=global_region, certificate_regions=regional_regions, backend_tls_config=config.get_backend_tls_config(), max_request_body_bytes=manifest_processor_config.get('max_request_body_bytes', 1048576), env=cdk.Environment(account=account, region=api_gateway_region), description='Global API Gateway with IAM authentication')
+op44=>operation: api_gateway_stack = GCOApiGatewayGlobalStack(app, f'{project_name}-api-gateway', global_accelerator_dns=global_stack.get_accelerator_dns_name(), project_name=project_name, api_gateway_config=api_gateway_config, registry_region=global_region, certificate_regions=regional_regions, backend_tls_config=config.get_backend_tls_config(), max_request_body_bytes=manifest_processor_config.get('max_request_body_bytes', 1048576), monitoring_region=monitoring_region, env=cdk.Environment(account=account, region=api_gateway_region), description='Global API Gateway with IAM authentication')
 sub46=>subroutine: api_gateway_stack.add_stack_dependency(global_stack)
 op48=>operation: regional_stacks = []
 cond51=>condition: for region in regional_regions
@@ -240,7 +240,7 @@ cond72=>operation: monitoring_stack.add_stack_dependency(regional_stack) while  
 cond82=>condition: if config.get_analytics_enabled()
 op86=>operation: analytics_stack = GCOAnalyticsStack(app, f'{project_name}-analytics', config=config, env=cdk.Environment(account=account, region=api_gateway_region), description='Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)')
 sub88=>subroutine: analytics_stack.add_stack_dependency(global_stack)
-op90=>operation: analytics_api_config = AnalyticsApiConfig(user_pool_arn=analytics_stack.cognito_pool.user_pool_arn, user_pool_client_id=analytics_stack.cognito_client.user_pool_client_id, presigned_url_lambda=analytics_stack.presigned_url_lambda, studio_domain_name=analytics_stack.studio_domain.domain_name or '', callback_url=f'https://{api_gateway_stack.api.rest_api_id}.execute-api.{api_gateway_region}.{api_gateway_stack.url_suffix}/prod/studio/callback')
+op90=>operation: analytics_api_config = AnalyticsApiConfig(user_pool_arn=analytics_stack.cognito_pool.user_pool_arn, presigned_url_lambda=analytics_stack.presigned_url_lambda)
 sub92=>subroutine: api_gateway_stack.set_analytics_config(analytics_api_config)
 sub94=>subroutine: api_gateway_stack.add_stack_dependency(analytics_stack)
 op99=>operation: assembly = app.synth()
@@ -293,17 +293,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-10-16T16:57:50Z -->
-        <!-- Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad -->
+        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
+        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-10-16T16:57:50Z">2026-10-16T16:57:50Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>3458f76ef1541be718c00458b8ecc8f7c770c6ad</code>
+            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>bf6d414787f2e6b8</code>
+            Flow content SHA-256: <code>3933e809e952583a</code>
           </p>
           <div id="canvas"></div>
         </div>

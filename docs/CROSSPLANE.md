@@ -183,7 +183,7 @@ captured by the kind CI job with the `gco crossplane screenshot` code.
 ### Status
 
 ```bash
-gco crossplane status [--output json]
+gco [-o json] crossplane status
 ```
 
 The command reads `cdk.json`, `charts.yaml` and the shipped post-Helm
@@ -204,7 +204,9 @@ resources, and with them what they composed, before the definition goes, all
 while Crossplane is still running. Crossview and Crossplane are then
 uninstalled, and the applier prunes the Function and the RBAC above.
 Crossplane installs its CRDs itself (its init container) rather than through
-the chart, so they stay behind. A stack delete runs the same cleanup.
+the chart, so they stay behind. A stack delete runs the same cleanup. The
+cleanup runs only while GCO's `crossplane` release exists, so a deploy with
+the chart off never touches a Crossplane that GCO did not install.
 
 ## Verification
 

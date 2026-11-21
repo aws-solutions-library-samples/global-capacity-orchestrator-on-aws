@@ -4,10 +4,10 @@ Monitoring stack for GCO (Global Capacity Orchestrator on AWS) - Cross-region mo
 This stack creates centralized monitoring resources for all GCO deployments:
 - CloudWatch Dashboard with comprehensive widgets for all regions
 - SNS topic for alerting
-- CloudWatch Alarms for critical metrics
-- Log groups for application logs
-- Anomaly detection for traffic patterns
-- Composite alarms for better signal-to-noise
+- CloudWatch Alarms for the control-plane metrics in this Region, including
+  a composite alarm for better signal-to-noise
+- With cost monitoring on, the cost report bucket, Glue database and table, and
+  Athena workgroup
 
 Dashboard Sections:
 - Global Accelerator: Flow counts, processed bytes
@@ -30,15 +30,21 @@ Cross-Region Metrics:
     - Regional metrics: In each cluster's region
 
 Alarms:
-- High CPU/memory utilization on EKS clusters
-- Unhealthy hosts in ALB target groups
-- High response times
-- Manifest processing failures
-- Lambda errors and throttles
-- SQS message age (stuck jobs)
-- DynamoDB throttling and system errors
-- API Gateway 5XX errors
-- Secret rotation failures
+    CloudWatch evaluates an alarm only against metrics in its own Region, so
+    every alarm lives in the Region of its metrics
+    (``gco/stacks/control_plane_alarms.py``):
+    - API Gateway 5XX errors and p99 latency, proxy Lambda errors and
+      throttles, secret rotation failures, and the composite of API Gateway
+      and proxy Lambda errors: here while ``deployment_regions.api_gateway``
+      is the monitoring Region (the default), otherwise in the API Gateway
+      stack with its own alert topic.
+    - DynamoDB jobs table throttling and system errors: here while
+      ``deployment_regions.global`` is the monitoring Region (the default),
+      otherwise in the global stack with its own alert topic.
+    Each workload Region's alarms (SQS message age and dead-letter messages,
+    EKS CPU/memory, manifest failures, and their composite) are created in
+    that Region's stack with its own alert topic; see
+    ``gco/stacks/regional_alarms.py``.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -51,11 +57,9 @@ from aws_cdk import (
 )
 from aws_cdk import aws_athena as athena
 from aws_cdk import aws_cloudwatch as cloudwatch
-from aws_cdk import aws_cloudwatch_actions as cw_actions
 from aws_cdk import aws_glue as glue
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_kms as kms
-from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sns as sns
 from aws_cdk import aws_ssm as ssm
@@ -70,15 +74,51 @@ from gco.stacks.constants import (
     cost_glue_database_name,
     cost_report_ssm_parameter_prefix,
 )
+from gco.stacks.control_plane_alarms import add_api_alarms, add_jobs_table_alarms
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-11-19T06:05:34Z
+# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
 # Flowchart(s) generated from this file:
 #   * ``GCOMonitoringStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.png``)
 # Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
 # <pyflowchart-code-diagram> END
+
+
+def dynamodb_search_sum(
+    metric_name: str, table_name: str, *, region: str, label: str, color: str
+) -> cloudwatch.MathExpression:
+    """Dashboard line: a per-operation DynamoDB metric summed over every operation.
+
+    ``SEARCH`` finds whichever operations have data, without the 10-metric
+    limit that alarm math has; alarms cannot use ``SEARCH``.
+    """
+    return cloudwatch.MathExpression(
+        expression=(
+            "SUM(SEARCH('{AWS/DynamoDB,Operation,TableName} "
+            f'MetricName="{metric_name}" TableName="{table_name}"\', \'Sum\', 300))'
+        ),
+        using_metrics={},
+        label=label,
+        color=color,
+        period=Duration.minutes(5),
+        search_region=region,
+    )
+
+
+#: SEARCH filter for the platform ALB: the AWS Load Balancer Controller names
+#: the ``gco-system/gco-gateway`` Gateway's load balancer
+#: ``k8s-gcosyste-gcogatew-<hash>`` (see ``_create_alb_widgets``).
+PLATFORM_ALB_SEARCH_FILTER = "LoadBalancer=app/k8s-gcosyste-gcogatew-"
+
+
+def _platform_alb_search(metric_name: str, statistic: str) -> str:
+    """SEARCH expression for one ALB metric of the platform ALB."""
+    return (
+        "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
+        f"MetricName=\"{metric_name}\" {PLATFORM_ALB_SEARCH_FILTER}', '{statistic}', 300)"
+    )
 
 
 if TYPE_CHECKING:
@@ -145,14 +185,8 @@ class GCOMonitoringStack(Stack):
         # Create CloudWatch dashboard
         self.dashboard = self._create_dashboard()
 
-        # Create alarms
+        # Create the alarms whose metrics are in this stack's Region
         self._create_alarms()
-
-        # Create composite alarms
-        self._create_composite_alarms()
-
-        # Create custom metrics
-        self._create_custom_metrics()
 
         # Export monitoring resources
         self._create_outputs()
@@ -202,7 +236,8 @@ class GCOMonitoringStack(Stack):
            grants every regional cost-monitor role ``GenerateDataKey`` /
            ``Decrypt`` / ``DescribeKey`` through S3 in this region.
         2. ``cost_report_access_logs_bucket`` — the dedicated S3 access-logs
-           destination for the primary bucket.
+           destination for the primary bucket, SSE-S3 because S3 server
+           access logging requires an SSE-S3 destination bucket.
         3. ``cost_report_bucket`` — the primary bucket. Its physical name is
            CloudFormation-generated: S3 bucket names are a global namespace
            and a deleted name is not reliably reusable, so the previous fixed
@@ -237,23 +272,11 @@ class GCOMonitoringStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        kms_actions = [
-            "kms:Encrypt",
-            "kms:Decrypt",
-            "kms:ReEncrypt*",
-            "kms:GenerateDataKey*",
-            "kms:DescribeKey",
-        ]
-        self.cost_report_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowS3ServiceEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
+        # The key policy names no service principal: S3 calls KMS for SSE-KMS
+        # with the permissions of the principal that reads or writes an object,
+        # Athena writes query results the same way with the caller's
+        # permissions, and the access-logs bucket is SSE-S3.
+        #
         # Every regional cost-monitor role writes KMS-encrypted objects into
         # the bucket below. The roles live in other regions and their stacks
         # deploy first, so the grant direction is inverted relative to the
@@ -284,11 +307,12 @@ class GCOMonitoringStack(Stack):
         s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
         access_logs_retention_days = int(s3_access_logs_ctx.get("retention_days", 90))
 
+        # SSE-S3: S3 server access logging requires an SSE-S3 destination
+        # (ACCESS_LOG_DESTINATION_SSE_S3_REASON).
         self.cost_report_access_logs_bucket = s3.Bucket(
             self,
             "CostReportAccessLogsBucket",
-            encryption=s3.BucketEncryption.KMS,
-            encryption_key=self.cost_report_kms_key,
+            encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
             versioned=True,
@@ -430,7 +454,10 @@ class GCOMonitoringStack(Stack):
             description="Home region of the central cost report bucket.",
         )
 
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+        from gco.stacks.nag_suppressions import (
+            acknowledge_access_log_destination_encryption,
+            acknowledge_nag_findings,
+        )
 
         cost_replication_reason = (
             "Cost reports are derived analytics data regenerated continuously "
@@ -492,6 +519,7 @@ class GCOMonitoringStack(Stack):
                 },
             ],
         )
+        acknowledge_access_log_destination_encryption(self.cost_report_access_logs_bucket)
 
         CfnOutput(
             self,
@@ -718,7 +746,7 @@ class GCOMonitoringStack(Stack):
             )
         )
 
-        # Flow count with anomaly detection
+        # New flows per period
         flow_count_widget = cloudwatch.GraphWidget(
             title="Global Accelerator - New Flows",
             left=[
@@ -1253,40 +1281,23 @@ class GCOMonitoringStack(Stack):
         )
         widgets.append(latency_widget)
 
-        # Throttled requests
+        # Throttled requests and system errors. Both metrics exist only per
+        # TableName and Operation, so each line sums every operation.
         throttle_widget = cloudwatch.GraphWidget(
             title="DynamoDB - Throttled Requests",
             left=[
-                cloudwatch.Metric(
-                    namespace="AWS/DynamoDB",
-                    metric_name="ThrottledRequests",
-                    dimensions_map={"TableName": jobs_table},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                    label="Jobs",
-                    color="#d62728",
+                dynamodb_search_sum(
+                    "ThrottledRequests",
+                    table,
                     region=global_region,
-                ),
-                cloudwatch.Metric(
-                    namespace="AWS/DynamoDB",
-                    metric_name="ThrottledRequests",
-                    dimensions_map={"TableName": templates_table},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                    label="Templates",
-                    color="#ff7f0e",
-                    region=global_region,
-                ),
-                cloudwatch.Metric(
-                    namespace="AWS/DynamoDB",
-                    metric_name="ThrottledRequests",
-                    dimensions_map={"TableName": webhooks_table},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                    label="Webhooks",
-                    color="#9467bd",
-                    region=global_region,
-                ),
+                    label=label,
+                    color=color,
+                )
+                for table, label, color in (
+                    (jobs_table, "Jobs", "#d62728"),
+                    (templates_table, "Templates", "#ff7f0e"),
+                    (webhooks_table, "Webhooks", "#9467bd"),
+                )
             ],
             width=12,
             height=6,
@@ -1294,30 +1305,20 @@ class GCOMonitoringStack(Stack):
         )
         widgets.append(throttle_widget)
 
-        # System errors
         errors_widget = cloudwatch.GraphWidget(
             title="DynamoDB - System Errors",
             left=[
-                cloudwatch.Metric(
-                    namespace="AWS/DynamoDB",
-                    metric_name="SystemErrors",
-                    dimensions_map={"TableName": jobs_table},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                    label="Jobs",
-                    color="#d62728",
+                dynamodb_search_sum(
+                    "SystemErrors",
+                    table,
                     region=global_region,
-                ),
-                cloudwatch.Metric(
-                    namespace="AWS/DynamoDB",
-                    metric_name="SystemErrors",
-                    dimensions_map={"TableName": templates_table},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                    label="Templates",
-                    color="#ff7f0e",
-                    region=global_region,
-                ),
+                    label=label,
+                    color=color,
+                )
+                for table, label, color in (
+                    (jobs_table, "Jobs", "#d62728"),
+                    (templates_table, "Templates", "#ff7f0e"),
+                )
             ],
             width=12,
             height=6,
@@ -1346,16 +1347,20 @@ class GCOMonitoringStack(Stack):
             for regional_stack in self.regional_stacks
         ]
 
-        # EKS cluster status
+        # API server requests answered with a server error. EKS publishes its
+        # control-plane metrics for clusters on Kubernetes 1.28 and later in
+        # AWS/EKS ("Monitor cluster data with Amazon CloudWatch", EKS User
+        # Guide), free of charge.
         cluster_status_widget = cloudwatch.SingleValueWidget(
-            title="EKS Clusters - Failed Requests",
+            title="EKS API Server - 5XX Responses",
             metrics=[
                 cloudwatch.Metric(
                     namespace="AWS/EKS",
-                    metric_name="cluster_failed_request_count",
-                    dimensions_map={"cluster_name": cluster_name},
+                    metric_name="apiserver_request_total_5XX",
+                    dimensions_map={"ClusterName": cluster_name},
                     statistic="Sum",
                     period=Duration.minutes(5),
+                    label=region,
                     region=region,
                 )
                 for cluster_name, region in cluster_info
@@ -1928,26 +1933,25 @@ class GCOMonitoringStack(Stack):
     def _create_alb_widgets(self) -> list[cloudwatch.IWidget]:
         """Create ALB monitoring widgets scoped to the GCO platform ALB.
 
-        ALBs are created by the AWS Load Balancer Controller at runtime
-        from an Ingress resource (not by CDK), so the exact ALB name
-        isn't known at synth time. We originally tried reading the ARN
-        off the regional stack's ``GaRegistration`` custom resource via
-        ``cross_region_references=True``, but that path races the
-        custom-resource response pipeline: CDK's cross-region
-        ``ExportsWriter`` executes ``Fn::GetAtt: [GaRegistration, AlbArn]``
-        before CloudFormation has the updated response data stored, and
-        errors with "Vendor response doesn't contain AlbArn attribute".
+        The platform ALB is created at runtime by the AWS Load Balancer
+        Controller from the ``gco-system/gco-gateway`` Gateway (not by CDK),
+        so its name is not known at synth time. Reading the ARN off the
+        regional stack's ``GaRegistration`` custom resource through
+        ``cross_region_references=True`` races the custom-resource response
+        pipeline (CDK's cross-region ``ExportsWriter`` evaluates
+        ``Fn::GetAtt: [GaRegistration, AlbArn]`` before CloudFormation has
+        the response data and fails with "Vendor response doesn't contain
+        AlbArn attribute"), so the widgets use a SEARCH expression instead.
 
-        Instead we use a SEARCH expression with a composite-token
-        filter. The ALB Controller names the platform ALB
-        ``k8s-gco-<hash>`` (the namespace is shortened because the
-        controller enforces a 32-char total name limit); CloudWatch's
-        ``LoadBalancer`` dimension is the ARN suffix ``app/<name>/<hash>``,
-        so an unquoted filter ``LoadBalancer=app/k8s-gco-`` performs a
-        composite-token match (the sequence ``app``, ``k``, ``8``, ``s``,
-        ``gco`` must appear consecutively in the dimension value).
-        Double-quoted filters would be exact matches and return nothing
-        because no ALB's dimension value is literally ``app/k8s-gco-``.
+        The controller names a Gateway's load balancer
+        ``k8s-<namespace>-<name>-<hash>`` with the namespace and name stripped
+        of non-alphanumerics and cut to 8 characters, which for this Gateway
+        is ``k8s-gcosyste-gcogatew-<hash>`` in every deployment. CloudWatch's
+        ``LoadBalancer`` dimension is the ARN suffix ``app/<name>/<id>``, so
+        the unquoted filter ``PLATFORM_ALB_SEARCH_FILTER`` is a
+        composite-token match on that prefix; a double-quoted filter would be
+        an exact match and find nothing. Another GCO deployment's Gateway ALB
+        in the same Region carries the same prefix and shows up too.
         """
         widgets: list[cloudwatch.IWidget] = []
 
@@ -1957,11 +1961,10 @@ class GCOMonitoringStack(Stack):
                 markdown=(
                     "# Application Load Balancers\n"
                     "Request metrics, response time, HTTP errors, and "
-                    "connection counts — scoped via SEARCH composite-token "
-                    "match to ALBs named ``app/k8s-gco-*`` so only the GCO "
-                    "platform ALB in each region appears. Inference ALBs "
-                    "(named per endpoint) and unrelated ALBs in the "
-                    "account are excluded."
+                    "connection counts of the GCO platform ALB that the "
+                    "gco-system/gco-gateway Gateway creates in each region "
+                    "(a SEARCH on load balancers named k8s-gcosyste-gcogatew-*); "
+                    "unrelated ALBs in the account are excluded."
                 ),
                 width=24,
                 height=1,
@@ -1975,11 +1978,7 @@ class GCOMonitoringStack(Stack):
                     title=f"ALB - Request Count ({region})",
                     left=[
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="RequestCount" '
-                                'LoadBalancer=app/k8s-gco-\', "Sum", 300)'
-                            ),
+                            expression=_platform_alb_search("RequestCount", "Sum"),
                             label="Request Count",
                             period=Duration.minutes(5),
                         ),
@@ -1997,20 +1996,12 @@ class GCOMonitoringStack(Stack):
                     title=f"ALB - Response Time ({region})",
                     left=[
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="TargetResponseTime" '
-                                'LoadBalancer=app/k8s-gco-\', "Average", 300)'
-                            ),
+                            expression=_platform_alb_search("TargetResponseTime", "Average"),
                             label="Avg Response Time",
                             period=Duration.minutes(5),
                         ),
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="TargetResponseTime" '
-                                'LoadBalancer=app/k8s-gco-\', "p99", 300)'
-                            ),
+                            expression=_platform_alb_search("TargetResponseTime", "p99"),
                             label="p99 Response Time",
                             period=Duration.minutes(5),
                         ),
@@ -2028,22 +2019,14 @@ class GCOMonitoringStack(Stack):
                     title=f"ALB - HTTP Errors ({region})",
                     left=[
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="HTTPCode_Target_4XX_Count" '
-                                'LoadBalancer=app/k8s-gco-\', "Sum", 300)'
-                            ),
+                            expression=_platform_alb_search("HTTPCode_Target_4XX_Count", "Sum"),
                             label="4XX Errors",
                             period=Duration.minutes(5),
                         ),
                     ],
                     right=[
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="HTTPCode_Target_5XX_Count" '
-                                'LoadBalancer=app/k8s-gco-\', "Sum", 300)'
-                            ),
+                            expression=_platform_alb_search("HTTPCode_Target_5XX_Count", "Sum"),
                             label="5XX Errors",
                             period=Duration.minutes(5),
                         ),
@@ -2061,11 +2044,7 @@ class GCOMonitoringStack(Stack):
                     title=f"ALB - Active Connections ({region})",
                     left=[
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="ActiveConnectionCount" '
-                                'LoadBalancer=app/k8s-gco-\', "Sum", 300)'
-                            ),
+                            expression=_platform_alb_search("ActiveConnectionCount", "Sum"),
                             label="Active Connections",
                             period=Duration.minutes(5),
                         ),
@@ -2246,469 +2225,46 @@ class GCOMonitoringStack(Stack):
         return widgets
 
     def _create_alarms(self) -> None:
-        """Create CloudWatch alarms"""
-        self._create_global_accelerator_alarms()
-        self._create_api_gateway_alarms()
-        self._create_lambda_alarms()
-        self._create_sqs_alarms()
-        self._create_dynamodb_alarms()
-        self._create_eks_alarms()
-        self._create_alb_alarms()
-        self._create_application_alarms()
+        """Create the control-plane alarms whose metrics are in this stack's Region.
 
-    def _create_global_accelerator_alarms(self) -> None:
-        """Create Global Accelerator alarms.
-
-        Note: Global Accelerator metrics are only available in us-west-2.
-        CloudWatch Alarms must be in the same region as the metrics they monitor.
-        Since this monitoring stack may be deployed in a different region,
-        we skip GA alarms here. To monitor GA, either:
-        1. Create alarms manually in us-west-2
-        2. Use CloudWatch cross-region dashboard widgets (which we do)
-        3. Deploy a separate alarm stack in us-west-2
+        CloudWatch evaluates an alarm only against metrics in its own Region.
+        The API Gateway and Lambda alarms are created here while
+        ``deployment_regions.api_gateway`` is the monitoring Region, and the
+        jobs table's alarms while ``deployment_regions.global`` is; otherwise
+        the API Gateway or global stack creates them with an alert topic in its
+        own Region (``gco/stacks/control_plane_alarms.py``). Global Accelerator
+        publishes its metrics in us-west-2 only, so it gets dashboard widgets
+        and no alarms.
         """
-        # GA alarms skipped - metrics only available in us-west-2
-        # Dashboard widgets use region parameter to display GA metrics correctly
-
-    def _create_api_gateway_alarms(self) -> None:
-        """Create API Gateway alarms"""
-        # Get the actual API name from the api_gateway_stack
-        api_name = (
-            self.api_gateway_stack.api.rest_api_name
-            if self.api_gateway_stack
-            else f"{self.project_name}-global-api"
-        )
-
-        # High 5XX error rate
-        api_5xx_alarm = cloudwatch.Alarm(
-            self,
-            "ApiGateway5xxAlarm",
-            alarm_description="API Gateway has high 5XX error rate",
-            metric=cloudwatch.Metric(
-                namespace="AWS/ApiGateway",
-                metric_name="5XXError",
-                dimensions_map={"ApiName": api_name},
-                statistic="Sum",
-                period=Duration.minutes(5),
-            ),
-            threshold=10,
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            evaluation_periods=2,
-            datapoints_to_alarm=2,
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        api_5xx_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-        # High latency
-        api_latency_alarm = cloudwatch.Alarm(
-            self,
-            "ApiGatewayHighLatencyAlarm",
-            alarm_description="API Gateway has high latency",
-            metric=cloudwatch.Metric(
-                namespace="AWS/ApiGateway",
-                metric_name="Latency",
-                dimensions_map={"ApiName": api_name},
-                statistic="p99",
-                period=Duration.minutes(5),
-            ),
-            threshold=10000,  # 10 seconds
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            evaluation_periods=3,
-            datapoints_to_alarm=2,
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        api_latency_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    def _create_lambda_alarms(self) -> None:
-        """Create Lambda function alarms."""
-        if self.api_gateway_stack is None:
-            return
-
-        proxy_lambda = self.api_gateway_stack.proxy_lambda
-        if proxy_lambda is not None:
-            proxy_function_name = proxy_lambda.function_name
-            proxy_errors_alarm = cloudwatch.Alarm(
+        monitoring_region = self.config.get_monitoring_region()
+        api_gateway_region = self.config.get_api_gateway_region()
+        if api_gateway_region == monitoring_region:
+            api_stack = self.api_gateway_stack
+            proxy_lambda = api_stack.proxy_lambda if api_stack is not None else None
+            add_api_alarms(
                 self,
-                "ProxyLambdaErrorsAlarm",
-                alarm_description="API Gateway proxy Lambda has errors",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/Lambda",
-                    metric_name="Errors",
-                    dimensions_map={"FunctionName": proxy_function_name},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
+                region=api_gateway_region,
+                api_name=(
+                    api_stack.api.rest_api_name
+                    if api_stack is not None
+                    else f"{self.project_name}-global-api"
                 ),
-                threshold=5,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            proxy_errors_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-            proxy_throttles_alarm = cloudwatch.Alarm(
-                self,
-                "ProxyLambdaThrottlesAlarm",
-                alarm_description="API Gateway proxy Lambda is being throttled",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/Lambda",
-                    metric_name="Throttles",
-                    dimensions_map={"FunctionName": proxy_function_name},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
+                proxy_function_name=(
+                    proxy_lambda.function_name if proxy_lambda is not None else None
                 ),
-                threshold=1,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-                evaluation_periods=2,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            proxy_throttles_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-        rotation_errors_alarm = cloudwatch.Alarm(
-            self,
-            "RotationLambdaErrorsAlarm",
-            alarm_description="Secret rotation Lambda has errors",
-            metric=cloudwatch.Metric(
-                namespace="AWS/Lambda",
-                metric_name="Errors",
-                dimensions_map={
-                    "FunctionName": self.api_gateway_stack.rotation_lambda.function_name
-                },
-                statistic="Sum",
-                period=Duration.hours(1),
-            ),
-            threshold=1,
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-            evaluation_periods=1,
-            datapoints_to_alarm=1,
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        rotation_errors_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    def _create_sqs_alarms(self) -> None:
-        """Create SQS queue alarms"""
-        for regional_stack in self.regional_stacks:
-            region = regional_stack.deployment_region
-            queue_name = regional_stack.job_queue.queue_name
-            dlq_name = regional_stack.job_dlq.queue_name
-            region_id = region.replace("-", "").title()
-
-            # Old message alarm (stuck jobs)
-            old_message_alarm = cloudwatch.Alarm(
-                self,
-                f"SqsOldMessageAlarm{region_id}",
-                alarm_description=f"SQS queue in {region} has old messages (potential stuck jobs)",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/SQS",
-                    metric_name="ApproximateAgeOfOldestMessage",
-                    dimensions_map={"QueueName": queue_name},
-                    statistic="Maximum",
-                    period=Duration.minutes(5),
+                rotation_function_name=(
+                    api_stack.rotation_lambda.function_name if api_stack is not None else None
                 ),
-                threshold=3600,  # 1 hour
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+                topic=self.alert_topic,
             )
-            old_message_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
 
-            # Dead letter queue alarm
-            dlq_alarm = cloudwatch.Alarm(
-                self,
-                f"SqsDlqAlarm{region_id}",
-                alarm_description=f"SQS dead letter queue in {region} has messages",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/SQS",
-                    metric_name="ApproximateNumberOfMessagesVisible",
-                    dimensions_map={"QueueName": dlq_name},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                ),
-                threshold=1,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-                evaluation_periods=1,
-                datapoints_to_alarm=1,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            dlq_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    def _create_dynamodb_alarms(self) -> None:
-        """Create DynamoDB alarms for job queue, templates, and webhooks tables."""
-        # Get table names from global stack
-        jobs_table = self.global_stack.jobs_table.table_name
-
-        # DynamoDB tables are in the global region
         global_region = self.config.get_global_region()
-
-        # Jobs table throttling alarm
-        jobs_throttle_alarm = cloudwatch.Alarm(
-            self,
-            "DynamoDBJobsThrottleAlarm",
-            alarm_description="DynamoDB jobs table is being throttled",
-            metric=cloudwatch.Metric(
-                namespace="AWS/DynamoDB",
-                metric_name="ThrottledRequests",
-                dimensions_map={"TableName": jobs_table},
-                statistic="Sum",
-                period=Duration.minutes(5),
+        if global_region == monitoring_region:
+            add_jobs_table_alarms(
+                self,
+                table_name=self.global_stack.jobs_table.table_name,
                 region=global_region,
-            ),
-            threshold=1,
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-            evaluation_periods=2,
-            datapoints_to_alarm=2,
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        jobs_throttle_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-        # Jobs table system errors alarm
-        jobs_errors_alarm = cloudwatch.Alarm(
-            self,
-            "DynamoDBJobsErrorsAlarm",
-            alarm_description="DynamoDB jobs table has system errors",
-            metric=cloudwatch.Metric(
-                namespace="AWS/DynamoDB",
-                metric_name="SystemErrors",
-                dimensions_map={"TableName": jobs_table},
-                statistic="Sum",
-                period=Duration.minutes(5),
-                region=global_region,
-            ),
-            threshold=1,
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-            evaluation_periods=1,
-            datapoints_to_alarm=1,
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        jobs_errors_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    def _create_eks_alarms(self) -> None:
-        """Create EKS cluster alarms"""
-        for regional_stack in self.regional_stacks:
-            region = regional_stack.deployment_region
-            cluster_name = regional_stack.cluster.cluster_name
-            region_id = region.replace("-", "").title()
-
-            # High CPU utilization alarm (node-level metric)
-            high_cpu_alarm = cloudwatch.Alarm(
-                self,
-                f"EksHighCpuAlarm{region_id}",
-                alarm_description=f"EKS cluster {cluster_name} has high CPU utilization",
-                metric=cloudwatch.Metric(
-                    namespace="ContainerInsights",
-                    metric_name="node_cpu_utilization",
-                    dimensions_map={"ClusterName": cluster_name},
-                    statistic="Average",
-                    period=Duration.minutes(5),
-                ),
-                threshold=80,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=3,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            high_cpu_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-            # High memory utilization alarm (node-level metric)
-            high_memory_alarm = cloudwatch.Alarm(
-                self,
-                f"EksHighMemoryAlarm{region_id}",
-                alarm_description=f"EKS cluster {cluster_name} has high memory utilization",
-                metric=cloudwatch.Metric(
-                    namespace="ContainerInsights",
-                    metric_name="node_memory_utilization",
-                    dimensions_map={"ClusterName": cluster_name},
-                    statistic="Average",
-                    period=Duration.minutes(5),
-                ),
-                threshold=85,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=3,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            high_memory_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    def _create_alb_alarms(self) -> None:
-        """Create ALB alarms.
-
-        Status: no alarms created yet, even though we now have the ALB
-        ARN at deploy time via the GA registration custom resource (which
-        also feeds the dashboard widgets). Adding per-ALB alarms here is
-        a straightforward enhancement — derive the ``LoadBalancer``
-        dimension the same way ``_create_alb_widgets`` does
-        (``Fn.split(":loadbalancer/", alb_arn)[1]``) and wire it into
-        ``cloudwatch.Alarm`` constructs.
-
-        For now we rely on:
-        1. Dashboard widgets pinned to each platform ALB (see
-           ``_create_alb_widgets``)
-        2. EKS Container Insights alarms for pod/node health
-        3. API Gateway alarms for request-level monitoring
-        """
-        # TODO: Add UnHealthyHostCount / 5XXCount alarms using the ARN
-        # returned by regional_stack.ga_registration.get_att_string("AlbArn").
-        # The test suite explicitly documents that the ALB alarm count is
-        # currently zero (test_alb_unhealthy_hosts_alarm_skipped); update
-        # that test when adding real alarms.
-
-    def _create_application_alarms(self) -> None:
-        """Create application-specific alarms"""
-        for regional_stack in self.regional_stacks:
-            region = regional_stack.deployment_region
-            cluster_name = regional_stack.cluster.cluster_name
-            region_id = region.replace("-", "").title()
-
-            # High manifest failure rate alarm
-            high_failure_rate_alarm = cloudwatch.Alarm(
-                self,
-                f"ManifestHighFailureRateAlarm{region_id}",
-                alarm_description=f"Manifest processor in {region} has high failure rate",
-                metric=cloudwatch.Metric(
-                    namespace="GCO/ManifestProcessor",
-                    metric_name="ManifestFailures",
-                    dimensions_map={"ClusterName": cluster_name, "Region": region},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                ),
-                threshold=10,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            high_failure_rate_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    def _create_composite_alarms(self) -> None:
-        """Create composite alarms for better signal-to-noise ratio"""
-
-        # Store individual alarms for composite alarm references
-        regional_alarms: dict[str, list[cloudwatch.Alarm]] = {}
-
-        for regional_stack in self.regional_stacks:
-            region = regional_stack.deployment_region
-            cluster_name = regional_stack.cluster.cluster_name
-            region_id = region.replace("-", "").title()
-            regional_alarms[region] = []
-
-            # Create regional health composite alarm
-            # Triggers when multiple issues occur in the same region
-            eks_cpu_alarm = cloudwatch.Alarm(
-                self,
-                f"CompositeEksCpu{region_id}",
-                metric=cloudwatch.Metric(
-                    namespace="ContainerInsights",
-                    metric_name="node_cpu_utilization",
-                    dimensions_map={"ClusterName": cluster_name},
-                    statistic="Average",
-                    period=Duration.minutes(5),
-                ),
-                threshold=90,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            regional_alarms[region].append(eks_cpu_alarm)
-
-            eks_memory_alarm = cloudwatch.Alarm(
-                self,
-                f"CompositeEksMemory{region_id}",
-                metric=cloudwatch.Metric(
-                    namespace="ContainerInsights",
-                    metric_name="node_memory_utilization",
-                    dimensions_map={"ClusterName": cluster_name},
-                    statistic="Average",
-                    period=Duration.minutes(5),
-                ),
-                threshold=90,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            regional_alarms[region].append(eks_memory_alarm)
-
-        # Create composite alarm for critical regional issues. Every region
-        # above appends exactly the CPU and memory alarms (two), so this
-        # always fires; no `len(alarms) >= 2` guard is needed here.
-        for region, alarms in regional_alarms.items():
-            region_id = region.replace("-", "").title()
-            composite_alarm = cloudwatch.CompositeAlarm(
-                self,
-                f"RegionalCriticalAlarm{region_id}",
-                alarm_description=f"Critical: Multiple issues detected in {region}",
-                alarm_rule=cloudwatch.AlarmRule.all_of(*alarms),
-            )
-            composite_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-        # API Gateway + Lambda composite alarm (only if api_gateway_stack is available)
-        if self.api_gateway_stack and self.api_gateway_stack.proxy_lambda is not None:
-            api_name = self.api_gateway_stack.api.rest_api_name
-            proxy_function_name = self.api_gateway_stack.proxy_lambda.function_name
-
-            api_error_alarm = cloudwatch.Alarm(
-                self,
-                "CompositeApiErrors",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/ApiGateway",
-                    metric_name="5XXError",
-                    dimensions_map={"ApiName": api_name},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                ),
-                threshold=5,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-
-            lambda_error_alarm = cloudwatch.Alarm(
-                self,
-                "CompositeLambdaErrors",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/Lambda",
-                    metric_name="Errors",
-                    dimensions_map={"FunctionName": proxy_function_name},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                ),
-                threshold=3,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-
-            api_lambda_composite = cloudwatch.CompositeAlarm(
-                self,
-                "ApiLambdaCompositeAlarm",
-                alarm_description="Critical: Both API Gateway and Lambda proxy have errors",
-                alarm_rule=cloudwatch.AlarmRule.all_of(api_error_alarm, lambda_error_alarm),
-            )
-            api_lambda_composite.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    def _create_custom_metrics(self) -> None:
-        """Create custom metric filters and log groups"""
-        for regional_stack in self.regional_stacks:
-            region = regional_stack.deployment_region
-            region_id = region.replace("-", "").title()
-
-            # Health monitor log group
-            # log_group_name intentionally omitted - let CDK generate unique name
-            logs.LogGroup(
-                self,
-                f"HealthMonitorLogGroup{region_id}",
-                retention=logs.RetentionDays.ONE_MONTH,
-                removal_policy=RemovalPolicy.DESTROY,
-            )
-
-            # Manifest processor log group
-            # log_group_name intentionally omitted - let CDK generate unique name
-            logs.LogGroup(
-                self,
-                f"ManifestProcessorLogGroup{region_id}",
-                retention=logs.RetentionDays.ONE_MONTH,
-                removal_policy=RemovalPolicy.DESTROY,
+                topic=self.alert_topic,
             )
 
     def _create_outputs(self) -> None:

@@ -34,8 +34,9 @@ gco jobs list -r <REGION>
 # 2. Check the health endpoint directly
 gco capacity status
 
-# 3. Check CloudWatch alarms in the monitoring dashboard
-# Look for: EKS CPU/memory alarms, ALB unhealthy hosts, Lambda errors
+# 3. Check CloudWatch alarms in the affected Region and the monitoring Region
+# Look for: EKS CPU/memory and SQS alarms (the Region's own stack),
+# API Gateway and Lambda errors (monitoring stack)
 
 # 4. Check EKS cluster status
 aws eks describe-cluster --name gco-<REGION> --region <REGION> \
@@ -130,7 +131,7 @@ aws secretsmanager get-secret-value \
    kubectl rollout restart deployment/manifest-processor -n gco-system
    ```
 
-**Prevention:** The monitoring stack includes a CloudWatch alarm for rotation failures. Ensure the SNS topic has subscribers.
+**Prevention:** The `RotationLambdaErrorsAlarm` CloudWatch alarm fires on a rotation failure. It notifies the monitoring stack's `AlertTopicArn` topic, or the API Gateway stack's `ApiGatewayAlertTopicArn` topic when `deployment_regions.api_gateway` is not the monitoring Region. Ensure that topic has subscribers.
 
 ---
 
@@ -480,7 +481,7 @@ kubectl logs -n gco-system -l app=queue-processor --all-containers \
      --region <REGION>
    ```
 
-**Prevention:** The monitoring stack deploys a CloudWatch alarm on `ApproximateNumberOfMessagesVisible` for the DLQ. If the alarm fires, messages are accumulating — follow the diagnosis steps above.
+**Prevention:** Each regional stack deploys a CloudWatch alarm on `ApproximateNumberOfMessagesVisible` for its DLQ that notifies the Region's alert topic (`RegionalAlertTopicArn` output). If the alarm fires, messages are accumulating — follow the diagnosis steps above.
 
 ---
 
@@ -491,10 +492,11 @@ kubectl logs -n gco-system -l app=queue-processor --all-containers \
 **Diagnosis:**
 
 ```bash
-# 1. Dry-run the manifest to see the exact error.
-#    Note this is a client-side kubectl parse, not an admission preview —
-#    it does not consult the cluster's validation policy.
-gco jobs submit my-job.yaml -n gco-jobs --dry-run
+# 1. Dry-run the manifest to see the exact error. The region that receives
+#    it checks it against its validation policy and applies nothing; the
+#    LimitRange and ResourceQuota of step 3 are checked only on a real
+#    submission.
+gco jobs submit my-job.yaml -n gco-jobs --region us-east-1 --dry-run
 
 # 2. Read what the region ACTUALLY enforces, from the deployed cluster.
 #    Prefer this over cdk.json: cdk.json is the input to a deploy, not the
@@ -813,8 +815,11 @@ aws logs tail "$LOG_GROUP" --since 24h --region "$REGION"
 4. For `DETECTION_FAILED`, fix the cause in IaC: verify the stack is in a state
    that supports drift detection, inspect the detector Lambda's role for the
    required CloudFormation read/drift actions, and resolve throttling or Lambda
-   timeout errors shown in its logs. Do not patch the role in the console and
-   leave that patch as new drift.
+   timeout errors shown in its logs. With `aurora_pgvector` enabled the run
+   reports the Aurora secret and its target attachment as failed checks by
+   design: the role cannot read secret values (see the
+   [drift-detection Lambda's permissions](../lambda/drift-detection/README.md#iam-permissions)).
+   Do not patch the role in the console and leave that patch as new drift.
 5. Run a fresh detection after remediation and require
    `DetectionStatus=DETECTION_COMPLETE` and `StackDriftStatus=IN_SYNC`:
 

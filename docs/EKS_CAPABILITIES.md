@@ -228,7 +228,7 @@ RBAC above are the controls on this path.
 
 ```bash
 gco stacks capabilities status                      # first deployment region
-gco stacks capabilities status --all-regions --output json
+gco -o json stacks capabilities status --all-regions
 ```
 
 For each type the command reports whether `cdk.json` enables it for the

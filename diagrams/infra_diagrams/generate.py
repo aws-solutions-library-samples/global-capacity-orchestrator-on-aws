@@ -147,6 +147,43 @@ def _run_cdk_dia(
     target.with_suffix(".dot").unlink(missing_ok=True)
 
 
+#: The required cdk.json fields, each at the value ``ConfigLoader``'s getters
+#: fall back to when it is absent. The diagrams synthesize without cdk.json to
+#: show the all-defaults topology, and ``ConfigLoader`` validates every
+#: context, so the required fields are spelled out here; every optional block
+#: is left out and keeps its default.
+_BASE_CONTEXT: dict[str, Any] = {
+    "deployment_regions": {
+        "global": "us-east-2",
+        "api_gateway": "us-east-2",
+        "monitoring": "us-east-2",
+        "regional": ["us-east-1"],
+    },
+    "kubernetes_version": "1.37",
+    "resource_thresholds": {
+        "cpu_threshold": 80,
+        "memory_threshold": 80,
+        "gpu_threshold": -1,
+        "pending_pods_threshold": 10,
+        "pending_requested_cpu_vcpus": 100,
+        "pending_requested_memory_gb": 200,
+        "pending_requested_gpus": -1,
+    },
+    "manifest_processor": {
+        "replicas": 3,
+        "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
+    },
+    "job_validation_policy": {"allowed_namespaces": ["gco-jobs"], "resource_quotas": {}},
+    "api_gateway": {
+        "throttle_rate_limit": 1000,
+        "throttle_burst_limit": 2000,
+        "log_level": "INFO",
+        "metrics_enabled": True,
+        "tracing_enabled": True,
+    },
+}
+
+
 def _generate(
     name: str,
     title: str,
@@ -155,13 +192,16 @@ def _generate(
     collapse: bool = True,
     context: dict[str, Any] | None = None,
 ) -> None:
-    """Synthesize the app built by ``build`` and render it to ``<name>.png``."""
+    """Synthesize the app built by ``build`` and render it to ``<name>.png``.
+
+    ``context`` is layered over :data:`_BASE_CONTEXT`.
+    """
     print(f"\n📊 Generating {title}...")
     output_dir = Path(__file__).parent
     with tempfile.TemporaryDirectory() as tmp:
         assembly_dir = Path(tmp) / "cdk.out"
         with cdk_asset_consumer(_PROJECT_ROOT):
-            app = cdk.App(outdir=str(assembly_dir), context=context)
+            app = cdk.App(outdir=str(assembly_dir), context={**_BASE_CONTEXT, **(context or {})})
             config = ConfigLoader(app)
             with _mocked_regional_assets():
                 include = build(app, config)
@@ -282,6 +322,7 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
         max_request_body_bytes=config.get_manifest_processor_config().get(
             "max_request_body_bytes", 1_048_576
         ),
+        monitoring_region=regions["monitoring"],
         env=cdk.Environment(region=regions["api_gateway"]),
     )
     api_gateway_stack.add_stack_dependency(global_stack)
@@ -338,13 +379,7 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
         api_gateway_stack.set_analytics_config(
             AnalyticsApiConfig(
                 user_pool_arn=analytics_stack.cognito_pool.user_pool_arn,
-                user_pool_client_id=analytics_stack.cognito_client.user_pool_client_id,
                 presigned_url_lambda=analytics_stack.presigned_url_lambda,
-                studio_domain_name=analytics_stack.studio_domain.domain_name or "",
-                callback_url=(
-                    f"https://{api_gateway_stack.api.rest_api_id}.execute-api."
-                    f"{regions['api_gateway']}.{api_gateway_stack.url_suffix}/prod/studio/callback"
-                ),
             )
         )
         api_gateway_stack.add_stack_dependency(analytics_stack)

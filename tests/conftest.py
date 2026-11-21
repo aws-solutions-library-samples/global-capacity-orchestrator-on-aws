@@ -310,9 +310,25 @@ def _no_real_mission_memory():
     if _GCO_MCP_PATH not in sys.path:
         sys.path.insert(0, _GCO_MCP_PATH)
     from mission import _engine_factory as _factory
+    from mission import deployment as _deployment
 
-    with patch.object(_factory, "_build_memory_store", return_value=None):
-        yield
+    # ``gco mission`` / ``gco swarm`` store the CLI's project and global
+    # Region process-wide (mission.deployment.configure); a CLI test must
+    # not leave them behind for the next test in the same worker.
+    saved = (
+        _deployment._configured_project_name,
+        _deployment._configured_global_region,
+        _deployment._configured_project_root,
+    )
+    try:
+        with patch.object(_factory, "_build_memory_store", return_value=None):
+            yield
+    finally:
+        (
+            _deployment._configured_project_name,
+            _deployment._configured_global_region,
+            _deployment._configured_project_root,
+        ) = saved
 
 
 # ============================================================================
@@ -320,11 +336,12 @@ def _no_real_mission_memory():
 # ============================================================================
 #
 # ``StackManager.destroy_orchestrated`` runs a set of boto3/AWS-CLI-backed
-# sweeps around the stack deletions: the image-registry preflight, the
-# ephemeral-bastion sweep (EC2 TerminateInstances), the backup-vault purge,
-# the EKS security-group watchdog and its final pass, the implicit log-group
-# sweep (CloudWatch DeleteLogGroup on every Lambda/EKS/Container Insights
-# group the stacks imply), the sweep of explicit log groups Lambda recreated
+# sweeps around the stack deletions: the ephemeral-bastion sweep (EC2
+# TerminateInstances), the backup-vault purge
+# (Backup StopBackupJob and DeleteRecoveryPoint), the EKS security-group
+# watchdog and its final pass, the implicit log-group sweep (CloudWatch
+# DeleteLogGroup on every Lambda/EKS/Container Insights group the stacks
+# imply), the sweep of explicit log groups Lambda recreated
 # after CloudFormation deleted them, bastion IAM retirement, the traffic-dial
 # SSM purge, and the post-regional EBS volume and add-on SSM sweeps.
 # Orchestration tests that mock ``destroy`` / ``list_stacks`` but not these
@@ -340,9 +357,17 @@ def _no_real_mission_memory():
 # methods was called still patch it locally, so their patch nests over this
 # one and wins.
 _DESTROY_CLEANUP_STUBS: dict[str, object] = {
-    "_image_registry_destroy_preflight": True,
     "cleanup_orphaned_bastions": 0,
-    "_cleanup_backup_vault": None,
+    # The orchestrator reads the outcome (``resource_status``) to decide
+    # whether a failed global-stack delete is retried, so stub a real one.
+    "_cleanup_backup_vault": {
+        "status": "not-needed",
+        "deleted_recovery_points": 0,
+        "stopped_backup_jobs": [],
+        "errors": [],
+    },
+    # Backup StopBackupJob on the global vault's unfinished jobs.
+    "_stop_backup_vault_jobs": {"stopped": [], "unstoppable": [], "errors": []},
     "_cleanup_eks_security_groups": None,
     "_start_eks_sg_watchdog": MagicMock(),
     "_collect_implicit_log_groups": {},
@@ -357,14 +382,18 @@ _DESTROY_CLEANUP_STUBS: dict[str, object] = {
     # orchestration test that names a live regional stack would destroy that
     # cluster's Prometheus/Grafana data — the most destructive helper here.
     "_cleanup_cluster_volumes": {"deleted": [], "surviving": [], "errors": []},
+    # The ECR replication guard (cli/ecr_replication.py) reads the global
+    # stack's template and the registry on every deploy that reaches the
+    # global stack and before its destroy, and rewrites the registry's
+    # replication configuration after it.
+    "_ecr_replication_deploy_preflight": None,
+    "_ecr_replication_destroy_preflight": None,
+    "_remove_gco_replication_rules": 0,
 }
 # Owner -> the helpers it exercises for real. An owner is a test class name,
 # a module-level test function name, or a test module name (its file stem);
 # a test unions the helpers of every key that applies to it.
 _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
-    "TestImageRegistryDestroyPreflight": frozenset({"_image_registry_destroy_preflight"}),
-    # Drives destroy() into the real preflight against a cdk.json it writes.
-    "test_stacks_image_registry_destroy": frozenset({"_image_registry_destroy_preflight"}),
     "TestCleanupOrphanedBastions": frozenset({"cleanup_orphaned_bastions"}),
     "test_cleanup_orphaned_bastions_filters_stacks_and_parallelizes": frozenset(
         {"cleanup_orphaned_bastions"}
@@ -372,7 +401,10 @@ _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
     "test_cleanup_orphaned_bastions_default_strict_and_empty_inputs": frozenset(
         {"cleanup_orphaned_bastions"}
     ),
-    "TestCleanupBackupVault": frozenset({"_cleanup_backup_vault"}),
+    # The vault sweep stops the vault's unfinished backup jobs first, through
+    # the same mocked Backup client.
+    "TestCleanupBackupVault": frozenset({"_cleanup_backup_vault", "_stop_backup_vault_jobs"}),
+    "TestStopBackupVaultJobs": frozenset({"_stop_backup_vault_jobs"}),
     "TestEksSecurityGroupCleanup": frozenset({"_cleanup_eks_security_groups"}),
     "TestCleanupEksSecurityGroups": frozenset({"_cleanup_eks_security_groups"}),
     "TestEksSgWatchdog": frozenset({"_start_eks_sg_watchdog", "_cleanup_eks_security_groups"}),
@@ -387,6 +419,13 @@ _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
     "TestTrafficDialParameterCleanup": frozenset({"_cleanup_traffic_dial_parameters"}),
     "TestAddonParameterCleanup": frozenset({"_cleanup_addon_parameters"}),
     "TestClusterVolumeCleanup": frozenset({"_cleanup_cluster_volumes"}),
+    "test_ecr_replication": frozenset(
+        {
+            "_ecr_replication_deploy_preflight",
+            "_ecr_replication_destroy_preflight",
+            "_remove_gco_replication_rules",
+        }
+    ),
     # Floci layer: drives the real method against the local emulator, so the
     # no-op stub would defeat the entire point of the module.
     "TestClusterVolumeSweepOverTheWire": frozenset({"_cleanup_cluster_volumes"}),
@@ -675,7 +714,6 @@ def valid_cdk_context():
             "unhealthy_threshold": 2,
         },
         "manifest_processor": {
-            "image": "gco/manifest-processor:latest",
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
         },

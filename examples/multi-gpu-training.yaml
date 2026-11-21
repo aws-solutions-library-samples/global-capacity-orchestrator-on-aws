@@ -6,7 +6,8 @@
 #
 # Prerequisites:
 #   - GPU nodes available
-#   - NVIDIA device plugin (installed by default)
+#   - Nothing to install for the GPUs: EKS Auto Mode nodes ship the NVIDIA
+#     driver and device plugin, which advertises nvidia.com/gpu
 #
 # Usage:
 #   kubectl apply -f examples/multi-gpu-training.yaml
@@ -101,8 +102,12 @@ spec:
         operator: Equal
         value: "true"
         effect: NoSchedule
+      # The pytorch/pytorch CUDA images are linux/amd64 only, and a 1-GPU
+      # selector alone also matches the Arm pool's g5g nodes (41-nodepool-
+      # gpu-arm.yaml), where the image cannot start: pin the architecture.
       nodeSelector:
         eks.amazonaws.com/instance-gpu-count: "1"
+        kubernetes.io/arch: amd64
   backoffLimit: 3
 
 ---

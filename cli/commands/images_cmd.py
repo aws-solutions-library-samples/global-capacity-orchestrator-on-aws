@@ -38,7 +38,14 @@ def images(config: Any) -> None:
 
 @images.command("init")
 @click.argument("name")
-@click.option("--retain/--no-retain", default=False, help="Apply gco:retain=true tag")
+@click.option(
+    "--retain/--no-retain",
+    default=False,
+    help=(
+        "Tag the repository gco:retain=true. A marker only: no GCO stack deletes "
+        "project repositories, so every one survives a stack destroy."
+    ),
+)
 @pass_config
 def images_init(config: Any, name: Any, retain: Any) -> None:
     """Create a project repository with the default lifecycle policy.
@@ -112,19 +119,22 @@ def images_tags(config: Any, name: Any) -> None:
 @click.argument("tag")
 @pass_config
 def images_describe(config: Any, name: Any, tag: Any) -> None:
-    """Print the full ECR details for a single image tag."""
+    """Print the full ECR details for a single image tag.
+
+    A tag the repository does not have is an error (exit 1).
+    """
     from ..images import get_image_manager
 
     formatter = get_output_formatter(config)
     try:
         result = get_image_manager(config).describe(name, tag)
-        if not result:
-            formatter.print_info(f"Tag '{tag}' not found in {name}")
-            return
-        formatter.print(result)
     except Exception as e:
         formatter.print_error(f"Failed to describe image: {e}")
         sys.exit(1)
+    if not result:
+        formatter.print_error(f"Tag '{tag}' not found in {name}")
+        sys.exit(1)
+    formatter.print(result)
 
 
 @images.command("uri")
@@ -156,7 +166,14 @@ def images_uri(config: Any, name: Any, tag: Any) -> None:
 @click.option("--dockerfile", "-f", default="Dockerfile", help="Path to Dockerfile")
 @click.option("--build-arg", "build_args", multiple=True, help="Build arg KEY=VALUE")
 @click.option("--platform", default="linux/amd64", help="Target platform")
-@click.option("--retain/--no-retain", default=False, help="Apply gco:retain=true tag")
+@click.option(
+    "--retain/--no-retain",
+    default=False,
+    help=(
+        "Tag the repository gco:retain=true. A marker only: no GCO stack deletes "
+        "project repositories, so every one survives a stack destroy."
+    ),
+)
 @pass_config
 def images_build(
     config: Any,
@@ -213,7 +230,14 @@ def images_build(
 @click.argument("name")
 @click.option("--tag", "-t", required=True, help="Image tag")
 @click.option("--local-image", required=True, help="Existing local image reference")
-@click.option("--retain/--no-retain", default=False, help="Apply gco:retain=true tag")
+@click.option(
+    "--retain/--no-retain",
+    default=False,
+    help=(
+        "Tag the repository gco:retain=true. A marker only: no GCO stack deletes "
+        "project repositories, so every one survives a stack destroy."
+    ),
+)
 @pass_config
 def images_push(
     config: Any,
@@ -455,7 +479,11 @@ def images_prune(config: Any, dry_run: Any, yes: Any) -> None:
 )
 @pass_config
 def images_orphans(config: Any, threshold_days: Any) -> None:
-    """List tags older than threshold_days that are not referenced anywhere."""
+    """List tags older than threshold_days that no inference endpoint or job uses.
+
+    Fails, rather than guess, when the inference endpoints or a Region's jobs
+    cannot be read.
+    """
     from ..images import get_image_manager
 
     formatter = get_output_formatter(config)
@@ -539,7 +567,8 @@ def replication_get(config: Any) -> None:
     formatter = get_output_formatter(config)
     try:
         result = get_image_manager(config).replication_get()
-        if not result:
+        if config.output_format == "table" and not result["policy"]["rules"]:
+            # JSON/YAML keep the document's shape: no rules is `"rules": []`.
             formatter.print_info("No replication policy configured.")
             return
         formatter.print(result)
@@ -557,7 +586,8 @@ def replication_status(config: Any) -> None:
     formatter = get_output_formatter(config)
     try:
         rows = get_image_manager(config).replication_status()
-        if not rows:
+        if config.output_format == "table" and not rows:
+            # JSON/YAML keep the list shape: an empty result is `[]`.
             formatter.print_info("No replication status entries.")
             return
         formatter.print(rows)

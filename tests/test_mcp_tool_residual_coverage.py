@@ -232,7 +232,7 @@ def test_storage_upload_worker_forwards_snapshot_descriptor() -> None:
         "--prefix",
         "models",
     ]
-    assert runner.call_kwargs[-1]["pass_fds"] == (7,)
+    assert runner.call_kwargs[-1] == {"timeout_seconds": 3600, "pass_fds": (7,)}
 
 
 def test_model_upload_worker_forwards_snapshot_descriptor() -> None:
@@ -250,12 +250,15 @@ def test_model_upload_worker_forwards_snapshot_descriptor() -> None:
         result = asyncio.run(loaded.module.models_upload("llama", "weights"))
 
         assert result == CLI_RESULT
+        # The upload gets the transfer timeout, not the two-minute default
+        # that stopped large uploads part-way.
         loaded.run_cli.assert_called_once_with(
             "models",
             "upload",
             "/dev/fd/9/weights",
             "--name",
             "llama",
+            timeout_seconds=3600,
             pass_fds=(9,),
         )
 

@@ -232,14 +232,17 @@ async def slurm_submit(
 
     Args:
         region: Region whose Slurm cluster runs the job.
-        script_path: Local path of the batch script (an interpreter line first).
+        script_path: Local path of the batch script (an interpreter line
+            first), relative to the project root (an absolute path must also
+            be inside it).
         name: Job name (default: the script's #SBATCH --job-name, else gco-job).
         partition: Partition (default: the cluster's default partition).
         nodes: Node count.
         tasks: Task count (--ntasks).
         cpus_per_task: CPUs per task.
         gpus_per_node: GPUs per node.
-        memory: Memory per node: MiB or a K/M/G/T suffix such as 64G.
+        memory: Memory per node: MiB or a K/M/G/T suffix such as 64G. 0 (all of
+            each node's memory) is refused; give an explicit size.
         time_limit: Wall time: minutes, HH:MM:SS or D-HH:MM:SS.
         working_directory: Working directory on the worker (default: the
             backend identity's home on the shared filesystem).
@@ -249,6 +252,9 @@ async def slurm_submit(
         backend: Which Slurm cluster: slinky or pcs; optional when the region
             runs one, required when it runs both.
     """
+    rejected = cli_runner.reject_paths_outside_project_root(script_path=script_path)
+    if rejected is not None:
+        return rejected
     args = _args("submit", script_path, region=region, backend=backend)
     for flag, value in (
         ("--name", name),

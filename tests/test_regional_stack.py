@@ -77,10 +77,10 @@ class MockConfigLoader:
             "health_check_path": "/api/v1/health",
         }
 
-    def get_alb_config(self):
+    def get_gateway_health_check_config(self):
         return {
-            "health_check_interval": 30,
-            "health_check_timeout": 5,
+            "interval_seconds": 15,
+            "timeout_seconds": 5,
             "healthy_threshold": 2,
             "unhealthy_threshold": 2,
         }
@@ -530,8 +530,8 @@ class TestMonitoringStackMethods:
         # Should have multiple alarms
         template.has_resource("AWS::CloudWatch::Alarm", {})
 
-    def test_monitoring_stack_creates_log_groups(self):
-        """Test that MonitoringStack creates log groups."""
+    def test_monitoring_stack_creates_no_log_groups(self):
+        """MonitoringStack creates no log group (nothing wrote to the old ones)."""
         from gco.stacks.monitoring_stack import GCOMonitoringStack
 
         app = cdk.App()
@@ -548,8 +548,9 @@ class TestMonitoringStackMethods:
         )
 
         template = assertions.Template.from_stack(stack)
-        # Should have log groups for health monitor and manifest processor
-        template.has_resource("AWS::Logs::LogGroup", {})
+        # No log group: the services log through Container Insights in their
+        # own Region (tests/test_monitoring_stack.py).
+        template.resource_count_is("AWS::Logs::LogGroup", 0)
 
 
 class TestConfigLoaderValidation:
@@ -1551,6 +1552,12 @@ class TestRegionalStackSynthesis:
         assert replacements["{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"] == "70"
         assert replacements["{{INFERENCE_PROXY_MIN_REPLICAS}}"] == "3"
         assert replacements["{{INFERENCE_PROXY_MAX_REPLICAS}}"] == "10"
+        # The platform ALB health check keeps the 15 / 5 / 2 / 2 probe the
+        # gateway manifest always shipped.
+        assert replacements["{{GATEWAY_HEALTH_CHECK_INTERVAL_SECONDS}}"] == "15"
+        assert replacements["{{GATEWAY_HEALTH_CHECK_TIMEOUT_SECONDS}}"] == "5"
+        assert replacements["{{GATEWAY_HEALTHY_THRESHOLD_COUNT}}"] == "2"
+        assert replacements["{{GATEWAY_UNHEALTHY_THRESHOLD_COUNT}}"] == "2"
         # Manifest-processor sizing renders verbatim from the validated config;
         # with autoscaling off the HPA gate stays unresolved so
         # 35-manifest-processor-hpa.yaml is skipped and pruned.
@@ -1663,6 +1670,72 @@ class TestRegionalStackSynthesis:
         (metric,) = hpa["spec"]["metrics"]
         assert metric["containerResource"]["container"] == app_container["name"]
         assert metric["containerResource"]["target"]["averageUtilization"] == 65
+
+    def test_gateway_health_check_config_renders_the_target_group_probe(self):
+        """cdk.json gateway_health_check reaches the gateway manifest as bare integers."""
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        context = json.loads(
+            (Path(__file__).resolve().parent.parent / "cdk.json").read_text(encoding="utf-8")
+        )["context"]
+        context["gateway_health_check"] = {
+            "interval_seconds": 30,
+            "timeout_seconds": 10,
+            "healthy_threshold": 3,
+            "unhealthy_threshold": 4,
+        }
+        app = cdk.App(context=context)
+        config = ConfigLoader(app)
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-gateway-health-check",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn=(
+                    "arn:aws:secretsmanager:us-east-2:123456789012:secret:"
+                    "gco/api-gateway-auth-token"
+                ),
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        replacements = resources["HelmInstallCharts"]["Properties"]["ImageReplacements"]
+        text = (
+            Path(__file__).resolve().parent.parent
+            / "lambda"
+            / "kubectl-applier-simple"
+            / "manifests"
+            / "post-helm-gateway.yaml"
+        ).read_text(encoding="utf-8")
+        for token, value in replacements.items():
+            if isinstance(value, str):
+                text = text.replace(token, value)
+        text = re.sub(r"\{\{[A-Z0-9_]+\}\}", "test-value", text)
+        target_group = next(
+            doc
+            for doc in yaml.safe_load_all(text)
+            if doc
+            and doc["kind"] == "TargetGroupConfiguration"
+            and doc["metadata"]["name"] == "gco-default-target-group"
+        )
+        assert target_group["spec"]["defaultConfiguration"]["healthCheckConfig"] == {
+            "healthCheckProtocol": "HTTPS",
+            "healthCheckPath": "/healthz",
+            "healthCheckInterval": 30,
+            "healthCheckTimeout": 10,
+            "healthyThresholdCount": 3,
+            "unhealthyThresholdCount": 4,
+        }
 
     def test_non_default_inference_proxy_config_renders_typed_manifest(self):
         """Real config values flow through ImageReplacements into typed YAML."""
@@ -2518,6 +2591,61 @@ class TestRegionalStackFsxConfigurations:
                 },
             )
 
+    def test_fsx_persistent_2_without_throughput_gets_250(self):
+        """A config without per_unit_storage_throughput gets its type's default.
+
+        The stack used to fall back to 200 for every PERSISTENT type, a value
+        FSx rejects for PERSISTENT_2 (125, 250, 500 or 1000).
+        """
+
+        class Persistent2DefaultThroughputConfig(MockConfigLoader):
+            def get_fsx_lustre_config(self, region=None):
+                return {
+                    "enabled": True,
+                    "storage_capacity_gib": 1200,
+                    "deployment_type": "PERSISTENT_2",
+                    "data_compression_type": "LZ4",
+                    "import_path": None,
+                    "export_path": None,
+                    "file_system_type_version": "2.15",
+                }
+
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = Persistent2DefaultThroughputConfig(app, fsx_enabled=True)
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                self._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+
+            stack = GCORegionalStack(
+                app,
+                "test-fsx-persistent-2-default-throughput",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+            template = assertions.Template.from_stack(stack)
+            template.has_resource_properties(
+                "AWS::FSx::FileSystem",
+                {
+                    "LustreConfiguration": assertions.Match.object_like(
+                        {"DeploymentType": "PERSISTENT_2", "PerUnitStorageThroughput": 250}
+                    ),
+                },
+            )
+
 
 class TestGlobalStackDynamoDBTables:
     """Tests for GlobalStack DynamoDB tables."""
@@ -2735,15 +2863,25 @@ class TestNagSuppressions:
         assert not rules & {"AwsSolutions-SQS4", "AwsSolutions-SNS3"}
 
     def test_apply_all_suppressions_monitoring_stack(self):
-        """Monitoring stacks acknowledge the SNS and CloudWatch alarm families."""
+        """Monitoring stacks acknowledge the SNS family stack-wide.
+
+        An alarm without an action is acknowledged on that alarm only (the
+        composite inputs, gco/stacks/control_plane_alarms.py), so the stack
+        does not hide one added later.
+        """
         from gco.stacks.nag_suppressions import apply_all_suppressions
 
         app = cdk.App()
         stack = cdk.Stack(app, "test-monitoring-suppressions")
         apply_all_suppressions(stack, stack_type="monitoring")
         rules = self._rules(self._acknowledged_ids(stack))
-        assert {"AwsSolutions-SNS3", "HIPAA.Security-CloudWatchAlarmAction"} <= rules
-        assert not rules & {"AwsSolutions-SQS4", "AwsSolutions-APIG2"}
+        assert {"AwsSolutions-SNS3", "HIPAA.Security-SNSEncryptedKMS"} <= rules
+        assert not rules & {
+            "AwsSolutions-SQS4",
+            "AwsSolutions-APIG2",
+            "HIPAA.Security-CloudWatchAlarmAction",
+            "NIST.800.53.R5-CloudWatchAlarmAction",
+        }
 
     def test_add_iam_suppressions_with_dynamodb_patterns(self):
         """A global Region adds the cross-Region DynamoDB index wildcards to IAM5."""
@@ -2849,6 +2987,62 @@ class TestValkeyCache:
         assert valkey_config["max_data_storage_gb"] == 5
         assert valkey_config["max_ecpu_per_second"] == 5000
         assert valkey_config["snapshot_retention_limit"] == 1
+
+    def test_valkey_cache_project_tag_is_the_context_tags_value(self):
+        """The cache's ``Project`` tag is cdk.json ``context.tags.Project``, not ``project_name``.
+
+        The cost reports filter on the ``context.tags`` value app.py applies to
+        the whole app; MockConfigLoader's (``gco``) differs from its project
+        name (``gco-test``), which ``gco:project`` keeps.
+        """
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        class ValkeyConfig(MockConfigLoader):
+            def get_valkey_config(self):
+                return {"enabled": True}
+
+        app = cdk.App()
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-valkey-tags",
+                config=ValkeyConfig(app),
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+        caches = assertions.Template.from_stack(stack).find_resources(
+            "AWS::ElastiCache::ServerlessCache"
+        )
+        [cache] = caches.values()
+        assert {tag["Key"]: tag["Value"] for tag in cache["Properties"]["Tags"]} == {
+            "Project": "gco",
+            "gco:project": "gco-test",
+            "Region": "us-east-1",
+        }
+
+    def test_project_tag_falls_back_to_the_project_name(self):
+        """Without ``context.tags.Project`` the explicit ``Project`` tags carry ``project_name``."""
+        from types import SimpleNamespace
+
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        class NoProjectTag(MockConfigLoader):
+            def get_tags(self):
+                return {"Environment": "test"}
+
+        assert GCORegionalStack._project_tag(SimpleNamespace(config=MockConfigLoader())) == "gco"
+        assert GCORegionalStack._project_tag(SimpleNamespace(config=NoProjectTag())) == "gco-test"
 
 
 class TestQueueProcessorConfig:
@@ -3350,11 +3544,13 @@ class TestClusterSharedBucketRegionalIntegration:
 
         # CDK's hash-suffix on security-group nested logical ids depends
         # on the stack name, so even after ``STACKNAME`` substitution the
-        # trailing hex differs. Normalize ``KubectlLambdaSG<hex>`` to a
-        # constant. The hex is 16+ chars of upper-case hex digits.
+        # trailing hex differs. Normalize the hex after each Lambda security
+        # group that has a cluster-API ingress rule (``KubectlLambdaSG<hex>``,
+        # ``GaRegistrationFunctionSecurityGroup<hex>``) to a constant. The hex
+        # is upper-case hex digits.
         serialized = _re.sub(
-            r"KubectlLambdaSG[0-9A-F]+",
-            "KubectlLambdaSG<hash>",
+            r"(KubectlLambdaSG|GaRegistrationFunctionSecurityGroup)[0-9A-F]+",
+            r"\1<hash>",
             serialized,
         )
         return serialized

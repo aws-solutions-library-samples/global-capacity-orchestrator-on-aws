@@ -380,7 +380,10 @@ def swarm_cmd() -> None:
     Gated by GCO_ENABLE_SWARM. See docs/SWARM.md for the supervisor
     model, the rails, and the determinism boundary.
     """
+    from .mission_cmd import configure_mission_deployment
+
     _check_feature_flag()
+    configure_mission_deployment()
 
 
 _SWARM_OPTIONS = [

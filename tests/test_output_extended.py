@@ -10,8 +10,12 @@ exercises _format_table's column filtering against an explicit list
 the format() method routes to the correct underlying formatter.
 """
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
+import pytest
+import yaml
 
 from cli.config import GCOConfig
 from cli.output import OutputFormatter, _serialize_value
@@ -161,6 +165,48 @@ class TestSerializeValueNested:
         data = Outer(inner=Inner(value=42), name="test")
         result = _serialize_value(data)
         assert result == {"inner": {"value": 42}, "name": "test"}
+
+    def test_datetimes_inside_dataclasses_use_isoformat(self):
+        """asdict copies datetimes through; they must still become ISO strings."""
+        dt = datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC)
+
+        @dataclass
+        class Inner:
+            when: datetime
+
+        @dataclass
+        class Outer:
+            created: datetime
+            inner: Inner
+            history: list[datetime]
+            window: tuple[datetime, datetime]
+
+        data = Outer(created=dt, inner=Inner(when=dt), history=[dt], window=(dt, dt))
+        result = _serialize_value({"rows": [data]})
+        assert result == {
+            "rows": [
+                {
+                    "created": dt.isoformat(),
+                    "inner": {"when": dt.isoformat()},
+                    "history": [dt.isoformat()],
+                    "window": [dt.isoformat(), dt.isoformat()],
+                }
+            ]
+        }
+
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_formatter_renders_dataclass_datetimes_like_top_level_ones(self, output_format):
+        """One timestamp format in JSON and YAML, wherever the datetime sits."""
+        dt = datetime(2024, 1, 15, 10, 30, 0, tzinfo=UTC)
+
+        @dataclass
+        class Row:
+            created: datetime
+
+        formatter = OutputFormatter(GCOConfig(output_format=output_format))
+        rendered = formatter.format({"top": dt, "row": Row(created=dt)})
+        parsed = json.loads(rendered) if output_format == "json" else yaml.safe_load(rendered)
+        assert parsed == {"top": "2024-01-15T10:30:00+00:00", "row": {"created": parsed["top"]}}
 
     def test_primitive_passthrough(self):
         """Primitives should pass through unchanged."""

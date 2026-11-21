@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
-        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
-        <meta name="gco-flow-digest" content="b365dcebae0f1543">
+        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
+        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
+        <meta name="gco-flow-digest" content="4f02ccefbab6b55b">
         <title>Cognito SRP authentication (gco analytics studio login)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,20 +208,20 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op445=>operation: 'Authenticate a Cognito user via the ADMIN_USER_PASSWORD_AUTH flow.\n\n    Uses ``admin_initiate_auth`` which sends the password over TLS\n    directly (no client-side SRP math). This requires the user pool\n    client to have ``ALLOW_ADMIN_USER_PASSWORD_AUTH`` enabled and the\n    caller to have ``cognito-idp:AdminInitiateAuth`` permission.\n\n    Returns a dict with ``IdToken``, ``AccessToken``, and\n    ``RefreshToken`` on success. Raises ``botocore.exceptions.ClientError``\n    for Cognito-side failures (``NotAuthorizedException``,\n    ``UserNotFoundException``, etc.).\n    '
-op447=>operation: import boto3
-op449=>operation: cognito = boto3.client('cognito-idp', region_name=region)
-op451=>operation: response = cognito.admin_initiate_auth(UserPoolId=pool_id, ClientId=client_id, AuthFlow='ADMIN_USER_PASSWORD_AUTH', AuthParameters={'USERNAME': username, 'PASSWORD': password})
-op453=>operation: tokens = response.get('AuthenticationResult') or {}
-io458=>inputoutput: output: {'IdToken': str(tokens.get('IdToken', '')), 'AccessToken': str(tokens.get('AccessToken', '')), 'RefreshToken': str(tokens.get('RefreshToken', ''))}
-e456=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op372=>operation: 'Authenticate a Cognito user via the ADMIN_USER_PASSWORD_AUTH flow.\n\n    Uses ``admin_initiate_auth`` which sends the password over TLS\n    directly (no client-side SRP math). This requires the user pool\n    client to have ``ALLOW_ADMIN_USER_PASSWORD_AUTH`` enabled and the\n    caller to have ``cognito-idp:AdminInitiateAuth`` permission.\n\n    Returns a dict with ``IdToken``, ``AccessToken``, and\n    ``RefreshToken`` on success. Raises ``botocore.exceptions.ClientError``\n    for Cognito-side failures (``NotAuthorizedException``,\n    ``UserNotFoundException``, etc.).\n    '
+op374=>operation: import boto3
+op376=>operation: cognito = boto3.client('cognito-idp', region_name=region)
+op378=>operation: response = cognito.admin_initiate_auth(UserPoolId=pool_id, ClientId=client_id, AuthFlow='ADMIN_USER_PASSWORD_AUTH', AuthParameters={'USERNAME': username, 'PASSWORD': password})
+op380=>operation: tokens = response.get('AuthenticationResult') or {}
+io385=>inputoutput: output: {'IdToken': str(tokens.get('IdToken', '')), 'AccessToken': str(tokens.get('AccessToken', '')), 'RefreshToken': str(tokens.get('RefreshToken', ''))}
+e383=>end: end function return
 
-op445->op447
-op447->op449
-op449->op451
-op451->op453
-op453->io458
-io458->e456
+op372->op374
+op374->op376
+op376->op378
+op378->op380
+op380->io385
+io385->e383
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -231,17 +231,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
-        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
+        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
+        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
+            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>b365dcebae0f1543</code>
+            Flow content SHA-256: <code>4f02ccefbab6b55b</code>
           </p>
           <div id="canvas"></div>
         </div>

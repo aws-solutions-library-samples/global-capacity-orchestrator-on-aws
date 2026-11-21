@@ -44,6 +44,7 @@ _QP_ENV_VARS = (
     "TRUSTED_REGISTRIES",
     "TRUSTED_DOCKERHUB_ORGS",
     "REQUIRE_ACCELERATOR_TOLERATION",
+    "YAML_MAX_DEPTH",
     "JOBS_TABLE_NAME",
     "DYNAMODB_REGION",
     "QP_JOB_QUEUE_MAX_RECEIVE_COUNT",
@@ -298,6 +299,67 @@ class TestNamespaceConfig:
         assert qp.validate_manifest(_job(gpu=3))[0] is False
 
 
+class TestNestingDepth:
+    """The SQS path enforces the REST path's ``yaml_max_depth`` limit.
+
+    It used to skip the check, so a manifest the REST path refused for its
+    nesting was applied when it arrived through the queue instead.
+    """
+
+    @staticmethod
+    def _deep_job(depth: int) -> dict:
+        """A valid Job whose one annotation nests ``depth`` dicts deep."""
+        nested: object = "leaf"
+        for _ in range(depth):
+            nested = {"nested": nested}
+        job = _job()
+        job["metadata"]["annotations"] = {"deep": nested}
+        return job
+
+    def test_a_manifest_past_the_default_limit_is_rejected_as_the_rest_path_rejects_it(self):
+        from unittest.mock import patch
+
+        from gco.services.manifest_processor import ManifestProcessor
+
+        qp = _reload()
+        with patch("gco.services.manifest_processor.config"):
+            rest = ManifestProcessor("c", "us-east-1", {"allowed_namespaces": ["gco-jobs"]})
+        assert qp.YAML_MAX_DEPTH == rest.yaml_max_depth == 50
+
+        deep = self._deep_job(60)
+        expected = "Manifest exceeds maximum nesting depth of 50 levels"
+        assert qp.validate_manifest(deep) == (False, expected)
+        assert rest.validate_manifest(deep) == (False, expected)
+        assert qp.validate_manifest(self._deep_job(40)) == (True, "")
+
+    def test_yaml_max_depth_sets_the_limit(self, monkeypatch):
+        monkeypatch.setenv("YAML_MAX_DEPTH", "8")
+        qp = _reload()
+        assert qp.validate_manifest(self._deep_job(4)) == (True, "")
+        assert qp.validate_manifest(self._deep_job(6)) == (
+            False,
+            "Manifest exceeds maximum nesting depth of 8 levels",
+        )
+
+    def test_a_body_too_deep_for_the_json_parser_is_retained_as_malformed(self):
+        """Nesting past the parser's own limit fails the message instead of the process."""
+        qp = _reload()
+        sqs = MagicMock()
+        qp.boto3 = MagicMock()
+        qp.boto3.client.return_value = sqs
+        depth = 130_000  # about 260 KB, within one SQS message
+        sqs.receive_message.return_value = {
+            "Messages": [
+                {
+                    "ReceiptHandle": "receipt",
+                    "Body": '{"job_id": "deep", "manifests": [' + "[" * depth + "]" * depth + "]}",
+                }
+            ]
+        }
+        assert qp.process_one_message() is False
+        sqs.delete_message.assert_not_called()
+
+
 # ── Apply Manifest ───────────────────────────────────────────────────────
 
 
@@ -316,6 +378,15 @@ class TestApplyManifest:
     def test_create(self):
         qp, _res = self._setup_mocks()
         assert qp.apply_manifest(_job()).status == "created"
+
+    def test_the_dynamic_client_is_built_on_a_bounded_client(self):
+        """Its discovery, reads and writes name no timeout; the client supplies one."""
+        from gco.services.k8s_client import BoundedApiClient
+
+        qp, _res = self._setup_mocks()
+        qp.apply_manifest(_job())
+        (api_client,) = qp.dynamic.DynamicClient.call_args.args
+        assert isinstance(api_client, BoundedApiClient)
 
     def test_update_on_409(self):
         from kubernetes.client.rest import ApiException
@@ -895,6 +966,71 @@ class TestParseCpuString:
     def test_empty_returns_zero(self):
         qp = _reload()
         assert qp._parse_cpu_string("") == 0
+
+
+class TestSqsGateAcceptsWhatTheApiServerAccepts:
+    """Regression: the SQS gate shares the REST gate's quantity parser.
+
+    Its own suffix table refused ``Pi`` and raised on a fractional or invalid
+    quantity instead of returning a rejection; both gates now count a manifest
+    through ``gco.job_admission.resource_totals``.
+    """
+
+    @staticmethod
+    def _with_resources(resources):
+        job = _job()
+        job["spec"]["template"]["spec"]["containers"][0]["resources"] = resources
+        return job
+
+    @pytest.mark.parametrize(
+        "resources",
+        [
+            {"limits": {"cpu": 1, "memory": 2147483648}},
+            {"requests": {"cpu": 0.5, "memory": "1.5Gi"}},
+            {"limits": {"cpu": "1e0"}},
+            None,
+            {"requests": None},
+        ],
+    )
+    def test_admits(self, resources):
+        qp = _reload()
+        assert qp.validate_manifest(self._with_resources(resources)) == (True, "")
+
+    def test_a_pebibyte_is_parsed_and_capped(self):
+        qp = _reload()
+        ok, reason = qp.validate_manifest(self._with_resources({"limits": {"memory": "1Pi"}}))
+        assert ok is False
+        assert reason.startswith("Memory 1048576Gi exceeds max")
+        assert "update job_validation_policy.resource_quotas in cdk.json" in reason
+
+    @pytest.mark.parametrize(
+        ("resources", "fragment"),
+        [
+            ({"limits": {"cpu": "-1"}}, "cpu: '-1' is negative"),
+            ({"limits": {"memory": "2Gib"}}, "memory: '2Gib' is not a Kubernetes quantity"),
+        ],
+    )
+    def test_an_invalid_quantity_is_a_rejection_not_an_exception(self, resources, fragment):
+        qp = _reload()
+        ok, reason = qp.validate_manifest(self._with_resources(resources))
+        assert ok is False
+        assert reason.startswith("Resource limit validation error: container 'worker' ")
+        assert fragment in reason
+
+    def test_a_fractional_gpu_is_a_rejection(self):
+        qp = _reload()
+        job = _job(gpu=1)
+        job["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"] = {
+            "nvidia.com/gpu": "0.5"
+        }
+        ok, reason = qp.validate_manifest(job)
+        assert ok is False
+        assert "is not a whole number of devices" in reason
+
+    def test_the_cap_parsers_take_numbers(self):
+        qp = _reload()
+        assert qp._parse_cpu_string(0.5) == 500
+        assert qp._parse_memory_string(1024) == 1024
 
 
 class TestParseMemoryString:
@@ -1990,6 +2126,63 @@ class TestTrainJobValidation:
         assert not ok
         assert "hostPath" in reason
 
+    def test_hostpath_in_a_runtime_patch_without_containers_rejected(self):
+        """A patch may set pod-level fields alone: a hostPath volume in one
+        patch and its mount in another must still be refused."""
+        qp = _reload()
+        ok, reason = qp.validate_manifest(
+            _trainjob(
+                runtime_patches=[
+                    {
+                        "manager": "volume",
+                        **_patch_with_pod_spec(
+                            {
+                                "volumes": [
+                                    {"name": "scratch", "emptyDir": {}},
+                                    {"name": "host", "hostPath": {"path": "/"}},
+                                ]
+                            }
+                        ),
+                    },
+                    {
+                        "manager": "mount",
+                        **_patch_with_pod_spec(
+                            {
+                                "containers": [
+                                    {
+                                        "name": "node",
+                                        "volumeMounts": [{"name": "host", "mountPath": "/host"}],
+                                    }
+                                ]
+                            }
+                        ),
+                    },
+                ],
+            )
+        )
+        assert not ok
+        assert "hostPath" in reason
+
+    def test_run_as_root_in_a_runtime_patch_without_containers_rejected(self, monkeypatch):
+        """A patch may set only the pod-level securityContext; the trainer
+        merges it into the one pod template, so every container would run as
+        root and BLOCK_RUN_AS_ROOT must refuse it."""
+        manifest = _trainjob(
+            runtime_patches=[
+                {
+                    "manager": "root",
+                    **_patch_with_pod_spec({"securityContext": {"runAsUser": 0}}),
+                }
+            ],
+        )
+        # The toggle stays opt-in: the default policy admits the patch.
+        assert _reload().validate_manifest(manifest) == (True, "")
+        monkeypatch.setenv("BLOCK_RUN_AS_ROOT", "true")
+        assert _reload().validate_manifest(manifest) == (
+            False,
+            "running as root (runAsUser: 0) is not permitted",
+        )
+
     def test_privileged_in_runtime_patch_rejected(self):
         qp = _reload()
         ok, reason = qp.validate_manifest(
@@ -2057,7 +2250,43 @@ class TestTrainJobValidation:
         )
         assert ok, reason
 
-    def test_inject_security_defaults_reaches_embedded_pod_specs(self):
+    def test_toleration_in_a_runtime_patch_without_containers_satisfies_gpu_request(self):
+        """The documented GPU variant: the patch sets scheduling fields only."""
+        qp = _reload()
+        ok, reason = qp.validate_manifest(
+            _trainjob(
+                num_nodes=1,
+                resources_per_node={"limits": {"nvidia.com/gpu": "1"}},
+                runtime_patches=[
+                    {
+                        "manager": "gco-example",
+                        **_patch_with_pod_spec(
+                            {
+                                "nodeSelector": {"kubernetes.io/arch": "amd64"},
+                                "tolerations": [
+                                    {
+                                        "key": "nvidia.com/gpu",
+                                        "operator": "Exists",
+                                        "effect": "NoSchedule",
+                                    }
+                                ],
+                            }
+                        ),
+                    }
+                ],
+            )
+        )
+        assert ok, reason
+
+    def test_inject_security_defaults_leaves_a_trainjob_alone(self):
+        """No ``automountServiceAccountToken`` is injected into a runtime patch.
+
+        Kubeflow Trainer 2.3.0's runtime-patch pod spec has no such field, so
+        the API server dropped the injected ``false``; the REST path agrees
+        (tests/test_manifest_processor_extended.py).
+        """
+        import copy
+
         qp = _reload()
         manifest = _trainjob(
             runtime_patches=[
@@ -2066,12 +2295,9 @@ class TestTrainJobValidation:
                 )
             ],
         )
-        qp._inject_security_defaults(manifest)
-        embedded = manifest["spec"]["runtimePatches"][0]["trainingRuntimeSpec"]["template"]["spec"][
-            "replicatedJobs"
-        ][0]["template"]["spec"]["template"]["spec"]
-        assert embedded["automountServiceAccountToken"] is False
-        assert "automountServiceAccountToken" not in manifest["spec"]["trainer"]
+        before = copy.deepcopy(manifest)
+        assert qp._inject_security_defaults(manifest) is manifest
+        assert manifest == before
 
     def test_apply_manifest_missing_addon_hint(self):
         """ResourceNotFoundError for TrainJob keeps the stable DLQ prefix and

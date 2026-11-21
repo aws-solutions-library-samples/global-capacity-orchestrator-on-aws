@@ -10,13 +10,22 @@ and nothing here may ever actually launch a validation run.
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
+import sys
+import threading
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
+from cli.commands import release_cmd
 from cli.commands.release_cmd import release
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeProcesses:
@@ -30,25 +39,31 @@ class FakeProcesses:
         self.harness_returncode = harness_returncode
 
     def __call__(self, command, **kwargs):
-        if command[0] == "git":
-            outputs = {
-                ("rev-parse", "--show-toplevel"): str(self.repo_root),
-                ("rev-parse", "HEAD"): "a" * 40,
-                ("symbolic-ref", "--short", "HEAD"): "test/floci-integration",
-            }
-            key = tuple(command[1:])
-            if key not in outputs:  # pragma: no cover - defensive
-                raise AssertionError(f"unexpected git call: {command}")
-            return subprocess.CompletedProcess(command, 0, stdout=outputs[key] + "\n", stderr="")
+        if command[0] != "git":  # pragma: no cover - defensive
+            raise AssertionError(f"the harness runs through _run_harness, not {command}")
+        outputs = {
+            ("rev-parse", "--show-toplevel"): str(self.repo_root),
+            ("rev-parse", "HEAD"): "a" * 40,
+            ("symbolic-ref", "--short", "HEAD"): "test/floci-integration",
+        }
+        key = tuple(command[1:])
+        if key not in outputs:  # pragma: no cover - defensive
+            raise AssertionError(f"unexpected git call: {command}")
+        return subprocess.CompletedProcess(command, 0, stdout=outputs[key] + "\n", stderr="")
+
+    def run_harness(self, command, **kwargs):
         self.harness_calls.append({"command": command, **kwargs})
-        return subprocess.CompletedProcess(command, self.harness_returncode)
+        return self.harness_returncode
+
+    def install(self, monkeypatch) -> FakeProcesses:
+        monkeypatch.setattr("cli.commands.release_cmd.subprocess.run", self)
+        monkeypatch.setattr("cli.commands.release_cmd._run_harness", self.run_harness)
+        return self
 
 
 @pytest.fixture
 def fake_processes(tmp_path, monkeypatch):
-    fake = FakeProcesses(tmp_path)
-    monkeypatch.setattr("cli.commands.release_cmd.subprocess.run", fake)
-    return fake
+    return FakeProcesses(tmp_path).install(monkeypatch)
 
 
 def _invoke(*args: str):
@@ -245,10 +260,20 @@ class TestHarnessInvocation:
         assert "--run-id run-42" in joined
 
     def test_harness_exit_code_propagates(self, tmp_path, monkeypatch):
-        fake = FakeProcesses(tmp_path, harness_returncode=3)
-        monkeypatch.setattr("cli.commands.release_cmd.subprocess.run", fake)
+        FakeProcesses(tmp_path, harness_returncode=3).install(monkeypatch)
         result = _invoke(*BASE)
         assert result.exit_code == 3, "operators script on the harness's exit code"
+
+    def test_the_harness_runs_through_the_interrupt_relay(self, fake_processes, tmp_path):
+        report_dir = tmp_path / "reports"
+        result = _invoke(*BASE, "--run-id", "run-7", "--report-dir", str(report_dir))
+        assert result.exit_code == 0, result.output
+        (call,) = fake_processes.harness_calls
+        assert call["cwd"] == fake_processes.repo_root
+        assert call["resume_hint"] == (
+            "Finish the teardown by running the same command again with "
+            f"--resume --run-id run-7 --report-dir {report_dir}."
+        )
 
     def test_emulator_endpoint_sets_the_verified_env_pair(self, fake_processes):
         result = _invoke(*BASE, "--emulator-endpoint", "http://127.0.0.1:4566/")
@@ -468,6 +493,348 @@ class TestValidateUpgrade:
         assert "base:       v8.7.0" in result.output
 
     def test_harness_exit_code_propagates(self, tmp_path, monkeypatch):
-        fake = FakeProcesses(tmp_path, harness_returncode=4)
-        monkeypatch.setattr("cli.commands.release_cmd.subprocess.run", fake)
+        FakeProcesses(tmp_path, harness_returncode=4).install(monkeypatch)
         assert _invoke_upgrade(*UPGRADE_BASE).exit_code == 4
+
+    def test_the_harness_runs_through_the_interrupt_relay(self, fake_processes, tmp_path):
+        report_dir = tmp_path / "reports"
+        result = _invoke_upgrade(
+            *UPGRADE_BASE, "--run-id", "run-8", "--report-dir", str(report_dir)
+        )
+        assert result.exit_code == 0, result.output
+        (call,) = fake_processes.harness_calls
+        assert call["cwd"] == fake_processes.repo_root
+        assert call["env"] == dict(os.environ)
+        assert "--resume --run-id run-8 --report-dir" in call["resume_hint"]
+
+
+# --------------------------------------------------------------------------
+# Interrupts reach the harness, and the command waits for its cleanup
+# --------------------------------------------------------------------------
+
+#: A stand-in harness. Like the real ones it turns SIGINT, SIGTERM and SIGHUP
+#: into a cleanup that outlasts the 0.25 seconds ``subprocess.run`` used to
+#: allow before killing it, and logs every signal it gets, so a test can count
+#: the deliveries. ``FAKE_HARNESS_LOG``/``FAKE_HARNESS_MODE`` (else argv 1
+#: and 2) say where to log and how to behave.
+_FAKE_HARNESS = r"""
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+log = Path(os.environ.get("FAKE_HARNESS_LOG") or sys.argv[1])
+mode = os.environ.get("FAKE_HARNESS_MODE") or sys.argv[2]
+received = []
+
+
+def note(text):
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(text + "\n")
+
+
+def interrupted(signum, frame):
+    received.append(signum)
+    note("signal " + signal.Signals(signum).name)
+
+
+for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+    signal.signal(getattr(signal, name), signal.SIG_IGN if mode == "ignore" else interrupted)
+note("ready")
+if mode == "exit":
+    sys.exit(3)
+if mode == "crash":
+    os.kill(os.getpid(), signal.SIGKILL)
+deadline = time.monotonic() + 60
+while not received and time.monotonic() < deadline:
+    time.sleep(0.01)
+if mode == "cleanup":
+    time.sleep(1.0)
+    note("cleanup finished")
+    sys.exit(128 + received[0])
+note("cleanup started")
+while len(received) < 2 and time.monotonic() < deadline:
+    time.sleep(0.01)
+note("report written")
+sys.exit(128 + received[0])
+"""
+
+
+def _lines(log: Path) -> list[str]:
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+def _wait_for(log: Path, line: str, timeout: float = 60.0) -> None:
+    deadline = time.monotonic() + timeout
+    while line not in _lines(log):
+        if time.monotonic() > deadline:  # pragma: no cover - diagnostic
+            raise AssertionError(f"{line!r} never appeared; log: {_lines(log)}")
+        time.sleep(0.01)
+
+
+def _signal_self_after(log: Path, line: str, *signums: int, pause: float = 0.0) -> threading.Thread:
+    """Signal this process, the command's, once ``line`` is in the harness's log."""
+
+    def send() -> None:
+        _wait_for(log, line)
+        for signum in signums:
+            os.kill(os.getpid(), signum)
+            time.sleep(pause)
+
+    thread = threading.Thread(target=send, daemon=True)
+    thread.start()
+    return thread
+
+
+@pytest.fixture
+def stray_signals() -> Iterator[list[int]]:
+    """Catch the relayed signals outside ``_run_harness``, so none can end the test run."""
+    caught: list[int] = []
+
+    def catch(signum: int, _frame: object) -> None:
+        caught.append(signum)
+
+    saved = {signum: signal.getsignal(signum) for signum in release_cmd._HARNESS_INTERRUPTS}
+    for signum in saved:
+        signal.signal(signum, catch)
+    try:
+        yield caught
+    finally:
+        for signum, handler in saved.items():
+            signal.signal(signum, handler)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sessions, process groups and signals")
+class TestHarnessInterrupts:
+    """``_run_harness`` with a real harness process and real signals."""
+
+    @staticmethod
+    def _harness(tmp_path: Path, mode: str) -> tuple[list[str], Path]:
+        script = tmp_path / "harness.py"
+        script.write_text(_FAKE_HARNESS, encoding="utf-8")
+        log = tmp_path / "harness.log"
+        return [sys.executable, str(script), str(log), mode], log
+
+    @staticmethod
+    def _run(command: list[str], tmp_path: Path, **timeouts: float) -> int:
+        return release_cmd._run_harness(
+            command,
+            cwd=tmp_path,
+            env=dict(os.environ),
+            resume_hint="Resume it with --resume.",
+            **timeouts,
+        )
+
+    def test_an_interrupt_is_passed_on_once_and_its_cleanup_awaited(
+        self, tmp_path, stray_signals, capsys
+    ):
+        command, log = self._harness(tmp_path, "cleanup")
+        sender = _signal_self_after(log, "ready", signal.SIGINT)
+
+        assert self._run(command, tmp_path) == 130
+        sender.join()
+        assert _lines(log) == ["ready", "signal SIGINT", "cleanup finished"]
+        notice = capsys.readouterr().err
+        assert "passed SIGINT on to the validation harness" in notice
+        assert "Waiting up to 6 hours" in notice
+        # The command's own handlers are back, and nothing reached them.
+        assert all(
+            getattr(signal.getsignal(signum), "__name__", "") == "catch"
+            for signum in release_cmd._HARNESS_INTERRUPTS
+        )
+        assert stray_signals == []
+
+    @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+    def test_sigterm_and_sighup_are_passed_on_too(self, tmp_path, stray_signals, signum):
+        command, log = self._harness(tmp_path, "cleanup")
+        sender = _signal_self_after(log, "ready", signum)
+
+        assert self._run(command, tmp_path) == 128 + signum
+        sender.join()
+        assert _lines(log) == ["ready", f"signal {signal.Signals(signum).name}", "cleanup finished"]
+
+    def test_a_second_interrupt_reaches_the_harness_once_more(self, tmp_path, stray_signals):
+        command, log = self._harness(tmp_path, "until-second")
+        first = _signal_self_after(log, "ready", signal.SIGINT)
+        second = _signal_self_after(log, "cleanup started", signal.SIGINT)
+
+        assert self._run(command, tmp_path) == 130
+        first.join()
+        second.join()
+        assert _lines(log) == [
+            "ready",
+            "signal SIGINT",
+            "cleanup started",
+            "signal SIGINT",
+            "report written",
+        ]
+
+    def test_a_cleanup_past_the_timeout_is_interrupted_again(self, tmp_path, stray_signals, capsys):
+        command, log = self._harness(tmp_path, "until-second")
+        sender = _signal_self_after(log, "ready", signal.SIGTERM)
+
+        assert self._run(command, tmp_path, interrupt_timeout=0.5) == 143
+        sender.join()
+        assert _lines(log) == [
+            "ready",
+            "signal SIGTERM",
+            "cleanup started",
+            "signal SIGTERM",
+            "report written",
+        ]
+        notice = capsys.readouterr().err
+        assert "still running 0.5 seconds after the interrupt" in notice
+        assert "waiting up to 5 minutes" in notice
+
+    def test_a_harness_that_never_exits_is_killed_with_the_resume_hint(
+        self, tmp_path, stray_signals, capsys
+    ):
+        command, log = self._harness(tmp_path, "ignore")
+        sender = _signal_self_after(log, "ready", signal.SIGINT)
+        started = time.monotonic()
+
+        assert self._run(command, tmp_path, interrupt_timeout=0.3, report_timeout=0.3) == 137
+        sender.join()
+        assert time.monotonic() - started < 30
+        notice = capsys.readouterr().err
+        assert "did not exit, so it was killed. Resume it with --resume." in notice
+
+    def test_a_signal_ignored_on_entry_stays_ignored(self, tmp_path, stray_signals):
+        previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        try:
+            command, log = self._harness(tmp_path, "cleanup")
+            sender = _signal_self_after(log, "ready", signal.SIGHUP, signal.SIGTERM, pause=0.5)
+
+            assert self._run(command, tmp_path) == 143
+            sender.join()
+            assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+        finally:
+            signal.signal(signal.SIGHUP, previous)
+        assert _lines(log) == ["ready", "signal SIGTERM", "cleanup finished"]
+
+    def test_a_harness_that_exits_on_its_own_keeps_its_status(self, tmp_path, stray_signals):
+        command, log = self._harness(tmp_path, "exit")
+        assert self._run(command, tmp_path) == 3
+        assert _lines(log) == ["ready"]
+
+    def test_a_harness_a_signal_ended_exits_128_plus_the_signal(self, tmp_path, stray_signals):
+        command, _log = self._harness(tmp_path, "crash")
+        assert self._run(command, tmp_path) == 128 + signal.SIGKILL
+
+    def test_a_harness_that_already_exited_is_not_an_error_to_signal(self, tmp_path):
+        process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        process.wait()
+        release_cmd._signal_harness(process, signal.SIGINT)
+
+    def test_a_handler_python_cannot_reinstall_comes_back_as_the_default(
+        self, tmp_path, stray_signals, monkeypatch
+    ):
+        # signal.signal returns None for a handler installed outside Python.
+        calls: list[tuple[int, object]] = []
+        real_signal = signal.signal
+
+        def outside_python(signum, handler):
+            calls.append((signum, handler))
+            real_signal(signum, handler)
+
+        monkeypatch.setattr(release_cmd.signal, "signal", outside_python)
+        command, _log = self._harness(tmp_path, "exit")
+        assert self._run(command, tmp_path) == 3
+        monkeypatch.undo()
+        restores = calls[len(release_cmd._HARNESS_INTERRUPTS) :]
+        assert restores == [(signum, signal.SIG_DFL) for signum in release_cmd._HARNESS_INTERRUPTS]
+
+    @pytest.mark.parametrize(
+        ("seconds", "text"),
+        [(21600, "6 hours"), (300, "5 minutes"), (90, "90 seconds"), (0.5, "0.5 seconds")],
+    )
+    def test_durations_read_naturally(self, seconds, text):
+        assert release_cmd._describe_seconds(seconds) == text
+
+    def test_a_closed_terminal_does_not_end_the_wait(self, monkeypatch):
+        def closed(*_args, **_kwargs):
+            raise OSError(5, "Input/output error")
+
+        monkeypatch.setattr(release_cmd.click, "echo", closed)
+        release_cmd._notice("anything")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sessions, process groups and signals")
+def test_ctrl_c_on_gco_release_validate_waits_for_the_harness_cleanup(tmp_path):
+    """The terminal's Ctrl-C on the real command: the harness finishes its cleanup.
+
+    The terminal sends SIGINT to its whole foreground process group. Before
+    the fix the harness was in that group with the command, and the command's
+    ``subprocess.run`` killed it 0.25 seconds into its cleanup.
+    """
+    checkout = tmp_path / "checkout"
+    package = checkout / "scripts" / "live_release_validation"
+    package.mkdir(parents=True)
+    (checkout / "scripts" / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__main__.py").write_text(_FAKE_HARNESS, encoding="utf-8")
+    (checkout / "cdk.json").write_text("{}", encoding="utf-8")
+    git = ["git", "-C", str(checkout)]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "checkout", "-q", "-b", "test/interrupts"], check=True)
+    subprocess.run(
+        [
+            *git,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+        check=True,
+    )
+    log = tmp_path / "harness.log"
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(REPO_ROOT),
+        "FAKE_HARNESS_LOG": str(log),
+        "FAKE_HARNESS_MODE": "cleanup",
+    }
+    command = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "cli.main",
+            "release",
+            "validate",
+            "--expected-account",
+            "123456789012",
+            CONSENT,
+            "--actions",
+            "preflight",
+            "--run-id",
+            "run-1",
+            "--report-dir",
+            str(tmp_path / "reports"),
+        ],
+        cwd=checkout,
+        env=environment,
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for(log, "ready")
+        os.killpg(command.pid, signal.SIGINT)
+        _stdout, stderr = command.communicate(timeout=60)
+    finally:
+        if command.poll() is None:  # pragma: no cover - only when the test fails
+            os.killpg(command.pid, signal.SIGKILL)
+            command.wait()
+
+    assert _lines(log) == ["ready", "signal SIGINT", "cleanup finished"], stderr
+    assert command.returncode == 130, stderr
+    assert "passed SIGINT on to the validation harness" in stderr

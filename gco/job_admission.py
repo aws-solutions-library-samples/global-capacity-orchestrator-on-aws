@@ -28,7 +28,7 @@ multi-region callers exercise the same code the cluster does.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterable
 from typing import Any, NamedTuple
 
 from gco.hyperpod_config import (
@@ -37,6 +37,7 @@ from gco.hyperpod_config import (
     HYPERPOD_LOCAL_QUEUE,
     HYPERPOD_TAINT_KEY,
 )
+from gco.k8s_quantity import cpu_millicores, device_count, memory_bytes
 from gco.services.structured_logging import sanitize_log_value
 
 logger = logging.getLogger(__name__)
@@ -162,10 +163,11 @@ class TrainJobPodSpecs(NamedTuple):
         trainer: A synthetic pod spec carrying ``spec.trainer``'s image and
             per-node resources, or ``None`` when neither is set (the runtime
             defaults then apply — our shipped runtimes pin trusted images).
-        embedded: Every dict carrying a container list found anywhere under
-            ``spec`` (today that means inside ``runtimePatches``); these are
-            live references into the manifest, so security-default injection
-            through them mutates the manifest.
+        embedded: Every pod-spec-shaped dict found anywhere under ``spec``
+            (today that means inside ``runtimePatches``; see
+            :func:`_collect_embedded_pod_specs`); these are live references
+            into the manifest, so security-default injection through them
+            mutates the manifest.
         num_nodes: ``spec.trainer.numNodes`` (minimum 1) — the replica
             multiplier for the trainer spec's resource totals.
     """
@@ -175,21 +177,47 @@ class TrainJobPodSpecs(NamedTuple):
     num_nodes: int
 
 
-def _collect_embedded_pod_specs(node: Any, found: list[dict[str, Any]]) -> None:
-    """Recursively collect every dict that carries a container list.
+#: The container lists of a pod spec. Their items are containers, whose own
+#: ``securityContext`` is checked as a container's, never as a pod's.
+_CONTAINER_LIST_FIELDS = ("containers", "initContainers", "ephemeralContainers")
+
+#: List fields that mark a dict as a pod spec: the container lists, plus the
+#: pod-level ``volumes`` and ``tolerations`` the checks read. A runtime patch
+#: may set pod-level fields without any container (the documented GPU variant
+#: sets only a toleration and a node selector), and Kubeflow Trainer merges
+#: every patch into the same pod template, so a hostPath volume in one patch
+#: and its mount in another must both be seen.
+_POD_SPEC_LIST_FIELDS = (*_CONTAINER_LIST_FIELDS, "volumes", "tolerations")
+
+
+def _collect_embedded_pod_specs(
+    node: Any, found: list[dict[str, Any]], *, is_container: bool = False
+) -> None:
+    """Recursively collect every pod-spec-shaped dict.
+
+    A dict is pod-spec-shaped when it carries one of
+    :data:`_POD_SPEC_LIST_FIELDS` or, unless it is a container
+    (*is_container*: an item of a container list), a ``securityContext``
+    mapping. A runtime patch may set the pod-level security context alone,
+    and ``runAsUser: 0`` there runs every container of the merged pod as
+    root; in the TrainJob schema the only other ``securityContext`` fields
+    are the containers' own.
 
     Walking the whole structure — rather than enumerating known patch paths —
-    means a future TrainJob field that can smuggle a container is validated
-    by default instead of silently skipped.
+    means a future TrainJob field that can smuggle a container or volume is
+    validated by default instead of silently skipped.
     """
     if isinstance(node, dict):
-        if any(
-            isinstance(node.get(key), list)
-            for key in ("containers", "initContainers", "ephemeralContainers")
+        if any(isinstance(node.get(key), list) for key in _POD_SPEC_LIST_FIELDS) or (
+            not is_container and isinstance(node.get("securityContext"), dict)
         ):
             found.append(node)
-        for value in node.values():
-            _collect_embedded_pod_specs(value, found)
+        for key, value in node.items():
+            if key in _CONTAINER_LIST_FIELDS and isinstance(value, list):
+                for container in value:
+                    _collect_embedded_pod_specs(container, found, is_container=True)
+            else:
+                _collect_embedded_pod_specs(value, found)
     elif isinstance(node, list):
         for item in node:
             _collect_embedded_pod_specs(item, found)
@@ -240,11 +268,13 @@ def trainjob_validation_pod_specs(manifest: dict[str, Any]) -> list[dict[str, An
 def _iter_all_containers(pod_spec: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """All (container_type, container) pairs incl. init and ephemeral containers."""
     result: list[tuple[str, dict[str, Any]]] = []
-    for container in pod_spec.get("containers", []):
+    # `or []`: a null list is valid in a manifest (and the SQS gate's twin,
+    # queue_processor._iter_containers, already read it as empty).
+    for container in pod_spec.get("containers") or []:
         result.append(("container", container))
-    for container in pod_spec.get("initContainers", []):
+    for container in pod_spec.get("initContainers") or []:
         result.append(("initContainer", container))
-    for container in pod_spec.get("ephemeralContainers", []):
+    for container in pod_spec.get("ephemeralContainers") or []:
         result.append(("ephemeralContainer", container))
     return result
 
@@ -344,6 +374,27 @@ def validate_resource_kind(
     return True, None
 
 
+def within_nesting_depth(document: object, max_depth: int) -> bool:
+    """Whether ``document`` nests dicts and lists no more than ``max_depth`` levels deep.
+
+    The ``yaml_max_depth`` check both submission paths apply before any other.
+    The top-level document is depth 0 and each dict or list adds one; a value
+    deeper than the limit fails it. The walk is iterative and stops at the
+    first value past the limit, so no document, however deep, can exhaust the
+    interpreter's stack here.
+    """
+    pending: list[tuple[object, int]] = [(document, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > max_depth:
+            return False
+        if isinstance(value, dict):
+            pending.extend((child, depth + 1) for child in value.values())
+        elif isinstance(value, list):
+            pending.extend((child, depth + 1) for child in value)
+    return True
+
+
 def _positive_quantity(value: Any) -> bool:
     """True if a K8s resource quantity is present and greater than zero."""
     if value is None:
@@ -380,44 +431,85 @@ def _toleration_matches(tolerations: list[dict[str, Any]], taint_key: str) -> bo
 # ---------------------------------------------------------------------------
 # Quantity parsing
 # ---------------------------------------------------------------------------
-# Deliberately the same narrow parsers the admission path has always used,
-# rather than gco.resource_governance.parse_k8s_quantity. They round and reject
-# differently at the edges (a bare float CPU, an exponent suffix), and a
-# pre-submit check that parses more permissively than the gate would call a job
-# admissible that the gate then rejects. Matching the gate matters more here
-# than being the better parser.
+# The gate, the CLI's pre-check (cli/job_policy.py) and the SQS consumer's gate
+# all read quantities through gco.k8s_quantity, which accepts what the API
+# server accepts: a string or a YAML/JSON number, any SI or binary suffix, a
+# decimal exponent. The narrower parsers these replaced refused `cpu: 1` as a
+# YAML number and every decimal CPU, so a manifest the API server takes was
+# rejected at the front door. The pre-check and the gate agree at one
+# version; a CLI newer than a region's deployment can still call a manifest
+# admissible that the older gate refuses, one more reason the pre-check is
+# advisory.
 
 
-def parse_cpu_millicores(cpu_str: str) -> int:
-    """Parse a Kubernetes CPU quantity to millicores."""
-    if not cpu_str:
-        return 0
-    cpu_str = cpu_str.strip()
-    if cpu_str.endswith("m"):
-        return int(cpu_str[:-1])
-    return int(cpu_str) * 1000
+def _absent_quantity(value: object) -> bool:
+    """No value, or an empty string: the field counts as zero."""
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
-def parse_memory_bytes(memory_str: str) -> int:
-    """Parse a Kubernetes memory quantity to bytes."""
-    if not memory_str:
-        return 0
-    memory_str = memory_str.strip()
-    if memory_str.endswith("Ki"):
-        return int(memory_str[:-2]) * 1024
-    if memory_str.endswith("Mi"):
-        return int(memory_str[:-2]) * 1024 * 1024
-    if memory_str.endswith("Gi"):
-        return int(memory_str[:-2]) * 1024 * 1024 * 1024
-    if memory_str.endswith("Ti"):
-        return int(memory_str[:-2]) * 1024 * 1024 * 1024 * 1024
-    if memory_str.endswith("k"):
-        return int(memory_str[:-1]) * 1000
-    if memory_str.endswith("M"):
-        return int(memory_str[:-1]) * 1000 * 1000
-    if memory_str.endswith("G"):
-        return int(memory_str[:-1]) * 1000 * 1000 * 1000
-    return int(memory_str)
+def parse_cpu_millicores(cpu: object) -> int:
+    """A CPU quantity in millicores, rounded up; an absent or empty one is 0."""
+    return 0 if _absent_quantity(cpu) else cpu_millicores(cpu)
+
+
+def parse_memory_bytes(memory: object) -> int:
+    """A memory quantity in bytes, rounded up; an absent or empty one is 0."""
+    return 0 if _absent_quantity(memory) else memory_bytes(memory)
+
+
+def parse_gpu_count(gpus: object) -> int:
+    """An ``nvidia.com/gpu`` quantity as a whole number; an absent or empty one is 0."""
+    return 0 if _absent_quantity(gpus) else device_count(gpus)
+
+
+def _container_quantity(
+    parse: Callable[[object], int], value: object, container_type: str, name: object, field: str
+) -> int:
+    """Parse one container's quantity, naming the container and field when it is invalid."""
+    try:
+        return parse(value)
+    except ValueError as exc:
+        raise ValueError(f"{container_type} {name!r} {field}: {exc}") from exc
+
+
+def resource_totals(
+    weighted_specs: Iterable[tuple[dict[str, Any], int]],
+) -> tuple[int, int, int]:
+    """``(millicores, bytes, GPUs)`` a manifest asks for, summed over every container.
+
+    Regular, init and ephemeral containers all count, each view weighted by
+    its replica multiplier (see :func:`weighted_pod_specs`). A container's
+    limit is used where it sets one, else its request. Shared by the REST
+    gate (:func:`check_resource_caps`) and the SQS consumer's gate, so the two
+    front doors cannot count the same manifest differently.
+
+    Raises:
+        ValueError: naming the container and field, when a quantity is not one
+            the API server would accept.
+    """
+    total_cpu = 0
+    total_memory = 0
+    total_gpu = 0
+    for pod_spec, multiplier in weighted_specs:
+        for container_type, container in _iter_all_containers(pod_spec):
+            # Any level may be null in a valid manifest (`resources: null`).
+            resources = container.get("resources") or {}
+            requests = resources.get("requests") or {}
+            limits = resources.get("limits") or {}
+            name = container.get("name")
+            cpu = limits.get("cpu") or requests.get("cpu")  # nosec B113  # dict.get()
+            memory = limits.get("memory") or requests.get("memory")  # nosec B113
+            gpu = limits.get("nvidia.com/gpu") or requests.get("nvidia.com/gpu")  # nosec B113
+            total_cpu += multiplier * _container_quantity(
+                parse_cpu_millicores, cpu, container_type, name, "cpu"
+            )
+            total_memory += multiplier * _container_quantity(
+                parse_memory_bytes, memory, container_type, name, "memory"
+            )
+            total_gpu += multiplier * _container_quantity(
+                parse_gpu_count, gpu, container_type, name, "nvidia.com/gpu"
+            )
+    return total_cpu, total_memory, total_gpu
 
 
 def extract_pod_spec(manifest: dict[str, Any]) -> dict[str, Any] | None:
@@ -646,25 +738,7 @@ def check_resource_caps(manifest: dict[str, Any], policy: JobValidationPolicy) -
     """
     try:
         errors: list[str] = []
-        total_cpu = 0
-        total_memory = 0
-        total_gpu = 0
-
-        for pod_spec, multiplier in weighted_pod_specs(manifest):
-            for _container_type, container in _iter_all_containers(pod_spec):
-                resources = container.get("resources", {})
-                requests = resources.get("requests", {})
-                limits = resources.get("limits", {})
-
-                # Use limits if available, otherwise requests.
-                cpu = limits.get("cpu") or requests.get("cpu", "0")  # nosec B113  # dict.get()
-                total_cpu += multiplier * parse_cpu_millicores(cpu)
-
-                memory = limits.get("memory") or requests.get("memory", "0")  # nosec B113
-                total_memory += multiplier * parse_memory_bytes(memory)
-
-                gpu = limits.get("nvidia.com/gpu") or requests.get("nvidia.com/gpu", "0")  # nosec B113
-                total_gpu += multiplier * int(gpu)
+        total_cpu, total_memory, total_gpu = resource_totals(weighted_pod_specs(manifest))
 
         if total_cpu > policy.max_cpu_millicores:
             logger.warning(f"CPU limit exceeded: {total_cpu}m > {policy.max_cpu_millicores}m")
@@ -682,7 +756,7 @@ def check_resource_caps(manifest: dict[str, Any], policy: JobValidationPolicy) -
 
         if errors:
             hint = (
-                "To raise limits, update resource_quotas in cdk.json "
+                "To raise limits, update job_validation_policy.resource_quotas in cdk.json "
                 "and redeploy (see examples/README.md#troubleshooting)"
             )
             return False, "; ".join(errors) + f". {hint}"
@@ -788,6 +862,53 @@ def check_security_context(
         return False, f"Security context error: {e}"
 
 
+def _trainjob_pod_templates(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """The pod templates a TrainJob's runtime patches set, merged the way Trainer merges them.
+
+    Kubeflow Trainer applies ``spec.runtimePatches`` in order, each one a
+    strategic merge patch onto the runtime's JobSet spec. Replicated jobs merge
+    by name, so every patch naming the same replicated job patches the same
+    pod template. A ``nodeSelector`` merges key by key, the later patch's value
+    winning; only string values count: the CRD types them as strings, and the
+    API server prunes a null. ``tolerations`` has no patch merge key
+    (``+listType=atomic`` in ``PodSpec``), so a patch that sets the list
+    replaces the earlier one, and an empty list sets nothing (the patch type
+    marshals it with ``omitempty``). One entry per replicated job named by any
+    patch, carrying its ``nodeSelector`` and, when a patch set them, its
+    ``tolerations``.
+    """
+    spec = manifest.get("spec")
+    patches = spec.get("runtimePatches") if isinstance(spec, dict) else None
+    templates: dict[str, dict[str, Any]] = {}
+    for patch in patches if isinstance(patches, list) else []:
+        replicated_jobs = _nested(
+            patch, "trainingRuntimeSpec", "template", "spec", "replicatedJobs"
+        )
+        for job in replicated_jobs if isinstance(replicated_jobs, list) else []:
+            if not isinstance(job, dict):
+                continue
+            template = templates.setdefault(str(job.get("name")), {"nodeSelector": {}})
+            pod_spec = _nested(job, "template", "spec", "template", "spec")
+            patched = _nested(pod_spec, "nodeSelector")
+            if isinstance(patched, dict):
+                template["nodeSelector"].update(
+                    {k: v for k, v in patched.items() if isinstance(v, str)}
+                )
+            tolerations = _nested(pod_spec, "tolerations")
+            if isinstance(tolerations, list) and tolerations:
+                template["tolerations"] = tolerations
+    return list(templates.values())
+
+
+def _nested(node: Any, *keys: str) -> Any:
+    """``node[keys[0]][keys[1]]...``, or ``None`` where a level is missing or not a mapping."""
+    for key in keys:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
 def hyperpod_routing(manifest: dict[str, Any], pod_specs: list[dict[str, Any]]) -> str | None:
     """How *manifest* reaches SageMaker HyperPod nodes, or ``None`` if it does not.
 
@@ -799,11 +920,19 @@ def hyperpod_routing(manifest: dict[str, Any], pod_specs: list[dict[str, Any]]) 
     scheduler" path of docs/HYPERPOD.md, where the toleration is the author's
     job. Anything else, including a manifest only some of whose pod specs
     select HyperPod, is ``None``.
+
+    A TrainJob is judged by its pod templates as Trainer builds them, not by
+    *pod_specs* (the callers' validation views, where the synthetic trainer
+    spec and each runtime patch stand alone): every pod template its runtime
+    patches set must select HyperPod once the patches are merged, so the
+    selector and the toleration may sit in different patches.
     """
     metadata = manifest.get("metadata")
     labels = (metadata.get("labels") if isinstance(metadata, dict) else None) or {}
     if isinstance(labels, dict) and labels.get(KUEUE_QUEUE_NAME_LABEL) == HYPERPOD_LOCAL_QUEUE:
         return "queue"
+    if manifest.get("kind") == "TrainJob":
+        pod_specs = _trainjob_pod_templates(manifest)
     if pod_specs and all(
         isinstance(spec.get("nodeSelector"), dict)
         and spec["nodeSelector"].get(CAPACITY_PROVIDER_LABEL) == CAPACITY_PROVIDER_HYPERPOD
@@ -811,6 +940,32 @@ def hyperpod_routing(manifest: dict[str, Any], pod_specs: list[dict[str, Any]]) 
     ):
         return "selector"
     return None
+
+
+def pod_tolerations(
+    manifest: dict[str, Any], pod_specs: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The tolerations *manifest*'s pods carry, for matching against node taints.
+
+    For every kind but a TrainJob, those of *pod_specs* (the callers'
+    validation views; one pod spec for those kinds). A TrainJob's pods carry
+    the tolerations Trainer builds from its runtime patches
+    (:func:`_trainjob_pod_templates`): for each pod template the list the last
+    patch naming it set, never a list a later patch replaced, and nothing from
+    a toleration anywhere else in the manifest (the CRD has no other
+    tolerations field and prunes unknown ones). The lists of every pod
+    template are combined, as each patch's were before: which replicated job
+    runs the trainer and takes ``spec.trainer``'s accelerator request is the
+    runtime's choice, and admission does not read the runtime.
+
+    Shared by the REST and SQS paths so the two cannot drift.
+    """
+    if manifest.get("kind") == "TrainJob":
+        pod_specs = _trainjob_pod_templates(manifest)
+    tolerations: list[dict[str, Any]] = []
+    for pod_spec in pod_specs:
+        tolerations.extend(pod_spec.get("tolerations", []) or [])
+    return tolerations
 
 
 def check_tolerations(
@@ -837,8 +992,11 @@ def check_tolerations(
 
     For a TrainJob the accelerator request usually lives in
     ``spec.trainer.resourcesPerNode`` while the toleration can only be expressed
-    through a ``runtimePatches`` pod spec, so the requested set and the
-    tolerations are each unioned across every pod-spec view before matching.
+    through a ``runtimePatches`` pod spec, so the requested set is unioned
+    across every pod-spec view, and the tolerations are those the pod templates
+    carry once Trainer merges the patches (:func:`pod_tolerations`): a later
+    patch that sets tolerations for the same replicated job replaces the
+    earlier list.
 
     *policy* is accepted for signature symmetry with the other checks and is
     unused: which taints exist is a property of how GCO builds nodepools, not of
@@ -859,10 +1017,9 @@ def check_tolerations(
         return True, None
 
     requested: set[str] = set()
-    tolerations: list[dict[str, Any]] = []
     for pod_spec in pod_specs:
         requested.update(requested_accelerators(pod_spec))
-        tolerations.extend(pod_spec.get("tolerations", []) or [])
+    tolerations = pod_tolerations(manifest, pod_specs)
 
     routing = hyperpod_routing(manifest, pod_specs)
     if routing == "queue":

@@ -234,6 +234,43 @@ class TestTasksListCommand:
         assert "t-full" in result.output
         assert "t-min" in result.output
 
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_root_machine_output_is_one_tasks_document(
+        self, runner: CliRunner, status_root: Path, output_format: str
+    ) -> None:
+        import yaml
+
+        from cli.main import cli
+
+        _write_record(status_root, "t-root", state="succeeded", pid=1)
+
+        result = runner.invoke(cli, ["-o", output_format, "tasks", "list"])
+
+        assert result.exit_code == 0, result.output
+        document = yaml.safe_load(result.stdout)
+        assert [task["task_id"] for task in document["tasks"]] == ["t-root"]
+        assert "TASK ID" not in result.stdout
+
+    def test_root_json_output_with_no_records_keeps_its_shape(
+        self, runner: CliRunner, status_root: Path
+    ) -> None:
+        from cli.main import cli
+
+        result = runner.invoke(cli, ["-o", "json", "tasks", "list"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout) == {"tasks": []}
+
+    def test_root_table_output_stays_a_table(self, runner: CliRunner, status_root: Path) -> None:
+        from cli.main import cli
+
+        _write_record(status_root, "t-table", pid=1)
+
+        result = runner.invoke(cli, ["-o", "table", "tasks", "list"])
+
+        assert result.exit_code == 0, result.output
+        assert "TASK ID" in result.output
+
     def test_limit_zero_lists_all(self, runner: CliRunner, status_root: Path) -> None:
         _write_record(status_root, "t-z", pid=1)
         result = runner.invoke(tasks, ["list", "-n", "0"])

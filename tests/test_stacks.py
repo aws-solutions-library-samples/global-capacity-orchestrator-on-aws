@@ -643,6 +643,137 @@ class TestAssetLockSharedFirst:
         finally:
             holder.close()
 
+    def test_waiting_publisher_stops_once_another_publish_is_fresh(self, tmp_path, monkeypatch):
+        """A publisher queued behind another's rebuild does not starve.
+
+        Several pytest workers start against a stale asset; one rebuilds it,
+        and every worker that then sees it fresh holds a shared lock for its
+        whole session (the lock held here for the whole test). A worker
+        still waiting for the exclusive lock could only time out, failing
+        every test on it. It must notice the published build and return.
+        """
+        import time
+
+        import cli.stacks as stacks_module
+
+        monkeypatch.setenv("GCO_ASSET_LOCK_TIMEOUT_SECONDS", "10")
+        monkeypatch.setattr(stacks_module, "_ASSET_PUBLISHED_RECHECK_SECONDS", 0.05)
+        source_dir, build_dir = TestCdkAssetConsumerLocking._write_fresh_helm_asset(
+            stacks_module, tmp_path, "old-version"
+        )
+        (source_dir / "handler.py").write_text("new-version", encoding="utf-8")
+        failures: list[BaseException] = []
+
+        def publish_elsewhere() -> None:
+            try:
+                time.sleep(0.3)
+                staging_dir = TestCdkAssetConsumerLocking._stage_helm_asset(
+                    stacks_module,
+                    source_dir,
+                    build_dir,
+                    "new-version",
+                    update_source=False,
+                )
+                stacks_module._publish_staged_asset(staging_dir, build_dir)
+            except BaseException as exc:  # pragma: no cover - surfaced by assertion below
+                failures.append(exc)
+
+        def forbidden_builder(staging_dir: Path) -> None:
+            raise AssertionError("the published build must be used, not rebuilt")
+
+        holder = self._hold_shared_lock(stacks_module, build_dir)
+        publisher = Thread(target=publish_elsewhere)
+        try:
+            publisher.start()
+            started = time.monotonic()
+            changed = stacks_module._prepare_lambda_asset(
+                source_dir,
+                build_dir,
+                source_inputs=None,
+                display_name="helm-installer",
+                builder=forbidden_builder,
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            publisher.join(5)
+            holder.close()
+
+        assert failures == []
+        assert changed is False
+        assert elapsed < 5
+        assert (build_dir / "handler.py").read_text(encoding="utf-8") == "new-version"
+
+    def test_waiting_publisher_still_times_out_when_nothing_is_published(
+        self, tmp_path, monkeypatch
+    ):
+        """The re-checks keep the bounded wait: a stale asset still times out."""
+        import cli.stacks as stacks_module
+
+        monkeypatch.setenv("GCO_ASSET_LOCK_TIMEOUT_SECONDS", "0.5")
+        monkeypatch.setattr(stacks_module, "_ASSET_PUBLISHED_RECHECK_SECONDS", 0.05)
+        source_dir, build_dir = TestCdkAssetConsumerLocking._write_fresh_helm_asset(
+            stacks_module, tmp_path, "old-version"
+        )
+        (source_dir / "handler.py").write_text("new-version", encoding="utf-8")
+        real_is_fresh = stacks_module._asset_build_is_fresh_unlocked
+        checks: list[Path] = []
+
+        def counted_is_fresh(source: Path, build: Path, *, source_inputs):
+            checks.append(build)
+            return real_is_fresh(source, build, source_inputs=source_inputs)
+
+        def forbidden_builder(staging_dir: Path) -> None:
+            raise AssertionError("no exclusive lock, so nothing may be built")
+
+        holder = self._hold_shared_lock(stacks_module, build_dir)
+        try:
+            with (
+                patch.object(
+                    stacks_module, "_asset_build_is_fresh_unlocked", side_effect=counted_is_fresh
+                ),
+                pytest.raises(TimeoutError, match="GCO_ASSET_LOCK_TIMEOUT_SECONDS"),
+            ):
+                stacks_module._prepare_lambda_asset(
+                    source_dir,
+                    build_dir,
+                    source_inputs=None,
+                    display_name="helm-installer",
+                    builder=forbidden_builder,
+                )
+        finally:
+            holder.close()
+
+        # The shared check before the wait, then re-checks while waiting.
+        assert len(checks) >= 3
+        assert set(checks) == {build_dir}
+
+    def test_published_check_reads_nothing_while_a_publish_holds_the_lock(
+        self, tmp_path, monkeypatch
+    ):
+        """A publisher mid-rename holds the exclusive lock: that is "not yet"."""
+        import fcntl
+
+        import cli.stacks as stacks_module
+
+        monkeypatch.setattr(stacks_module, "_ASSET_PUBLISHED_RECHECK_SECONDS", 0.0)
+        source_dir, build_dir = TestCdkAssetConsumerLocking._write_fresh_helm_asset(
+            stacks_module, tmp_path, "fresh-version"
+        )
+        published = stacks_module._published_while_waiting(
+            source_dir, build_dir, source_inputs=None
+        )
+        lock_path = build_dir.with_name(f".{build_dir.name}.lock")
+        with lock_path.open("a+b") as publisher_lock:
+            fcntl.flock(publisher_lock.fileno(), fcntl.LOCK_EX)
+            with patch.object(
+                stacks_module,
+                "_asset_build_is_fresh_unlocked",
+                side_effect=AssertionError("must not read during a publish"),
+            ):
+                assert published() is False
+
+        assert published() is True
+
 
 class TestStackInfo:
     """Tests for StackInfo dataclass."""
@@ -1116,6 +1247,47 @@ class TestStackManagerOperations:
         mock_popen.assert_called_once()
         assert process.communicate_timeouts == [None]
 
+    def test_deploy_prepares_assets_once_per_stack(self):
+        """deploy() prepares the assets itself; its CDK run must not hash them again."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(stdout="", stderr="")
+        with (
+            patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(manager, "ensure_asset_sources_readable"),
+            patch.object(manager, "_sync_lambda_sources"),
+            patch.object(manager, "_check_and_fix_stuck_stack"),
+            patch.object(manager, "ensure_bootstrapped", return_value=True),
+            patch.object(manager, "_get_stack_status", return_value="UPDATE_COMPLETE"),
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build") as mock_prepare,
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
+            assert manager.deploy("gco-global", require_approval=False) is True
+
+        mock_prepare.assert_called_once_with()
+        assert mock_popen.call_args.args[0][:3] == ["cdk", "deploy", "gco-global"]
+
+    @pytest.mark.parametrize("method", ["synth", "diff"])
+    def test_synth_and_diff_prepare_assets_once(self, method):
+        """synth()/diff() prepare the assets themselves; their CDK run must not hash them again."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(stdout="out", stderr="")
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build") as mock_prepare,
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
+            assert getattr(manager, method)("gco-global") == "out"
+
+        mock_prepare.assert_called_once_with()
+        assert mock_popen.call_args.args[0][1] == method
+
     def test_list_stacks(self):
         """Test listing CDK stacks."""
         from cli.stacks import StackManager
@@ -1388,6 +1560,44 @@ class TestStackDeploymentOrder:
 
         assert result == ["gco-regional-api-us-east-1", "gco-us-west-2", "gco-us-east-1"]
 
+    def test_analytics_stack_is_ordered_with_the_control_plane(self):
+        """``<project>-analytics`` is a global-tier stack, never a base regional one.
+
+        app.py makes the analytics stack depend on the global stack and the API
+        Gateway stack on the analytics stack, so it deploys between the two and
+        is destroyed between them. A keep-control-plane teardown (destroy-all
+        --keep-control-plane, gco upgrade) must never list it: that would delete
+        Studio home directories and Cognito users the operator was told survive.
+        """
+        from cli.stacks import get_stack_deployment_order, get_stack_destroy_order
+
+        stacks = [
+            "acme-us-east-1",
+            "acme-analytics",
+            "acme-global",
+            "acme-regional-api-us-east-1",
+            "acme-api-gateway",
+            "acme-monitoring",
+        ]
+
+        assert get_stack_deployment_order(stacks, project_name="acme")[:3] == [
+            "acme-global",
+            "acme-analytics",
+            "acme-api-gateway",
+        ]
+        assert get_stack_destroy_order(stacks, project_name="acme") == [
+            "acme-monitoring",
+            "acme-regional-api-us-east-1",
+            "acme-us-east-1",
+            "acme-api-gateway",
+            "acme-analytics",
+            "acme-global",
+        ]
+        assert get_stack_destroy_order(stacks, project_name="acme", keep_control_plane=True) == [
+            "acme-regional-api-us-east-1",
+            "acme-us-east-1",
+        ]
+
     def test_deployment_order_non_gco_project(self):
         """#139: ordering is by suffix, so a non-``gco`` project orders
         identically. Regression for the hardcoded ``gco-*`` priority dict."""
@@ -1478,6 +1688,48 @@ class TestStackManagerOrchestrated:
             "gco-monitoring",
         ]
 
+    def test_deploy_orchestrated_deploys_analytics_between_global_and_api_gateway(self):
+        """The analytics stack is a sequential global-tier deploy, not a regional one.
+
+        As a "regional" stack it was deployed with --exclusively, in parallel
+        with the regional stacks, and its route refresh redeployed the API
+        Gateway stack that the regional stacks import from while they deployed.
+        """
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        stacks = [
+            "gco-us-east-1",
+            "gco-analytics",
+            "gco-global",
+            "gco-regional-api-us-east-1",
+            "gco-api-gateway",
+            "gco-monitoring",
+            "gco-us-west-2",
+        ]
+        with (
+            patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(StackManager, "list_stacks", return_value=stacks),
+            patch.object(StackManager, "deploy", return_value=True) as mock_deploy,
+        ):
+            manager = StackManager(config)
+            success, _, failed = manager.deploy_orchestrated(require_approval=False, parallel=True)
+
+        assert success is True
+        assert failed == []
+        calls = [
+            (call.kwargs["stack_name"], call.kwargs.get("exclusively", False))
+            for call in mock_deploy.call_args_list
+        ]
+        assert calls[:3] == [
+            ("gco-global", False),
+            ("gco-analytics", False),
+            ("gco-api-gateway", False),
+        ]
+        assert [name for name, _ in calls].count("gco-analytics") == 1
+        assert sorted(name for name, _ in calls[3:5]) == ["gco-us-east-1", "gco-us-west-2"]
+
     def test_destroy_orchestrated_orders_regional_bridges_before_base_stacks(self):
         """Sequential destroy releases bridge VPC imports before base teardown."""
         from cli.stacks import StackManager
@@ -1493,7 +1745,6 @@ class TestStackManagerOrchestrated:
         thread = MagicMock()
         with (
             patch.object(StackManager, "list_stacks", return_value=stacks),
-            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(StackManager, "cleanup_orphaned_bastions"),
             patch.object(StackManager, "_cleanup_backup_vault"),
             patch.object(StackManager, "_start_eks_sg_watchdog", return_value=thread),
@@ -1686,70 +1937,6 @@ class TestStackManagerOrchestrated:
             assert successful == ["gco-us-east-1", "gco-global"]
             assert failed == []
 
-    def test_destroy_orchestrated_runs_image_registry_preflight_first(self):
-        """The image-registry preflight must fire before any teardown so
-        operators don't end up with monitoring + regional + api-gateway
-        already destroyed when the global-stack ECR delete fails on a
-        non-empty repo. When the preflight refuses (e.g.
-        ``removal_policy: "destroy"`` + ``empty_on_delete: false`` with
-        repos still present), ``destroy_orchestrated`` returns
-        ``(False, [], <every stack>)`` without invoking ``destroy()``."""
-        from cli.stacks import StackManager
-
-        config = MagicMock()
-
-        with (
-            patch.object(StackManager, "list_stacks") as mock_list,
-            patch.object(StackManager, "destroy") as mock_destroy,
-            patch.object(StackManager, "_image_registry_destroy_preflight") as mock_preflight,
-            patch.object(StackManager, "_cleanup_backup_vault") as mock_cleanup_vault,
-        ):
-            mock_list.return_value = ["gco-global", "gco-us-east-1", "gco-monitoring"]
-            mock_preflight.return_value = False  # preflight refuses
-
-            manager = StackManager(config)
-            success, successful, failed = manager.destroy_orchestrated(force=True)
-
-            assert success is False
-            assert successful == []
-            # Every stack reported as failed (none were attempted).
-            assert set(failed) == {"gco-global", "gco-us-east-1", "gco-monitoring"}
-            # destroy() must NOT have been called — refusal happens
-            # before any teardown.
-            mock_destroy.assert_not_called()
-            # The preflight took a force=True hint so it can match the
-            # caller's confirmation posture.
-            mock_preflight.assert_called_once_with(force=True)
-            # And the backup-vault cleanup must NOT have run either —
-            # we're returning before any AWS-side mutation.
-            mock_cleanup_vault.assert_not_called()
-
-    def test_destroy_orchestrated_proceeds_when_preflight_passes(self):
-        """When the preflight returns True (the default ``retain`` posture
-        or an empty registry under ``destroy``), orchestration proceeds
-        to the backup-vault cleanup and per-stack destroy phases."""
-        from cli.stacks import StackManager
-
-        config = MagicMock()
-
-        with (
-            patch.object(StackManager, "list_stacks") as mock_list,
-            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
-            patch.object(StackManager, "destroy") as mock_destroy,
-            patch.object(StackManager, "_image_registry_destroy_preflight") as mock_preflight,
-            patch.object(StackManager, "_cleanup_backup_vault") as mock_cleanup_vault,
-        ):
-            mock_list.return_value = ["gco-global", "gco-us-east-1"]
-            mock_destroy.return_value = True
-            mock_preflight.return_value = True  # preflight passes
-
-            manager = StackManager(config)
-            success, _successful, _failed = manager.destroy_orchestrated(force=True)
-
-            assert success is True
-            assert mock_destroy.call_count >= 2
-            mock_cleanup_vault.assert_called_once()
-
     def test_destroy_orchestrated_failure_blocks_dependent_stacks(self):
         """A regional failure prevents dependent API and global teardown."""
         from cli.stacks import StackManager
@@ -1921,7 +2108,6 @@ class TestParallelDeployment:
         thread = MagicMock()
         with (
             patch.object(StackManager, "list_stacks", return_value=stacks),
-            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(StackManager, "cleanup_orphaned_bastions"),
             patch.object(StackManager, "_cleanup_backup_vault"),
             patch.object(StackManager, "_start_eks_sg_watchdog", return_value=thread),
@@ -3178,6 +3364,7 @@ class TestStackManagerDestroyAnalyticsFallback:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         with (
@@ -3305,6 +3492,7 @@ class TestStackManagerDestroyExclusively:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         with (
@@ -3348,6 +3536,7 @@ class TestStackManagerDestroyExclusively:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         with (
@@ -4004,6 +4193,7 @@ class TestCleanupEksSecurityGroups:
                 {
                     "GroupId": "sg-12345",
                     "GroupName": "eks-cluster-sg-gco-us-east-1-123456",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
                 }
             ]
         }
@@ -4017,9 +4207,50 @@ class TestCleanupEksSecurityGroups:
             manager._cleanup_eks_security_groups("gco-us-east-1")
 
             mock_ec2.describe_security_groups.assert_called_once_with(
-                Filters=[{"Name": "group-name", "Values": ["eks-cluster-sg-gco-us-east-1-*"]}]
+                Filters=[
+                    {"Name": "group-name", "Values": ["eks-cluster-sg-gco-us-east-1-*"]},
+                    {"Name": "tag:aws:eks:cluster-name", "Values": ["gco-us-east-1"]},
+                ]
             )
             mock_ec2.delete_security_group.assert_called_once_with(GroupId="sg-12345")
+
+    def test_cleanup_leaves_other_clusters_security_groups_alone(self):
+        """gco-us-east-1's name prefix also matches the group of gco-us-east-1-dev."""
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_security_groups.return_value = {
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-dev",
+                    "GroupName": "eks-cluster-sg-gco-us-east-1-dev-987654",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1-dev"}],
+                },
+                {"GroupId": "sg-untagged", "GroupName": "eks-cluster-sg-gco-us-east-1-555"},
+                {
+                    "GroupId": "sg-own",
+                    "GroupName": "eks-cluster-sg-gco-us-east-1-123456",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                },
+            ]
+        }
+        mock_ec2.describe_network_interfaces.return_value = {"NetworkInterfaces": []}
+        with (
+            patch("boto3.client", return_value=mock_ec2),
+            patch.object(StackManager, "_find_project_root", return_value=Path(".")),
+        ):
+            outcome = StackManager(config)._cleanup_eks_security_groups("gco-us-east-1")
+
+        mock_ec2.delete_security_group.assert_called_once_with(GroupId="sg-own")
+        mock_ec2.describe_network_interfaces.assert_called_once_with(
+            Filters=[{"Name": "group-id", "Values": ["sg-own"]}]
+        )
+        assert outcome["inspected"] == 1
+        assert {"Name": "tag:aws:eks:cluster-name", "Values": ["gco-us-east-1"]} in (
+            mock_ec2.describe_security_groups.call_args.kwargs["Filters"]
+        )
 
     def test_cleanup_waits_for_enis_before_deleting_sg(self):
         """Service-managed ENIs block cleanup without being detached or deleted."""
@@ -4034,6 +4265,7 @@ class TestCleanupEksSecurityGroups:
                 {
                     "GroupId": "sg-12345",
                     "GroupName": "eks-cluster-sg-gco-us-east-1-123456",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
                 }
             ]
         }

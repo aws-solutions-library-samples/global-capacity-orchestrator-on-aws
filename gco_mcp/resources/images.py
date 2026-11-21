@@ -22,17 +22,28 @@ def _get_manager() -> Any:
     return get_image_manager()
 
 
+def _repository(manager: Any, name: str) -> str:
+    """Return the ECR repository for ``name``: ``<project_name>/<name>``."""
+    return f"{manager._repo_prefix}/{name}"
+
+
 @mcp.resource("images://gco/index")
 def images_index() -> str:
-    """List every gco/* repository in ECR with summary metadata."""
+    """List every repository under the deployment's ECR prefix (``<project_name>/``).
+
+    The ``gco`` in the resource URIs is the scheme's namespace; the
+    repositories themselves live under the project name from cdk.json.
+    """
     try:
-        repos = _get_manager().list_repos()
+        manager = _get_manager()
+        repos = manager.list_repos()
     except Exception as e:
         return f"# Image Registry\n\nFailed to list repositories: {e}\n"
 
-    lines = ["# Image Registry — `gco/*` repositories\n"]
+    prefix = f"{manager._repo_prefix}/"
+    lines = [f"# Image Registry — `{prefix}*` repositories\n"]
     if not repos:
-        lines.append("No repositories found under the `gco/` prefix.")
+        lines.append(f"No repositories found under the `{prefix}` prefix.")
         lines.append("")
         lines.append("Run `gco images init <name>` to create the first repo.")
         return "\n".join(lines)
@@ -50,9 +61,9 @@ def images_index() -> str:
     lines.append("## Per-repo resources")
     for repo in repos:
         name = repo.get("name", "")
-        if not name.startswith("gco/"):
+        if not name.startswith(prefix):
             continue
-        bare = name.removeprefix("gco/")
+        bare = name.removeprefix(prefix)
         lines.append(f"- `images://gco/{bare}/tags` — list every tag on `{name}`")
     lines.append("")
     lines.append("## Registry-wide resources")
@@ -65,14 +76,18 @@ def images_tags_resource(name: str) -> str:
     """List every tag on a single repository.
 
     Args:
-        name: Repository name (without the ``gco/`` prefix).
+        name: Repository name without the project prefix (``trainer`` for
+            ``<project_name>/trainer``).
     """
+    repository = name
     try:
-        rows = _get_manager().list_tags(name)
+        manager = _get_manager()
+        repository = _repository(manager, name)
+        rows = manager.list_tags(name)
     except Exception as e:
-        return f"# Tags for `gco/{name}`\n\nFailed to list tags: {e}\n"
+        return f"# Tags for `{repository}`\n\nFailed to list tags: {e}\n"
 
-    lines = [f"# Tags for `gco/{name}`\n"]
+    lines = [f"# Tags for `{repository}`\n"]
     if not rows:
         lines.append("No tags found on this repository.")
         return "\n".join(lines)
@@ -94,7 +109,7 @@ def images_tags_resource(name: str) -> str:
         if not tag or tag in seen_tags:
             continue
         seen_tags.add(tag)
-        lines.append(f"- `images://gco/{name}/{tag}` — full describe for `gco/{name}:{tag}`")
+        lines.append(f"- `images://gco/{name}/{tag}` — full describe for `{repository}:{tag}`")
     return "\n".join(lines)
 
 
@@ -103,16 +118,19 @@ def images_describe_resource(name: str, tag: str) -> str:
     """Full ECR describe payload for a single tag, as JSON.
 
     Args:
-        name: Repository name (without the ``gco/`` prefix).
+        name: Repository name without the project prefix.
         tag: Image tag.
     """
+    repository = name
     try:
-        result = _get_manager().describe(name, tag)
+        manager = _get_manager()
+        repository = _repository(manager, name)
+        result = manager.describe(name, tag)
     except Exception as e:
-        return json.dumps({"error": str(e), "name": f"gco/{name}", "tag": tag}, indent=2)
+        return json.dumps({"error": str(e), "name": repository, "tag": tag}, indent=2)
 
     if not result:
-        return json.dumps({"error": "tag not found", "name": f"gco/{name}", "tag": tag}, indent=2)
+        return json.dumps({"error": "tag not found", "name": repository, "tag": tag}, indent=2)
     return json.dumps(result, indent=2, default=str)
 
 

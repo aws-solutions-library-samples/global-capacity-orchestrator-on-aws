@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
-        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
-        <meta name="gco-flow-digest" content="47a52e1eff3d89c6">
+        <meta name="gco-generated-at" content="2026-11-19T12:23:38Z">
+        <meta name="gco-source-commit" content="e192bb01bb7807a52e11e262c0cb44173133f894">
+        <meta name="gco-flow-digest" content="c8f3ef0e75575cd6">
         <title>Image mirror into project-scoped ECR (plan, strategy, auth, per-image copy, #139)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,59 +208,54 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4091=>operation: 'Mirror the configured upstream images into ECR for ``region`` (full flow).\n\n    ``source_refs`` defaults to :func:`collect_source_refs` (every registered\n    image). Resolves the account/registry, builds the plan, picks a multi-arch\n    copy strategy, authenticates, then for each image ensures the repo exists and\n    copies it — skipping any tag already present when ``skip_existing`` is True\n    (so repeat deploys are a fast no-op). Returns a summary dict with the\n    destination ``registry``, the ``strategy`` used, and the ``mirrored`` /\n    ``skipped`` destination refs.\n    '
-op4093=>operation: ecr_namespace = (ecr_namespace or cdk_default_namespace()).strip('/')
-cond4096=>operation: source_refs = collect_source_refs(load_charts_config(charts_path) if charts_path else None) if  source_refs is None
-op4106=>operation: account_id = _account_id()
-op4108=>operation: registry_host = _registry_host(account_id, region)
-op4110=>operation: plan = plan_from_sources(source_refs, registry_host, ecr_namespace)
-op4112=>operation: runtime = detect_runtime()
-op4114=>operation: strategy = resolve_copy_strategy(runtime)
-sub4116=>subroutine: log(f'Mirroring {len(plan)} image(s) into {registry_host}/{ecr_namespace} (region {region}) via {strategy} (runtime: {runtime}):')
-op4118=>operation: username, password = ecr_auth(region)
-cond4121=>operation: runtime_login(runtime, registry_host, username, password, log=log) if  strategy != 'skopeo'
-op4131=>operation: ecr_client = boto3.client('ecr', region_name=region)
-op4133=>operation: mirrored: list[str] = []
-op4135=>operation: skipped: list[str] = []
-op4137=>operation: created_repositories: list[str] = []
-op4139=>operation: on_created = _bind_repository_created_callback(on_repository_created, region) if on_repository_created is not None else None
-cond4142=>condition: for item in plan
-cond4147=>operation: created_repositories.append(item.dest_repo) if  ensure_repository(ecr_client, item.dest_repo, log=log, repository_tags=repository_tags, on_created=on_created)
-cond4158=>condition: if skip_existing and tag_exists(ecr_client, item.dest_repo, item.tag)
-sub4162=>subroutine: log(f'  skip (already mirrored): {item.dest_ref}')
-sub4164=>subroutine: skipped.append(item.dest_ref)
-sub4166=>subroutine: continue
-sub4171=>subroutine: copy_image(item, runtime=runtime, strategy=strategy, password=password, log=log)
-sub4173=>subroutine: mirrored.append(item.dest_ref)
-io4180=>inputoutput: output: {'registry': f'{registry_host}/{ecr_namespace}', 'strategy': strategy, 'mirrored': mirrored, 'skipped': skipped, 'created_repositories': sorted(set(created_repositories))}
-e4178=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op836=>operation: 'Mirror the configured upstream images into ECR for ``region`` (full flow).\n\n    ``source_refs`` defaults to :func:`collect_source_refs` (every registered\n    image). Resolves the account/registry, builds the plan, picks a multi-arch\n    copy strategy, authenticates, then for each image ensures the repo exists and\n    copies it — skipping any tag already present when ``skip_existing`` is True\n    (so repeat deploys are a fast no-op). Returns a summary dict with the\n    destination ``registry``, the ``strategy`` used, and the ``mirrored`` /\n    ``skipped`` destination refs.\n    '
+op838=>operation: ecr_namespace = (ecr_namespace or cdk_default_namespace()).strip('/')
+cond841=>operation: source_refs = collect_source_refs(load_charts_config(charts_path) if charts_path else None) if  source_refs is None
+op851=>operation: account_id = _account_id()
+op853=>operation: registry_host = _registry_host(account_id, region)
+op855=>operation: plan = plan_from_sources(source_refs, registry_host, ecr_namespace)
+op857=>operation: runtime = detect_runtime()
+op859=>operation: strategy = resolve_copy_strategy(runtime)
+sub861=>subroutine: log(f'Mirroring {len(plan)} image(s) into {registry_host}/{ecr_namespace} (region {region}) via {strategy} (runtime: {runtime}):')
+op863=>operation: username, password = ecr_auth(region)
+cond866=>operation: runtime_login(runtime, registry_host, username, password, log=log) if  strategy != 'skopeo'
+op876=>operation: ecr_client = boto3.client('ecr', region_name=region)
+op878=>operation: mirrored: list[str] = []
+op880=>operation: skipped: list[str] = []
+op882=>operation: created_repositories: list[str] = []
+op884=>operation: on_created = _bind_repository_created_callback(on_repository_created, region) if on_repository_created is not None else None
+op886=>operation: with contextlib.ExitStack() as scope:
+    authfile = scope.enter_context(registry_authfile(registry_host, username, password)) if strategy == 'skopeo' else None
+    for item in plan:
+        if ensure_repository(ecr_client, item.dest_repo, log=log, repository_tags=repository_tags, on_created=on_created):
+            created_repositories.append(item.dest_repo)
+        if skip_existing and tag_exists(ecr_client, item.dest_repo, item.tag):
+            log(f'  skip (already mirrored): {item.dest_ref}')
+            skipped.append(item.dest_ref)
+            continue
+        copy_image(item, runtime=runtime, strategy=strategy, authfile=authfile, log=log)
+        mirrored.append(item.dest_ref)
+io891=>inputoutput: output: {'registry': f'{registry_host}/{ecr_namespace}', 'strategy': strategy, 'mirrored': mirrored, 'skipped': skipped, 'created_repositories': sorted(set(created_repositories))}
+e889=>end: end function return
 
-op4091->op4093
-op4093->cond4096
-cond4096->op4106
-op4106->op4108
-op4108->op4110
-op4110->op4112
-op4112->op4114
-op4114->sub4116
-sub4116->op4118
-op4118->cond4121
-cond4121->op4131
-op4131->op4133
-op4133->op4135
-op4135->op4137
-op4137->op4139
-op4139->cond4142
-cond4142(yes)->cond4147
-cond4147->cond4158
-cond4158(yes)->sub4162
-sub4162->sub4164
-sub4164->sub4166
-cond4158(no)->sub4171
-sub4171->sub4173
-sub4173(left)->cond4142
-cond4142(no)->io4180
-io4180->e4178
+op836->op838
+op838->cond841
+cond841->op851
+op851->op853
+op853->op855
+op855->op857
+op857->op859
+op859->sub861
+sub861->op863
+op863->cond866
+cond866->op876
+op876->op878
+op878->op880
+op880->op882
+op882->op884
+op884->op886
+op886->io891
+io891->e889
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -270,17 +265,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
-        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
+        <!-- Generated at (UTC): 2026-11-19T12:23:38Z -->
+        <!-- Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T12:23:38Z">2026-11-19T12:23:38Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
+            Source commit: <code>e192bb01bb7807a52e11e262c0cb44173133f894</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>47a52e1eff3d89c6</code>
+            Flow content SHA-256: <code>c8f3ef0e75575cd6</code>
           </p>
           <div id="canvas"></div>
         </div>

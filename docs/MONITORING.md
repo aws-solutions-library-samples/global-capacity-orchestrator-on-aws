@@ -38,7 +38,13 @@ GCO ships **three** complementary observability surfaces:
   and SNS surface. It answers "is the platform up, are alarms firing, what does
   the fleet look like across regions" using AWS-native metrics (Global
   Accelerator, API Gateway, Lambda, SQS, DynamoDB, Container Insights node/GPU
-  aggregates). This stack is unaffected by the `cluster_observability` toggle.
+  aggregates). Alarms must sit in the Region of their metrics, so each
+  workload Region's queue, node and manifest alarms are created by that
+  Region's stack with its own SNS topic (`RegionalAlertTopicArn` output), and
+  a global or API Gateway stack outside the monitoring Region creates its own
+  alarms and topic (`GlobalAlertTopicArn`, `ApiGatewayAlertTopicArn`); see
+  [MAINTENANCE.md → Monitoring and alerting](MAINTENANCE.md#monitoring-and-alerting).
+  This stack is unaffected by the `cluster_observability` toggle.
 - **Cluster observability (this feature)** — per-cluster Prometheus/Grafana at a
   cardinality CloudWatch does not surface: per-GPU DCGM series, scheduler queue
   depth, KEDA scaler lag, per-pod GCO service RED metrics.
@@ -60,12 +66,15 @@ cluster unless you opt out. The drivers, per region:
   database + dashboards (`10Gi`), and Alertmanager (`5Gi`). These are the
   standing cost: roughly the gp3 rate for ~65 GiB per region, plus snapshots if
   you enable them. Sizes are configurable under
-  `cluster_observability.{prometheus,grafana,alertmanager}.persistence_size`, and
-  Prometheus retention (default `15d`) bounds how much of the 50 GiB fills.
+  `cluster_observability.{prometheus,grafana,alertmanager,mlflow}.persistence_size`
+  as positive Kubernetes quantity strings (`"50Gi"`; `cdk synth` rejects
+  `"50GB"`), and Prometheus retention (default `15d`) bounds how much of the
+  50 GiB fills.
 - **Compute** — the component pods (Prometheus, Grafana, Alertmanager, operator,
-  `kube-state-metrics`) plus a `node-exporter` and DCGM-exporter DaemonSet pod on
-  each node. These are small (tens to low-hundreds of millicores) but scale with
-  node count because the DaemonSets run one pod per node.
+  `kube-state-metrics`) plus a `node-exporter` DaemonSet pod on each node and a
+  DCGM-exporter DaemonSet pod on each NVIDIA GPU node. These are small (tens to
+  low-hundreds of millicores) but scale with node count because the DaemonSets
+  run one pod per node.
 - **Data transfer** — scrape traffic stays in-cluster (no cross-AZ storage
   reads), so egress cost is negligible. There is no public endpoint and no ALB,
   so no load-balancer hours.
@@ -109,7 +118,10 @@ Per regional cluster, when enabled:
   (`eks.amazonaws.com/instance-memory`): EKS Auto Mode's 2-vCPU/4 GiB
   general-purpose nodes cannot carry one of them next to the host footprint
   (see `_LARGE_MEMORY_NODE_AFFINITY` in `gco/stacks/regional_stack.py`).
-- A standalone DCGM exporter DaemonSet on GPU nodes for per-GPU metrics.
+- A standalone DCGM exporter DaemonSet on every NVIDIA GPU node (selected by
+  the Auto Mode `eks.amazonaws.com/instance-gpu-manufacturer` label, so the
+  training, Arm, inference, EFA and reserved-capacity pools are all covered)
+  for per-GPU metrics.
 - Curated Grafana dashboards (see [below](#curated-dashboards)).
 - A credential-rotation CronJob (see
   [Admin credential rotation](#admin-credential-rotation)).
@@ -148,8 +160,10 @@ or AWS Systems Manager). `gco monitoring open` handles the forward and can build
 the SSM tunnel for you:
 
 ```bash
-# From inside the VPC (VPN / bastion / Cloud9): the endpoint is reachable, so a
-# plain forward works. Browse http://localhost:3000.
+# From a host in the VPC that the cluster security group admits on 443 (a
+# bastion or Cloud9 instance carrying that group, or a VPN endpoint whose group
+# you added as a source): the endpoint is reachable, so a plain forward works.
+# Browse http://localhost:3000.
 gco monitoring open --region us-east-1
 
 # From a laptop with no VPC route: tunnel to the private API endpoint through an
@@ -165,7 +179,11 @@ gco monitoring open --region us-east-1 --via-ssm auto
 the cluster's API endpoint on a local port, then runs `kubectl port-forward`
 against `https://127.0.0.1:8443` with the real endpoint as the TLS server name.
 It requires the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
-locally and an SSM-managed instance in the VPC that can reach the endpoint.
+locally and an SSM-managed instance in the VPC that can reach the endpoint:
+the EKS cluster security group admits HTTPS only from itself and from the
+security groups of GCO's own Lambdas, so the instance must carry the cluster
+security group (the `ClusterSecurityGroupId` stack output) or a security group
+you add to it as an ingress source on 443.
 
 `--via-ssm auto` provisions that instance for you: a minimal `t3.micro` (with
 automatic fallback through `t3a.micro`, `t3.small`, then `t2.micro` when the
@@ -212,11 +230,15 @@ Secret, or passed with `--admin-password` / `$GCO_GRAFANA_ADMIN_PASSWORD`.
 # In one terminal:
 gco monitoring open --region us-east-1 --via-ssm i-0123456789abcdef0
 
-# In another:
-gco monitoring users list
-gco monitoring users add --username alice --email alice@example.com --generate-password
-gco monitoring users remove --username alice --yes
+# In another (the Secret read opens its own tunnel on a free local port):
+gco monitoring users list --region us-east-1 --via-ssm i-0123456789abcdef0
+gco monitoring users add --username alice --email alice@example.com --generate-password \
+    --region us-east-1 --via-ssm i-0123456789abcdef0
+gco monitoring users remove --username alice --yes --region us-east-1 --via-ssm i-0123456789abcdef0
 ```
+
+Inside the VPC (or on a cluster whose public endpoint you can reach) drop
+`--via-ssm`. With `--admin-password` the Secret is not read at all.
 
 ## Admin credential rotation
 
@@ -236,6 +258,16 @@ credential, so they go over verified HTTPS to the `grafana-tls` Service
 sidecar); the rotator trusts only the GCO internal CA, projected from the
 `gco-monitoring-trust` Secret, and fails before reading any credential when
 that CA is missing.
+
+The new password reaches the Secret before Grafana changes: the rotator first
+stores it under an extra `admin-password-pending` key, then resets Grafana,
+then moves it into `admin-password` (retrying that write) and removes the extra
+key. If a run fails partway, the Secret still holds the password Grafana
+accepts in one of the two keys, the Job fails visibly, and the next run (the
+Job's retry or the next schedule) checks which one Grafana accepts and keeps
+that one in `admin-password` before rotating again. While a run is unfinished,
+`gco monitoring users` may read the previous password from `admin-password`;
+the next run fixes it.
 
 The cadence is configurable and defaults to monthly:
 

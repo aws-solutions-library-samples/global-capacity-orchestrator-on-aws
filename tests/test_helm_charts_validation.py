@@ -533,6 +533,13 @@ class TestLiveChartsOnline:
         )
         assert errors == [], "Slurm API version lockstep failed:\n" + "\n".join(errors)
 
+    def test_pinned_volcano_images_are_the_charts_release(self) -> None:
+        # Reads the pinned chart's appVersion (`helm show chart`): the image
+        # tags must name the components the chart's templates were written for.
+        charts = validator.load_charts(LIVE_CHARTS)
+        errors = validator.validate_volcano_image_lockstep(charts, online=True)
+        assert errors == [], "Volcano image lockstep failed:\n" + "\n".join(errors)
+
     def test_online_detects_a_bogus_version(self) -> None:
         # Give the check a version that cannot exist and confirm it fails —
         # proves the online gate has teeth against a mistyped pin.
@@ -1126,6 +1133,8 @@ spec:
               template:
                 spec:
                   automountServiceAccountToken: false
+                  nodeSelector:
+                    kubernetes.io/arch: amd64
                   containers:
                     - name: node
                       image: {_TRAINER_IMAGE}
@@ -1315,9 +1324,9 @@ class TestTrainerLockstepValidation:
         assert errors == []
 
     def test_matching_upstream_passes_online(self) -> None:
-        # The upstream fixture has neither the automount override nor the
-        # NoNewPrivs securityContext — proving both documented deviations
-        # are tolerated by the spec comparison.
+        # The upstream fixture has no automount override, no NoNewPrivs
+        # securityContext and no amd64 nodeSelector — proving all three
+        # documented deviations are tolerated by the spec comparison.
         errors = _lockstep(
             online=True,
             runtime_fetcher=lambda entry, helm: _upstream_runtime(),
@@ -1335,6 +1344,21 @@ class TestTrainerLockstepValidation:
         assert len(image_errors) == 1
         assert "pytorch/pytorch:8.8.8-runtime" in image_errors[0]
         assert _TRAINER_IMAGE in image_errors[0]
+
+    def test_a_shipped_runtime_without_the_amd64_pin_fails_online(self) -> None:
+        # The deviations are required, not just tolerated: the image is
+        # linux/amd64 only, so dropping the pin is drift.
+        unpinned = _RUNTIME_MANIFEST_FIXTURE.replace(
+            "                  nodeSelector:\n                    kubernetes.io/arch: amd64\n", ""
+        )
+        assert unpinned != _RUNTIME_MANIFEST_FIXTURE
+        errors = _lockstep(
+            manifest_text=unpinned,
+            online=True,
+            runtime_fetcher=lambda entry, helm: _upstream_runtime(),
+        )
+        assert len(errors) == 1
+        assert "differs from what chart" in errors[0]
 
     def test_non_image_spec_drift_fails_online(self) -> None:
         upstream = _upstream_runtime()
@@ -1913,6 +1937,370 @@ class TestMainSlurmLockstepWiring:
         assert "docker" not in capsys.readouterr().out
 
 
+# ── Volcano image / chart lockstep ───────────────────────────────────────────
+
+
+def _volcano_entry(version: str = "1.16.0", **basic) -> dict:
+    """A ``volcano`` charts.yaml entry pinning ``v1.16.0``, with ``values.basic`` overrides."""
+    values = {
+        "basic": {
+            "scheduler_image_name": "volcanosh/vc-scheduler",
+            "image_tag_version": "v1.16.0",
+            **basic,
+        }
+    }
+    return _classic(
+        repo_name="volcano-sh",
+        repo_url="https://volcano-sh.github.io/helm-charts",
+        chart="volcano",
+        version=version,
+        namespace="volcano-system",
+        values=values,
+    )
+
+
+def _volcano_lockstep(charts: dict | None = None, **overrides) -> list[str]:
+    kwargs = {"online": False}
+    kwargs.update(overrides)
+    return validator.validate_volcano_image_lockstep(
+        {"volcano": _volcano_entry()} if charts is None else charts, **kwargs
+    )
+
+
+class TestVolcanoImageTags:
+    def test_returns_the_shared_tag_and_every_non_empty_override(self) -> None:
+        entry = _volcano_entry(
+            scheduler_image_tag_version=" v1.16.1 ",
+            hypernode_controller_image_tag_version="v1.16.2",
+            admission_image_tag_version="",
+            controller_image_tag_version=None,
+        )
+
+        assert validator.volcano_image_tags(entry) == {
+            "image_tag_version": "v1.16.0",
+            "scheduler_image_tag_version": "v1.16.1",
+            "hypernode_controller_image_tag_version": "v1.16.2",
+        }
+
+    def test_other_basic_keys_are_not_tags(self) -> None:
+        entry = _volcano_entry(image_tag_version_note="v0", image_registry="docker.io")
+        assert validator.volcano_image_tags(entry) == {"image_tag_version": "v1.16.0"}
+
+    @pytest.mark.parametrize(
+        "values",
+        [None, {}, {"basic": None}, {"basic": ["image_tag_version"]}],
+        ids=["no-values", "no-basic", "null-basic", "list-basic"],
+    )
+    def test_an_entry_without_a_basic_mapping_pins_nothing(self, values) -> None:
+        assert validator.volcano_image_tags({"version": "1.16.0", "values": values}) == {}
+
+    def test_real_charts_pin_only_the_shared_tag(self) -> None:
+        charts = validator.load_charts(validator._DEFAULT_CHARTS)
+        tags = validator.volcano_image_tags(charts["volcano"])
+        assert tags == {"image_tag_version": f"v{charts['volcano']['version']}"}
+
+
+class TestChartAppVersionFromShow:
+    def test_reads_app_version(self) -> None:
+        show = "apiVersion: v2\nappVersion: 1.16.0\nname: volcano\nversion: 1.16.0\n"
+        assert validator.chart_app_version_from_show(show) == "1.16.0"
+
+    @pytest.mark.parametrize(
+        "show",
+        [
+            "name: volcano\nversion: 1.16.0\n",
+            "appVersion: ''\n",
+            "appVersion: 1.16\n",
+            "- not\n- a mapping\n",
+            "appVersion: [unclosed\n",
+        ],
+        ids=["absent", "empty", "not-a-string", "not-a-mapping", "invalid-yaml"],
+    )
+    def test_anything_else_is_none(self, show: str) -> None:
+        assert validator.chart_app_version_from_show(show) is None
+
+
+class TestVolcanoImageLockstepValidation:
+    def test_matching_tags_pass_offline(self) -> None:
+        assert _volcano_lockstep() == []
+
+    def test_a_stale_shared_tag_names_the_key_both_versions_and_the_fix(self) -> None:
+        charts = {"volcano": _volcano_entry(image_tag_version="v1.15.2")}
+
+        errors = _volcano_lockstep(charts)
+
+        assert len(errors) == 1
+        assert errors[0].startswith(
+            "volcano image lockstep: charts.yaml volcano.values.basic.image_tag_version is "
+            "'v1.15.2' but the chart is 1.16.0; pin 'v1.16.0' in the same change."
+        )
+        assert "reject every PodGroup update" in errors[0]
+
+    def test_every_stale_override_is_reported_in_key_order(self) -> None:
+        charts = {
+            "volcano": _volcano_entry(
+                scheduler_image_tag_version="v1.15.2",
+                admission_image_tag_version="v1.15.1",
+                controller_image_tag_version="",
+            )
+        }
+
+        errors = _volcano_lockstep(charts)
+
+        assert [e.split(" ")[4] for e in errors] == [
+            "volcano.values.basic.admission_image_tag_version",
+            "volcano.values.basic.scheduler_image_tag_version",
+        ]
+
+    def test_a_tag_without_the_v_prefix_is_stale(self) -> None:
+        # Volcano tags its images v<version>; 1.16.0 names no image.
+        errors = _volcano_lockstep({"volcano": _volcano_entry(image_tag_version="1.16.0")})
+        assert len(errors) == 1
+        assert "is '1.16.0' but the chart is 1.16.0; pin 'v1.16.0'" in errors[0]
+
+    def test_a_v_prefixed_chart_version_is_compared_without_it(self) -> None:
+        assert _volcano_lockstep({"volcano": _volcano_entry(version="v1.16.0")}) == []
+
+    def test_an_entry_that_pins_no_tag_fails(self) -> None:
+        entry = _volcano_entry()
+        del entry["values"]["basic"]["image_tag_version"]
+
+        errors = _volcano_lockstep({"volcano": entry})
+
+        assert errors == [
+            "volcano image lockstep: charts.yaml volcano.values.basic pins no "
+            "image_tag_version; gco images mirror reads it to know which tag to copy"
+        ]
+
+    def test_missing_chart_entry_is_an_error_for_the_real_charts_file(self) -> None:
+        assert _volcano_lockstep({}, require_entry=True) == [
+            "volcano image lockstep: no 'volcano' entry with a version in charts.yaml"
+        ]
+
+    @pytest.mark.parametrize(
+        "charts",
+        [{}, {"volcano": "junk"}, {"volcano": {"chart": "volcano"}}],
+        ids=["absent", "not-a-mapping", "no-version"],
+    )
+    def test_missing_chart_entry_is_skipped_for_fixture_files(self, charts: dict) -> None:
+        assert _volcano_lockstep(charts, require_entry=False) == []
+
+    def test_offline_mode_never_asks_helm(self) -> None:
+        errors = _volcano_lockstep(
+            app_version_fetcher=lambda entry, helm: pytest.fail("offline must not call helm")
+        )
+        assert errors == []
+
+    @pytest.mark.parametrize("app_version", ["1.16.0", "v1.16.0"])
+    def test_a_matching_app_version_passes_online(self, app_version: str) -> None:
+        assert (
+            _volcano_lockstep(online=True, app_version_fetcher=lambda entry, helm: app_version)
+            == []
+        )
+
+    def test_an_app_version_other_than_the_chart_version_fails_online(self) -> None:
+        errors = _volcano_lockstep(online=True, app_version_fetcher=lambda entry, helm: "1.16.1")
+
+        assert errors == [
+            "volcano image lockstep: chart 1.16.0 declares appVersion 1.16.1, so its images "
+            "are not tagged v<chart version>; pin 'v1.16.1' and change this check to compare "
+            "against appVersion"
+        ]
+
+    def test_fetcher_receives_the_entry_and_the_helm_binary(self) -> None:
+        calls: list[tuple[dict, str]] = []
+        charts = {"volcano": _volcano_entry()}
+
+        def record(entry: dict, helm: str) -> str:
+            calls.append((entry, helm))
+            return "1.16.0"
+
+        errors = _volcano_lockstep(
+            charts, online=True, app_version_fetcher=record, helm_binary="h3"
+        )
+
+        assert errors == []
+        assert calls == [(charts["volcano"], "h3")]
+
+    def test_fetcher_failure_is_reported_not_swallowed(self) -> None:
+        def _boom(entry: dict, helm: str) -> str:
+            raise RuntimeError("helm show chart volcano-sh/volcano at '1.16.0' failed: timeout")
+
+        errors = _volcano_lockstep(online=True, app_version_fetcher=_boom)
+
+        assert errors == [
+            "volcano image lockstep: helm show chart volcano-sh/volcano at '1.16.0' failed: timeout"
+        ]
+
+    def test_stale_tags_and_an_online_mismatch_are_both_reported(self) -> None:
+        errors = _volcano_lockstep(
+            {"volcano": _volcano_entry(image_tag_version="v1.15.2")},
+            online=True,
+            app_version_fetcher=lambda entry, helm: "1.16.1",
+        )
+        assert len(errors) == 2
+        assert "is 'v1.15.2' but the chart is 1.16.0" in errors[0]
+        assert "declares appVersion 1.16.1" in errors[1]
+
+    def test_real_repo_is_in_lockstep_offline(self) -> None:
+        # The always-on half of the gate, on the committed charts.yaml: the
+        # pinned images are the chart's own release.
+        charts = validator.load_charts(validator._DEFAULT_CHARTS)
+        assert validator.validate_volcano_image_lockstep(charts, online=False) == []
+
+
+class TestFetchVolcanoAppVersion:
+    """The ``helm show chart`` call, with the retry ladder faked so helm never runs."""
+
+    def test_adds_the_classic_repo_then_reads_app_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[list[str], dict]] = []
+
+        def fake_retry(cmd, env, **kwargs):
+            calls.append((cmd, kwargs))
+            if cmd[1:3] == ["show", "chart"]:
+                return (0, "appVersion: 1.16.0\nversion: 1.16.0\n", "")
+            return (0, "", "")
+
+        monkeypatch.setattr(validator, "_run_with_retry", fake_retry)
+
+        assert validator.fetch_volcano_app_version(_volcano_entry(), "h3") == "1.16.0"
+
+        commands = [cmd for cmd, _ in calls]
+        assert commands[0][:4] == [
+            "h3",
+            "repo",
+            "add",
+            "volcano-sh",
+        ]
+        assert commands[-1] == [
+            "h3",
+            "show",
+            "chart",
+            "volcano-sh/volcano",
+            "--version",
+            "1.16.0",
+        ]
+        assert calls[-1][1]["description"] == "helm show chart volcano (appVersion)"
+
+    def test_an_oci_chart_needs_no_repo_add(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            validator,
+            "_run_with_retry",
+            lambda cmd, env, **k: (calls.append(cmd), (0, "appVersion: v1.16.0\n", ""))[1],
+        )
+        entry = _volcano_entry()
+        entry.update(repo_url="oci://example.invalid/charts", use_oci=True)
+
+        assert validator.fetch_volcano_app_version(entry) == "v1.16.0"
+        assert calls == [
+            ["helm", "show", "chart", "oci://example.invalid/charts/volcano", "--version", "1.16.0"]
+        ]
+
+    def test_a_failed_show_is_a_runtime_error_with_the_tail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            validator,
+            "_run_with_retry",
+            lambda cmd, env, **k: (
+                (1, "", 'Error: chart "volcano" version "1.16.0" not found')
+                if cmd[1] == "show"
+                else (0, "", "")
+            ),
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            validator.fetch_volcano_app_version(_volcano_entry())
+
+        assert str(excinfo.value) == (
+            "helm show chart volcano-sh/volcano at '1.16.0' failed: "
+            'Error: chart "volcano" version "1.16.0" not found'
+        )
+
+    def test_a_chart_without_app_version_is_a_runtime_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (0, "version: 1.16.0\n", "")
+        )
+
+        with pytest.raises(RuntimeError, match=r"^chart 1\.16\.0 declares no appVersion; update"):
+            validator.fetch_volcano_app_version(_volcano_entry())
+
+    def test_an_entry_helm_cannot_address_is_a_runtime_error(self) -> None:
+        entry = _volcano_entry()
+        del entry["repo_url"]
+
+        with pytest.raises(RuntimeError, match="cannot build a Helm reference from the 'volcano'"):
+            validator.fetch_volcano_app_version(entry)
+
+
+class TestMainVolcanoLockstepWiring:
+    @staticmethod
+    def _charts_file(tmp_path: Path, **basic) -> Path:
+        path = tmp_path / "charts.yaml"
+        path.write_text(
+            yaml.safe_dump({"charts": {"volcano": _volcano_entry(**basic)}}), encoding="utf-8"
+        )
+        return path
+
+    def test_offline_mode_reports_a_stale_tag(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = self._charts_file(tmp_path, image_tag_version="v1.15.2")
+
+        rc = validator.main(["--charts", str(path), "--mode", "offline"])
+
+        assert rc == 1
+        assert "volcano.values.basic.image_tag_version is 'v1.15.2'" in capsys.readouterr().out
+
+    def test_online_mode_reads_app_version_with_the_chosen_helm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(validator.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (0, "version: 1.16.0\n", "")
+        )
+        calls: list[str] = []
+        monkeypatch.setattr(
+            validator,
+            "fetch_volcano_app_version",
+            lambda entry, helm: (calls.append(helm), "1.16.0")[1],
+        )
+
+        rc = validator.main(
+            [
+                "--charts",
+                str(self._charts_file(tmp_path)),
+                "--mode",
+                "online",
+                "--helm-binary",
+                "helm3",
+            ]
+        )
+
+        assert rc == 0
+        assert calls == ["helm3"]
+
+    def test_the_real_charts_file_requires_the_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # main() holds only the repository's own charts.yaml to the entry.
+        charts = validator.load_charts(validator._DEFAULT_CHARTS)
+        del charts["volcano"]
+        path = tmp_path / "charts.yaml"
+        path.write_text(yaml.safe_dump({"charts": charts}), encoding="utf-8")
+        monkeypatch.setattr(validator, "_DEFAULT_CHARTS", path)
+
+        rc = validator.main(["--charts", str(path), "--mode", "offline"])
+
+        assert rc == 1
+        assert "no 'volcano' entry with a version in charts.yaml" in capsys.readouterr().out
+
+
 # ── Remaining branches ────────────────────────────────────────────────────────
 #
 # Everything below closes a specific branch the suites above route around.
@@ -2398,6 +2786,12 @@ class TestTrainerLockstepParserEdges:
                         {
                             "name": "node",
                             "template": {
+                                "spec": {"template": {"spec": {"nodeSelector": "not-a-mapping"}}}
+                            },
+                        },
+                        {
+                            "name": "node",
+                            "template": {
                                 "spec": {
                                     "template": {
                                         "spec": {
@@ -2421,12 +2815,14 @@ class TestTrainerLockstepParserEdges:
 
         adjusted = validator._apply_documented_runtime_deviations(spec)
 
-        node_pod = adjusted["template"]["spec"]["replicatedJobs"][3]["template"]["spec"][
-            "template"
-        ]["spec"]
+        jobs = adjusted["template"]["spec"]["replicatedJobs"]
+        node_pod = jobs[4]["template"]["spec"]["template"]["spec"]
         assert node_pod["automountServiceAccountToken"] is False
-        # A non-mapping securityContext is left alone rather than overwritten.
+        assert node_pod["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
+        # A non-mapping securityContext or nodeSelector is left alone rather
+        # than overwritten.
         assert node_pod["containers"][2]["securityContext"] == "not-a-mapping"
+        assert jobs[3]["template"]["spec"]["template"]["spec"]["nodeSelector"] == "not-a-mapping"
         assert adjusted["template"]["spec"]["replicatedJobs"][0] == "not-a-mapping"
 
     def test_documented_deviations_tolerate_a_non_list_jobs_field(self) -> None:

@@ -10,6 +10,7 @@ A standalone [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stack tha
 - [Quick Start](#quick-start)
 - [Customizing the IAM Policy](#customizing-the-iam-policy)
 - [Using with a Fork or Different Repo](#using-with-a-fork-or-different-repo)
+- [Reusing an Existing OIDC Provider](#reusing-an-existing-oidc-provider)
 - [Using the Role in Workflows](#using-the-role-in-workflows)
 - [Files](#files)
 - [Testing](#testing)
@@ -27,7 +28,7 @@ This stack is **standalone** — it does not depend on or affect the main GCO in
 
 ## What Gets Created
 
-1. **IAM OIDC Identity Provider** — trusts `token.actions.githubusercontent.com` (the GitHub OIDC issuer). Skipped if one already exists in the account.
+1. **IAM OIDC Identity Provider** — trusts `token.actions.githubusercontent.com` (the GitHub OIDC issuer). An account can have only one provider for that issuer, and roles of other repositories may trust it, so the provider this stack creates is retained when the stack is deleted. If the account already has one, deploy with `github_oidc_provider_arn` and the stack creates none (see [Reusing an Existing OIDC Provider](#reusing-an-existing-oidc-provider)).
 2. **IAM Role** — assumable only by GitHub Actions workflows from your repository. The trust policy restricts access to a specific GitHub repository subject prefix and branch; repositories created or transferred after July 15, 2026 use immutable owner and repository IDs in that prefix.
 3. **IAM Policy** — attached to the role. By default grants only the read APIs used by the monthly dependency scan: [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) model/profile discovery, [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) Region and accelerator-catalog discovery, [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) add-on and cluster-version discovery, EMR release labels, RDS engine versions, the [AWS PCS](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) node lifecycle script and AMI catalogs (listing the public `aws-pcs-repo-*` buckets, the public `/aws/service/pcs/ami` SSM tree and Amazon's sample AMIs), and [STS](https://docs.aws.amazon.com/STS/latest/APIReference/) caller identity. You can expand this for your own needs.
 
@@ -160,6 +161,30 @@ name before deployment. Setting it to `"*"` is an explicit opt-in that allows
 any branch or tag and should be reserved for a role whose permissions and
 environment protections make that broader trust acceptable.
 
+## Reusing an Existing OIDC Provider
+
+IAM allows one OIDC provider per issuer URL in an account, so if the account
+already has a `token.actions.githubusercontent.com` provider (created by
+another stack, the console, or another repository's setup), creating a second
+one fails. Point the stack at the existing provider instead:
+
+```bash
+aws iam list-open-id-connect-providers   # find the GitHub provider's ARN
+cdk deploy GCOGitHubOIDCStack \
+  -c github_oidc_provider_arn=arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com
+```
+
+or set `github_oidc_provider_arn` in `cdk.json`. The stack then only creates the
+role and its policy, and the role trusts that provider. Make sure the provider
+lists `sts.amazonaws.com` as a client ID (audience); the trust policy requires
+it.
+
+If this stack created the provider, leave `github_oidc_provider_arn` unset.
+Switching to it removes the provider from the stack; that is safe only after
+the stack has been deployed by a version that retains the provider (this one).
+A stack deployed by an earlier version deletes the provider when it leaves the
+template, so redeploy once without the setting first.
+
 ## Using the Role in Workflows
 
 After deploying, add the role ARN as a GitHub Actions secret (`GCO_CI_ROLE_ARN`), then use it in your workflow:
@@ -183,7 +208,7 @@ steps:
 | `app.py` | CDK app entry point — instantiates the OIDC stack |
 | `stack.py` | CDK stack definition — OIDC provider, IAM role, IAM policy |
 | `policy.json` | IAM policy document attached to the role (edit this to change permissions) |
-| `cdk.json` | CDK configuration — edit `github_repo`, `github_subject_prefix`, and `github_branch` here |
+| `cdk.json` | CDK configuration — edit `github_repo`, `github_subject_prefix`, and `github_branch` here, and add `github_oidc_provider_arn` to reuse an existing provider |
 | `README.md` | This file |
 
 ## Testing
@@ -205,6 +230,8 @@ The tests verify:
 - The `s3:ListBucket` grant stays scoped to the public `aws-pcs-repo-*` buckets
 - Branch restriction works when specified
 - Custom repo names are reflected in the trust policy
+- The provider the stack creates is retained on delete and replacement
+- `github_oidc_provider_arn` makes the role trust an existing provider without creating one, and must name the GitHub issuer
 
 ## Tearing Down
 
@@ -213,4 +240,9 @@ cd .github/oidc_provider
 cdk destroy GCOGitHubOIDCStack
 ```
 
-This removes the IAM role and policy. The OIDC provider is retained if other roles in the account depend on it.
+This removes the IAM role and policy. The OIDC provider stays in the account
+whether this stack created it or reused an existing one, because roles of other
+repositories may trust it. A stack deployed by an earlier version of this file
+deletes the provider it created; redeploy it once before destroying. Delete the
+provider yourself (`aws iam delete-open-id-connect-provider --open-id-connect-provider-arn ARN`)
+only after checking that no other role trusts it.

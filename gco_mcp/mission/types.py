@@ -42,8 +42,18 @@ VerdictReason = Literal[
     "max_wall_clock",
     "no_progress",
     "user_abort",
+    "script_time_limit",
+    "script_memory_limit",
+    "script_error",
 ]
-"""The exhaustive set of reasons that pair with a :data:`VerdictLabel`."""
+"""The exhaustive set of reasons that pair with a :data:`VerdictLabel`.
+
+The three ``script_*`` reasons end a session whose scripted strategy the
+sandbox stopped: ``script_time_limit`` (the script's wall-clock cap,
+``GCO_MCP_CODE_MODE_MAX_DURATION_SECS``), ``script_memory_limit``
+(``GCO_MCP_CODE_MODE_MAX_MEMORY``), and ``script_error`` (an uncaught error
+raised while the script ran, or a sandbox failure).
+"""
 
 StatusLabel = Literal["pending", "running", "paused", "completed", "terminated", "failed"]
 """The lifecycle states of a :class:`SessionState`."""
@@ -382,11 +392,14 @@ class IterationRecord(TypedDict):
     # Set by ``_execute_script`` when the sandbox runner raises
     # :class:`mcp.mission.sandbox.SandboxTerminated`. The Decide_Phase's
     # cascade reads this sentinel before any other branch and emits
-    # ``("terminate", <reason>)`` so a sandbox cap propagates up to the
-    # budget-cap path rather than failing the iteration as a phase
-    # exception. Carries the wall-clock :data:`VerdictReason`
-    # ``max_wall_clock`` for duration / memory / runtime caps.
+    # ``("terminate", <reason>)`` so a sandbox stop propagates up to the
+    # verdict rather than failing the iteration as a phase exception. The
+    # reason says why the sandbox stopped the script: ``script_time_limit``,
+    # ``script_memory_limit``, or ``script_error``.
     sandbox_terminated_reason: NotRequired[VerdictReason]
+    # The error the sandbox reported (``"KeyError: 'missing'"``, ``"TimeoutError:
+    # script exceeded its 30-second wall-clock cap"``), at most 200 characters.
+    sandbox_terminated_detail: NotRequired[str]
 
 
 class SessionState(TypedDict):

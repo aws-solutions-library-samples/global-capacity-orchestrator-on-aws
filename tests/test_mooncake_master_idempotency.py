@@ -10,8 +10,8 @@ server inside the master process.
 
 The example below drives :meth:`InferenceMonitor._ensure_mooncake_store` an
 arbitrary number of times against a fake Kubernetes API that mimics the real
-create-if-absent behavior (a second create of an existing object raises a
-``409 Conflict``), and checks the converged shape.
+API server (a read of a missing object answers ``404``, a second create of an
+existing object raises a ``409 Conflict``), and checks the converged shape.
 """
 
 from __future__ import annotations
@@ -37,6 +37,18 @@ class _CreateIfAbsentK8s:
         self.statefulsets: dict[tuple[str, str], Any] = {}
         self.services: dict[tuple[str, str], Any] = {}
         self.deployments: dict[tuple[str, str], Any] = {}
+
+    @staticmethod
+    def _read(objects: dict[tuple[str, str], Any], name: str, namespace: str) -> Any:
+        if (namespace, name) not in objects:
+            raise ApiException(status=404, reason="Not Found")
+        return objects[(namespace, name)]
+
+    def read_namespaced_stateful_set(self, name, namespace, **_kwargs):
+        return self._read(self.statefulsets, name, namespace)
+
+    def read_namespaced_service(self, name, namespace, **_kwargs):
+        return self._read(self.services, name, namespace)
 
     def create_namespaced_stateful_set(self, namespace, body, **_kwargs):
         key = (namespace, body.metadata.name)

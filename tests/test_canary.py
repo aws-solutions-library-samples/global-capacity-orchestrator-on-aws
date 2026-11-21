@@ -1142,7 +1142,8 @@ class TestInferenceManagerRegions:
         manager.config = MagicMock()
         manager._aws_client = mock_aws.return_value
 
-        with patch.object(manager, "_get_store", return_value=mock_store):
-            result = manager.remove_region("ep1", "us-east-1")
-
-        assert result is None
+        with (
+            patch.object(manager, "_get_store", return_value=mock_store),
+            pytest.raises(Exception, match="DynamoDB error"),
+        ):
+            manager.remove_region("ep1", "us-east-1")

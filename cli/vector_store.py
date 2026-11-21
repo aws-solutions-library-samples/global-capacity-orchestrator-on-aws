@@ -22,14 +22,22 @@ Three operations:
 
 Resolution conventions, copied from their precedents:
 
-* **Region** follows the store convention documented in
-  ``gco/services/template_store.py``: ``DYNAMODB_REGION`` →
-  ``GLOBAL_REGION`` → ``AWS_REGION``, else the SDK default chain. A
-  ``query_region`` override retargets ONLY the DynamoDB data client —
-  that is how ``gco vector search --region`` reads a specific replica —
-  while SSM discovery and embedding stay on the default chain (the
-  parameters live in the global region; the query vector can be
-  produced anywhere).
+* **Project** is the ``project_name`` argument (``gco vector`` passes the
+  CLI configuration's: cdk.json ``project_name``, the config file,
+  ``GCO_PROJECT_NAME``), else ``GCO_PROJECT_NAME``, else ``gco``.
+* **Region** of the SSM names and of the DynamoDB data client follows the
+  store convention documented in ``gco/services/template_store.py``, with
+  the deployment's global Region ahead of ``AWS_REGION``:
+  ``DYNAMODB_REGION`` → ``GLOBAL_REGION`` → the ``global_region``
+  argument (``gco vector`` passes the configuration's: cdk.json
+  ``deployment_regions.global``, the config file, ``GCO_GLOBAL_REGION``)
+  → ``AWS_REGION``, else the SDK default chain. The global stack
+  publishes the parameters in the global Region only. A ``query_region``
+  override retargets ONLY the DynamoDB data client — that is how ``gco
+  vector search --region`` reads a specific replica — while SSM discovery
+  stays in the global Region and embedding stays on the environment
+  chain (``DYNAMODB_REGION`` → ``GLOBAL_REGION`` → ``AWS_REGION``; the
+  query vector can be produced anywhere).
 * **Names** resolve lazily from SSM (``/{project}/vector-store-table-name``,
   ``/{project}/vector-store-index-name``, and the cluster-shared bucket
   metadata under ``/{project}/cluster-shared-bucket/``) on first use and
@@ -103,14 +111,23 @@ _BUCKET_REGION_PARAM_SUFFIX = "cluster-shared-bucket/region"
 #: server-side, so refusing the upload client-side is kinder.
 _INGESTIBLE_SUFFIXES = (".txt", ".md", ".jsonl")
 
+#: The ingest Lambda's limits (``MAX_OBJECT_BYTES``, ``MAX_CHUNKS_PER_OBJECT``
+#: and ``MAX_CHUNK_CHARS`` in lambda/vector-ingest/handler.py, which this CLI
+#: does not ship with; tests/test_vector_cli.py holds the two to each other).
+_INGEST_MAX_OBJECT_BYTES = 4 * 1024 * 1024
+_INGEST_MAX_CHUNKS = 500
+_INGEST_MAX_CHUNK_CHARS = 2000
+
 _UNAVAILABLE_HINT = (
     "the vector store is unavailable — the table or index may not be "
     "provisioned (deploy with vector_store.enabled: true), or the vector "
     "index may still be building after the first deploy (several minutes)"
 )
 
-#: Region resolution order shared with the sibling DynamoDB stores.
-_REGION_ENV_ORDER = ("DYNAMODB_REGION", "GLOBAL_REGION", "AWS_REGION")
+#: Region variables read first, the convention shared with the sibling
+#: DynamoDB stores. The deployment's global Region comes after them, then
+#: ``AWS_REGION`` (see :func:`_resolve_region`).
+_REGION_ENV_ORDER = ("DYNAMODB_REGION", "GLOBAL_REGION")
 
 
 class VectorStoreError(RuntimeError):
@@ -127,13 +144,20 @@ class VectorStoreUnavailableError(VectorStoreError):
     """
 
 
-def _resolve_region() -> str | None:
-    """Return the first configured region env var, else ``None``."""
+def _resolve_region(global_region: str | None = None) -> str | None:
+    """Return the Region to use, or ``None`` for the SDK's default chain.
+
+    ``DYNAMODB_REGION``, then ``GLOBAL_REGION``, then ``global_region``
+    (the deployment's global Region, when the caller knows it), then
+    ``AWS_REGION``. The global Region used to be missing from the chain,
+    so an operator whose ``AWS_REGION`` or profile Region was not the
+    global one could not reach the store.
+    """
     for env_var in _REGION_ENV_ORDER:
         value = os.environ.get(env_var)
         if value:
             return value
-    return None
+    return global_region or os.environ.get("AWS_REGION") or None
 
 
 def _number_attr(value: float) -> dict[str, str]:
@@ -167,6 +191,54 @@ def _embedding_request_body(text: str, model_id: str, dimensions: int) -> str:
     return json.dumps(body)
 
 
+def _text_chunk_count(text: str) -> int:
+    """How many chunks the ingest Lambda's ``chunk_text`` makes of a .txt/.md *text*.
+
+    The same greedy packing: blank-line separated paragraphs, joined by a
+    blank line up to ``_INGEST_MAX_CHUNK_CHARS``, a longer paragraph split at
+    exactly that width.
+    """
+    count = 0
+    current = 0  # length of the chunk being packed; 0 when there is none
+    paragraphs = (part.strip() for part in text.replace("\r\n", "\n").split("\n\n"))
+    for paragraph in paragraphs:
+        for start in range(0, len(paragraph), _INGEST_MAX_CHUNK_CHARS):
+            piece = len(paragraph[start : start + _INGEST_MAX_CHUNK_CHARS])
+            if not current:
+                current = piece
+            elif current + 2 + piece <= _INGEST_MAX_CHUNK_CHARS:
+                current += 2 + piece
+            else:
+                count += 1
+                current = piece
+    return count + (1 if current else 0)
+
+
+def _check_ingest_limits(path: Path) -> None:
+    """Refuse a file the ingest Lambda would refuse as too large, before any upload.
+
+    The Lambda fails an object over ``_INGEST_MAX_OBJECT_BYTES`` or with more
+    than ``_INGEST_MAX_CHUNKS`` chunks (one per non-empty .jsonl line) without
+    writing a chunk, so ``--wait`` could only time out on it.
+    """
+    size = path.stat().st_size
+    if size > _INGEST_MAX_OBJECT_BYTES:
+        raise VectorStoreError(
+            f"{path.name}: {size} bytes, over the {_INGEST_MAX_OBJECT_BYTES}-byte limit "
+            "of the ingest Lambda; split it into smaller files"
+        )
+    text = path.read_bytes().decode("utf-8", errors="replace")
+    if path.suffix.lower() == ".jsonl":
+        chunks = sum(1 for line in text.splitlines() if line.strip())
+    else:
+        chunks = _text_chunk_count(text)
+    if chunks > _INGEST_MAX_CHUNKS:
+        raise VectorStoreError(
+            f"{path.name}: {chunks} chunks, over the {_INGEST_MAX_CHUNKS}-chunk limit "
+            "of the ingest Lambda; split it into smaller files"
+        )
+
+
 class VectorStoreClient:
     """Operator client for ingest, search, and status.
 
@@ -179,9 +251,17 @@ class VectorStoreClient:
         table_name: Table name override; ``None`` resolves from SSM.
         index_name: Index name override; ``None`` resolves from SSM.
         bucket_name: Corpus bucket override; ``None`` resolves from SSM.
+        project_name: Project whose ``/{project}/...`` SSM names to read
+            (``gco vector`` passes its configuration's). ``None`` reads
+            ``GCO_PROJECT_NAME``, else ``gco``.
+        global_region: The deployment's global Region, where the SSM
+            names and the table the data client reads by default live
+            (``gco vector`` passes its configuration's).
+            ``DYNAMODB_REGION`` and ``GLOBAL_REGION`` still come first;
+            ``None`` falls back to ``AWS_REGION``, then the SDK default.
         query_region: Region whose replica the DynamoDB data client
             reads (``gco vector search --region``). ``None`` follows the
-            default chain. SSM and embedding never follow this override.
+            chain above. SSM and embedding never follow this override.
         embedding_model_id: Embedding model override. Must match the
             model the corpus was ingested with.
         dimensions: Requested embedding width. Must match the deployed
@@ -195,6 +275,8 @@ class VectorStoreClient:
         index_name: str | None = None,
         *,
         bucket_name: str | None = None,
+        project_name: str | None = None,
+        global_region: str | None = None,
         query_region: str | None = None,
         embedding_model_id: str = DEFAULT_EMBEDDING_MODEL_ID,
         dimensions: int = DEFAULT_DIMENSIONS,
@@ -204,6 +286,8 @@ class VectorStoreClient:
         self._index_name = index_name
         self._bucket_name = bucket_name
         self._bucket_region: str | None = None
+        self._project_name = project_name
+        self._global_region = global_region
         self._query_region = query_region
         self._embedding_model_id = embedding_model_id
         self._dimensions = int(dimensions)
@@ -216,16 +300,20 @@ class VectorStoreClient:
     # internals
     # ------------------------------------------------------------------ #
 
+    def _home_region(self) -> str | None:
+        """Return the Region of the SSM names and of the default data client."""
+        return _resolve_region(self._global_region)
+
     def _resolve_ssm_name(self, suffix: str) -> str:
         """Fetch ``/{project}/{suffix}`` from SSM, mapping absence to unavailable."""
         from botocore.exceptions import BotoCoreError, ClientError
 
         from gco.services.aws_ssm import get_ssm_parameter
 
-        project_name = os.environ.get("GCO_PROJECT_NAME", "gco")
+        project_name = self._project_name or os.environ.get("GCO_PROJECT_NAME") or "gco"
         param_name = f"/{project_name}/{suffix}"
         try:
-            return get_ssm_parameter(param_name, region=_resolve_region())
+            return get_ssm_parameter(param_name, region=self._home_region())
         except ClientError as err:
             code = err.response.get("Error", {}).get("Code")
             if code == "ParameterNotFound":
@@ -260,7 +348,7 @@ class VectorStoreClient:
             import boto3
 
             self._dynamodb_client = boto3.client(
-                "dynamodb", region_name=self._query_region or _resolve_region()
+                "dynamodb", region_name=self._query_region or self._home_region()
             )
         return self._dynamodb_client
 
@@ -470,7 +558,7 @@ class VectorStoreClient:
         return {
             "table_name": table_name,
             "index_name": index_name,
-            "region": self._query_region or _resolve_region() or "sdk-default",
+            "region": self._query_region or self._home_region() or "sdk-default",
             "table_status": table.get("TableStatus"),
             "item_count": int(table.get("ItemCount", 0)),
             "index_status": index_status,
@@ -499,7 +587,10 @@ class VectorStoreClient:
 
         Args:
             paths: Files to upload. Every path must exist and carry an
-                ingestible suffix (.txt, .md, .jsonl).
+                ingestible suffix (.txt, .md, .jsonl). Each uploads to the
+                corpus prefix plus its file name (the directory is not
+                part of the key), so the file names must be distinct; a
+                name already in the corpus replaces that document.
             wait_timeout_seconds: 0 returns right after the uploads.
 
         Returns:
@@ -510,8 +601,8 @@ class VectorStoreClient:
         Raises:
             VectorStoreUnavailableError: Bucket/table SSM names absent,
                 no credentials, or endpoint unreachable.
-            VectorStoreError: A path is missing or not ingestible, or
-                the upload fails.
+            VectorStoreError: A path is missing or not ingestible, two
+                paths share a file name, or the upload fails.
         """
         from botocore.exceptions import BotoCoreError, ClientError
 
@@ -525,6 +616,18 @@ class VectorStoreClient:
                     f"{path.name}: unsupported suffix {path.suffix!r} — the ingest "
                     f"pipeline reads {', '.join(_INGESTIBLE_SUFFIXES)}"
                 )
+            _check_ingest_limits(path)
+        # The key drops the directory: two files with one name would land
+        # on one key, and the second upload would replace the first.
+        first_by_name: dict[str, Path] = {}
+        for path in paths:
+            if path.name in first_by_name:
+                raise VectorStoreError(
+                    f"{first_by_name[path.name]} and {path} would both upload to "
+                    f"{self._corpus_prefix}{path.name}: the corpus key is the file "
+                    "name, so the second would replace the first. Rename one of them."
+                )
+            first_by_name[path.name] = path
 
         bucket_name, bucket_region = self._resolve_bucket()
         client = self._get_s3_client(bucket_region)

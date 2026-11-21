@@ -177,6 +177,10 @@ def models_delete(config: Any, model_name: Any, yes: Any) -> None:
             formatter.print_success(f"Deleted {deleted} file(s) for model '{model_name}'")
         else:
             formatter.print_warning(f"No files found for model '{model_name}'")
+        if config.output_format != "table":
+            # One document whether or not anything was deleted, so JSON/YAML
+            # callers can tell the two apart.
+            formatter.print({"model_name": model_name, "files_deleted": deleted})
 
     except Exception as e:
         formatter.print_error(f"Failed to delete model: {e}")

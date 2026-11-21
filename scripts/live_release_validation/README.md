@@ -24,14 +24,14 @@ guide: how the code is organized and where a new check belongs.
 | Path | Responsibility |
 |---|---|
 | `registry.py` | The ordered action registry: names, descriptions, dependencies, handlers. Single source of truth for `--actions`. |
-| `runner.py` | Executes selected actions, checkpoints after each, and guarantees cleanup + reporting once runtime construction succeeds; bootstrap failures report cleanup blocked with an exact recovery command. |
+| `runner.py` | Executes selected actions, checkpoints after each, and guarantees cleanup + reporting once runtime construction succeeds; bootstrap failures report cleanup blocked with an exact recovery command (`write_startup_failure_report`, which the example and upgrade entry points use too). |
 | `models.py` | Main `RunSettings`, `RunCheckpoint`, `RunContext`, `ActionResult`, and `ValidationReport` types. |
 | `artifact_io.py` | Owner-only report/checkpoint directory validation (the reports, the checkpoint, the isolated `kubeconfig`, and the run's own `model-repositories/` directory are the only entries a resume accepts) and atomic text writes. |
 | `inference_contract.py` | Strict vLLM/SGLang/Triton request, structured-decision (`/v1/systemone`), probe, endpoint, and resume-identity helpers used by main `RunSettings`. |
 | `actions/` | One module per action. This is the "test case" layer. |
 | `checks/` | Reusable validation helpers (polling, waiting, payload validation) shared by actions. |
 | `ownership/` | Durable proof of what this run created and may therefore destroy. |
-| `cleanup/` | Deletion of exactly those proven-owned resources, plus `cleanup/local_images.py`: the best-effort prune of the local CDK asset images (`cdkasset-<hash>` and the bootstrap ECR repository tags) every `deploy` leaves in the host's container store, so successive runs cannot fill the disk. |
+| `cleanup/` | Deletion of exactly those proven-owned resources, plus `cleanup/local_images.py`: the best-effort prune of the local CDK asset images (`cdkasset-<hash>` and the bootstrap ECR repository tags) every `deploy` leaves in the host's container store, so successive runs cannot fill the disk. It removes those tags, never an image ID, so an image that also carries a tag of the operator's stays. |
 | `protected.py` | The ownership boundary: identity matching that keeps pre-existing account resources untouchable. |
 | `context.py` | Run identity helpers: git SHA/branch, topology profile, Region selection. |
 | `constants.py` | Tags, labels, and tuning constants shared across modules. |
@@ -45,7 +45,7 @@ matches the action name printed in the run log. The one deliberate exception is
 lifecycle over two different transports, and splitting them would duplicate the
 lifecycle rather than clarify it.
 
-The first-class `inference` action lives in `actions/inference.py`; its lifecycle coordinator lives in `checks/inference.py`, with the scenario plan and every argv-only `gco` command plus response parsing in `checks/inference_commands.py`, the model-registry upload/removal and Mooncake store reconfigure phases in `checks/inference_scenarios.py`, Kubernetes inventory/stable absence in `checks/inference_inventory.py` and endpoint plus shared-proxy readiness/HPA checks in `checks/inference_runtime.py`. `inference_contract.py` defines a required fixed-order vLLM/SGLang/Triton runtime matrix with separate digest-pinned images, immutable model identities, official ports/launcher inputs, request/response schemas, and model-info probes (vLLM through its OpenAI-compatible surface plus, on the baseline scenario, the structured decisions API `/v1/systemone` with `--logprobs-mode raw_logprobs` and a Qwen3-family model, SGLang through its native `/generate` and `/server_info` so the two adapters cannot collapse into one, Triton through KServe v2 `/v2/models/<model>/infer` and `/v2/models/stats` with a harness-generated identity model repository uploaded to the model registry and served through `--model-source`). vLLM also runs as a Mooncake shared KV-cache store (`--mooncake-mode store`, TCP, cold tier): the leg requires the monitor to report the master Ready and the cold tier active on the own-Region bucket, then reconfigures the store and requires the role pods to roll onto the re-rendered `mooncake.json` (the `gco.io/mooncake-config-digest` pod-template annotation) and answer again. Those inputs and the checked-in TLS-sidecar CPU/HPA expectations are part of the main `RunSettings` checkpoint identity. There is no sibling CLI, settings type, report, or registry. The main registry, report, isolated kubeconfig, and teardown path are authoritative. The lifecycle checkpoints a random owner nonce before creation, runs vLLM baseline/HPA then SGLang baseline/HPA with peak concurrency one, and proves stable full absence after every scenario. A cleaned pre-invocation resume archives the closed lifecycle and rotates the incarnation only after fresh absence proof; invoked scenarios are never recreated.
+The first-class `inference` action lives in `actions/inference.py`; its lifecycle coordinator lives in `checks/inference.py`, with the scenario plan and every argv-only `gco` command plus response parsing in `checks/inference_commands.py`, the model-registry upload/removal and Mooncake store reconfigure phases in `checks/inference_scenarios.py`, Kubernetes inventory/stable absence in `checks/inference_inventory.py` and endpoint plus shared-proxy readiness/HPA checks in `checks/inference_runtime.py`. `inference_contract.py` defines a required fixed-order vLLM/SGLang/Triton runtime matrix with separate digest-pinned images, immutable model identities, official ports/launcher inputs, request/response schemas, and model-info probes (vLLM through its OpenAI-compatible surface plus, on the baseline scenario, the structured decisions API `/v1/systemone` with `--logprobs-mode raw_logprobs` and a Qwen3-family model, SGLang through its native `/generate` and `/server_info` so the two adapters cannot collapse into one, Triton through KServe v2 `/v2/models/<model>/infer` and `/v2/models/stats` with a harness-generated identity model repository uploaded to the model registry and served through `--model-source`). vLLM also runs as a Mooncake shared KV-cache store (`--mooncake-mode store`, TCP, cold tier): the leg requires the monitor to report the master Ready and the cold tier active on the own-Region bucket, then reconfigures the store and requires the role pods to roll onto the re-rendered `mooncake.json` (the `gco.io/mooncake-config-digest` pod-template annotation) and answer again. Those inputs and the checked-in TLS-sidecar CPU/HPA expectations are part of the main `RunSettings` checkpoint identity. There is no sibling CLI, settings type, report, or registry. The main registry, report, isolated kubeconfig, and teardown path are authoritative. The lifecycle checkpoints a random owner nonce before creation, runs vLLM baseline/HPA then SGLang baseline/HPA with peak concurrency one, and proves stable full absence after every scenario. A cleaned pre-invocation resume archives the closed lifecycle and rotates the incarnation only after fresh absence proof; invoked scenarios are never recreated, and a resumed invoked scenario finishes its remaining steps after the invocation on the same endpoint or fails closed. `execute` fails unless every counter in its summary covers the whole matrix (`_contract_shortfalls`).
 
 The `schedulers` action (`actions/schedulers.py`, enablement resolution in
 `checks/schedulers.py`) runs one scheduling-gated probe Job per enabled batch
@@ -74,14 +74,19 @@ the `pcs_overrides` CDK context (`pcs_overrides_json()`, deep-merged over the
 `pcs` block by the config loader, part of the resume identity like
 `tracing_overrides`): the API's `/api/v1/slurm/backends` listing, a batch job
 submitted with `backend=pcs` that must reach `COMPLETED` on a node PCS
-launches from zero, its slurmdbd record with the caller attribution, and the
+launches from zero (journaled under `state.pcs_probe` before the POST and with
+its job ID, so a resume waits for that job, or finds it by its run-scoped name
+in the queue and in accounting, instead of submitting another), its slurmdbd
+record with the caller attribution, and the
 output file read back from the managed login node by the real
 `gco slurm output --backend pcs` (an argv-only subprocess). `preflight` runs
 `cli.pcs_preflight` for the same merged block before `deploy`
 (`_pcs_preflight`), and `cleanup/pcs_nodes.py` waits after teardown for the
 instances PCS launched to leave `shutting-down` and for their tagged root
-volumes to finish deleting, which the inventory would otherwise count as
-present. The inventory's `pcs` scanner (`inventory/scanners.py`)
+volumes to start deleting, which the inventory would otherwise count as
+present. The wait, the cluster-volume scanner and the tagged-volume strip
+(`ownership/ebs_volumes.py`) share one set of volume states that count as
+gone, `deleting` and `deleted` (`inventory/_shared.py`). The inventory's `pcs` scanner (`inventory/scanners.py`)
 claims clusters by project name or `gco:project` tag and everything PCS keeps
 under them. It runs in every enabled Region PCS is offered in: botocore lists
 no Region for PCS (the service ships only an endpoint ruleset), so
@@ -201,8 +206,12 @@ stack is absent, and `final-inventory` compares the account with the record
 again. `platform-workloads` also reads the internal PKI in the same session
 (`checks/internal_pki.py`: the `gco-internal-ca` ClusterIssuer, its CA
 Certificate, and every GCO leaf), and `network-posture` dials the TLS-sidecar
-ports, the loopback-bound plaintext ports, and a stand-in model pod
-(`manifests/netpol-model-target-job.yaml`).
+ports, the loopback-bound plaintext ports, a stand-in model pod
+(`manifests/netpol-model-target-job.yaml`), and the same stand-in started
+without its `gco.io/type: inference` label, which `gco-inference`'s default
+deny must keep unreachable from another namespace. The labelled stand-in
+answering a labelled peer (`model-from-inference`) is the positive control for
+both.
 
 ## How a run executes
 
@@ -214,7 +223,7 @@ each one in registry order:
 2. Calls the handler with the shared `RunContext`.
 3. Persists the checkpoint and rewrites both reports — pass or fail.
 
-Once runtime construction succeeds, if a deploy was ever attempted the runner runs guaranteed cleanup (`destroy_deployment`) and `final-inventory`, so an interrupted action still tears down and reports. That post-run inventory is the last look at the account, so it runs even when the `final-inventory` action already passed; in that case the action keeps its own row and duration, the re-check is recorded under `cleanup.final_inventory_recheck` (status, timestamps, duration, and whether it had to stand in for a missing action result), and its scan is the report's `final_inventory`. A failed re-check replaces any passed result — the account is not clean, whatever the action saw earlier. If construction itself fails after loading a deployed checkpoint, no unverified client is allowed to delete: the failure report marks cleanup blocked and prints the exact `--resume` recovery command instead of claiming destruction.
+Once runtime construction succeeds, if a deploy was ever attempted the runner runs guaranteed cleanup (`destroy_deployment`) and `final-inventory`, so an interrupted action still tears down and reports. That post-run inventory is the last look at the account, so it runs even when the `final-inventory` action already passed; in that case the action keeps its own row and duration, the re-check is recorded under `cleanup.final_inventory_recheck` (status, timestamps, duration, and whether it had to stand in for a missing action result), and its scan is the report's `final_inventory`. A failed re-check replaces any passed result — the account is not clean, whatever the action saw earlier — and is recorded under `cleanup.final_inventory_recheck` with its error; when the scan itself failed, the report carries no final inventory rather than the earlier, superseded scan. If construction itself fails after loading a deployed checkpoint, no unverified client is allowed to delete: the failure report marks cleanup blocked and prints the exact `--resume` recovery command instead of claiming destruction.
 
 An action handler is just:
 

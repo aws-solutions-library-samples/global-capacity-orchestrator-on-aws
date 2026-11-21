@@ -121,6 +121,50 @@ class TestReconcileCanary:
         assert status["replicas_ready"] == 1
         assert status["replicas_desired"] == 3
 
+    def test_restarted_endpoint_scales_its_stopped_canary_back_up(self, monitor):
+        """A stop scales the canary to 0; starting again restores its replicas."""
+        mock_deployment = MagicMock()
+        mock_deployment.spec.replicas = 0
+        mock_deployment.status.ready_replicas = None
+
+        with (
+            patch.object(monitor, "_get_deployment", return_value=mock_deployment),
+            patch.object(monitor, "_get_deployment_image", return_value="new:v2"),
+            patch.object(monitor, "_scale_deployment") as mock_scale,
+        ):
+            status = monitor._reconcile_canary(
+                "ep",
+                "ns",
+                {"image": "old:v1", "canary": {"image": "new:v2"}},
+                {"image": "new:v2", "weight": 10, "replicas": 1},
+                {"ingress_path": "/inference/ep"},
+            )
+
+        mock_scale.assert_called_once_with("ep-canary", "ns", 1)
+        assert status["state"] == "updating"
+        assert status["replicas_ready"] == 0
+
+    def test_canary_with_an_unset_replica_count_counts_as_one(self, monitor):
+        mock_deployment = MagicMock()
+        mock_deployment.spec.replicas = None
+        mock_deployment.status.ready_replicas = 1
+
+        with (
+            patch.object(monitor, "_get_deployment", return_value=mock_deployment),
+            patch.object(monitor, "_get_deployment_image", return_value="new:v2"),
+            patch.object(monitor, "_scale_deployment") as mock_scale,
+        ):
+            status = monitor._reconcile_canary(
+                "ep",
+                "ns",
+                {"image": "old:v1", "canary": {"image": "new:v2"}},
+                {"image": "new:v2", "weight": 10, "replicas": 1},
+                {"ingress_path": "/inference/ep"},
+            )
+
+        mock_scale.assert_not_called()
+        assert status["state"] == "running"
+
     def test_reports_running_only_when_all_canary_replicas_are_ready(self, monitor):
         mock_deployment = MagicMock()
         mock_deployment.spec.replicas = 2

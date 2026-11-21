@@ -80,8 +80,11 @@ Action pipeline: `preflight → static → baseline → deploy → examples →
 destroy → final-inventory`. Consent, identity verification (account, SHA,
 branch, clean worktree), checkpoint/resume, KMS-deletion authorization,
 and report privacy all behave exactly as documented for
-[live release validation](LIVE_RELEASE_VALIDATION.md). A failed example
-never skips teardown — `destroy` and `final-inventory` run regardless.
+[live release validation](LIVE_RELEASE_VALIDATION.md), and so does an
+interruption: `gco examples validate` passes Ctrl-C, `SIGTERM` and `SIGHUP`
+on to the harness and waits, up to 6 hours, for its teardown and report. A
+failed example never skips teardown — `destroy` and `final-inventory` run
+regardless.
 
 Per-run enablement is **derived from the selection**: examples that need
 off-by-default charts thread `helm_enabled_overrides` (`argocd`,
@@ -117,6 +120,13 @@ enablement, capacity gates, timeouts, and any disclosed mutations.
 | `gco dag run` | pipeline-dag (+ its two step files) | DAG run exits 0, steps complete |
 | `kubectl apply` (documented for CRDs) | kueue, volcano, yunikorn, slurm, ray, keda, multi-gpu, model-download | Jobs complete / vcjob Completed / RayCluster ready / ScaledJob spawns Jobs |
 | `kubectl apply` (platform add-ons) | argocd-gitops-job, crossplane-batch-job, kro-batch-job (+ their companion API files), ack-sqs-queue | Application Synced + Healthy at the pinned commit with its Git Jobs complete / the composed Job completes / `ACK.ResourceSynced` and the queue resolves in SQS |
+
+Every `gco` command in that table, and the `gco stacks access` and
+`gco vector ingest` calls the harness makes, runs this checkout's CLI:
+`python -m cli.main` with the harness's own interpreter, from the repository
+root. A `gco` on your `PATH` is never used, because it can be another
+release or another checkout, and the run exists to prove this commit's
+documented paths.
 
 `kubectl` reaches the PRIVATE EKS endpoint through the CLI's own
 SSM-tunnel machinery (`gco cluster tunnel --via-ssm auto` internals). A
@@ -172,9 +182,10 @@ skip):
   deletes the queue.
 - **vector-store-search-job** — runs the documented prerequisite verbatim
   (`gco vector ingest --demo --wait`), records exactly which corpus objects
-  were uploaded, and reverts precisely those afterwards: the DynamoDB chunk
-  items per recorded source key, then the S3 objects. A pre-existing user
-  corpus in the same table is never touched.
+  were uploaded, and reverts precisely those afterwards, in the table and
+  bucket of the run's project and global Region (the ones the ingest used):
+  the DynamoDB chunk items per recorded source key, then the S3 objects. A
+  pre-existing user corpus in the same table is never touched.
 - **kubeflow-trainjob** — waits for the TrainJob CRD and the shipped
   `torch-distributed` runtime before submitting (deploy-time artifacts;
   nothing to revert).
@@ -212,7 +223,10 @@ queue or the Argo CD example's commit under validation.
 Capacity-gated examples (`efa-distributed-training` on P-family,
 inferentia/trainium on Inf/Trn) check the account's service quota first
 and record an explicit **skipped** row with the quota evidence when it is
-zero — a skip is never silent.
+zero — a skip is never silent. A quota the run cannot read (no
+`servicequotas:GetServiceQuota` permission, a throttled or malformed answer)
+fails the example instead, because nothing then shows the account lacks the
+capacity.
 
 ## Reports
 
@@ -223,9 +237,12 @@ mode-`0600` `kubeconfig` the `examples` action reached the cluster with
 carries a per-example row (status, duration, submission command, disclosed
 mutations, criteria evidence, cleanup proof) under the `examples` action's
 `details`, whether the action passed or failed; a failed `static` action
-keeps its failed checks there the same way. Reports contain
-account-specific identifiers — share sanitized summaries only, never the
-raw files.
+keeps its failed checks there the same way. If the harness cannot start
+after a run already deployed, the failure report marks `cleanup` as
+blocked, as the release harness's does, and when the checkpoint is this
+invocation's it names the exact `--resume` command that tears the
+deployment down. Reports contain account-specific identifiers — share
+sanitized summaries only, never the raw files.
 
 ## Scoping and Iteration
 
@@ -239,6 +256,14 @@ gco examples validate --skip-examples efa-distributed-training,multi-gpu-trainin
 # Resume an interrupted run (exact identity required):
 gco examples validate --resume --run-id <id> --report-dir <dir> ...
 ```
+
+Each example's submission is checkpointed just before it is made. When a
+resumed run reaches an example an interrupted attempt may have submitted
+(its record still says it was being submitted, or it failed), the run deletes
+that example's objects first and then submits it once: `gco jobs
+submit-direct` and the manifest API rename a second submission of a Job that
+is still running, and the harness would never clean up that duplicate. A
+failed deletion fails the example without submitting it.
 
 `--examples` also narrows the derived enablement: selecting only
 `valkey-cache-job` deploys with Valkey forced on but leaves Aurora, FSx,

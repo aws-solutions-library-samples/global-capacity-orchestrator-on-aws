@@ -13,12 +13,15 @@ ECR client mocked — no Docker daemon or AWS calls.
 
 import base64
 import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cli import _image_mirror as mirror
+from gco.config.config_loader import ConfigValidationError
 
 
 def _sample_charts(**basic_overrides):
@@ -150,7 +153,7 @@ class TestCopyStrategy:
         )
 
     def test_all_platforms_commands_preserve_arch(self):
-        cmds = mirror._copy_commands(self._item(), "finch", "all-platforms", "")
+        cmds = mirror._copy_commands(self._item(), "finch", "all-platforms")
         assert cmds == [
             ["finch", "pull", "--all-platforms", "docker.io/volcanosh/vc-scheduler:v1.15.0"],
             [
@@ -167,16 +170,31 @@ class TestCopyStrategy:
             ],
         ]
 
-    def test_skopeo_command_uses_copy_all(self):
-        cmds = mirror._copy_commands(self._item(), "docker", "skopeo", "ECRTOKEN")
-        argv = cmds[0]
+    def test_skopeo_command_reads_the_login_from_the_auth_file(self):
+        """The ECR token never goes on skopeo's command line, which any
+        local user can read while the copy runs."""
+        cmds = mirror._copy_commands(
+            self._item(), "docker", "skopeo", authfile="/private/auth.json"
+        )
+        assert cmds == [
+            [
+                "skopeo",
+                "copy",
+                "--all",
+                "--dest-authfile",
+                "/private/auth.json",
+                "docker://docker.io/volcanosh/vc-scheduler:v1.15.0",
+                "docker://reg/gco/dockerhub/volcanosh/vc-scheduler:v1.15.0",
+            ]
+        ]
+
+    def test_skopeo_without_an_auth_file_uses_its_own_credential_lookup(self):
+        (argv,) = mirror._copy_commands(self._item(), "docker", "skopeo")
         assert argv[:3] == ["skopeo", "copy", "--all"]
-        assert argv[argv.index("--dest-creds") + 1] == "AWS:ECRTOKEN"
-        assert argv[-2] == "docker://docker.io/volcanosh/vc-scheduler:v1.15.0"
-        assert argv[-1] == "docker://reg/gco/dockerhub/volcanosh/vc-scheduler:v1.15.0"
+        assert not any(arg.startswith("--dest-") for arg in argv)
 
     def test_buildx_command_uses_imagetools_create(self):
-        cmds = mirror._copy_commands(self._item(), "docker", "buildx", "")
+        cmds = mirror._copy_commands(self._item(), "docker", "buildx")
         assert cmds[0][:4] == ["docker", "buildx", "imagetools", "create"]
 
 
@@ -555,6 +573,69 @@ class TestConfigurationInputs:
             "ecr_namespace": "research/dockerhub",
         }
 
+    @staticmethod
+    def _cdk_json(tmp_path: Path, block: object) -> Path:
+        config_path = tmp_path / "cdk.json"
+        config_path.write_text(
+            json.dumps({"context": {"project_name": "research", "volcano_image_mirror": block}}),
+            encoding="utf-8",
+        )
+        return config_path
+
+    @pytest.mark.parametrize("value", ["false", "off", 1, None])
+    def test_an_enabled_value_the_synth_rejects_is_an_error_not_truthiness(
+        self, tmp_path: Path, value: object
+    ):
+        """MIRROR-FLAG: ``bool("false")`` is True, so the deploy path mirrored
+        images for a cdk.json whose synth then fails; the flag now follows the
+        regional stack's read_block_flag."""
+        config_path = self._cdk_json(tmp_path, {"enabled": value})
+
+        with pytest.raises(ConfigValidationError, match=r"volcano_image_mirror\.enabled must be"):
+            mirror.read_mirror_config(config_path)
+        # The namespace alone does not depend on the flag.
+        assert mirror.cdk_default_namespace(config_path) == "research/dockerhub"
+
+    def test_the_string_true_still_reads_as_true(self, tmp_path: Path):
+        config_path = self._cdk_json(tmp_path, {"enabled": "TRUE"})
+
+        assert mirror.read_mirror_config(config_path) == {
+            "enabled": True,
+            "ecr_namespace": "research/dockerhub",
+        }
+
+    def test_a_block_that_is_not_an_object_is_an_error(self, tmp_path: Path):
+        config_path = self._cdk_json(tmp_path, "enabled")
+
+        with pytest.raises(ConfigValidationError, match="volcano_image_mirror must be an object"):
+            mirror.read_mirror_config(config_path)
+        assert mirror.cdk_default_namespace(config_path) == "research/dockerhub"
+
+    def test_a_json_boolean_is_read_without_importing_aws_cdk(self, tmp_path: Path):
+        """A base install has no aws_cdk (the ``cdk`` extra); the common case
+        must not import the config loader that needs it."""
+        config_path = self._cdk_json(tmp_path, {"enabled": True})
+        snippet = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from cli import _image_mirror\n"
+            f"config = _image_mirror.read_mirror_config(Path({str(config_path)!r}))\n"
+            "assert config['enabled'] is True, config\n"
+            "assert 'gco.config.config_loader' not in sys.modules, 'config loader imported'\n"
+            "assert 'aws_cdk' not in sys.modules, 'aws_cdk imported'\n"
+            "print('ok')\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", snippet],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == "ok"
+
 
 class TestRuntimeCapabilities:
     @pytest.mark.parametrize(
@@ -584,6 +665,7 @@ class TestRuntimeCapabilities:
 
         run.assert_called_once_with(
             ["docker", "buildx", "version"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=15,
             check=False,
@@ -614,6 +696,7 @@ class TestRuntimeCapabilities:
 
         run.assert_called_once_with(
             ["finch", "pull", "--help"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=15,
@@ -698,11 +781,11 @@ class TestCopyExecution:
 
     def test_unknown_copy_strategy_is_rejected(self):
         with pytest.raises(ValueError, match="unknown copy strategy"):
-            mirror._copy_commands(self._item(), "docker", "single-platform", "")
+            mirror._copy_commands(self._item(), "docker", "single-platform")
 
     def test_all_platform_commands_run_in_pull_tag_push_order(self):
         item = self._item()
-        expected = mirror._copy_commands(item, "finch", "all-platforms", "")
+        expected = mirror._copy_commands(item, "finch", "all-platforms")
         successful = [MagicMock(returncode=0, stdout="", stderr="") for _ in expected]
 
         with patch.object(mirror.subprocess, "run", side_effect=successful) as run:
@@ -725,6 +808,73 @@ class TestCopyExecution:
 
         assert run.call_count == 2
         assert run.call_args_list[-1].args[0][:2] == ["finch", "tag"]
+
+
+class TestChildStdin:
+    def test_children_never_read_the_callers_stdin(self):
+        """MIRROR-STDIN: the MCP server runs the mirror in-process, where its
+        stdin is the client's JSON-RPC stream. Every child gets /dev/null,
+        except the login, which is fed the password."""
+        item = mirror.MirrorItem(
+            source_ref="docker.io/example/image:v1",
+            dest_repo="gco/dockerhub/example/image",
+            dest_ref="registry.example.com/gco/dockerhub/example/image:v1",
+        )
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(cmd, **kwargs):
+            calls.append((list(cmd), kwargs))
+            return MagicMock(returncode=0, stdout="--all-platforms", stderr="")
+
+        with patch.object(mirror.subprocess, "run", side_effect=run):
+            mirror._runtime_has_buildx("docker")
+            mirror._runtime_supports_all_platforms("finch")
+            mirror.copy_image(item, runtime="docker", strategy="buildx", log=lambda _m: None)
+            mirror.runtime_login("docker", "registry.example.com", "AWS", "token", log=print)
+
+        assert [cmd[:2] for cmd, _ in calls] == [
+            ["docker", "buildx"],
+            ["finch", "pull"],
+            ["docker", "buildx"],
+            ["docker", "login"],
+        ]
+        for cmd, kwargs in calls:
+            if cmd[1] == "login":
+                assert kwargs["input"] == b"token" and "stdin" not in kwargs
+            else:
+                assert kwargs["stdin"] is subprocess.DEVNULL, cmd
+
+
+class TestRegistryAuthfile:
+    def test_holds_one_login_readable_only_by_its_owner(self):
+        with mirror.registry_authfile("registry.example.com", "AWS", "secret-token") as path:
+            authfile = Path(path)
+            assert authfile.stat().st_mode & 0o777 == 0o600
+            assert authfile.parent.stat().st_mode & 0o777 == 0o700
+            document = json.loads(authfile.read_text(encoding="utf-8"))
+        assert document == {
+            "auths": {
+                "registry.example.com": {
+                    "auth": base64.b64encode(b"AWS:secret-token").decode(),
+                }
+            }
+        }
+        assert not authfile.exists()
+        assert not authfile.parent.exists()
+
+    def test_is_removed_when_a_copy_fails(self):
+        seen: list[Path] = []
+
+        def copy_that_fails() -> None:
+            with mirror.registry_authfile("registry.example.com", "AWS", "secret-token") as path:
+                seen.append(Path(path))
+                raise RuntimeError("image copy failed")
+
+        with pytest.raises(RuntimeError, match="image copy failed"):
+            copy_that_fails()
+        (authfile,) = seen
+        assert not authfile.exists()
+        assert not authfile.parent.exists()
 
 
 class TestMirrorImages:
@@ -815,7 +965,25 @@ class TestMirrorImages:
         assert any("skip (already mirrored)" in message for message in logs)
 
     def test_skopeo_force_copy_does_not_use_runtime_login_or_presence_probe(self):
+        """skopeo gets the ECR login from a private auth file that exists only
+        while the copies run, never from its command line."""
         source_ref = "docker.io/example/image:v1"
+        registry_host = "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+        copies: list[dict[str, object]] = []
+
+        def run(argv, **_kwargs):
+            authfile = Path(argv[argv.index("--dest-authfile") + 1])
+            copies.append(
+                {
+                    "argv": argv,
+                    "authfile": authfile,
+                    "file_mode": authfile.stat().st_mode & 0o777,
+                    "dir_mode": authfile.parent.stat().st_mode & 0o777,
+                    "auths": json.loads(authfile.read_text(encoding="utf-8"))["auths"],
+                }
+            )
+            return MagicMock(returncode=0, stdout="", stderr="")
+
         with (
             patch.object(mirror, "_account_id", return_value="123456789012"),
             patch.object(mirror, "detect_runtime", return_value="docker"),
@@ -824,7 +992,7 @@ class TestMirrorImages:
             patch.object(mirror, "runtime_login") as runtime_login,
             patch.object(mirror, "ensure_repository", return_value=False),
             patch.object(mirror, "tag_exists") as tag_exists,
-            patch.object(mirror, "copy_image") as copy_image,
+            patch.object(mirror.subprocess, "run", side_effect=run),
             patch.object(mirror.boto3, "client", return_value=MagicMock()),
         ):
             result = mirror.mirror_images(
@@ -836,13 +1004,20 @@ class TestMirrorImages:
 
         runtime_login.assert_not_called()
         tag_exists.assert_not_called()
-        copy_image.assert_called_once()
-        assert copy_image.call_args.kwargs["runtime"] == "docker"
-        assert copy_image.call_args.kwargs["strategy"] == "skopeo"
-        assert copy_image.call_args.kwargs["password"] == "secret-token"
-        assert result["mirrored"] == [
-            "123456789012.dkr.ecr.us-east-1.amazonaws.com/gco/dockerhub/example/image:v1"
-        ]
+        (copy,) = copies
+        argv = copy["argv"]
+        assert argv[:3] == ["skopeo", "copy", "--all"]
+        assert not any("secret-token" in arg for arg in argv)
+        assert "--dest-creds" not in argv
+        assert copy["file_mode"] == 0o600
+        assert copy["dir_mode"] == 0o700
+        assert copy["auths"] == {
+            registry_host: {"auth": base64.b64encode(b"AWS:secret-token").decode()}
+        }
+        # Removed, with its directory, once the copies are done.
+        assert not copy["authfile"].exists()
+        assert not copy["authfile"].parent.exists()
+        assert result["mirrored"] == [f"{registry_host}/gco/dockerhub/example/image:v1"]
         assert result["skipped"] == []
         assert result["created_repositories"] == []
 

@@ -38,7 +38,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-from gco.service_images import discover_service_dockerfiles
+from gco.service_images import IMAGE_NAME_RE, discover_service_dockerfiles
 
 from ._container_runtime import detect_container_runtime
 from ._image_uri import (
@@ -46,13 +46,14 @@ from ._image_uri import (
     ecr_registry_host,
 )
 from ._image_uri import (
-    rewrite_image_uri_for_region as _rewrite_image_uri_for_region,  # noqa: F401
+    rewrite_image_uri_for_region as _rewrite_image_uri_for_region,
 )
 from .config import GCOConfig, _load_cdk_json, get_config
+from .costs import PROJECT_TAG_KEY, project_tag_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-25T13:00:05Z
-# Generated from Git commit: de508a874e7ac267180e26a4c6fc56c1cd0878c2
+# Generated at (UTC): 2026-11-19T14:17:34Z
+# Generated from Git commit: d0db0066b3e8f603134a252ab3753efd40d90493
 # Flowchart(s) generated from this file:
 #   * ``ImageManager.build`` -> ``diagrams/code_diagrams/cli/images.ImageManager_build.html``
 #     (PNG: ``diagrams/code_diagrams/cli/images.ImageManager_build.png``)
@@ -68,11 +69,12 @@ logger = logging.getLogger(__name__)
 
 # Image name and tag validation regexes.
 #
-# Names: short, dns-friendly. Lowercase letter start, lowercase
-# alphanumerics and dashes after, max 63 characters total. The regex
-# also accepts a single character (``^[a-z]$``) — any longer name
-# requires a closing alphanumeric so dangling dashes are rejected.
-_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+# Names become ``<project>/<name>`` ECR repository suffixes, so they follow the
+# rule gco/service_images.py applies to the service images: a lowercase letter,
+# then lowercase letters and digits joined by single dashes, at most 63
+# characters. ECR rejects a path segment that ends in a dash or holds two in a
+# row.
+_NAME_RE = IMAGE_NAME_RE
 
 # Tags: docker reference grammar. First character must be alnum or
 # underscore; subsequent characters allow dot, dash, underscore.
@@ -197,10 +199,11 @@ class ImageManager:
 
     def _validate_name(self, name: str) -> str:
         """Validate an image name against ``_NAME_RE``."""
-        if not _NAME_RE.match(name):
+        if not _NAME_RE.fullmatch(name):
             raise ValueError(
-                f"Invalid image name: {name!r}. Expected lowercase letters, "
-                "digits, and dashes; must start with a letter; max 63 chars."
+                f"Invalid image name: {name!r}. Expected lowercase letters and digits "
+                "joined by single dashes; must start with a letter and end with a "
+                "letter or digit; max 63 chars."
             )
         return name
 
@@ -221,6 +224,7 @@ class ImageManager:
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--short", "HEAD"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -359,7 +363,15 @@ class ImageManager:
             )
 
     def _apply_retain_tag(self, name: str) -> None:
-        """Apply the ``gco:retain=true`` resource tag to the repository."""
+        """Apply the ``gco:retain=true`` resource tag to the repository.
+
+        A marker only. No GCO stack creates or deletes ``<project>/*``
+        repositories, so every one survives ``gco stacks destroy`` with or
+        without it, and :meth:`delete_repo` deletes a tagged one too. The one
+        reader is the image-lookup custom resource handler
+        (lambda/image-lookup), which keeps a tagged repository on delete; the
+        global stack exports it, but no GCO stack uses it.
+        """
         ecr = self._ecr_client()
         ecr.tag_resource(
             resourceArn=self._repo_arn(name),
@@ -390,8 +402,8 @@ class ImageManager:
             build_args: Optional ``KEY=value`` build args.
             platform: ``--platform`` argument for the build (default
                 ``linux/amd64``).
-            retain: When True, mark the repository with ``gco:retain=true``
-                so it survives stack destroys.
+            retain: When True, tag the repository ``gco:retain=true`` (a
+                marker; see :meth:`_apply_retain_tag`).
             quiet: Capture container build output instead of writing it to the
                 command's output stream. Used for machine-readable CLI output.
 
@@ -431,7 +443,7 @@ class ImageManager:
         build_cmd.append(str(ctx))
 
         logger.info("Building image: %s", " ".join(build_cmd))
-        build_run_kwargs: dict[str, Any] = {"cwd": str(ctx)}
+        build_run_kwargs: dict[str, Any] = {"cwd": str(ctx), "stdin": subprocess.DEVNULL}
         if quiet:
             build_run_kwargs.update(capture_output=True, text=True)
         # check=True: a failed build must not fall through to the push below.
@@ -439,6 +451,7 @@ class ImageManager:
 
         push_result = subprocess.run(
             [runtime, "push", full_uri],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             check=True,
@@ -489,13 +502,14 @@ class ImageManager:
 
         full_uri = f"{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}"
 
-        tag_run_kwargs: dict[str, Any] = {}
+        tag_run_kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL}
         if quiet:
             tag_run_kwargs.update(capture_output=True, text=True)
         # check=True: a failed tag must not fall through to the push below.
         subprocess.run([runtime, "tag", local_image, full_uri], check=True, **tag_run_kwargs)
         push_result = subprocess.run(
             [runtime, "push", full_uri],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             check=True,
@@ -596,14 +610,22 @@ class ImageManager:
         return rows
 
     def describe(self, name: str, tag: str) -> dict[str, Any]:
-        """Return the full ECR image details for a single tag."""
+        """Return the full ECR image details for a single tag, or ``{}`` without one.
+
+        DescribeImages answers a tag the repository does not have with
+        ImageNotFoundException rather than an empty list; both mean ``{}``.
+        A missing repository still raises.
+        """
         validated_name = self._validate_name(name)
         validated_tag = self._validate_tag(tag)
         ecr = self._ecr_client()
-        resp = ecr.describe_images(
-            repositoryName=f"{self._repo_prefix}/{validated_name}",
-            imageIds=[{"imageTag": validated_tag}],
-        )
+        try:
+            resp = ecr.describe_images(
+                repositoryName=f"{self._repo_prefix}/{validated_name}",
+                imageIds=[{"imageTag": validated_tag}],
+            )
+        except ecr.exceptions.ImageNotFoundException:
+            return {}
         details = resp.get("imageDetails", [])
         if not details:
             return {}
@@ -675,33 +697,28 @@ class ImageManager:
             return f"{repo}:{tag}"
         return _DISAGGREGATED_DEFAULT_IMAGE
 
-    def _current_replication_configuration(self, ecr: Any) -> tuple[str | None, dict[str, Any]]:
-        """Return the registry ID and current ECR replication configuration."""
-        try:
-            response = ecr.get_replication_configuration()
-        except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "")
-            if code == "ReplicationConfigurationNotFoundException":
-                return None, {"rules": []}
-            raise
+    def _current_replication_configuration(self, ecr: Any) -> tuple[str, dict[str, Any]]:
+        """Return the registry ID and the registry's ECR replication configuration.
 
-        configuration = response.get("replicationConfiguration") or {"rules": []}
-        if not isinstance(configuration, dict):
-            configuration = {"rules": []}
-        if not isinstance(configuration.get("rules"), list):
-            configuration = {**configuration, "rules": []}
-        return response.get("registryId"), configuration
+        ECR has no GetReplicationConfiguration operation: DescribeRegistry
+        returns the rules (:func:`cli.ecr_replication.read_registry`), an empty
+        list when none are configured.
+        """
+        from .ecr_replication import read_registry
+
+        registry_id, rules = read_registry(ecr)
+        return registry_id, {"rules": rules}
 
     def replication_get(self) -> dict[str, Any]:
-        """Return the current ECR replication configuration, or ``{}``.
+        """Return the registry's ECR replication configuration.
 
-        The historical ``policy`` response key is retained for CLI/API
-        compatibility, but its value now comes from the replication API rather
-        than the unrelated registry-permissions policy API.
+        ``{"registryId": ..., "policy": {"rules": [...]}}``, with an empty
+        ``rules`` list when none are configured. The historical ``policy``
+        response key is retained for CLI/API compatibility, but its value now
+        comes from the replication API rather than the unrelated
+        registry-permissions policy API.
         """
         registry_id, configuration = self._current_replication_configuration(self._ecr_client())
-        if not configuration.get("rules"):
-            return {}
         return {
             "registryId": registry_id,
             "policy": configuration,
@@ -765,7 +782,9 @@ class ImageManager:
         """Create the project repository idempotently with default lifecycle.
 
         ``CreateRepository`` is invoked with ``imageTagMutability=MUTABLE``
-        and ``scanOnPush=True``. If the repository already exists, the
+        and ``scanOnPush=True``, and tags the repository ``Project`` with the
+        value the stacks carry (:func:`cli.costs.project_tag_value`), the tag
+        ``gco costs`` filters on. If the repository already exists, the
         method becomes a no-op for repository creation but still applies
         the default lifecycle policy and the optional ``gco:retain`` tag.
         """
@@ -780,7 +799,7 @@ class ImageManager:
                 imageTagMutability="MUTABLE",
                 imageScanningConfiguration={"scanOnPush": True},
                 tags=[
-                    {"Key": "Project", "Value": self.config.project_name},
+                    {"Key": PROJECT_TAG_KEY, "Value": project_tag_value()},
                 ],
             )
             created = True
@@ -902,11 +921,13 @@ class ImageManager:
             **current,
             "rules": [*preserved_rules, managed_rule],
         }
-        response = ecr.put_replication_configuration(replicationConfiguration=configuration)
+        # The response carries only the configuration written; the registry ID
+        # is the one DescribeRegistry reported.
+        ecr.put_replication_configuration(replicationConfiguration=configuration)
         return {
             "configuration": configuration,
             "destinations": destinations,
-            "registry_id": response.get("registryId") or registry_id or account,
+            "registry_id": registry_id,
             "updated": True,
         }
 
@@ -1066,17 +1087,20 @@ class ImageManager:
         }
 
     def orphans(self, threshold_days: int = 30) -> list[dict[str, Any]]:
-        """List ``gco/*`` tags older than ``threshold_days`` with no references.
+        """List ``<project>/*`` tags older than ``threshold_days`` that nothing uses.
 
-        Cross-references against:
-          * inference endpoint specs (via :class:`cli.inference.InferenceManager`),
-          * recent jobs (best-effort; returns empty for the jobs side when
-            the queue table schema is unavailable).
+        A tag is in use when an inference endpoint's record or a job names it,
+        by tag or by digest, through any Region's replica of the registry
+        (:meth:`_references_here`). Jobs count while they are unfinished, and
+        finished ones while they are newer than ``threshold_days``. Every
+        source must be read: a failure raises rather than report the tags of
+        an unread endpoint or Region as orphans.
         """
         cutoff = datetime.now(UTC) - timedelta(days=threshold_days)
-        referenced: set[str] = set()
-        referenced.update(self._collect_inference_image_refs())
-        referenced.update(self._collect_recent_job_image_refs(threshold_days))
+        tags_in_use, digests_in_use = self._references_here(
+            self._collect_inference_image_refs()
+            | self._collect_recent_job_image_refs(threshold_days)
+        )
 
         rows: list[dict[str, Any]] = []
         for repo in self.list_repos():
@@ -1088,89 +1112,108 @@ class ImageManager:
                 pushed = self._parse_iso(tag_row.get("pushed_at"))
                 if pushed and pushed >= cutoff:
                     continue
-                uri = f"{self._registry_host()}/{repo_name}:{tag}"
-                if uri in referenced:
+                repository = f"{self._registry_host()}/{repo_name}"
+                uri = f"{repository}:{tag}"
+                digest = tag_row.get("digest")
+                if uri in tags_in_use or f"{repository}@{digest}" in digests_in_use:
                     continue
                 rows.append(
                     {
                         "repository": repo_name,
                         "tag": tag,
-                        "digest": tag_row.get("digest"),
+                        "digest": digest,
                         "pushed_at": tag_row.get("pushed_at"),
                         "uri": uri,
                     }
                 )
         return rows
 
+    def _references_here(self, refs: set[str]) -> tuple[set[str], set[str]]:
+        """Return ``(tag_uris, digest_uris)`` for ``refs`` as this Region names them.
+
+        Endpoints and jobs name the replica in their own Region
+        (:func:`cli._image_uri.rewrite_image_uri_for_region`), so an ECR
+        reference is first rewritten to this manager's Region. A reference
+        with a digest (``repo@sha256:...``, also ``repo:tag@sha256:...``)
+        names that image whatever its tags; one without a tag or digest
+        names ``:latest``.
+        """
+        tag_uris: set[str] = set()
+        digest_uris: set[str] = set()
+        for ref in refs:
+            name, _, digest = _rewrite_image_uri_for_region(ref, self.region).partition("@")
+            slash, colon = name.rfind("/"), name.rfind(":")
+            repository, tag = (name[:colon], name[colon + 1 :]) if colon > slash else (name, "")
+            if digest:
+                digest_uris.add(f"{repository}@{digest}")
+                if tag:
+                    tag_uris.add(name)
+            else:
+                tag_uris.add(f"{repository}:{tag or 'latest'}")
+        return tag_uris, digest_uris
+
     def _collect_inference_image_refs(self) -> set[str]:
-        """Return every image URI referenced by a registered inference endpoint."""
+        """Return every image an inference endpoint's record names.
+
+        That is each ``image`` value anywhere in the record (the endpoint's,
+        the canary's, the Mooncake proxy's) and each per-Region replica URI in
+        ``region_image_uris``. Raises when the endpoints cannot be read.
+        """
+        from .inference import InferenceManager
+
         try:
-            from .inference import InferenceManager
+            endpoints = InferenceManager(self.config).list_endpoints()
         except Exception as e:
-            logger.debug("InferenceManager unavailable: %s", e)
-            return set()
-        try:
-            manager = InferenceManager(self.config)
-            endpoints = manager.list_endpoints()
-        except Exception as e:
-            logger.debug("list_endpoints failed: %s", e)
-            return set()
+            raise RuntimeError(f"could not read the inference endpoints: {e}") from e
+
         refs: set[str] = set()
-        for ep in endpoints or []:
-            spec = ep.get("spec") or {}
-            image = spec.get("image") if isinstance(spec, dict) else None
-            if image:
-                refs.add(image)
-            canary = spec.get("canary") if isinstance(spec, dict) else None
-            if isinstance(canary, dict) and canary.get("image"):
-                refs.add(canary["image"])
+
+        def collect(node: Any) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key == "image" and isinstance(value, str) and value:
+                        refs.add(value)
+                    elif key == "region_image_uris" and isinstance(value, dict):
+                        refs.update(uri for uri in value.values() if isinstance(uri, str) and uri)
+                    else:
+                        collect(value)
+            elif isinstance(node, list):
+                for item in node:
+                    collect(item)
+
+        collect(endpoints)
         return refs
 
     def _collect_recent_job_image_refs(self, threshold_days: int = 30) -> set[str]:
-        """Return image URIs referenced by jobs newer than ``threshold_days``.
+        """Return the images of every unfinished job and of jobs newer than ``threshold_days``.
 
-        Walks every deployed region via :class:`cli.jobs.JobManager` and
-        unions the ``image_refs`` field on each ``JobInfo`` whose
-        ``created_time`` is within the cutoff. Treats jobs without a
-        ``created_time`` as in-window so a freshly-submitted job that
-        hasn't yet been picked up by the cluster's status loop isn't
-        accidentally considered orphaned.
-
-        Best-effort: any per-region failure is logged at debug and
-        skipped so the orphan scan still completes against the
-        regions that did respond. The deferred import breaks an
+        Lists each regional stack's jobs with :class:`cli.jobs.JobManager`, one
+        Region at a time, so a Region that cannot be read raises instead of
+        being skipped: a job there may use any tag. A job without a
+        ``created_time`` counts as new. The deferred imports break an
         otherwise-circular ``cli.images`` ↔ ``cli.jobs`` dependency.
         """
-        try:
-            from .jobs import JobManager
-        except Exception as e:
-            logger.debug("JobManager unavailable: %s", e)
-            return set()
+        from .aws_client import get_aws_client
+        from .jobs import JobManager
 
-        try:
-            manager = JobManager(self.config)
-        except Exception as e:
-            logger.debug("JobManager init failed: %s", e)
-            return set()
-
-        try:
-            jobs = manager.list_jobs(all_regions=True)
-        except Exception as e:
-            logger.debug("list_jobs(all_regions=True) failed: %s", e)
-            return set()
-
+        manager = JobManager(self.config)
+        regions = sorted(get_aws_client(self.config).discover_regional_stacks())
         cutoff = datetime.now(UTC) - timedelta(days=threshold_days)
         refs: set[str] = set()
-        for job in jobs or []:
-            created = getattr(job, "created_time", None)
-            if isinstance(created, datetime):
-                created_aware = created if created.tzinfo else created.replace(tzinfo=UTC)
-                if created_aware < cutoff:
+        for region in regions:
+            try:
+                jobs = manager.list_jobs(region=region)
+            except Exception as e:
+                raise RuntimeError(f"could not list the jobs in {region}: {e}") from e
+            for job in jobs:
+                created = self._parse_iso(getattr(job, "created_time", None))
+                finished = getattr(job, "status", None) in ("succeeded", "failed")
+                if finished and created is not None and created < cutoff:
                     continue
-            image_refs = getattr(job, "image_refs", None) or []
-            for ref in image_refs:
-                if isinstance(ref, str) and ref:
-                    refs.add(ref)
+                refs.update(
+                    ref for ref in getattr(job, "image_refs", None) or [] if isinstance(ref, str)
+                )
+        refs.discard("")
         return refs
 
     @staticmethod

@@ -179,7 +179,7 @@ def test_discovery_finds_expected_blocks() -> None:
         "eks_cluster",
         "global_accelerator",
         "backend_tls",
-        "alb_config",
+        "gateway_health_check",
         "api_gateway",
         "waf",
         "manifest_processor",

@@ -14,12 +14,13 @@ import re
 from typing import Any
 
 import cli_runner
-from cli_runner import PROJECT_ROOT  # runtime-resolved checkout root (uvx-safe)
+from iam import child_environment
 from server import mcp
 
 from resources._eks import eks_context_for_region, is_valid_region
 
-MANIFESTS_DIR = PROJECT_ROOT / "lambda" / "kubectl-applier-simple" / "manifests"
+# cli_runner.PROJECT_ROOT: the runtime-resolved checkout root (uvx-safe).
+MANIFESTS_DIR = cli_runner.PROJECT_ROOT / "lambda" / "kubectl-applier-simple" / "manifests"
 
 # Permissive RFC 1123 label rule for namespace and resource names.
 # Bounded length plus the alphanumeric+hyphen alphabet rules out
@@ -97,9 +98,11 @@ def _k8s_live_resource_for_region(region: str, namespace: str, kind: str, name: 
                 "--context",
                 context_arn,
             ],
+            stdin=cli_runner.subprocess.DEVNULL,  # type: ignore[attr-defined]
             capture_output=True,
             text=True,
             timeout=_KUBECTL_TIMEOUT_SECONDS,
+            env=child_environment(),
         )
     except FileNotFoundError:
         return json.dumps({"error": "kubectl not found"})

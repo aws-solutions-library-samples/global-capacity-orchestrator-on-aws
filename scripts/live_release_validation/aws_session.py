@@ -23,10 +23,16 @@ the *other* config precedence on conflicts).
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 import boto3
 from botocore.config import Config
+
+from cli.aws_client import GCOAWSClient
+
+logger = logging.getLogger(__name__)
 
 # ``adaptive`` includes everything ``standard`` retries (throttling errors,
 # transient 5xx, timeouts) and adds client-side rate limiting. The attempt
@@ -71,3 +77,57 @@ class ThrottleResilientSession:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._session, name)
+
+
+# AWS WAF answers a request its web ACL blocks through API Gateway's
+# ``WAF_FILTERED`` gateway response: HTTP 403 with this body. WAF decides
+# before API Gateway authorizes or integrates anything, so a blocked request
+# never reached GCO and sending it again is safe for every method. An IAM
+# refusal names the caller ("User: ... is not authorized ..."), and an
+# unknown route says "Missing Authentication Token", so neither matches.
+_WAF_BLOCK_BODY = {"message": "Forbidden"}
+#: Wait between attempts while the web ACL blocks this host.
+_WAF_RETRY_INTERVAL_SECONDS = 30.0
+#: GCO's per-IP rate rule counts a trailing five-minute window and WAF
+#: re-evaluates it about every 30 seconds, so a block clears within about six
+#: minutes of the burst that caused it; seven bounds the wait.
+_WAF_RETRY_DEADLINE_SECONDS = 420.0
+
+
+def is_waf_block(response: Any) -> bool:
+    """Whether ``response`` is API Gateway relaying an AWS WAF block."""
+    if getattr(response, "status_code", None) != 403:
+        return False
+    try:
+        return bool(response.json() == _WAF_BLOCK_BODY)
+    except ValueError:
+        return False
+
+
+class WafPatientApiClient(GCOAWSClient):
+    """The CLI's API client, waiting out the API's per-IP AWS WAF rate rule.
+
+    The global API's web ACL blocks a source IP that sends more than
+    ``waf.per_ip_rate_limit`` requests (100 by default) in five minutes. The
+    harness polls jobs, add-ons and backends from one machine, and a busy
+    action crossed that limit live: the ``schedulers`` action's PCS status
+    read got the WAF's 403 and failed the run. Every request, including the
+    ones the client's other methods make, goes through this method: a WAF
+    block is retried every 30 seconds for up to seven minutes, and the last
+    response is returned when the block outlasts that, so a real outage still
+    fails. Any other response, a 403 that is not WAF's included, is returned
+    as it is.
+    """
+
+    def make_authenticated_request(self, *args: Any, **kwargs: Any) -> Any:
+        deadline = time.monotonic() + _WAF_RETRY_DEADLINE_SECONDS
+        while True:
+            response = super().make_authenticated_request(*args, **kwargs)
+            if not is_waf_block(response) or time.monotonic() >= deadline:
+                return response
+            logger.warning(
+                "The API's AWS WAF rate rule blocked this host; retrying in %.0fs",
+                _WAF_RETRY_INTERVAL_SECONDS,
+            )
+            response.close()
+            time.sleep(_WAF_RETRY_INTERVAL_SECONDS)

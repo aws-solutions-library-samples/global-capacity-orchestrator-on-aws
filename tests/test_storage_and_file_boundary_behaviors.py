@@ -311,6 +311,7 @@ def test_upload_detects_source_change_between_plan_and_open(tmp_path: Path) -> N
         key="source.bin",
         size=4,
         sha256="0" * 64,
+        crc32=0,
         signature=signature,
         current=False,
     )
@@ -393,6 +394,7 @@ def test_open_upload_source_rejects_nonregular_descriptor(
         key="source",
         size=0,
         sha256="0" * 64,
+        crc32=0,
         signature=(1, 2, 3, 4),
         current=False,
     )
@@ -419,6 +421,7 @@ def test_verify_upload_source_signature_rejects_replaced_path(
         key="source",
         size=4,
         sha256="0" * 64,
+        crc32=0,
         signature=(1, 2, 3, 4),
         current=False,
     )
@@ -493,35 +496,23 @@ def test_file_system_lookup_continues_past_wrong_type() -> None:
     assert client.get_file_system_by_region("us-east-1", "efs") is None
 
 
-def test_datasync_lookup_continues_past_wrong_file_system_id() -> None:
-    client = _file_client()
-    client.get_file_systems = Mock(
-        return_value=[
-            FileSystemInfo(
-                file_system_id="fs-other",
-                file_system_type="efs",
-                region="us-east-1",
-                dns_name="efs.example",
-            )
-        ]
-    )
-
-    with pytest.raises(ValueError, match="fs-target not found"):
-        client.create_datasync_download_task(
-            "fs-target",
-            "us-east-1",
-            "/data",
-            "destination",
-        )
-
-
 def test_access_point_client_error_returns_empty_list() -> None:
+    import boto3
+    from botocore.stub import Stubber
+
     client = _file_client()
-    efs = MagicMock()
-    efs.describe_access_points.side_effect = _client_error("AccessDeniedException")
+    efs = boto3.client(
+        "efs",
+        region_name="us-east-1",
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",  # nosec B106 - fake credentials, nothing is sent
+    )
+    stubber = Stubber(efs)
+    stubber.add_client_error("describe_access_points", service_error_code="FileSystemNotFound")
     client._session.client.return_value = efs
 
-    assert client.get_access_point_info("fs-123", "us-east-1") == []
+    with stubber:
+        assert client.get_access_point_info("fs-123", "us-east-1") == []
 
 
 def _client_error(code: str):

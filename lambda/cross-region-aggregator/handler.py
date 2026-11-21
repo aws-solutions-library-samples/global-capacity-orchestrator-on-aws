@@ -41,8 +41,8 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-16T14:35:30Z
-# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
+# Generated at (UTC): 2026-11-18T16:59:04Z
+# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/cross-region-aggregator/handler.lambda_handler.png``)
@@ -61,8 +61,21 @@ _DNS_SUFFIX_RE = re.compile(
 
 # Regional API Gateway uses the AWS public trust chain. Certificate validation
 # remains mandatory; the private-root pool is used only by each VPC proxy's
-# subsequent ALB connection.
-http = urllib3.PoolManager(cert_reqs="CERT_REQUIRED")
+# subsequent ALB connection. urllib3's own retries are off: they re-sent a
+# timed-out GET or DELETE up to three more times, each with a fresh timeout,
+# which outlasted the function's 29-second timeout (the whole request then
+# failed at API Gateway instead of one Region being reported as an error) and
+# re-sent a bulk DELETE while the first was still running.
+http = urllib3.PoolManager(cert_reqs="CERT_REQUIRED", retries=False)
+
+#: Kept back from the invocation's remaining time to assemble and return the
+#: aggregate response. Every regional request must finish before that.
+_RESPONSE_HEADROOM_SECONDS = 2.0
+#: The regional request budget when the remaining time is unknown: the
+#: function's 29-second timeout less the headroom.
+_DEFAULT_REQUEST_BUDGET_SECONDS = 27.0
+#: The regional jobs API's own ``limit`` ceiling (gco/services/api_routes/jobs.py).
+_MAX_JOBS_LIMIT = 1000
 
 _cached_endpoints: dict[str, str] | None = None
 _endpoints_cache_time: float = 0
@@ -186,6 +199,19 @@ def _sigv4_headers(region: str, method: str, url: str, body: str | None) -> dict
     return {str(key): str(value) for key, value in request.headers.items()}
 
 
+class _BadRequest(ValueError):
+    """Client input the aggregator rejects with 400."""
+
+
+def _request_deadline(context: Any) -> float:
+    """The ``time.monotonic()`` by which every regional request must finish."""
+    get_remaining_time = getattr(context, "get_remaining_time_in_millis", None)
+    budget = _DEFAULT_REQUEST_BUDGET_SECONDS
+    if callable(get_remaining_time):
+        budget = float(get_remaining_time()) / 1000.0 - _RESPONSE_HEADROOM_SECONDS
+    return time.monotonic() + max(0.0, budget)
+
+
 def query_region(
     region: str,
     endpoint: str,
@@ -193,8 +219,23 @@ def query_region(
     method: str = "GET",
     body: str | None = None,
     query_params: dict[str, str] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
-    """Query one regional bridge over AWS-managed TLS with SigV4 authentication."""
+    """Query one regional bridge over AWS-managed TLS with SigV4 authentication.
+
+    The request is sent once and must finish by ``deadline`` (a
+    ``time.monotonic()`` value; the default budget from now when omitted), so
+    a slow Region is reported as an error while the aggregate still answers.
+    """
+    remaining = (
+        deadline - time.monotonic() if deadline is not None else _DEFAULT_REQUEST_BUDGET_SECONDS
+    )
+    if remaining <= 0:
+        return {
+            "_region": region,
+            "_status": "error",
+            "_error": "No time left to query the region",
+        }
     try:
         base_url = _normalize_regional_api_url(endpoint, region)
         query_str = "?" + urlencode(query_params) if query_params else ""
@@ -205,7 +246,7 @@ def query_region(
             url,
             headers=_sigv4_headers(region, method, url, body),
             body=body.encode("utf-8") if body else None,
-            timeout=10.0,
+            timeout=urllib3.Timeout(total=remaining),
         )
 
         if response.status == 200:
@@ -252,11 +293,13 @@ def aggregate_jobs(
     namespace: str | None = None,
     status: str | None = None,
     limit: int = 50,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Aggregate jobs from all regions."""
     endpoints = get_regional_endpoints()
 
-    query_params: dict[str, str] = {"limit": str(limit * 2)}  # Get more per region, then trim
+    # Get more per region, then trim; the regional API caps its own limit.
+    query_params: dict[str, str] = {"limit": str(min(limit * 2, _MAX_JOBS_LIMIT))}
     if namespace:
         query_params["namespace"] = namespace
     if status:
@@ -270,7 +313,14 @@ def aggregate_jobs(
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {
             executor.submit(
-                query_region, region, endpoint, "/api/v1/jobs", "GET", None, query_params
+                query_region,
+                region,
+                endpoint,
+                "/api/v1/jobs",
+                "GET",
+                None,
+                query_params,
+                deadline=deadline,
             ): region
             for region, endpoint in endpoints.items()
         }
@@ -335,7 +385,7 @@ def aggregate_jobs(
     }
 
 
-def aggregate_metrics() -> dict[str, Any]:
+def aggregate_metrics(deadline: float | None = None) -> dict[str, Any]:
     """Aggregate cluster metrics from all regions."""
     endpoints = get_regional_endpoints()
 
@@ -344,7 +394,9 @@ def aggregate_metrics() -> dict[str, Any]:
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {
-            executor.submit(query_region, region, endpoint, "/api/v1/status"): region
+            executor.submit(
+                query_region, region, endpoint, "/api/v1/status", deadline=deadline
+            ): region
             for region, endpoint in endpoints.items()
         }
 
@@ -384,7 +436,7 @@ def aggregate_metrics() -> dict[str, Any]:
     }
 
 
-def aggregate_health() -> dict[str, Any]:
+def aggregate_health(deadline: float | None = None) -> dict[str, Any]:
     """Aggregate health status from all regions."""
     endpoints = get_regional_endpoints()
 
@@ -392,7 +444,9 @@ def aggregate_health() -> dict[str, Any]:
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {
-            executor.submit(query_region, region, endpoint, "/api/v1/health"): region
+            executor.submit(
+                query_region, region, endpoint, "/api/v1/health", deadline=deadline
+            ): region
             for region, endpoint in endpoints.items()
         }
 
@@ -447,6 +501,7 @@ def bulk_delete_jobs(
     older_than_days: int | None = None,
     label_selector: str | None = None,
     dry_run: bool = True,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Bulk delete jobs across all regions."""
     endpoints = get_regional_endpoints()
@@ -473,7 +528,13 @@ def bulk_delete_jobs(
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {
             executor.submit(
-                query_region, region, endpoint, "/api/v1/jobs", "DELETE", body_str
+                query_region,
+                region,
+                endpoint,
+                "/api/v1/jobs",
+                "DELETE",
+                body_str,
+                deadline=deadline,
             ): region
             for region, endpoint in endpoints.items()
         }
@@ -516,6 +577,32 @@ def bulk_delete_jobs(
     }
 
 
+def _jobs_limit(value: Any) -> int:
+    """The ``limit`` query parameter: an integer from 1 to the regional ceiling."""
+    if value is None:
+        return 50
+    try:
+        limit = int(value)
+    except (TypeError, ValueError) as exc:
+        raise _BadRequest("limit must be an integer") from exc
+    if not 1 <= limit <= _MAX_JOBS_LIMIT:
+        raise _BadRequest(f"limit must be between 1 and {_MAX_JOBS_LIMIT}")
+    return limit
+
+
+def _json_object_body(body: str | None) -> dict[str, Any]:
+    """The request body as a JSON object; an absent body is an empty one."""
+    if not body:
+        return {}
+    try:
+        data = json.loads(body)
+    except ValueError as exc:
+        raise _BadRequest("Request body must be a JSON object") from exc
+    if not isinstance(data, dict):
+        raise _BadRequest("Request body must be a JSON object")
+    return data
+
+
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """
     Handle cross-region aggregation requests.
@@ -525,7 +612,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         GET /global/health - Health status across all regions
         GET /global/status - Cluster status across all regions
         DELETE /global/jobs - Bulk delete across all regions
+
+    Every regional request must finish ``_RESPONSE_HEADROOM_SECONDS`` before
+    the invocation's deadline. A malformed ``limit`` or DELETE body is a 400.
     """
+    deadline = _request_deadline(context)
     http_method = event.get("httpMethod", "GET")
     path = event.get("path", "")
     query_params = event.get("queryStringParameters") or {}
@@ -537,21 +628,23 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             result = aggregate_jobs(
                 namespace=query_params.get("namespace"),
                 status=query_params.get("status"),
-                limit=int(query_params.get("limit", "50")),
+                limit=_jobs_limit(query_params.get("limit")),
+                deadline=deadline,
             )
         elif path == "/api/v1/global/jobs" and http_method == "DELETE":
-            body_data = json.loads(body) if body else {}
+            body_data = _json_object_body(body)
             result = bulk_delete_jobs(
                 namespace=body_data.get("namespace"),
                 status=body_data.get("status"),
                 older_than_days=body_data.get("older_than_days"),
                 label_selector=body_data.get("label_selector"),
                 dry_run=body_data.get("dry_run", True),
+                deadline=deadline,
             )
         elif path == "/api/v1/global/health":
-            result = aggregate_health()
+            result = aggregate_health(deadline=deadline)
         elif path == "/api/v1/global/status":
-            result = aggregate_metrics()
+            result = aggregate_metrics(deadline=deadline)
         else:
             return {
                 "statusCode": 404,
@@ -564,6 +657,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "body": json.dumps(result),
         }
 
+    except _BadRequest as exc:
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"error": str(exc)}),
+        }
     except RuntimeError:
         _LOGGER.exception("Regional aggregation bridge discovery failed")
         return {

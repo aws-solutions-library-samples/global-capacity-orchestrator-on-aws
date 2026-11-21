@@ -14,6 +14,7 @@ already have your own SSM instance.
 
 from __future__ import annotations
 
+import shlex
 import socket
 import sys
 import time
@@ -21,6 +22,7 @@ from typing import Any
 
 import click
 
+from .. import cluster_ui
 from ..cluster_tunnel import (
     DEFAULT_API_LOCAL_PORT,
     ROUTE_DIRECT,
@@ -43,7 +45,7 @@ def cluster(config: Any) -> None:
 
 
 @cluster.command("tunnel")
-@click.option("--region", help="Cluster region (defaults to the first cdk.json regional entry).")
+@click.option("--region", help=cluster_ui._REGION_HELP)
 @click.option(
     "--via-ssm",
     "via_ssm",
@@ -109,10 +111,10 @@ def tunnel_cmd(
         _print_connection_plan(config, formatter, cluster_name, target_region, via_ssm, local_port)
         return
 
-    from ..kubectl_helpers import update_kubeconfig
+    from ..kubectl_helpers import kubectl_context_flags, update_kubeconfig
 
     try:
-        update_kubeconfig(cluster_name, target_region)
+        context = update_kubeconfig(cluster_name, target_region)
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))
         sys.exit(1)
@@ -131,7 +133,18 @@ def tunnel_cmd(
                 formatter.print_success(
                     f"SSM tunnel open: {session.server} → {session.plan.endpoint} (Ctrl-C to stop)"
                 )
-                kubectl_command = "kubectl " + " ".join(session.plan.kubectl_flags()) + " get nodes"
+                # The tunnel's --server overrides only the endpoint; the context
+                # supplies this cluster's credentials and CA whatever context
+                # is current in the shell that runs it.
+                kubectl_command = shlex.join(
+                    [
+                        "kubectl",
+                        *kubectl_context_flags(context),
+                        *session.plan.kubectl_flags(),
+                        "get",
+                        "nodes",
+                    ]
+                )
                 formatter.print_info(_kubectl_hint(kubectl_command))
                 _block_until_interrupt()
             elif session.route == ROUTE_DIRECT:
@@ -232,7 +245,7 @@ _DOCTOR_STATUS_MARKS = {"ok": "✓", "warn": "⚠", "fail": "✗", "unknown": "?
 
 
 @cluster.command("doctor")
-@click.option("--region", help="Cluster region (defaults to the first cdk.json regional entry).")
+@click.option("--region", help=cluster_ui._REGION_HELP)
 @pass_config
 def doctor_cmd(config: Any, region: str | None) -> None:
     """Diagnose EKS API access: reachability, authentication, authorization.

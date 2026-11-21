@@ -9,7 +9,11 @@
 # `kueue.x-k8s.io/queue-name: gco-hyperpod` to run on HyperPod capacity.
 #
 # The ClusterQueue's nominal quotas come from cdk.json hyperpod.queue; they
-# are admission caps, the instance groups are the real limit.
+# are admission caps, the instance groups are the real limit. As in the
+# default queue, Neuron devices share max_gpu and EFA interfaces get the most
+# those accelerators can attach (gco.resource_governance.kueue_efa_quota):
+# Kueue never admits a workload that requests a resource the queue does not
+# cover.
 #
 # Gated on both {{KUEUE_ENABLED}} and {{HYPERPOD_ENABLED}}: disabling either
 # leaves a placeholder unreplaced, the applier skips the file and prunes the
@@ -44,7 +48,12 @@ spec:
   namespaceSelector: {}
   queueingStrategy: BestEffortFIFO
   resourceGroups:
-    - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+    - coveredResources:
+        - "cpu"
+        - "memory"
+        - "nvidia.com/gpu"
+        - "aws.amazon.com/neuron"
+        - "vpc.amazonaws.com/efa"
       flavors:
         - name: gco-hyperpod-flavor
           resources:
@@ -54,6 +63,10 @@ spec:
               nominalQuota: "{{HYPERPOD_QUEUE_MAX_MEMORY}}"
             - name: "nvidia.com/gpu"
               nominalQuota: "{{HYPERPOD_QUEUE_MAX_GPU}}"
+            - name: "aws.amazon.com/neuron"
+              nominalQuota: "{{HYPERPOD_QUEUE_MAX_GPU}}"
+            - name: "vpc.amazonaws.com/efa"
+              nominalQuota: "{{HYPERPOD_QUEUE_MAX_EFA}}"
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue

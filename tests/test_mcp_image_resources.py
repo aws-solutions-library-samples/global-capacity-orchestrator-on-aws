@@ -58,7 +58,7 @@ class TestImagesIndexResource:
     """images://gco/index — list every gco/* repository."""
 
     def test_index_lists_repositories(self):
-        manager = MagicMock()
+        manager = MagicMock(_repo_prefix="gco")
         manager.list_repos.return_value = _fake_repos()
         with patch("cli.images.get_image_manager", return_value=manager):
             content = _read_resource("images://gco/index")
@@ -72,7 +72,7 @@ class TestImagesIndexResource:
         assert "images://gco/replication/status" in content
 
     def test_index_handles_empty_registry(self):
-        manager = MagicMock()
+        manager = MagicMock(_repo_prefix="gco")
         manager.list_repos.return_value = []
         with patch("cli.images.get_image_manager", return_value=manager):
             content = _read_resource("images://gco/index")
@@ -85,7 +85,7 @@ class TestImagesTagsResource:
     """images://gco/{name}/tags — list every tag on a repo."""
 
     def test_tags_lists_each_tag_with_metadata(self):
-        manager = MagicMock()
+        manager = MagicMock(_repo_prefix="gco")
         manager.list_tags.return_value = [
             {
                 "tag": "v1",
@@ -112,7 +112,7 @@ class TestImagesTagsResource:
         assert "images://gco/my-app/latest" in content
 
     def test_tags_empty_repo_renders_friendly_message(self):
-        manager = MagicMock()
+        manager = MagicMock(_repo_prefix="gco")
         manager.list_tags.return_value = []
         with patch("cli.images.get_image_manager", return_value=manager):
             content = _read_resource("images://gco/empty/tags")
@@ -123,7 +123,7 @@ class TestImagesDescribeResource:
     """images://gco/{name}/{tag} — full ECR describe for a single tag."""
 
     def test_describe_returns_json_payload(self):
-        manager = MagicMock()
+        manager = MagicMock(_repo_prefix="gco")
         manager.describe.return_value = {
             "name": "gco/my-app",
             "tag": "v1",
@@ -142,7 +142,7 @@ class TestImagesDescribeResource:
         assert parsed["digest"] == "sha256:abc"
 
     def test_describe_missing_tag_returns_error_payload(self):
-        manager = MagicMock()
+        manager = MagicMock(_repo_prefix="gco")
         manager.describe.return_value = {}
         with patch("cli.images.get_image_manager", return_value=manager):
             content = _read_resource("images://gco/my-app/missing")
@@ -156,7 +156,7 @@ class TestImagesReplicationStatusResource:
     """images://gco/replication/status — registry-wide replication state."""
 
     def test_replication_status_lists_per_region_rows(self):
-        manager = MagicMock()
+        manager = MagicMock(_repo_prefix="gco")
         manager.replication_status.return_value = [
             {
                 "repository": "gco/my-app",
@@ -182,7 +182,7 @@ class TestImagesReplicationStatusResource:
         assert "IN_PROGRESS" in content
 
     def test_replication_status_empty_renders_guidance(self):
-        manager = MagicMock()
+        manager = MagicMock(_repo_prefix="gco")
         manager.replication_status.return_value = []
         with patch("cli.images.get_image_manager", return_value=manager):
             content = _read_resource("images://gco/replication/status")

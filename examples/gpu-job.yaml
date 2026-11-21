@@ -5,7 +5,10 @@
 #
 # Prerequisites:
 #   - GPU nodepool (enabled by default)
-#   - NVIDIA device plugin (enabled by default)
+#   - Nothing to install for the GPU itself: EKS Auto Mode nodes ship the
+#     NVIDIA driver and device plugin, which advertises nvidia.com/gpu.
+#     GCO installs its own nvidia-device-plugin chart only for SageMaker
+#     HyperPod nodes, which run outside Auto Mode.
 #
 # Usage:
 #   gco jobs submit-sqs examples/gpu-job.yaml --region us-east-1

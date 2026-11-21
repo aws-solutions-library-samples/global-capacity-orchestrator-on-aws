@@ -239,8 +239,8 @@ class TestMetricsEndpointNoMonitor:
 
             with pytest.raises(HTTPException) as exc_info:
                 await get_metrics()
-            # The error is wrapped in a 500 error with the 503 detail
-            assert exc_info.value.status_code == 500
+            # "Not initialized" stays a 503 rather than turning into a 500.
+            assert exc_info.value.status_code == 503
         finally:
             health_api_module.health_monitor = original_monitor
             health_api_module.current_health_status = original_status
@@ -393,3 +393,96 @@ class TestGlobalExceptionHandler:
             response = await global_exception_handler(mock_request, exc)
 
             assert response.status_code == 500
+
+
+class TestErrorsDoNotLeakInternals:
+    """Callers get stable messages; the underlying errors go to the log."""
+
+    @pytest.fixture
+    def api(self):
+        import gco.services.health_api as health_api_module
+
+        saved = (
+            health_api_module.health_monitor,
+            health_api_module.current_health_status,
+            health_api_module.webhook_dispatcher,
+        )
+        yield health_api_module
+        (
+            health_api_module.health_monitor,
+            health_api_module.current_health_status,
+            health_api_module.webhook_dispatcher,
+        ) = saved
+
+    @pytest.mark.asyncio
+    async def test_a_metrics_failure_is_a_generic_500(self, api, caplog):
+        from fastapi import HTTPException
+
+        monitor = MagicMock()
+        monitor.get_health_status = AsyncMock(
+            side_effect=RuntimeError("pool exhausted at 10.0.0.7")
+        )
+        api.health_monitor = monitor
+        api.current_health_status = None
+
+        with caplog.at_level("ERROR"), pytest.raises(HTTPException) as exc_info:
+            await api.get_metrics()
+
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.detail == "Failed to get metrics"
+        assert "pool exhausted at 10.0.0.7" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_health_names_the_failed_read_but_not_its_error(self, api, caplog):
+        import json
+
+        from kubernetes.client.exceptions import ApiException
+
+        from gco.models import ResourceThresholds
+        from gco.services.health_monitor import HealthMonitor
+
+        with (
+            patch("gco.services.health_monitor.config"),
+            patch("gco.services.health_monitor.client"),
+        ):
+            monitor = HealthMonitor("c1", "us-east-1", ResourceThresholds(80, 80, -1))
+        monitor.metrics_v1beta1.list_cluster_custom_object.return_value = {"items": []}
+        monitor.core_v1.list_node.return_value = MagicMock(items=[])
+        denied = ApiException(status=403, reason="Forbidden")
+        denied.body = 'pods is forbidden: User "system:serviceaccount:gco-system:health-monitor"'
+        monitor.core_v1.list_pod_for_all_namespaces.side_effect = denied
+        api.health_monitor = monitor
+        api.current_health_status = None
+
+        with caplog.at_level("ERROR"):
+            response = await api.health_check()
+
+        assert response.status_code == 503
+        body = json.loads(response.body)
+        assert body["message"] == "Health check error: listing pods failed"
+        assert "forbidden" not in response.body.decode().lower()
+        assert "Forbidden" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_status_reports_the_thresholds_the_monitor_applies(self, api, monkeypatch):
+        from gco.models import ResourceThresholds
+
+        for name in ("CPU_THRESHOLD", "MEMORY_THRESHOLD", "GPU_THRESHOLD"):
+            monkeypatch.delenv(name, raising=False)
+        api.webhook_dispatcher = None
+
+        api.health_monitor = None
+        environment = (await api.get_status())["environment"]
+        assert (
+            environment["cpu_threshold"],
+            environment["memory_threshold"],
+            environment["gpu_threshold"],
+        ) == ("80", "80", "60")
+
+        api.health_monitor = MagicMock(thresholds=ResourceThresholds(70, 75, -1))
+        environment = (await api.get_status())["environment"]
+        assert (
+            environment["cpu_threshold"],
+            environment["memory_threshold"],
+            environment["gpu_threshold"],
+        ) == ("70", "75", "-1")

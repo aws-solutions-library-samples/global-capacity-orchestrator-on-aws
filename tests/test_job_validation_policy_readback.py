@@ -324,13 +324,23 @@ class TestPolicyEndpoint:
 
 
 class TestAggregatorRouteAllowlist:
-    """The cross-region aggregator may read the policy, and only read it."""
+    """The aggregator's regional allowlist is exactly the routes it calls.
 
-    def test_policy_is_a_read_only_entry(self) -> None:
+    ``GET api/v1/policy`` was on it, but the aggregator never calls the
+    policy route; ``gco jobs policy`` reads it with the caller's own
+    credentials. Every allowlist entry widens the aggregator role's
+    identity policy and every regional bridge's resource policy.
+    """
+
+    def test_allowlist_is_the_routes_the_aggregator_calls(self) -> None:
+        import re
+        from pathlib import Path
+
         from gco.stacks.constants import AGGREGATOR_REGIONAL_API_ROUTES
 
-        assert ("GET", "api/v1/policy") in AGGREGATOR_REGIONAL_API_ROUTES
-        methods = {
-            method for method, path in AGGREGATOR_REGIONAL_API_ROUTES if path == "api/v1/policy"
-        }
-        assert methods == {"GET"}
+        handler = (
+            Path(__file__).resolve().parent.parent / "lambda/cross-region-aggregator/handler.py"
+        ).read_text(encoding="utf-8")
+        called = set(re.findall(r'"/(api/v1/(?!global/)[a-z]+)"', handler))
+        assert called == {path for _, path in AGGREGATOR_REGIONAL_API_ROUTES}
+        assert ("GET", "api/v1/policy") not in AGGREGATOR_REGIONAL_API_ROUTES

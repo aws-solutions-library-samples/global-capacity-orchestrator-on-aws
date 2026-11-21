@@ -79,10 +79,9 @@ class TestResourceUtilizationExtended:
         with pytest.raises(ValueError, match="gpu"):
             ResourceUtilization(cpu=50.0, memory=50.0, gpu=-1.0)
 
-    def test_invalid_gpu_over_100(self):
-        """Test that GPU over 100 raises error."""
-        with pytest.raises(ValueError, match="gpu"):
-            ResourceUtilization(cpu=50.0, memory=50.0, gpu=101.0)
+    def test_gpu_over_100_is_accepted(self):
+        """Running pods can hold more GPUs than nodes report allocatable."""
+        assert ResourceUtilization(cpu=50.0, memory=50.0, gpu=101.0).gpu == 101.0
 
     def test_invalid_cpu_type(self):
         """Test that invalid CPU type raises error."""
@@ -749,6 +748,32 @@ class TestKubernetesManifestValidationEdgeCases:
             metadata={"name": "test-sa"},
         )
         assert manifest.kind == "ServiceAccount"
+
+    @pytest.mark.parametrize(
+        ("kind", "content"),
+        [
+            ("ConfigMap", {"binaryData": {"blob": "AAEC"}}),
+            ("ConfigMap", {}),
+            ("Secret", {"stringData": {"token": "not-a-real-token"}}),
+            ("Secret", {"type": "kubernetes.io/dockerconfigjson"}),
+        ],
+        ids=[
+            "configmap-binary-data-only",
+            "empty-configmap",
+            "secret-string-data-only",
+            "secret-type-only",
+        ],
+    )
+    def test_configmaps_and_secrets_need_neither_spec_nor_data(self, kind, content):
+        """Their payload fields are all optional, so the API server accepts these shapes."""
+        manifest = {"apiVersion": "v1", "kind": kind, "metadata": {"name": "x"}, **content}
+        assert KubernetesManifest.from_dict(manifest).kind == kind
+        assert ManifestSubmissionRequest(manifests=[manifest]).manifests == [manifest]
+
+    @pytest.mark.parametrize("kind", ["Job", "CronJob", "Deployment", "Pod", "Service", "TrainJob"])
+    def test_a_workload_without_spec_is_still_rejected(self, kind):
+        with pytest.raises(ValueError, match="Either spec or data must be provided"):
+            KubernetesManifest(apiVersion="v1", kind=kind, metadata={"name": "x"})
 
 
 class TestManifestSubmissionRequestValidation:

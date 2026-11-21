@@ -107,9 +107,12 @@ class TestCostMonitoringDefaults:
         assert config["reports"]["interval_minutes"] == 60
         assert config["reports"]["transition_to_infrequent_access_days"] == 90
 
-    def test_malformed_block_falls_back_to_defaults(self):
-        config = _loader({"cost_monitoring": "yes-please"}).get_cost_monitoring_config()
-        assert config["enabled"] is True
+    def test_malformed_block_is_rejected(self):
+        """A scalar used to read as an absent block, which left cost monitoring on."""
+        with pytest.raises(
+            ConfigValidationError, match=re.escape("cost_monitoring must be an object, got str")
+        ):
+            _loader({"cost_monitoring": "yes-please"})
 
 
 class TestCostMonitoringValidation:

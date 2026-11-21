@@ -134,22 +134,44 @@ and `region`, while ordinary table output retains `✓ Job my-job deleted`.
 ### Regional API Mode
 
 Every workload region has a regional API bridge because the centralized
-aggregator uses it to reach that region's private VPC. In the commercial `aws`
-partition, the bridge's resource policy admits only the aggregator role by
-default, and `api_gateway.regional_api_enabled=true` additionally permits
-IAM-authorized principals from the deployment account. In other partitions,
-same-account direct access is enabled automatically because [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html)
-and its global proxy routes are omitted.
+aggregator uses it to reach that region's private VPC. Outside the commercial
+`aws` partition it is also the supported workload ingress, because [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html)
+and its global proxy routes are omitted there.
 
 When a command supplies an exact target region, the CLI automatically resolves
 and signs against that region's API Gateway; it never forwards a routing header
 to the global endpoint. When `--regional-api` is enabled (or
 `GCO_REGIONAL_API=true` is set), the CLI requires a selected region for every API
-call and never uses the global API Gateway → Global Accelerator path. In `aws`,
-enable the policy opt-in in `cdk.json` and redeploy before using either form of
-direct regional access. Outside `aws`, the deployment enables that same-account
-policy automatically. The global endpoint rejects `X-GCO-Target-Region` rather
-than silently pretending a region pin succeeded.
+call and never uses the global API Gateway → Global Accelerator path. The global
+endpoint rejects `X-GCO-Target-Region` rather than silently pretending a region
+pin succeeded.
+
+The CLI signs every request with your AWS credentials, and neither API's
+resource policy admits the account as a whole, so those credentials need an IAM
+policy that allows `execute-api:Invoke` on the GCO APIs: the global API in
+`deployment_regions.api_gateway` and each regional bridge. Administrator
+credentials have it; for a narrower identity, attach a policy such as:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "execute-api:Invoke",
+      "Resource": "arn:aws:execute-api:*:123456789012:*/prod/*"
+    }
+  ]
+}
+```
+
+Replace the account ID, and replace the API id wildcard with the ids of the
+APIs in the `<project>-api-gateway` and `<project>-regional-api-<region>`
+stacks to grant nothing beyond GCO. [docs/iam-policies](iam-policies/README.md) has per-route examples.
+`api_gateway.regional_api_enabled` is deprecated: it no longer changes
+anything, and the synth warns about it and ignores it, so remove it from
+`cdk.json`. It used to add a resource-policy statement that let every principal
+of the account call the bridge without such a permission.
 
 Both API Gateway hops use AWS-managed TLS and [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html). The regional VPC Lambda
 then uses HMAC plus deployment-local private-root TLS to the internal ALB.
@@ -385,8 +407,10 @@ gco analytics users set-password --username alice \
 #### `gco analytics studio login`
 
 Sign in to SageMaker Studio via Cognito SRP and print a presigned
-Studio URL on its own line on stdout (pipe-friendly). The password,
-`IdToken`, and URL are never written to disk.
+Studio URL on its own line on stdout (pipe-friendly): the progress shown
+while a first login provisions the user profile (30-60 seconds) goes to
+stderr, so `URL=$(gco analytics studio login ...)` captures only the URL.
+The password, `IdToken`, and URL are never written to disk.
 
 ```bash
 gco analytics studio login [OPTIONS]
@@ -424,7 +448,10 @@ gco analytics studio login \
 
 Run pre-flight checks before `gco stacks deploy gco-analytics`. Each
 check prints `✓`/`✗` plus a short remediation line. Exits `1` on any
-failing check.
+failing check. With `-o json` or `-o yaml` the command prints one
+document instead, also when a check fails:
+`{"passed": false, "checks": [{"name": "...", "ok": false, "remediation": "..."}]}`
+(`remediation` is empty for a passing check).
 
 Checks performed:
 
@@ -434,7 +461,17 @@ Checks performed:
 - The three `/gco/cluster-shared-bucket/*` SSM parameters are
   present in the global region
 - No orphaned retained analytics resources are left from a previous
-  `retain`-policy destroy
+  `retain`-policy destroy: a Studio EFS file system or Cognito user pool
+  that a deleted `{project}-analytics` stack skipped on delete
+  (CloudFormation lists a deleted stack's resources for 90 days), a file
+  system tagged `Name={project}-analytics/StudioEfs` (the tag CDK gives
+  it), or a file system or user pool tagged `gco:analytics:managed=true`
+  with `gco:project={project}` (the tags the analytics stack gives both). The live
+  stack's resources are never reported. The remediation lists the delete
+  commands in order, with `--region`: access points and mount targets
+  before the file system, hosted UI domains before the user pool. When the
+  CloudFormation lookup fails, the check fails without suggesting any
+  deletion.
 
 ```bash
 gco analytics doctor
@@ -545,7 +582,7 @@ Check and manage cluster capacity.
 | [`gco capacity cancel-reservation`](#gco-capacity-cancel-reservation) | Cancel an On-Demand Capacity Reservation and stop its charges. |
 | [`gco capacity instance-info`](#gco-capacity-instance-info) | Describe an instance type's compute characteristics, resolved live from `ec2:DescribeInstanceTypes` — vCPUs/cores/threads, memory, every accelerator class, EFA and network limits, local NVMe and EBS, purchase options, platform capabilities. |
 | [`gco capacity spot-prices`](#gco-capacity-spot-prices) | Get spot price history for an instance type in a region. |
-| [`gco capacity history`](#gco-capacity-history) | Query the historical capacity surface (optional global-stack add-on, on by default). |
+| [`gco capacity history`](#gco-capacity-history) | Query the historical capacity surface (optional global-stack add-on, on in the shipped cdk.json). |
 | [`gco capacity history show`](#gco-capacity-history-show) | Show the recorded capacity time-series for an instance type in a region. |
 | [`gco capacity history stats`](#gco-capacity-history-stats) | Show p25/p50/p75/min/max/stddev per metric over a time window. |
 | [`gco capacity history patterns`](#gco-capacity-history-patterns) | Show a day-of-week by hour heatmap of average spot scores. |
@@ -574,16 +611,31 @@ gco capacity check [OPTIONS]
 | `--type` | `-t` | Capacity type: `spot`, `on-demand`, or `both` |
 | `--enrich-historical` | | Append historical capacity context to the output (requires historical.enabled) |
 
+With `--output json` or `--output yaml`, the command prints the list of estimates;
+with `--enrich-historical` it prints one document instead,
+`{"estimates": [...], "historical": {...}}`, where `historical` is the
+[`gco capacity history stats`](#gco-capacity-history-stats) summary for the last 7 days, or `null`
+when the history cannot be read (the reason goes to stderr).
+
 **Example:**
 
 ```bash
 gco capacity check --instance-type g4dn.xlarge --region us-east-1
 gco capacity check -i g5.xlarge -r us-west-2 -t spot
+gco --output json capacity check -i g5.xlarge -r us-west-2 --enrich-historical
 ```
 
 #### `gco capacity status`
 
-View capacity status across regions.
+View capacity status across regions. `QUEUE` (`queue_depth`) is the Region's SQS job
+queue backlog. `RUNNING` (`running_jobs`) is the health monitor's `ActiveJobs` metric
+(CloudWatch namespace `GCO/HealthMonitor`, published every 30 seconds): Jobs in the
+job namespaces with a pending or running pod. It is not the SQS in-flight message
+count, which only covers messages being applied or waiting to be retried. When the
+metric has no recent datapoint the count is reported as unavailable (`jobs` in
+`unavailable_signals`), and recommendations neither describe the Region as having no
+running jobs nor score it as idle. The same values feed
+[`recommend-region`](#gco-capacity-recommend-region), `gco status` and the capacity advisor.
 
 ```bash
 gco capacity status [OPTIONS]
@@ -633,6 +685,14 @@ gco capacity recommend-region [OPTIONS]
 When `--instance-type` is provided, the recommendation uses weighted multi-signal
 scoring that combines spot placement scores, spot-vs-on-demand pricing, queue depth,
 GPU utilization, and running job counts. Without it, a simpler composite score is used.
+The spot placement score is asked for the number of instances that hold `--gpu-count`
+(or `--min-gpus`) GPUs of the type, rounded up (`-i p4d.24xlarge --gpu-count 16` scores
+2 instances), and for one instance when no GPU count is given or the type's GPU count is
+unknown; each Region's entry reports it as `spot_target_instances`.
+A Region that does not offer the type is left out of the ranking (listed with `--verbose`,
+and under `ineligible_regions` in JSON), and the command fails when no deployed Region
+offers it; a Region whose offering could not be checked is ranked after the Regions
+confirmed to sell the type (`offered: null`). Aliases such as `p6-b200` are expanded first.
 
 `--backend hyperpod` considers only Regions whose regional stack runs a
 [SageMaker HyperPod](HYPERPOD.md#how-work-reaches-hyperpod-nodes) cluster and ranks
@@ -691,6 +751,14 @@ thinking fields.
 - AWS credentials with `bedrock:InvokeModel` permission
 - The specified Bedrock model must be enabled in your account
 
+Bedrock is called in `AWS_REGION`, else `AWS_DEFAULT_REGION`, else the CLI's default
+region (`gco --region`, `GCO_DEFAULT_REGION`, the config file, or the first regional
+Region in `cdk.json`), the same order `gco autopilot` uses. A geography-scoped
+inference profile (`eu.`, `apac.`, `jp.`, `au.`) only answers in its geography's
+Regions, so pick a Region there when passing one with `--model`. Bedrock errors name
+the Region that was called. [`gco capacity predict`](#gco-capacity-predict) uses the
+same Region.
+
 **Options:**
 
 | Option | Short | Description |
@@ -705,6 +773,11 @@ thinking fields.
 | `--max-cost` | | Maximum cost per hour in USD |
 | `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.capacity_advisor_default_model_id`) |
 | `--raw` | | Show raw AI response |
+
+With `--output json` or `--output yaml`, the command prints one document with
+`recommended_region`, `recommended_instance_type`, `recommended_capacity_type`,
+`confidence`, `cost_estimate`, `reasoning`, `alternative_options` and `warnings`
+(plus `raw_response` with `--raw`); the disclaimer goes to stderr.
 
 **Example:**
 
@@ -728,6 +801,15 @@ gco capacity ai-recommend -w "ML training" --model us.anthropic.claude-sonnet-4-
 #### `gco capacity reservations`
 
 List On-Demand Capacity Reservations (ODCRs) across deployed regions.
+
+A Region whose listing EC2 refuses (a denied `ec2:DescribeCapacityReservations`,
+throttling, a Region that is not enabled) is named with EC2's error code and
+message, and the JSON report lists it under `errors` (`region`, `error_code`,
+`error`); it is never shown as a Region without reservations. The other Regions
+still answer; when every Region refuses, or `--region` names one that does, the
+command exits 1. The same applies to
+[`reservation-check`](#gco-capacity-reservation-check) (under `odcr.errors`) and
+[`find-reservations`](#gco-capacity-find-reservations).
 
 ```bash
 gco capacity reservations [OPTIONS]
@@ -753,6 +835,8 @@ gco capacity reservations -r us-east-1
 
 Check reservation availability and Capacity Block offerings for ML workloads. Checks both existing ODCRs and purchasable Capacity Blocks (guaranteed GPU capacity for a fixed duration at a known price). Pass `--region` more than once to check several regions in parallel, and use `--earliest-start`/`--latest-start` to ask for blocks starting near a date. For a full duration-range sweep that returns one consolidated ranked report, use [`gco capacity find-blocks`](#gco-capacity-find-blocks).
 
+ODCR availability is judged per Region: `--count` is met only when one Region has that many free reserved instances, since a workload cannot use reservations in another Region. The table lists each Region's free and reserved instances when more than one Region is checked; the JSON report carries them under `odcr.by_region` (`region`, `reserved_instances`, `available_instances`, `has_availability`), next to the overall `total_available_instances`.
+
 ```bash
 gco capacity reservation-check [OPTIONS]
 ```
@@ -761,7 +845,7 @@ gco capacity reservation-check [OPTIONS]
 |--------|-------------|
 | `-i, --instance-type` | Instance type to check (required) |
 | `-r, --region` | Region(s) to check; repeatable (default: all deployed regions) |
-| `-c, --count` | Minimum instances needed (default: 1) |
+| `-c, --count` | Minimum instances needed in one region (default: 1) |
 | `--include-blocks/--no-blocks` | Include Capacity Block offerings (default: yes) |
 | `--block-duration` | Capacity Block duration in hours (default: 24) |
 | `--block-duration-days` | Capacity Block duration in days (overrides `--block-duration`) |
@@ -835,7 +919,14 @@ the `cb-...` ID to this command. Run with `--dry-run` before committing —
 Capacity Block purchases incur charges. A passed dry run means the request is
 well-formed and you hold `ec2:PurchaseCapacityBlock`; EC2's dry run does not
 look the offering up, so it cannot tell you whether the offering still exists.
-Only the purchase itself does.
+Only the purchase itself does. When EC2 refuses the purchase or the dry run, the
+command exits 1 in every output mode; with `--output json` or `--output yaml` the
+result document (`success: false`, `error_code`, `error`) is still printed on stdout.
+
+A purchase asks for confirmation first (on stderr in JSON/YAML mode); declining
+exits 1 without calling EC2. Pass `--yes` in scripts: when stdin is not a terminal
+and `--yes` is missing, the command exits 2 before calling EC2 instead of waiting
+for an answer. `--dry-run` never asks.
 
 ```bash
 gco capacity reserve [OPTIONS]
@@ -848,14 +939,18 @@ gco capacity reserve [OPTIONS]
 | `--offering-id` | `-o` | Capacity Block offering ID (`cb-…`) (required) |
 | `--region` | `-r` | AWS region where the offering exists (required) |
 | `--dry-run` | | Check the request and your permission without purchasing; does not verify the offering exists |
+| `--yes` | `-y` | Skip the confirmation prompt; required when stdin is not a terminal |
 
 **Example:**
 
 ```bash
-# Find offerings, validate, then purchase
+# Find offerings, validate, then purchase (asks for confirmation)
 gco capacity reservation-check -i p4d.24xlarge -r us-east-1
 gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1 --dry-run
 gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1
+
+# In a script
+gco --output json capacity reserve -o cb-0123456789abcdef0 -r us-east-1 --yes
 ```
 
 #### `gco capacity find-training-plans`
@@ -940,7 +1035,7 @@ gco capacity find-reservations [OPTIONS]
 |--------|-------------|
 | `-i, --instance-type` | Instance type or alias to filter by (e.g. `p6-b200`); omit for all types |
 | `-r, --region` | Region(s) to search; repeatable (default: all deployed regions) |
-| `-c, --count` | Minimum available instances to consider the search satisfied (default: 1) |
+| `-c, --count` | Minimum available instances in one region for the search to count as satisfied (default: 1) |
 | `--state` | Reservation state filter (default: `active`; use `all` for any state) |
 | `--pricing/--no-pricing` | Enrich reservations with On-Demand pricing (default: yes) |
 
@@ -954,7 +1049,7 @@ gco capacity find-reservations -i p6-b200 -r us-east-1 -r us-west-2 --no-pricing
 
 #### `gco capacity create-reservation`
 
-Create a new On-Demand Capacity Reservation (ODCR) — the ODCR counterpart to [`gco capacity reserve`](#gco-capacity-reserve). Reserves On-Demand capacity for an instance type in a specific Availability Zone. **Charges accrue** for the reserved capacity whether or not it is used, until the reservation is cancelled. Run with `--dry-run` first to check the request and your permission; EC2's dry run does not check capacity or the Availability Zone, only the real request does.
+Create a new On-Demand Capacity Reservation (ODCR) — the ODCR counterpart to [`gco capacity reserve`](#gco-capacity-reserve). Reserves On-Demand capacity for an instance type in a specific Availability Zone. **Charges accrue** for the reserved capacity whether or not it is used, until the reservation is cancelled. Run with `--dry-run` first to check the request and your permission; EC2's dry run does not check capacity or the Availability Zone, only the real request does. A refused request exits 1 in every output mode, with the result document on stdout in JSON/YAML mode, as for [`gco capacity reserve`](#gco-capacity-reserve). Creating a reservation asks for confirmation the same way: pass `--yes` in scripts, since without a terminal on stdin and without `--yes` the command exits 2 before calling EC2; `--dry-run` never asks.
 
 ```bash
 gco capacity create-reservation [OPTIONS]
@@ -972,16 +1067,17 @@ gco capacity create-reservation [OPTIONS]
 | `--end-date` | | Optional end date (`YYYY-MM-DD` or ISO); omit for an unlimited reservation |
 | `--ebs-optimized` | | Reserve EBS-optimized capacity |
 | `--dry-run` | | Check the request and your permission without creating (no cost); does not check capacity or the AZ |
+| `--yes` | `-y` | Skip the confirmation prompt; required when stdin is not a terminal |
 
 ```bash
-# Validate, then create
+# Validate, then create (asks for confirmation; -y skips the prompt)
 gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2 --dry-run
 gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2
 ```
 
 #### `gco capacity cancel-reservation`
 
-Cancel an On-Demand Capacity Reservation, releasing its capacity so it stops incurring On-Demand charges. Only ODCRs can be cancelled this way; a Capacity Block runs for its fixed term. Instances already running against the reservation are not terminated — they revert to normal On-Demand billing.
+Cancel an On-Demand Capacity Reservation, releasing its capacity so it stops incurring On-Demand charges. Only ODCRs can be cancelled this way; a Capacity Block runs for its fixed term. Instances already running against the reservation are not terminated — they revert to normal On-Demand billing. A refused cancellation exits 1 in every output mode, with the result document on stdout in JSON/YAML mode. The command asks for confirmation first (on stderr in JSON/YAML mode) and declining exits 1. Pass `--yes` in scripts: without a terminal on stdin and without `--yes` the command exits 2 before calling EC2 instead of waiting for an answer; `--dry-run` never asks.
 
 ```bash
 gco capacity cancel-reservation [OPTIONS]
@@ -992,7 +1088,7 @@ gco capacity cancel-reservation [OPTIONS]
 | `--reservation-id` | `-o` | Capacity Reservation ID (`cr-…`) to cancel (required) |
 | `--region` | `-r` | AWS region where the reservation exists (required) |
 | `--dry-run` | | Check your permission without cancelling; does not verify the reservation exists |
-| `--yes` | `-y` | Skip confirmation |
+| `--yes` | `-y` | Skip the confirmation prompt; required when stdin is not a terminal |
 
 ```bash
 gco capacity cancel-reservation -o cr-0123456789abcdef0 -r us-east-1 --dry-run
@@ -1053,7 +1149,13 @@ gco -o json capacity instance-info p5.48xlarge | jq '{efa: .efa_supported, gpus:
 
 #### `gco capacity spot-prices`
 
-Get spot price history for an instance type in a region.
+Get spot price history for an instance type in a region: one row per Availability
+Zone with the current price (the newest price change), the average, minimum and
+maximum over the window, and a stability score (1 minus the coefficient of
+variation). The average and the stability are weighted by how long each price was in
+effect, so a price that held all week counts for more than a short spike. Every page
+of `DescribeSpotPriceHistory` is read. The `*_7d` field names are kept for any
+`--days` value.
 
 ```bash
 gco capacity spot-prices [OPTIONS]
@@ -1076,7 +1178,7 @@ gco capacity spot-prices -i p4d.24xlarge -r us-west-2 -d 30
 
 #### `gco capacity history`
 
-Query the historical capacity surface, an optional add-on to the global stack (not a separate stack) that is enabled by default. Set `historical.enabled` to `false` in cdk.json to opt out. The poller writes time-series snapshots to DynamoDB; when none are available yet the subcommands print a clear notice.
+Query the historical capacity surface, an optional add-on to the global stack (not a separate stack) that the shipped cdk.json turns on (`historical.enabled: true`). Set `historical.enabled` to `false` in cdk.json to opt out; a cdk.json that leaves the key out deploys without it. The poller writes time-series snapshots to DynamoDB; when none are available yet the subcommands print a clear notice.
 
 Spot placement scores are collected per *instance pool* (a reviewed set of interchangeable types; the snapshot's `spot_pool` attribute names it) at each configured target capacity, because the underlying AWS API needs at least three instance types to return a meaningful score. Snapshots recorded before pooled collection used single-type requests whose scores are artificially depressed and are not comparable with pooled values; see the [capacity poller README](../lambda/capacity-poller/README.md#history-discontinuity).
 
@@ -1192,9 +1294,18 @@ Manually dial `REGION` to `PERCENTAGE` (0-100) and record an override the
 scheduled controller honors: the region is left alone until the override is
 cleared. Applies `UpdateEndpointGroup` carrying only the dial, so the
 registered ALB endpoint is untouched. Prompts for confirmation unless
-`--yes` is passed; changes apply to new connections only and converge to the
-accelerator's edge locations over a few minutes. Warns when the change would
-leave no fully dialed region on the listener.
+`--yes` is passed (declining exits 1 and changes nothing); changes apply to
+new connections only and converge to the accelerator's edge locations over a
+few minutes. Warns when the change would leave no fully dialed region on the
+listener.
+
+The override (`/{project}/traffic-dial/override-{region}` in SSM) is written
+before the dial changes, so the controller already skips the region when it does.
+If the override cannot be written, the dial is not touched. If the dial update
+fails, the override is put back as it was (removed, or its previous value) and
+the command exits 1 saying so; if that also fails, the error says the override
+now holds the new value while the dial is unchanged, and names
+`gco capacity traffic-dial clear REGION`.
 
 ```bash
 gco capacity traffic-dial set REGION PERCENTAGE [OPTIONS]
@@ -1291,6 +1402,15 @@ in another shell. With `--print` it instead emits the ready-to-run tunnel +
 `kubectl` commands (a connection plan) without opening anything — JSON under
 `gco --output json`, copy-paste shell commands otherwise.
 
+SIGTERM and SIGHUP (`kill`, a supervisor's timeout, closing the terminal) end
+this command, and every other command that holds a tunnel (`monitoring open`,
+`costs dashboard`, `gitops`, `crossplane`, `slurm shell|output`, `nodepools`
+with `--via-ssm`), the way Ctrl-C does: the port-forward and the SSM session
+are stopped and an `auto` bastion is terminated, also while it is still
+waiting to register with SSM, before the command exits with status 143 or
+129. A handler a calling program installed for those signals, or the SIGHUP
+`nohup` ignores, is left in place.
+
 The tunnel needs the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html),
 which `aws ssm start-session` hands the session to; the `gco-dev` image ships a
 pinned copy. Run through the `gco` shell function, the tunnel listens on the
@@ -1307,9 +1427,9 @@ gco cluster tunnel [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
-| `--via-ssm INSTANCE_ID\|auto` | Tunnel through an existing SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included (see [Route selection](#route-selection)). |
-| `--local-port` | Local port to bind for the API tunnel (default `8443`). |
+| `--region` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel through an existing SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down on exit. An existing instance must carry the cluster security group (`ClusterSecurityGroupId` stack output) or one that group admits on 443; the cluster security group admits no VPC CIDR. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included (see [Route selection](#route-selection)). |
+| `--local-port` | Local port to bind for the API tunnel (default `8443`). A port another process already listens on is refused, and the tunnel counts as open only once the Session Manager plugin reports its own listener there, so kubectl never reaches another process by mistake. The other commands that open a tunnel (`monitoring open`, `gitops`, `crossplane`, `costs dashboard`, `slurm`) use `8443` and refuse it the same way while it is taken, for example by a running `gco cluster tunnel`. |
 | `--print` | Print the tunnel + `kubectl` connection plan instead of opening the tunnel. |
 | `--bastion-ttl-minutes` | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`). |
 | `--yes` / `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
@@ -1321,7 +1441,11 @@ cluster security group (no new security group, and **no inbound ports** — SSM 
 outbound-only), requires IMDSv2, self-terminates after `--bastion-ttl-minutes`,
 and is tagged `gco:ephemeral=true`. It is torn down automatically when the tunnel
 closes; if teardown ever fails, the command prints the exact orphan-check
-command.
+command. Its IAM role and instance profile (`<project>-ephemeral-bastion-role`
+and `<project>-ephemeral-bastion-profile`) are shared by every `auto` bastion
+of the project in every Region, so teardown terminates only the instance and
+leaves them in place for the next session; `gco stacks destroy-all` deletes
+them.
 
 ##### Route selection
 
@@ -1332,7 +1456,7 @@ way, and prints a `Route:` line naming it:
 
 | Endpoint access | No `--via-ssm` | `--via-ssm INSTANCE_ID` or `auto` |
 |---|---|---|
-| `PRIVATE` (default) | Prints the tunnel options and tries the kubeconfig endpoint directly, for callers already inside the VPC | SSM tunnel to the private endpoint |
+| `PRIVATE` (default) | Prints the tunnel options and tries the kubeconfig endpoint directly, for callers already inside the VPC whose security group the cluster security group admits on 443 | SSM tunnel to the private endpoint |
 | `PUBLIC_AND_PRIVATE` | The public endpoint, directly | SSM tunnel to the private endpoint |
 | Public only (not a mode GCO deploys) | The public endpoint, directly | Fails: there is no private endpoint to reach |
 
@@ -1350,9 +1474,9 @@ follows the same table.
 # Auto-provision an ephemeral bastion, tunnel, and hold it open:
 gco cluster tunnel --region us-east-1 --via-ssm auto
 
-# In another shell, run kubectl through the tunnel:
-kubectl --server https://127.0.0.1:8443 \
-    --tls-server-name <endpoint-host> get nodes
+# In another shell, run the kubectl command the tunnel prints:
+kubectl --context=arn:aws:eks:us-east-1:<account-id>:cluster/gco-us-east-1 \
+    --server https://127.0.0.1:8443 --tls-server-name <endpoint-host> get nodes
 
 # Or just print the connection plan (no changes made, JSON for scripting):
 gco cluster tunnel --region us-east-1 --print
@@ -1363,6 +1487,17 @@ Opening a tunnel does **not** replace an EKS access entry: the tunnel solves
 reachability, while authentication still needs `gco stacks access -r <region>`
 (or a `developer_access` entry in cdk.json). Run `gco cluster doctor` when
 unsure which layer is failing.
+
+`--server` replaces only the endpoint; the cluster's credentials and CA come
+from the kubeconfig context, so the printed command names the cluster's
+context with `--context`. Commands that run kubectl for you (`cluster tunnel`,
+`jobs submit-direct`, `files`, `monitoring open`, `costs dashboard`, `gitops`,
+`crossplane`, `slurm shell|output`) refresh the cluster's kubeconfig entry and
+pass its context to every kubectl call, so they reach that cluster whatever
+context is current. A kubeconfig entry already pointed at a local tunnel
+(`server` on `127.0.0.1` or `localhost` with `tls-server-name` set) is kept as
+it is and its own context is used; such an entry with no context fails with an
+error instead of falling back to the current context.
 
 #### `gco cluster doctor`
 
@@ -1391,7 +1526,7 @@ gco cluster doctor [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 
 **Example:**
 
@@ -1422,7 +1557,7 @@ invocation.
 
 #### `gco config-cmd init`
 
-Initialize the config file with a starter template.
+Initialize the config file with a starter template. The template lists the per-machine settings (`default_region`, `default_namespace`, `output_format`, `verbose`, `use_regional_api`, the cache and timeout settings, the mount paths) as commented-out lines with their built-in defaults. Settings you give this command are written as values instead: the root `-r`, `-o`, `-v` and `--regional-api`/`--global-api` options, and the `GCO_*` environment variables for those settings. `project_name` and the deployment Regions are never written, because each checkout's `cdk.json` supplies them and a value in this file would override the `cdk.json` of every checkout (see [Config File](#config-file) for the precedence). The file is created with owner-only permissions, together with `~/.gco` when it does not exist yet.
 
 ```bash
 gco config-cmd init [OPTIONS]
@@ -1438,8 +1573,11 @@ gco config-cmd init [OPTIONS]
 
 ```bash
 gco config-cmd init
-gco config-cmd init -f          # overwrite existing
+gco config-cmd init -f             # overwrite existing
+gco -r eu-west-1 config-cmd init   # template with default_region set
 ```
+
+Earlier releases wrote every resolved setting, including `project_name` and the Regions from the `cdk.json` where `init` ran. If your `~/.gco/config.yaml` came from one of them, run `gco config-cmd init --force` (or delete those keys) so each checkout's `cdk.json` applies again.
 
 #### `gco config-cmd show`
 
@@ -1469,7 +1607,7 @@ gco config-cmd get default_region
 
 ### Costs Commands
 
-View cost breakdowns and estimates for GCO resources. Uses AWS Cost Explorer filtered by the `Project: GCO` tag applied to all resources.
+View cost breakdowns and estimates for GCO resources. `summary`, `regions`, `trend` and `forecast` use AWS Cost Explorer filtered by the `Project` tag that `cdk.json` `context.tags` applies to every stack (`GCO` in the committed file). The CLI reads the value from the `cdk.json` in the current directory and uses `GCO` outside a checkout. Two deployments in one account that keep the same value see each other's spend; give each deployment its own `context.tags.Project` value to report project-scoped cost.
 
 **Setup (one-time):** To filter costs by the `Project` tag, you must activate cost allocation tags in your AWS account. The CLI can do this for you:
 
@@ -1598,6 +1736,8 @@ gco costs trend --all
 
 Estimate costs for currently running workloads (jobs and inference endpoints) based on instance pricing and runtime.
 
+The command lists the pods in `gco-jobs` and `gco-inference` with your kubeconfig credentials (it runs `aws eks update-kubeconfig` for each region's cluster first), so each cluster's API endpoint must be reachable from where you run it. With the default `PRIVATE` endpoint access that means a host inside the VPC that the cluster security group admits on 443; this command has no `--via-ssm` route (see [Route selection](#route-selection)). Each Kubernetes request attempt is bounded by `K8S_API_TIMEOUT` seconds (default 30). A region whose cluster cannot be read is named on stderr and the command exits 1; the workloads read from the other regions are still printed, so a cluster that cannot be reached never reads as one with nothing running.
+
 ```bash
 gco costs workloads [OPTIONS]
 ```
@@ -1639,7 +1779,7 @@ gco costs forecast
 gco costs forecast --days 60
 ```
 
-> **Note:** Cost Explorer needs at least 14 days of historical data to generate forecasts.
+> **Note:** Cost Explorer needs at least 14 days of historical data to generate forecasts. When it cannot produce one (too little history, a missing `ce:GetCostForecast` permission, a window it rejects), the command prints the error and exits 1 in every output mode.
 
 #### `gco costs allocation`
 
@@ -1704,6 +1844,8 @@ After activation, allow up to 24 hours before tag data appears in Cost Explorer.
 #### `gco costs k8s`
 
 Query Kubernetes allocation costs across regions. These commands run [Amazon Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) aggregations over the [Parquet](https://parquet.apache.org/docs/) allocation reports the per-region cost-monitor services write to the central cost report bucket. Requires `cost_monitoring.enabled` in `cdk.json` (the default) and a deployed monitoring stack — see [docs/COST_MONITORING.md](COST_MONITORING.md).
+
+The queries run in the monitoring Region: `deployment_regions.monitoring` from the `cdk.json` in the current directory, overridden by `monitoring_region` in the [config file](#config-file) or `GCO_MONITORING_REGION`. Outside a checkout the CLI uses `us-east-2`, the monitoring stack's default Region, so set one of those when your monitoring stack is elsewhere.
 
 ```bash
 gco costs k8s COMMAND [OPTIONS]
@@ -1809,7 +1951,7 @@ Generate and list OpenCost allocation reports through the authenticated GCO API 
 gco costs report COMMAND [OPTIONS]
 ```
 
-Passing `--region` pins the request to that region's API bridge (each region's cost monitor owns its own OpenCost data); in the commercial partition direct bridge access requires `api_gateway.regional_api_enabled=true`. Without `--region` the request rides the global API and is served by the nearest healthy region — the response names the region that answered.
+Passing `--region` pins the request to that region's API bridge (each region's cost monitor owns its own OpenCost data); your credentials need `execute-api:Invoke` on that bridge ([Regional API Mode](#regional-api-mode)). Without `--region` the request rides the global API and is served by the nearest healthy region — the response names the region that answered.
 
 #### `gco costs report generate`
 
@@ -1893,7 +2035,7 @@ gco costs dashboard [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--service` | | `grafana` (default) or `opencost` |
-| `--region` | | Cluster region (defaults to the first cdk.json regional entry) |
+| `--region` | | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry) |
 | `--local-port` | | Local port to bind (defaults per-service) |
 | `--via-ssm` | | Tunnel through an SSM-managed instance: an instance id, or `auto`. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | | Self-terminate backstop for an `auto` bastion (default: 120) |
@@ -1940,7 +2082,7 @@ dashboard. No AWS or cluster access. The
 the same document.
 
 ```bash
-gco crossplane status [--output json]
+gco [-o json] crossplane status
 ```
 
 #### `gco crossplane open`
@@ -1956,7 +2098,7 @@ gco crossplane open [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region`, `-r` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--local-port` | Local port to bind (default `3001`, the port the dashboard's CORS origin names). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
@@ -2029,6 +2171,12 @@ gco dag run pipeline.yaml -r us-east-1
 gco dag run pipeline.yaml --dry-run
 ```
 
+With `-o json` or `-o yaml`, `dag run` prints one document: the DAG's `name`,
+`region`, `namespace`, every step with its final `status`, `job_name`, times and
+`error`, and a top-level `status` of `succeeded` or `failed` (the command exits 1
+when a step failed). `--dry-run`, and a DAG that fails validation, print the
+`gco dag validate` document instead.
+
 #### `gco dag validate`
 
 Validate a DAG definition without running it. Checks for cycles, missing dependencies, and missing manifest files.
@@ -2041,7 +2189,12 @@ gco dag validate DAG_FILE
 
 ```bash
 gco dag validate examples/pipeline-dag.yaml
+gco -o json dag validate examples/pipeline-dag.yaml
 ```
+
+With `-o json` or `-o yaml` it prints one document with `name`, `valid`,
+`errors`, `region`, `namespace`, `steps` (name, manifest, depends_on) and, for a
+valid DAG, `execution_order`; an invalid DAG still exits 1.
 
 #### DAG File Format
 
@@ -2107,7 +2260,7 @@ gco deps scan [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--nodepools-only` | Run only the accelerator-catalog / Karpenter NodePool freshness check (offline policy validation always; live EC2 catalog comparison when AWS credentials resolve). Fast, and the only network it may touch is EC2. |
-| `--report FILE` | Write the Markdown report to `FILE` instead of stdout. |
+| `--report FILE` | Write the Markdown report to `FILE` instead of stdout. With `-o json` or `-o yaml` the envelope still goes to stdout and the report is also written to `FILE`. |
 
 **Examples:**
 
@@ -2120,7 +2273,7 @@ gco deps scan --nodepools-only
 
 # Machine-readable envelope (has_drift, scan_complete, report_markdown,
 # findings: the same rows as JSON, one record per surface) —
-# the same shape the MCP deps_scan tool returns
+# the same shape the MCP deps_scan tool returns; -o yaml renders it as YAML
 gco -o json deps scan
 
 # Save the report for a PR description
@@ -2135,7 +2288,7 @@ Validate the shipped example manifests under `examples/`.
 
 #### `gco examples validate`
 
-Run [example-job validation](EXAMPLE_VALIDATION.md): deploy the configured GCO topology (force-enabling any optional schedulers or infrastructure features the selected examples need), execute every selected example through its **documented** submission path (`gco jobs submit`/`submit-sqs`/`submit-direct`, `gco dag run`, or `kubectl apply` over the CLI's own SSM-tunnel machinery), verify per-example success criteria, clean each example up, destroy everything, and write per-example reports. `--static-only` runs the offline contract checks in seconds with no AWS access and no consent flags — it is the minimum bar for any change under `examples/` (CI enforces the same checks).
+Run [example-job validation](EXAMPLE_VALIDATION.md): deploy the configured GCO topology (force-enabling any optional schedulers or infrastructure features the selected examples need), execute every selected example through its **documented** submission path (`gco jobs submit`/`submit-sqs`/`submit-direct`, `gco dag run`, or `kubectl apply` over the CLI's own SSM-tunnel machinery), verify per-example success criteria, clean each example up, destroy everything, and write per-example reports. `--static-only` runs the offline contract checks in seconds with no AWS access and no consent flags — it is the minimum bar for any change under `examples/` (CI enforces the same checks). During a live run, Ctrl-C, `SIGTERM` and `SIGHUP` reach the harness and its teardown is awaited exactly as for [`gco release validate`](#gco-release-validate).
 
 ```bash
 # Offline checks only (fast; no AWS):
@@ -2287,6 +2440,10 @@ List EFS access points for a file system. Useful for inspecting which
 namespaces have been provisioned and for confirming the POSIX UID/GID
 each access point enforces.
 
+A file system that does not exist has no access points (an empty list, `[]` in
+JSON). Any other failure to read them, such as access denied or throttling,
+prints the error on stderr and exits 1.
+
 ```bash
 gco files access-points FILE_SYSTEM_ID [OPTIONS]
 ```
@@ -2338,7 +2495,7 @@ autoscaler, and how to reach the UI. No AWS or cluster access; a
 document.
 
 ```bash
-gco gitops status [--region REGION] [--output json]
+gco [-o json] gitops status [--region REGION]
 ```
 
 #### `gco gitops open`
@@ -2355,7 +2512,7 @@ gco gitops open [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region`, `-r` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--local-port` | Local port to bind (default `8080`). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
@@ -2378,7 +2535,10 @@ Forward the UI in the background, log in to the Argo CD API as `admin` and
 capture `/applications` with the session cookie as a full-page PNG — no browser
 sign-in. Needs Playwright (`pip install 'gco[diagrams]'` and
 `playwright install chromium` once). This is the code behind
-`images/argocd-ui.png`.
+`images/argocd-ui.png`. The command refuses a `--local-port` another process
+already listens on and sends the password only after kubectl reports its own
+listener on `127.0.0.1:<port>`, the address it then connects to
+(`crossplane screenshot` forwards the same way).
 
 ```bash
 gco gitops screenshot [OPTIONS]
@@ -2429,7 +2589,7 @@ architecture and lifecycle policy options.
 | [`gco images delete-repo`](#gco-images-delete-repo) | Delete a whole repository. |
 | [`gco images cleanup`](#gco-images-cleanup) | Remove untagged images across one or all project repos. |
 | [`gco images prune`](#gco-images-prune) | Remove untagged images older than 30 days. |
-| [`gco images orphans`](#gco-images-orphans) | List tags older than `threshold_days` that are not referenced by any deployed inference endpoint or recent job. |
+| [`gco images orphans`](#gco-images-orphans) | List tags older than `threshold_days` that no inference endpoint or job uses. |
 | [`gco images lifecycle`](#gco-images-lifecycle) | Lifecycle policy management. |
 | [`gco images mirror`](#gco-images-mirror) | Mirror third-party images (e.g. Volcano's `docker.io` images) into the project ECR. |
 | [`gco images replication`](#gco-images-replication) | Replication management for the project's ECR registry. |
@@ -2439,7 +2599,15 @@ architecture and lifecycle policy options.
 #### `gco images init`
 
 Create a project repository with the default lifecycle policy applied
-(keep 20 tagged images, expire untagged after 7 days).
+(keep 20 tagged images, expire untagged after 7 days). `NAME` (here and in the
+other `gco images` commands) is a lowercase letter, then lowercase letters and
+digits joined by single dashes, at most 63 characters: it becomes the
+`<project>/NAME` repository, and ECR rejects a name that ends in a dash or
+holds two in a row.
+
+A new repository is tagged `Project` with the value the stacks carry
+(`context.tags.Project` in cdk.json, `GCO` without one), the tag `gco costs`
+filters on.
 
 ```bash
 gco images init NAME [OPTIONS]
@@ -2449,7 +2617,7 @@ gco images init NAME [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--retain / --no-retain` | Apply `gco:retain=true` so the repo survives stack destroy |
+| `--retain / --no-retain` | Tag the repository `gco:retain=true`. A marker only: no GCO stack creates or deletes project repositories, so every repository survives `gco stacks destroy` with or without it, and `gco images delete-repo` deletes a tagged one too. Its one reader is the image-lookup custom resource handler the global stack exports (no GCO stack uses it), which keeps a tagged repository on delete |
 
 **Example:**
 
@@ -2484,7 +2652,8 @@ gco images tags my-app
 #### `gco images describe`
 
 Print the full ECR details for a single image tag — digest, push time,
-size, scan findings.
+size, scan findings. A tag the repository does not have is an error: the
+command says so on stderr and exits 1.
 
 ```bash
 gco images describe NAME TAG
@@ -2543,7 +2712,7 @@ gco images build CONTEXT [OPTIONS]
 | `--dockerfile` | `-f` | Path to Dockerfile within the context |
 | `--build-arg` | | Build arg `KEY=VALUE`, repeatable |
 | `--platform` | | Target platform (e.g. `linux/amd64`) |
-| `--retain / --no-retain` | | Apply `gco:retain=true` |
+| `--retain / --no-retain` | | Tag the repository `gco:retain=true`, a marker (see [`gco images init`](#gco-images-init)) |
 
 **Example:**
 
@@ -2568,7 +2737,7 @@ gco images push NAME [OPTIONS]
 |--------|-------|-------------|
 | `--tag` | `-t` | Image tag (required) |
 | `--local-image` | | Existing local image reference (required) |
-| `--retain / --no-retain` | | Apply `gco:retain=true` |
+| `--retain / --no-retain` | | Tag the repository `gco:retain=true`, a marker (see [`gco images init`](#gco-images-init)) |
 
 **Example:**
 
@@ -2670,9 +2839,14 @@ gco images prune --no-dry-run -y       # actually delete
 
 #### `gco images orphans`
 
-List tags older than `threshold_days` that are not referenced by any
-deployed inference endpoint or recent job. Cross-references against
-both data sources before declaring a tag an orphan.
+List tags older than `threshold_days` that nothing uses. A tag is in use
+when an inference endpoint names it (its image, canary image, per-Region
+replica URIs or any other image in its record) or a job in any regional
+cluster does (every unfinished job, and finished jobs created within
+`threshold_days`), by tag or by digest, through any Region's replica of the
+registry. The command reads every source before it answers: when the
+inference endpoints or a Region's jobs cannot be read, it fails instead of
+listing tags that may be in use.
 
 ```bash
 gco images orphans [OPTIONS]
@@ -2746,9 +2920,25 @@ gco images replication COMMAND
 
 **Subcommands:**
 
-- `get` - Print the current ECR replication configuration
-- `status` - Print per-image replication status across project repos
-- `sync` - Apply the project's standard replication rule (`gco/*` to all deployed regions)
+- `get` - Print the current ECR replication configuration (the registry's
+  rules, read with `ecr:DescribeRegistry`); with no rules JSON/YAML print the
+  same document with an empty `rules` list
+- `status` - Print per-image replication status across project repos (`[]` in
+  JSON/YAML when there is none)
+- `sync` - Apply the project's standard replication rule (`gco/*` to all deployed regions):
+  reads the rules with `ecr:DescribeRegistry`, keeps every rule for other
+  repository prefixes, and writes the result with `ecr:PutReplicationConfiguration`
+
+The global stack owns the registry's replication configuration when
+`images.replication` is on. Every `gco stacks deploy`/`deploy-all` that can
+reach the global stack reads the registry (`ecr:DescribeRegistry`) and the
+deployed template (`cloudformation:GetTemplate`) in the global Region and
+refuses, with instructions, when the deploy would delete or overwrite
+replication rules GCO did not create. Destroying the global stack retains the
+configuration; the CLI then removes only this project's rule
+(`ecr:PutReplicationConfiguration`). See
+[CUSTOMIZATION.md](CUSTOMIZATION.md#running-multiple-deployments-in-one-account-and-region)
+for the same-region caveat.
 
 **Example:**
 
@@ -2762,7 +2952,7 @@ gco images replication sync
 
 ### Inference Commands
 
-Manage multi-region inference endpoints. Endpoints are stored in DynamoDB and reconciled by the `inference_monitor` in each target region.
+Manage multi-region inference endpoints. Endpoints are stored in the `<project_name>-inference-endpoints` DynamoDB table in the global Region and reconciled by the `inference_monitor` in each target region. The commands (and `gco images orphans`) read the table of the deployment the CLI configuration names: cdk.json `project_name` and `deployment_regions.global`, or the config file, `GCO_PROJECT_NAME` and `GCO_GLOBAL_REGION`. `INFERENCE_ENDPOINTS_TABLE_NAME`, when set, still names the table.
 
 See [Inference Guide](INFERENCE.md) for architecture details and workflows.
 
@@ -2793,6 +2983,8 @@ See [Inference Guide](INFERENCE.md) for architecture details and workflows.
 
 </details>
 
+With `--output json` or `--output yaml`, the commands that change an endpoint (`scale`, `stop`, `start`, `delete`, `update-image`, `canary`, `promote`, `rollback`, `add-region`, `remove-region`, `set-topology`, `configure-store`) print the updated endpoint record, the same document `gco inference status` returns. Declining a confirmation prompt aborts the command with exit status 1.
+
 #### `gco inference deploy`
 
 Deploy an inference endpoint to one or more regions.
@@ -2803,7 +2995,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 
 **Arguments:**
 
-- `ENDPOINT_NAME` - Unique name for the endpoint
+- `ENDPOINT_NAME` - Unique name for the endpoint: a DNS-1035 label (lowercase letters, digits and `-`, starting with a letter) of at most 55 characters. A name whose Kubernetes object names would overlap another endpoint's (`llama-canary` beside `llama`, `foo-proxy` beside `foo`) is refused; see [What Gets Created](INFERENCE.md#what-gets-created)
 
 **Options:**
 
@@ -2817,17 +3009,17 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--gpu-type` | | Preferred instance type (e.g. g5.xlarge), rendered as a preferred node affinity on `node.kubernetes.io/instance-type`. A hint, not a requirement: Karpenter launches another type when it can't get this one |
 | `--port` | | Container port (default: 8000; SGLang's documented default is 30000). 8443 is reserved for the pod's TLS sidecar, which is the only port the endpoint's Service publishes ([Model Endpoint TLS](INFERENCE.md#model-endpoint-tls)) |
 | `--model-path` | | Mount the inference namespace's EFS volume (`efs-claim`) at `/models` without syncing anything; `--model-source` mounts it too. The volume is separate from the `gco-shared-storage` volume jobs use in `gco-jobs` |
-| `--model-source` | | S3 URI for model weights (auto-synced via init container) |
+| `--model-source` | | S3 URI for model weights in the GCO model bucket (`$(gco models uri <name>)`), synced to `/models/<endpoint name>` by an init container that runs as the namespace's `gco-service-account`, whose role can read the model bucket and no other bucket outside the two shared buckets |
 | `--health-path` | | Health check endpoint path (default: /health) |
-| `--env` | `-e` | Environment variable (KEY=VALUE), repeatable |
+| `--env` | `-e` | Environment variable (KEY=VALUE), repeatable. A value without `=` or without a key is refused |
 | `--namespace` | `-n` | Kubernetes namespace (default: gco-inference) |
-| `--label` | `-l` | Label (key=value), repeatable |
-| `--min-replicas` | | Autoscaling: minimum replicas |
-| `--max-replicas` | | Autoscaling: maximum replicas |
-| `--autoscale-metric` | | Autoscaling metric (e.g. `cpu:70`, `memory:80`, `gpu:60`), repeatable. CPU/memory use the native HPA; gpu/gpu_memory scale via [KEDA](https://keda.sh/) + CloudWatch. |
+| `--label` | `-l` | Label (key=value), repeatable. A value without `=` or without a key is refused |
+| `--min-replicas` | | Autoscaling: minimum replicas, at least 1 (default: 1). Requires `--autoscale-metric` |
+| `--max-replicas` | | Autoscaling: maximum replicas, at least the minimum (default: 10). Requires `--autoscale-metric` |
+| `--autoscale-metric` | | Autoscaling metric as `TYPE[:TARGET]` (e.g. `cpu:70`, `memory:80`, `gpu:60`), repeatable; enables autoscaling. `TYPE` is `cpu`, `memory`, `gpu` or `gpu_memory`; `TARGET` is a whole-number utilization percentage (default: 70). CPU/memory use the native HPA; gpu/gpu_memory scale via [KEDA](https://keda.sh/) + CloudWatch. |
 | `--capacity-type` | | Pin the pods to one node capacity type: `spot`, `on-demand` or `hyperpod` (all hard pins, no fallback; `hyperpod` selects the Region's [SageMaker HyperPod](HYPERPOD.md) nodes). Unset by default: no selector is added, so a node Karpenter launches for the pod is Spot when Spot is available and On-Demand otherwise ([Karpenter NodePool capacity type](https://karpenter.sh/docs/concepts/nodepools/)), and the pod can land on any existing node with room. See [INFERENCE.md](INFERENCE.md#spot-instances-for-inference) |
 | `--accelerator` | | Accelerator type: `nvidia` for GPU instances (default), `neuron` for [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/)/Inferentia |
-| `--node-selector` | | Node selector (key=value), repeatable. E.g. `eks.amazonaws.com/instance-family=inf2` |
+| `--node-selector` | | Node selector (key=value), repeatable. E.g. `eks.amazonaws.com/instance-family=inf2`. A value without `=` or without a key is refused |
 | `--extra-args` | | One container argument per value, repeatable (e.g. `--extra-args=--max-model-len --extra-args 4096`). For vLLM the renderer adds `--model $(MODEL)` when `-e MODEL=...` is set, unless these arguments already name the model (`--model`, a positional model tag, or `--config`) |
 | `--mooncake-mode` | | Mooncake serving mode: `disaggregated` (prefill/decode split), `store` (shared KV-cache), or `both` |
 | `--prefill-replicas` | | Number of prefill replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
@@ -2848,7 +3040,7 @@ gco inference deploy llama3-70b \
   -i vllm/vllm-openai:v0.32.0 \
   -r us-east-1 -r eu-west-1 \
   --replicas 2 --gpu-count 4 \
-  --model-source s3://bucket/models/llama3-70b \
+  --model-source $(gco models uri llama3-70b) \
   -e MODEL=/models/llama3-70b
 
 # Deploy with autoscaling (creates a Kubernetes HPA)
@@ -2925,7 +3117,7 @@ gco inference scale my-llm --replicas 4
 
 #### `gco inference stop`
 
-Stop an inference endpoint (scales to zero, keeps configuration).
+Stop an inference endpoint (scales to zero, keeps configuration). Every Deployment of the endpoint scales to zero: the model Deployment and its canary, or the Mooncake roles and the prefill-decode proxy. Spec changes made while it is stopped (`update-image`, `set-topology`, `configure-store`, `canary`, `promote`, `rollback`) are kept, the endpoint stays stopped, and the changes take effect when it starts.
 
 ```bash
 gco inference stop ENDPOINT_NAME [OPTIONS]
@@ -3014,7 +3206,7 @@ gco inference delete my-llm -y
 
 #### `gco inference update-image`
 
-Update the container image for an endpoint. Triggers a rolling update across all target regions.
+Update the container image for an endpoint. Triggers a rolling update across all target regions; a stopped endpoint keeps the new image and rolls it out when it starts. On a Mooncake endpoint the prefill, decode and store-role pods roll onto the new image, one pod-template change per reconcile pass (a pending TLS sidecar or `mooncake.json` change lands first); the prefill-decode proxy keeps its own `mooncake.proxy.image`.
 
 ```bash
 gco inference update-image ENDPOINT_NAME [OPTIONS]
@@ -3050,7 +3242,7 @@ gco inference invoke ENDPOINT_NAME [OPTIONS]
 |--------|-------|-------------|
 | `--prompt` | `-p` | Text prompt to send |
 | `--data` | `-d` | Raw JSON body (overrides --prompt) |
-| `--path` | | API sub-path (default: auto-detected from image) |
+| `--path` | | API sub-path under the endpoint (default: auto-detected from image). It must start with `/` and may not contain a `.` or `..` segment, literal or percent-encoded, because the request would then leave the endpoint for another route |
 | `--region` | `-r` | Target region for the request |
 | `--max-tokens` | | Max tokens to generate (default: 100) |
 | `--stream/--no-stream` | | Enable or disable incremental response streaming; when omitted, raw JSON with `"stream": true` enables it automatically |
@@ -3236,7 +3428,7 @@ gco inference set-topology my-llm --prefill 3 --decode 6
 
 #### `gco inference configure-store`
 
-Update the shared KV-cache store on a Mooncake `store`/`both` endpoint. Settings merge onto the endpoint's existing store block and re-trigger reconciliation, so changing one field leaves the others intact. The monitor re-renders the endpoint's `mooncake.json` and rolls its role pods onto it (the connectors read the file at start-up), so expect one rolling restart per change.
+Update the shared KV-cache store on a Mooncake `store`/`both` endpoint. Settings merge onto the endpoint's existing store block and re-trigger reconciliation, so changing one field leaves the others intact. The monitor re-renders the endpoint's `mooncake.json` and rolls its role pods onto it (the connectors read the file at start-up), so expect one rolling restart per change. At least one option is required: without one the command changes nothing and exits with status 1.
 
 ```bash
 gco inference configure-store ENDPOINT_NAME [OPTIONS]
@@ -3330,11 +3522,26 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 | `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (manifest `metadata.namespace` takes precedence) |
 | `--region` | `-r` | Target specific region |
 | `--dry-run` | | Validate without applying |
-| `--check-policy` | | Check the manifests against the target region's deployed policy first and report anything that would be rejected (advisory; submission continues) |
+| `--check-policy` | | Check the manifests against the target region's deployed policy first and report anything that would be rejected (advisory; submission continues). With `-o json` or `-o yaml` the findings go to stderr, so stdout stays the submission document |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
-| `--wait` | `-w` | Wait for job completion |
+| `--wait` | `-w` | Wait for job completion (exit status below) |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
+
+`--wait` follows the first batch Job the submission created or, when there is
+none, the first Kubeflow TrainJob (finished when its `Complete` or `Failed`
+condition is true). A submission with neither (a Deployment, a Pod) prints a
+warning that there is nothing to wait for and exits 0 once submitted.
+
+**Exit status:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | Submitted; with `--wait`, the job succeeded |
+| `1` | Not submitted, or `--wait` could not read the job's status (the job may still exist) |
+| `2` | Invalid options or arguments |
+| `3` | `--wait`: the job ran and finished with status `failed` |
+| `4` | `--wait`: the job had not finished when `--timeout` expired; it keeps running |
 
 **Example:**
 
@@ -3360,7 +3567,7 @@ gco jobs submit-sqs MANIFEST_PATH [OPTIONS]
 | `--region` | `-r` | Target region for SQS queue |
 | `--auto-region` | | Auto-select optimal region based on capacity (ignored with `--region`) |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
-| `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (manifest `metadata.namespace` takes precedence) |
+| `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (default: the configured default namespace, `GCO_DEFAULT_NAMESPACE`; manifest `metadata.namespace` takes precedence) |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 
@@ -3402,7 +3609,7 @@ gco jobs submit-direct MANIFEST_PATH [OPTIONS]
 | `--dry-run` | | Validate without applying |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
-| `--wait` | `-w` | Wait for job completion |
+| `--wait` | `-w` | Wait for job completion; follows a Job, else a TrainJob, as [`gco jobs submit`](#gco-jobs-submit) does, with the same exit status |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 
 `submit-direct` skips GCO's server-side admission, so `--sandbox` runs the
@@ -3425,15 +3632,21 @@ gco jobs submit-queue MANIFEST_PATH [OPTIONS]
 
 Jobs are stored in DynamoDB and picked up by the target region's manifest processor. This enables global job submission with centralized tracking and status history.
 
+This is [`gco queue submit`](#gco-queue-submit) under a second name: the same
+options (including `--sandbox` and the `--max-spot-price` / `--spot-instance-type`
+gate), the same namespace rules and the same routing through the global API.
+
 **Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Target region for job execution (required) |
-| `--namespace` | `-n` | Kubernetes namespace |
+| `--namespace` | `-n` | Namespace for a manifest that declares none (default: the configured default namespace); must match a namespace the manifest declares |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--max-spot-price` | | Spot price cap in USD/hour (requires `--spot-instance-type`); see [`gco queue submit`](#gco-queue-submit) |
+| `--spot-instance-type` | | EC2 instance type whose spot price gates dispatch (requires `--max-spot-price`) |
 
 **Example:**
 
@@ -3460,8 +3673,17 @@ gco jobs list [OPTIONS]
 | `--region` | `-r` | Target region (required unless --all-regions) |
 | `--all-regions` | `-a` | Query all regions via global API |
 | `--namespace` | `-n` | Filter by namespace |
-| `--status` | `-s` | Filter by status |
-| `--limit` | `-l` | Maximum results (default: 50) |
+| `--status` | `-s` | Filter by status: `pending`, `running`, `succeeded` or `failed` (the status `gco jobs get` reports) |
+| `--limit` | `-l` | Maximum jobs to return (default: 50, at least 1). With `--region` the CLI reads as many API pages (up to 1000 jobs each) as that takes, newest first |
+
+With `--region`, a read that fails (an HTTP error from the regional API, a Region
+without the regional API bridge, missing credentials) prints the error on stderr and
+exits 1 in every output mode; it is never reported as an empty job list.
+
+With `--all-regions`, the global API reads every Region. Each Region it cannot read
+is listed under `errors` (`{"region", "error"}`) in the JSON output and named on
+stderr in table mode; the jobs of the other Regions are still printed, and the
+command exits 1.
 
 **Example:**
 
@@ -3554,11 +3776,19 @@ gco jobs logs JOB_NAME [OPTIONS]
 | `--namespace` | `-n` | Job namespace |
 | `--tail` | `-t` | Number of lines to show (default: 100) |
 | `--since` | `-s` | Hours to look back in CloudWatch (default: 24) |
-| `--container` | `-c` | Container name (for multi-container pods) |
+| `--container` | `-c` | Container to read in a multi-container pod (default: the pod's first container) |
 | `--node` | | Node rank to fetch for a distributed TrainJob (default: 0) |
 
 Kubeflow TrainJobs are resolved automatically: logs come from the
 rank-`--node` pod of the training job (rank 0 by default).
+
+When the pod is gone (completed and cleaned up) or still pending, the command
+falls back to CloudWatch Logs (`/aws/containerinsights/<cluster>/application`,
+written by the CloudWatch Observability add-on) and prints the newest `--tail`
+lines of the last `--since` hours, oldest first. It reads only the streams of
+this job's pods in `--namespace` (for a TrainJob, the rank-`--node` pod), and only
+the `--container` stream when that option is given; a job named `train` never
+picks up `pretrain` or `train-v2` logs.
 
 **Example:**
 
@@ -3598,6 +3828,11 @@ gco jobs pod-logs multi-job multi-job-pod1 -r us-east-1 --container sidecar
 #### `gco jobs delete`
 
 Delete a job.
+
+A name the batch Job API does not know is deleted as a Kubeflow TrainJob of
+that name (which removes its JobSet, child Jobs and pods). When neither exists
+the command reports the batch Job's `404` and exits 1; when the TrainJob exists
+but its deletion fails, it reports that error instead.
 
 ```bash
 gco jobs delete JOB_NAME [OPTIONS]
@@ -3701,7 +3936,9 @@ A pod with a `deletionTimestamp` shows `Terminating` whatever phase it still
 reports, as `kubectl` does, and a pod a disruption is deleting is called out
 with its `DisruptionTarget` reason (`EvictionByEvictionAPI` for a Karpenter /
 EKS Auto Mode drain). `--output json` adds a per-pod `node` block, each pod's
-`metadata.deletionTimestamp` and `status.disruptionTarget`, and a job-wide
+`metadata.deletionTimestamp` and `status.disruptionTarget`, each container's
+state (for an exited container, `exitCode`, `reason`, `signal`, `message`,
+`startedAt` and `finishedAt`) and previous termination (`lastState`), and a job-wide
 `scheduling` block; see [Get Job Pods](API.md#get-job-pods).
 
 #### `gco jobs metrics`
@@ -3729,6 +3966,12 @@ gco jobs metrics training-job -r us-west-2 -n ml-jobs
 #### `gco jobs retry`
 
 Retry a failed job.
+
+Creates a new Job from the failed job's spec under a new name and keeps the
+original for debugging. The copy goes through the same validation as a new
+submission; when the API refuses it (for example, an image registry or
+namespace the current policy no longer allows), the command prints the API's
+message with each validation error and exits 1.
 
 ```bash
 gco jobs retry JOB_NAME [OPTIONS]
@@ -3764,7 +4007,7 @@ gco jobs bulk-delete [OPTIONS]
 | `--region` | `-r` | Target region (required unless --all-regions) |
 | `--all-regions` | `-a` | Delete across all regions |
 | `--namespace` | `-n` | Filter by namespace |
-| `--status` | `-s` | Filter by status |
+| `--status` | `-s` | Filter by status: `succeeded` (or its synonym `completed`) or `failed` |
 | `--older-than-days` | `-d` | Delete jobs older than N days |
 | `--label-selector` | `-l` | Kubernetes label selector |
 | `--dry-run` | | Only show what would be deleted (default) |
@@ -3831,6 +4074,11 @@ policy over the network, so it exits 0 unless you pass `--fail-on-reject`. A
 check that blocked on its own opinion would refuse valid jobs whenever it was
 stale or wrong.
 
+When it checks more than one region, it reads them in parallel, and a region
+whose policy read has not finished after 45 seconds is reported as unreadable
+("timed out after 45s") with an `unknown` verdict, so one hung region does not
+hold up the answer for the others.
+
 ```bash
 gco jobs check-policy [MANIFEST_PATH] [OPTIONS]
 ```
@@ -3877,9 +4125,13 @@ than discovering a policy conflict after a region has been provisioned.
 This reads the deployed cluster, not your local `cdk.json`. The two diverge
 whenever the stack was deployed from a different checkout, and CDK adds the
 project's own ECR registries to `trusted_registries` at synth time, so the
-effective allowlist is always larger than the configured one. Note that
-`gco jobs submit --dry-run` is a client-side `kubectl` parse, not an admission
-preview — it never consults this policy.
+effective allowlist is always larger than the configured one (a policy without
+`trusted_registries` starts from the services' default list).
+`gco jobs submit --dry-run` checks a manifest against this policy in the
+region that receives it and applies nothing, but it never reaches the
+Kubernetes API server, so the `LimitRange` and `ResourceQuota` this command
+also reports are not evaluated. `gco jobs submit-direct --dry-run` is a
+client-side `kubectl --dry-run=client` parse that consults neither.
 
 ```bash
 gco jobs policy [OPTIONS]
@@ -3914,13 +4166,18 @@ gco jobs queue-status [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Filter by region |
-| `--all-regions` | | Show all regions |
+| `--all-regions` | `-a` | Show all regions |
+
+With `-o json` or `-o yaml`, `--all-regions` prints one list with each answering
+region's status document (an empty list when no region could be read); a single
+region prints its status document.
 
 **Example:**
 
 ```bash
 gco jobs queue-status --all-regions
 gco jobs queue-status -r us-east-1
+gco -o json jobs queue-status --all-regions
 ```
 
 ---
@@ -3985,8 +4242,8 @@ gco mission run [OPTIONS]
 **Options:**
 
 - `--directive TEXT` — Required. Natural-language goal description.
-- `--tool-allowlist NAME` — Repeatable. Tools the loop may invoke; required unless `--allow-all-tools` is set. The first allowlisted tool also seeds the deterministic strategy when sampling is off.
-- `--allow-all-tools` — Resolve the session's tool allowlist to every registered MCP tool (minus the `mission_*` control tools). Mutually exclusive with `--tool-allowlist`.
+- `--tool-allowlist NAME` — Repeatable. Tools the loop may invoke; required unless `--allow-all-tools` is set. The first allowlisted tool also seeds the deterministic strategy when sampling is off. The `mission_*` control tools and the `swarm_*` tools are refused (`control_tool_not_allowed`).
+- `--allow-all-tools` — Resolve the session's tool allowlist to every registered MCP tool (minus the `mission_*` and `swarm_*` tools). Mutually exclusive with `--tool-allowlist`.
 - `--max-iterations INTEGER` — Iteration cap (default: 5). Pass `-1` to opt out.
 - `--max-wall-clock INTEGER` — Wall-clock cap in seconds (default: 300). Pass `-1` to opt out.
 - `--max-criteria INTEGER` — Cap on the number of criterion entries the scaffolder emits (default: 5).
@@ -3996,10 +4253,13 @@ gco mission run [OPTIONS]
 - `--allow-scripted-strategies` — Permit scripted strategies (the AST-validated Python sandbox).
 - `--save-criteria PATH` — Also write the scaffolded criteria JSON to `PATH` for inspection or reuse.
 - `--cadence` — Checkpoint cadence kind (default: `every_iteration`).
+- `--cadence-n INTEGER` — `n` parameter for `every_n_iterations`.
+- `--cadence-t INTEGER` — `t` parameter (seconds) for `every_t_seconds`.
+- `--cadence-event TEXT` — `event_name` parameter for `on_event`.
 - `--stagnation-threshold INTEGER` — Iterations of no progress before terminate (default: 3).
 - `--dry-run` — Use a stub tool dispatcher and disable Strategy_Revision sampling during iteration (the criteria scaffolder still runs through Bedrock when sampling is enabled). Smoke-tests the loop without spending AWS or Bedrock credits.
 
-A scaffold-summary JSON line lands on stderr before iteration starts; per-iteration verdicts stream to stderr as JSON lines; the Final_Report lands on stdout when a terminal verdict fires.
+The directive, caps, cadence and stagnation threshold are validated before the scaffold step, so a bad flag exits 1 without sampling and without writing `--save-criteria`. A scaffold-summary JSON line lands on stderr before iteration starts; per-iteration verdicts stream to stderr as JSON lines; the Final_Report lands on stdout when a terminal verdict fires.
 
 ```bash
 # No-AWS smoke test against in-memory tools.
@@ -4035,8 +4295,8 @@ gco mission start [OPTIONS]
 - `--with-defaults` — Use a basic placeholder predicate criterion when no `--criteria-file` is provided.
 - `--max-iterations INTEGER` — Required. Hard cap on iterations. Pass `-1` to opt out (uncapped).
 - `--max-wall-clock INTEGER` — Required. Hard cap on wall-clock seconds. Pass `-1` to opt out (uncapped).
-- `--tool-allowlist NAME` — Repeatable. Tools the loop may invoke; required unless `--allow-all-tools` is set.
-- `--allow-all-tools` — Resolve the session's tool allowlist to every registered MCP tool (minus the `mission_*` control tools). Mutually exclusive with `--tool-allowlist`.
+- `--tool-allowlist NAME` — Repeatable. Tools the loop may invoke; required unless `--allow-all-tools` is set. The `mission_*` control tools and the `swarm_*` tools are refused (`control_tool_not_allowed`).
+- `--allow-all-tools` — Resolve the session's tool allowlist to every registered MCP tool (minus the `mission_*` and `swarm_*` tools). Mutually exclusive with `--tool-allowlist`.
 - `--cadence` — Checkpoint cadence kind (default: `every_iteration`).
 - `--cadence-n INTEGER` — `n` parameter for `every_n_iterations`.
 - `--cadence-t INTEGER` — `t` parameter (seconds) for `every_t_seconds`.
@@ -4342,7 +4602,9 @@ Permanently delete a model from the versioned central S3 bucket. This removes
 all current files, historical object versions, and delete markers beneath the
 model prefix; the operation cannot be undone. If S3 reports an error for one
 batch, earlier successful deletions remain in effect and the command reports
-the failed object versions.
+the failed object versions. With `--output json` or `yaml` the result is
+`{"model_name": ..., "files_deleted": N}`, `N` being `0` when the model had no
+files.
 
 ```bash
 gco models delete MODEL_NAME [OPTIONS]
@@ -4454,7 +4716,7 @@ gco monitoring open [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--service` | `grafana` (default, `localhost:3000`), `prometheus` (`:9090`), `alertmanager` (`:9093`), `opencost` (the OpenCost UI, `:9091`), `opencost-api` (the OpenCost allocation API, `:9003`), or `mlflow` (the MLflow tracking UI, `:5000`). The OpenCost targets exist when `cost_monitoring.enabled` is on — see [docs/COST_MONITORING.md](COST_MONITORING.md); the MLflow target when `cluster_observability.mlflow.enabled` is on — see [docs/MONITORING.md](MONITORING.md#mlflow-experiment-tracking). |
-| `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--local-port` | Override the local bind port. |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
@@ -4463,7 +4725,7 @@ gco monitoring open [OPTIONS]
 **Example:**
 
 ```bash
-# From inside the VPC:
+# From a host in the VPC that the cluster security group admits on 443:
 gco monitoring open --region us-east-1
 
 # From a laptop, tunnelling through an SSM-managed instance:
@@ -4478,11 +4740,20 @@ gco monitoring open --service mlflow --region us-east-1 --via-ssm auto -y
 Manage Grafana users through the admin HTTP API, over an active
 `gco monitoring open` port-forward (default `http://localhost:3000`). Admin
 credentials are read from the `kube-prometheus-stack-grafana` Secret, or passed
-with `--admin-password` / `$GCO_GRAFANA_ADMIN_PASSWORD`.
+with `--admin-password` / `$GCO_GRAFANA_ADMIN_PASSWORD`. The Secret is read on
+the `--region` cluster (the CLI's default region otherwise) through its
+kubeconfig context, with a 60-second limit; from outside the VPC pass
+`--via-ssm INSTANCE_ID|auto` (with `--bastion-ttl-minutes` and `--yes`, as for
+`monitoring open`) so the read gets an SSM tunnel of its own, on a free local
+port next to the one `monitoring open` holds. Its route messages go to stderr.
+`users remove --yes` also skips the bastion prompt. `users add` takes the new
+user's password from `--password` or `$GCO_GRAFANA_USER_PASSWORD` (which keeps
+it off the command line), or generates one with `--generate-password`.
 
 ```bash
 gco monitoring users add --username alice --email alice@example.com --generate-password
-gco monitoring users list [--as-json]
+GCO_GRAFANA_USER_PASSWORD='...' gco monitoring users add --username bob
+gco monitoring users list [--as-json] [--region us-east-1] [--via-ssm auto -y]
 gco monitoring users remove --username alice --yes
 ```
 
@@ -4551,7 +4822,7 @@ gco nodepools describe NODEPOOL_NAME [OPTIONS]
 
 Generate nodepool manifest for ODCR (On-Demand Capacity Reservation). The manifest holds two objects: an [EKS Auto Mode `NodeClass`](https://docs.aws.amazon.com/eks/latest/userguide/create-node-class.html) named `<name>-nodeclass` that binds the reservation through `capacityReservationSelectorTerms`, and a `NodePool` that launches reserved capacity (`karpenter.sh/capacity-type: reserved`) through it. GCO clusters run EKS Auto Mode, so the NodeClass is Auto Mode's `eks.amazonaws.com/v1` kind rather than self-managed Karpenter's `EC2NodeClass`. It reuses the cluster's own node role, subnets and cluster security group, which the command reads from the cluster with `eks:DescribeCluster`, so nodes join the cluster the same way the built-in pools' nodes do. See [Control deployment of workloads into Capacity Reservations with EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/auto-odcr.html).
 
-Nothing is applied: the command prints the manifest or writes it to `--output-file`. The EKS endpoint is private by default, so apply it through [`gco cluster tunnel`](#gco-cluster-tunnel), which holds the tunnel open and prints the `kubectl` flags to use:
+Nothing is applied: the command prints the manifest or writes it to `--output-file`. A printed manifest is all of stdout (the apply hint goes to stderr), so `> nodepool.yaml` saves valid YAML. The EKS endpoint is private by default, so apply it through [`gco cluster tunnel`](#gco-cluster-tunnel), which holds the tunnel open and prints the `kubectl` flags to use:
 
 ```bash
 gco cluster tunnel --via-ssm auto                  # keep this running
@@ -4661,7 +4932,7 @@ Manage the global job queue (DynamoDB-backed). The job queue provides centralize
 | [`gco queue submit`](#gco-queue-submit) | Submit a job to the global queue for regional pickup. |
 | [`gco queue list`](#gco-queue-list) | List jobs in the global queue. |
 | [`gco queue get`](#gco-queue-get) | Get details of a queued job including status history. |
-| [`gco queue cancel`](#gco-queue-cancel) | Cancel a queued job (only works for jobs not yet running). |
+| [`gco queue cancel`](#gco-queue-cancel) | Cancel a queued job (only while it is still queued, before a region claims it). |
 | [`gco queue stats`](#gco-queue-stats) | Get job queue statistics by region and status. |
 
 </details>
@@ -4679,11 +4950,20 @@ gco queue submit MANIFEST_PATH [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Target region for job execution (required) |
-| `--namespace` | `-n` | Kubernetes namespace |
+| `--namespace` | `-n` | Namespace for a manifest that declares none (default: the configured default namespace, `gco-jobs`); must match a namespace the manifest declares |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
-| `--label` | `-l` | Add labels (key=value), can be repeated |
+| `--label` | `-l` | Add labels (`key=value` with a non-empty key; the value may be empty), can be repeated |
+| `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 | `--max-spot-price` | | Spot price cap in USD/hour; the job stays queued until the current spot price of `--spot-instance-type` in the target region drops to or below this value. Requires `--spot-instance-type` |
 | `--spot-instance-type` | | EC2 instance type whose spot price gates dispatch (e.g. `g5.xlarge`). Requires `--max-spot-price` |
+
+The manifest must be one `batch/v1` Job. It runs in its own `metadata.namespace`;
+`--namespace` names the namespace for a manifest that declares none, and a
+`--namespace` that contradicts the manifest fails before anything is sent (the
+queue API would answer `422`). The request goes through the global API, any of
+whose Regions can enqueue for any target Region; with `--regional-api` it uses the
+target Region's bridge. [`gco jobs submit-queue`](#gco-jobs-submit-queue) is this
+same command under a second name.
 
 With the spot price gate set, the regional queue worker re-evaluates the instance type's lowest current spot price across the region's Availability Zones on every polling pass and only dispatches once it clears the cap. `gco queue get` shows the gate and the last observed price; the job waits indefinitely until the price clears or you cancel it with `gco queue cancel`. Price-gated jobs never block other queued work. See [docs/COST_MONITORING.md](COST_MONITORING.md#spot-price-aware-scheduling).
 
@@ -4702,6 +4982,15 @@ gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-typ
 
 List jobs in the global queue.
 
+It shows one page of up to `--limit` jobs, in no particular order: the queue's
+scan order, which is neither newest first nor by priority. When more jobs may
+match, the table ends with the `gco queue list ... --cursor CURSOR` command that
+reads the next page, and `--output json` / `yaml` carries the page's
+`next_cursor`. Pass it back with `--cursor` and the same filters (a cursor is
+bound to the filters it was issued with). A page can hold fewer than `--limit`
+jobs, even none, and still have a next page when the queue's scan budget ended it
+early; see [List Queued Jobs](API.md#list-queued-jobs).
+
 ```bash
 gco queue list [OPTIONS]
 ```
@@ -4711,9 +5000,10 @@ gco queue list [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Filter by target region |
-| `--status` | `-s` | Filter by status (queued, claimed, running, succeeded, failed, cancelled) |
+| `--status` | `-s` | Filter by status (queued, claimed, applying, pending, running, succeeded, failed, cancelled). A region claims a queued job, applies it (`applying`), and it is `pending` until its pods run |
 | `--namespace` | `-n` | Filter by namespace |
-| `--limit` | `-l` | Maximum results (default: 50) |
+| `--limit` | `-l` | Maximum jobs in this page, 1-1000 (default: 50) |
+| `--cursor` | | Read the page after a previous one (its `next_cursor`); use the same filters |
 
 **Example:**
 
@@ -4721,6 +5011,7 @@ gco queue list [OPTIONS]
 gco queue list
 gco queue list --region us-east-1 --status queued
 gco queue list -s running
+gco queue list -s running --cursor CURSOR_FROM_THE_PREVIOUS_PAGE
 ```
 
 #### `gco queue get`
@@ -4746,7 +5037,9 @@ gco queue get abc123-def456 --region us-east-1
 
 #### `gco queue cancel`
 
-Cancel a queued job (only works for jobs not yet running).
+Cancel a queued job (only while it is still queued, before a region claims it).
+A job that is already `claimed`, `applying`, `pending`, `running` or finished cannot be
+cancelled here; the API answers `409`.
 
 ```bash
 gco queue cancel JOB_ID [OPTIONS]
@@ -4797,6 +5090,8 @@ Release validation lifecycle.
 
 Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When a cluster-facing action (`inference`, `platform-workloads`, `network-posture`, `eks-capabilities`) or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM, SGLang and Triton images plus full immutable vLLM/SGLang model revisions are mandatory (Triton serves a harness-generated identity model from the model registry); exact framework requests/responses, model-info probes, the Mooncake store scenario, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
 
+Ctrl-C, `SIGTERM` and `SIGHUP` are passed on to the harness once each. The first starts its controlled cleanup (the teardown, the final inventory and the report) and the command waits for it; a second stops the teardown but still writes the report. After 6 hours the command interrupts the harness again itself, and 5 minutes later kills it and prints the `--resume` command that finishes the teardown. The command exits with the harness's status (130 after Ctrl-C). See [Run the Script Locally](LIVE_RELEASE_VALIDATION.md#run-the-script-locally).
+
 ```bash
 gco release validate --expected-account 123456789012 \
   --i-understand-this-deploys-and-destroys-infrastructure \
@@ -4836,7 +5131,7 @@ gco release validate --expected-account 123456789012 \
 
 #### `gco release validate-upgrade`
 
-Run [upgrade validation](UPGRADE_VALIDATION.md): deploy the previous release from a private clone with that release's own `gco`, run its `gco upgrade` to the checked-out commit, verify the upgraded deployment (the topology check, unchanged control-plane stack IDs, recreated workload stacks, a job template written before the upgrade that must read back unchanged), then destroy everything and verify the account against its baseline. Like `gco release validate`, it derives the SHA, branch, run id and report directory, takes consent only as flags, and executes `python -m scripts.upgrade_validation`. The candidate commit is tagged only in a private mirror inside the run's workspace, never in your repository.
+Run [upgrade validation](UPGRADE_VALIDATION.md): deploy the previous release from a private clone with that release's own `gco`, run its `gco upgrade` to the checked-out commit, verify the upgraded deployment (the topology check, unchanged control-plane stack IDs, recreated workload stacks, a job template written before the upgrade that must read back unchanged), then destroy everything and verify the account against its baseline. Like `gco release validate`, it derives the SHA, branch, run id and report directory, takes consent only as flags, and executes `python -m scripts.upgrade_validation`. The candidate commit is tagged only in a private mirror inside the run's workspace, never in your repository. Ctrl-C, `SIGTERM` and `SIGHUP` reach the harness and its cleanup is awaited exactly as for `gco release validate`.
 
 ```bash
 gco release validate-upgrade --expected-account 123456789012 \
@@ -4892,7 +5187,7 @@ Work with a region's Slurm cluster(s): the [Slinky](https://slinky.schedmd.com/)
 The backends enabled in the region, from `GET /api/v1/slurm/backends`: for each, its kind and endpoint, and for PCS the cluster id, status, Slurm version, accounting mode, default partition, the Slurm identity the API submits as, and the login kind (`ssm`). The header says whether `--backend` is required (both on) or which one is the default (one on). A backend whose discovery fails is listed as `unavailable` with the reason, so one broken backend never hides the other.
 
 ```bash
-gco slurm backends -r REGION [--output json]
+gco [-o json] slurm backends -r REGION
 ```
 
 #### `gco slurm status`
@@ -4900,7 +5195,7 @@ gco slurm backends -r REGION [--output json]
 Controller reachability (`ping`), every partition with its node and CPU totals, and node and job counts by state. The default partition is marked `*`. The header names the backend that answered when the API resolved one (`[pcs]`).
 
 ```bash
-gco slurm status -r REGION [--backend slinky|pcs] [--output json]
+gco [-o json] slurm status -r REGION [--backend slinky|pcs]
 ```
 
 #### `gco slurm partitions`
@@ -4965,7 +5260,7 @@ gco slurm submit SCRIPT --auto-region [OPTIONS]
 | `--tasks`, `-n` | Task count (`--ntasks`). |
 | `--cpus-per-task`, `-c` | CPUs per task. |
 | `--gpus-per-node` | GPUs per node (`gres/gpu:N`); the `gpu` partitions are whole-node, so match the instance's GPU count. |
-| `--mem` | Memory per node: MiB, or a `K`/`M`/`G`/`T` suffix such as `64G`. |
+| `--mem` | Memory per node: MiB, or a `K`/`M`/`G`/`T` suffix such as `64G`; a `K` size rounds up to whole MiB, as in sbatch. `--mem=0` (sbatch's "all of each node's memory") is refused, as a flag or an `#SBATCH` directive, because the API can only request an explicit size; an explicit `--mem` flag overrides the directive. |
 | `--time`, `-t` | Wall time: minutes, `HH:MM:SS` or `D-HH:MM:SS`. |
 | `--chdir`, `-D` | Working directory on the worker (default `/tmp` on Slinky, where `/home/slurm/...` is on the shared EFS; the identity's home on PCS). |
 | `--env`, `-e` | Extra environment variable `NAME=VALUE` (repeatable). |
@@ -5014,7 +5309,7 @@ gco slurm shell [--backend slinky|pcs] [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--backend`, `-b` | `slinky` (login pod) or `pcs` (login instance). |
-| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region`, `-r` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
 | `--yes`, `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
@@ -5082,6 +5377,24 @@ Manage CDK infrastructure stacks.
 
 </details>
 
+The commands that run the CDK CLI start it in its own process group. When
+`gco` receives SIGTERM while CDK runs (cancelling an MCP deploy or destroy task
+sends one), it terminates that process group, and every one a `--parallel` run
+started, before it exits with status 143. Each group gets 30 seconds to exit
+before it is killed, and the groups of a `--parallel` run are stopped at the
+same time, so this takes at most about 30 seconds. The MCP server waits 45
+seconds before it kills `gco`. CloudFormation still completes or rolls back the
+stack operation that was already in progress.
+
+Every command here that edits cdk.json (the feature toggles such as
+`gco stacks fsx enable`, and the managed-config commands `gco stacks regions`
+and `gco stacks bedrock`) rewrites the whole file in one format: two-space
+indentation, keys in their existing order, non-ASCII text such as the
+comments' em dashes kept as UTF-8 rather than `\uXXXX` escapes, and one
+trailing newline. Code that writes cdk.json the same way can use
+`cli.stacks.serialize_cdk_json`. When cdk.json is a symlink, the edit rewrites
+the file it points at and the link stays in place.
+
 #### `gco stacks list`
 
 List all GCO stacks.
@@ -5119,6 +5432,15 @@ gco stacks status gco-us-east-1 --region us-east-1
 #### `gco stacks deploy`
 
 Deploy a single stack. Automatically bootstraps CDK in the target region if needed.
+
+A region counts as bootstrapped when its `CDKToolkit` stack is `CREATE_COMPLETE`
+or `UPDATE_COMPLETE`. A missing stack, or one left failed, rolled back or in
+`REVIEW_IN_PROGRESS`, is bootstrapped again; one that CloudFormation is still
+creating, updating or deleting is waited for first (up to
+`GCO_CDK_SETTLE_TIMEOUT_SECONDS`, 1,200 seconds by default). When CloudFormation
+cannot be read at all (expired credentials, `AccessDenied`, throttling), the
+deploy fails with that error instead of starting a bootstrap that would fail the
+same way.
 
 ```bash
 gco stacks deploy STACK_NAME [OPTIONS]
@@ -5212,21 +5534,32 @@ gco stacks destroy-all [OPTIONS]
 | `--parallel` | `-p` | Destroy regional stacks in parallel |
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
 | `--retain-volumes` | | Report each cluster's orphaned EBS volumes instead of deleting them |
-| `--keep-control-plane` | | Destroy only the regional API bridges and regional stacks; leave the global, API Gateway and monitoring stacks standing (scale to zero workload Regions) |
+| `--keep-control-plane` | | Destroy only the regional API bridges and regional stacks; leave the global, API Gateway, monitoring and analytics stacks standing (scale to zero workload Regions) |
 | `--enable` | | Evaluate the same app the overridden deploy did (`NAME[,NAME...]`, repeatable). Not required for deletion — `DeleteStack` removes whatever the deployed template contains |
+
+A failed teardown is retried up to three times in all, 30 seconds apart. The
+closing `Destroyed: N/M stacks` line counts the stacks of the destroy set that
+some attempt deleted and the last attempt did not report as failed, so stacks a
+stopped teardown never reached do not count as destroyed. The command exits 1
+unless every stack is gone.
 
 ##### Keeping the control plane (`--keep-control-plane`)
 
 `--keep-control-plane` scales the deployment to zero workload Regions instead of
 removing it. Only the regional API bridges and the base regional stacks are
-destroyed; `<project>-global`, `<project>-api-gateway` and `<project>-monitoring`
-stay, together with everything they own — the DynamoDB tables, the model and
-cluster-shared buckets, the image registry, EFS recovery points in the backup
-vault, and the cost-report bucket. Before anything is deleted the monitoring stack
+destroyed; `<project>-global`, `<project>-api-gateway`, `<project>-monitoring`
+and, when deployed, `<project>-analytics` stay, together with everything they
+own — the DynamoDB tables, the model and cluster-shared buckets, the image
+registry, EFS recovery points in the backup vault, the cost-report bucket, and
+the analytics stack's Studio home directories, Cognito users and notebook
+outputs. Before anything is deleted the monitoring stack
 is updated in place with `--context gco:control-plane-only=true` (the run-scoped
 equivalent of an empty `deployment_regions.regional`) so it stops referencing the
 regional stacks; CloudFormation would otherwise refuse to delete a stack whose
-exports are still consumed. The sweeps that only make sense for a full teardown
+exports are still consumed. When that update fails, the attempt deletes nothing:
+the command reports that the monitoring stack could not be updated (it is not
+part of the destroy set, so it is not listed as a failed delete) and exits 1
+once the retries are spent. The sweeps that only make sense for a full teardown
 are skipped: the image-registry preflight, the backup-vault purge, bastion IAM
 retirement, and the traffic-dial parameter purge. Per-stack sweeps (orphaned
 bastions, roles held in instance profiles, implicit and recreated log groups,
@@ -5275,12 +5608,21 @@ is named, so nothing survives silently.
 Deletion is irreversible, so use `--retain-volumes` if you want to keep
 Prometheus history or take snapshots first.
 
+CloudFormation cannot delete a backup vault that still holds recovery points, so
+a full `destroy-all` empties the global stack's AWS Backup vault twice: when the
+teardown starts, and again right before it deletes `<project>-global`, often an
+hour later, by which time the daily (03:00 UTC) or weekly (Sundays 04:00 UTC)
+backup may have written a new recovery point. Each pass first stops the backup
+jobs still writing to that vault. If the global stack's delete still fails on
+the vault, it is emptied again and the delete is retried once.
+
 After stack deletion, `destroy-all` makes a best-effort sweep of known resources
 that CloudFormation never modeled. It targets the implicit CloudWatch log groups
 created out-of-band by Lambda (`/aws/lambda/<function>`), the EKS control plane
 (`/aws/eks/<cluster>/cluster`), and Container Insights
-(`/aws/containerinsights/<cluster>/...`), plus the ephemeral SSM bastion's IAM
-role and instance profile if a killed tunnel session left them behind.
+(`/aws/containerinsights/<cluster>/...`), plus the IAM role and instance
+profile that every `--via-ssm auto` bastion of the project shares (tunnel
+teardown leaves them in place).
 
 The sweep also deletes a destroyed stack's own log groups that exist again
 after CloudFormation deleted them. A Lambda function's last log lines can arrive
@@ -5291,8 +5633,9 @@ a group CloudFormation retained is left alone.
 
 Once every regional stack is confirmed absent, `destroy-all` also deletes each
 Region's `/<project>/addons/<region>/` SSM parameters: the add-on status records
-that `gco stacks addons status` reads, the convergence replay input and
-execution record, and the teardown fence. The Helm and manifest tooling writes
+that `gco stacks addons status` reads, the convergence replay input (with
+its parts, when it was too large for one parameter) and execution record, and
+the teardown fence. The Helm and manifest tooling writes
 them at runtime, so CloudFormation never removes them; the next deployment in
 that Region writes them again.
 
@@ -5301,7 +5644,10 @@ resources configured for retention, and unexpected resources outside the known
 inventory, may remain. Only exact names taken from the destroyed stacks' own
 resources are considered, and only for stacks whose deletion succeeded. Sweep
 failures are reported best-effort and do not fail the destroy command; log
-groups belonging to stacks that failed to delete are left untouched.
+groups belonging to stacks that failed to delete are left untouched. When an
+error interrupts the teardown, the log-group sweep still runs, for every stack
+CloudFormation confirms is gone, before the error is reported: the names were
+read from the live stacks, so a later run could not find them.
 
 #### `gco stacks bootstrap`
 
@@ -5340,6 +5686,23 @@ gco stacks access                             # Auto-detect region from cdk.json
 gco stacks access -r us-west-2                # Specific region
 gco stacks access -c my-cluster -r eu-west-1  # Custom cluster name
 ```
+
+The command exits non-zero when a step fails: an access entry that cannot be
+created (only `ResourceInUseException`, an entry that already exists, is
+tolerated), a policy that cannot be associated, or a final
+`kubectl get nodes` that fails for any reason other than reaching the API
+server. kubectl's error is printed; an `Unauthorized` right after the entry
+was created usually means it has not reached the cluster yet, so rerun the
+command. An API server this host cannot reach (a private endpoint, or a CIDR
+allowlist that leaves out your egress IP) only warns: the access entry and
+policy still apply to callers inside the network.
+
+With `-o json` or `-o yaml`, a run that exits `0` prints one document:
+`cluster`, `region`, `principal_arn`, `api_server_reachable`, `node_count`,
+`kubectl_error` and `warning`. When kubectl reached the API server,
+`kubectl_error` and `warning` are `null`; when it could not (the warning
+case above), `api_server_reachable` is `false`, `node_count` is `null`, and
+the other two carry kubectl's error and the warning text.
 
 The access entry this creates is required even when you reach a PRIVATE
 endpoint through `gco cluster tunnel` — the tunnel solves reachability,
@@ -5418,7 +5781,7 @@ gco stacks capabilities status [OPTIONS]
 
 ```bash
 gco stacks capabilities status                                      # first deployment region
-gco stacks capabilities status --all-regions --output json          # one document per region
+gco -o json stacks capabilities status --all-regions                # one document per region
 ```
 
 #### `gco stacks regions`
@@ -5496,8 +5859,23 @@ gco stacks fsx COMMAND [OPTIONS]
 ```bash
 gco stacks fsx status
 gco stacks fsx enable --storage-capacity 1200 -y
+gco stacks fsx enable -d PERSISTENT_2 --throughput 500 -y
 gco stacks fsx disable -y
 ```
+
+`enable --throughput` (`-t`) sets the per-unit storage throughput, in MB/s per
+TiB, of a PERSISTENT file system, and only the values FSx for Lustre accepts for
+the deployment type pass: 50, 100 or 200 for `PERSISTENT_1` (default 200), and
+125, 250, 500 or 1000 for `PERSISTENT_2` (default 250). `SCRATCH_1` and
+`SCRATCH_2` file systems have no such setting, so `enable` writes none for them
+and refuses `--throughput`.
+
+`enable` writes the configuration its summary shows: an option you leave out
+is removed from the block it writes (`fsx_lustre`, or the Region's
+`fsx_lustre_regions` entry with `-r`), so an import path, export path or
+throughput written by an earlier run does not carry over, and the deprecated
+`node_group` key is removed. A key removed from a Region's entry falls back
+to the global block.
 
 #### `gco stacks valkey`
 
@@ -5575,7 +5953,7 @@ gco stacks pcs COMMAND [OPTIONS]
 
 ```bash
 gco stacks pcs status
-gco stacks pcs status --all-regions --output json
+gco -o json stacks pcs status --all-regions
 gco stacks pcs enable -y
 gco stacks pcs enable --region us-east-1 --mode existing --cluster-id pcs_0123456789abcdef -y
 gco stacks pcs preflight -r us-east-1
@@ -5610,13 +5988,13 @@ gco stacks hyperpod COMMAND [OPTIONS]
 | `--cluster-name` | | `enable` | The HyperPod cluster name (default `<project>-hyperpod`) |
 | `--yes` | `-y` | `enable`, `disable` | Skip confirmation |
 
-`preflight` runs against the live account with the AWS APIs alone (no kubectl, no CDK). Per Region: SageMaker HyperPod publishes a health-monitoring agent image there (the regional stack refuses to synthesize otherwise), HyperPod publishes a node AMI for the EKS minor the cluster will run at `CreateCluster` (the version the deployed cluster reports, or cdk.json `kubernetes_version` before the first deploy; a cdk.json minor below the running one, or more than one above it, fails because the deploy could not apply it; read from the public SSM tree `/aws/service/sagemaker-hyperpod/ami/x86_64` — HyperPod picks the AMI from the cluster's version at `CreateCluster`, and the newest EKS minor has none until HyperPod catches up, see [HYPERPOD.md](HYPERPOD.md#enabling-it)), the account's `<instance type> for cluster usage` Service Quotas cover every instance group's count (a type with no such quota is not a HyperPod type in the Region), every `training_plan_arn` names a plan that exists, is `Active` or `Scheduled`, targets HyperPod clusters, reserves the group's instance type and sits in the configured zone, the configured Availability Zone exists, the regional EKS cluster (once deployed) is `ACTIVE` and authenticates with access entries, and no HyperPod cluster of the same name that this project does not own exists in the Region. An AWS error while checking (a denied call, throttling) is a warning, never a failure: only a fact that would break the deploy or keep the nodes from joining fails the preflight. `gco stacks deploy` and `deploy-all` run the same checks for every regional stack with HyperPod on; `--skip-hyperpod-preflight` bypasses them.
+`preflight` runs against the live account with the AWS APIs alone (no kubectl, no CDK). Per Region: SageMaker HyperPod publishes a health-monitoring agent image there (the regional stack refuses to synthesize otherwise), HyperPod publishes a node AMI for the EKS minor the cluster will run at `CreateCluster` (the version the deployed cluster reports, or cdk.json `kubernetes_version` before the first deploy; a cdk.json minor below the running one, or more than one above it, fails because the deploy could not apply it; read from the public SSM tree `/aws/service/sagemaker-hyperpod/ami/x86_64` — HyperPod picks the AMI from the cluster's version at `CreateCluster`, and the newest EKS minor has none until HyperPod catches up, see [HYPERPOD.md](HYPERPOD.md#enabling-it)), the account's `<instance type> for cluster usage` Service Quotas cover every instance group's count (the applied value, or AWS's default for a quota the account never had changed; a type with neither is not a HyperPod type in the Region), every `training_plan_arn` names a plan that exists, is `Active` or `Scheduled`, targets HyperPod clusters, reserves the group's instance type and sits in the configured zone, the configured Availability Zone exists, the regional EKS cluster (once deployed) is `ACTIVE` and authenticates with access entries, and no HyperPod cluster of the same name that this project does not own exists in the Region. An AWS error while checking (a denied call, throttling) is a warning, never a failure: only a fact that would break the deploy or keep the nodes from joining fails the preflight. `gco stacks deploy` and `deploy-all` run the same checks for every regional stack with HyperPod on; `--skip-hyperpod-preflight` bypasses them.
 
 **Example:**
 
 ```bash
 gco stacks hyperpod status
-gco stacks hyperpod status --all-regions --output json
+gco -o json stacks hyperpod status --all-regions
 gco stacks hyperpod enable -y
 gco stacks hyperpod enable --region us-east-1 --instance-type ml.p5.48xlarge --instance-count 4 --availability-zone us-east-1b -y
 gco stacks hyperpod preflight -r us-east-1
@@ -5643,13 +6021,18 @@ gco stacks addons COMMAND [OPTIONS]
 | `--region` | `-r` | AWS region (default: first deployment region) |
 | `--all-regions` | `-A` | Apply across all deployment regions |
 
-`status` marks `installed`, `uninstalled`, `absent`, `applied` and `validated` rows as healthy. Healthy rows show the first 80 characters of their message; any other status prints the full message, which for a failed manifest phase is the list of resources that did not apply.
+`status` marks `installed`, `uninstalled`, `absent`, `applied` and `validated` rows as healthy. Healthy rows show the first 80 characters of their message; any other status prints the full message, which for a failed manifest phase is the list of resources that did not apply. An active teardown fence (`_teardown`) shows as `teardown-active`; the replay input (`_input` and its parts) and the execution record (`_execution`) are not listed. The command exits 1 when any row is not healthy or a Region's records cannot be read. With `gco -o json` or `-o yaml` it prints one list of `{region, name, status, message}` rows across the Regions; a Region whose records cannot be read contributes a row with status `error` and no name.
+
+`install` replays the execution input the last deploy stored in `/{project}/addons/{region}/_input` into the Helm install state machine of this project's regional stack, `{project}-{region}`. It finds that state machine among the stack's resources (`cloudformation:ListStackResources`), because every deployment's state machine gets a generated name of the same shape, and it exits 1 instead of starting another deployment's installer when the stack or its state machine cannot be found.
+
+The deploy stores that input compressed and base64-encoded. When the encoding is larger than one SSM parameter value (8 KiB), it is split into parts, `_input.<digest>.1` to `_input.<digest>.<n>`, and `_input` holds a header with the part count and the SHA-256 of the whole encoding. `install` reads the parts in order and exits 1, naming the parameter, when a part is missing or the parts do not match the header's SHA-256.
 
 **Example:**
 
 ```bash
 gco stacks addons status
 gco stacks addons status --all-regions
+gco -o json stacks addons status --all-regions
 gco stacks addons install -r us-west-2
 ```
 
@@ -5726,7 +6109,7 @@ gco stacks outputs gco-global -r us-east-2
 
 One read-only command that answers "what is my deployment doing right now?" across every
 configured region — the aggregate view that otherwise takes `gco stacks status`,
-`gco queue stats`, `gco jobs list --all-regions`, `gco capacity status`, and
+`gco jobs queue-status --all-regions`, `gco queue stats`, `gco capacity status`, and
 `gco inference list` run separately and joined by hand. The same document backs the
 `fleet_status` MCP tool, so an agent learns the whole fleet state in one call.
 
@@ -5767,7 +6150,10 @@ gco status --fail-on-findings
 | `--fail-on-findings` | Exit 1 after rendering when any `error`-severity finding is present |
 
 **Sections.** Each is gathered independently, in parallel, under a 30-second
-per-section timeout. The default set is Tier 1: free control-plane reads that
+per-section timeout, or 50 seconds with `--with-policy`: the `policy` section
+waits up to 45 seconds for each region's policy read and then reports a region
+still reading as unreadable, and the longer timeout lets it report the regions
+that answered. The default set is Tier 1: free control-plane reads that
 need no cluster reachability. Tier 2 costs money per call and Tier 3 needs the
 Kubernetes API, so both are opt-in flags.
 
@@ -5775,8 +6161,8 @@ Kubernetes API, so both are opt-in flags.
 |---------|------|--------|
 | `regions` | 1 | `cdk.json` deployment topology (no AWS call) |
 | `stacks` | 1 | CloudFormation status per expected stack, plus deployed optional stacks |
-| `queue` | 1 | SQS job-queue and dead-letter-queue depth per region |
-| `jobs` | 1 | Job counts by region and status from the queue-statistics API |
+| `queue` | 1 | SQS job-queue and dead-letter-queue depth per region, as `gco jobs queue-status --all-regions` shows it |
+| `jobs` | 1 | Central job-queue records by region and status from the queue-statistics API, as `gco queue stats` shows them (`source: central job queue`). Only `gco queue submit` and `gco jobs submit-queue` create these records, so jobs sent with `gco jobs submit`, `submit-sqs` or `submit-direct` are not counted; list those with `gco jobs list --all-regions` |
 | `capacity` | 1 | Queue depth and GPU/CPU utilization per region, with telemetry provenance |
 | `inference` | 1 | Inference endpoint desired state from the global registry |
 | `costs` | 2 | Cost Explorer 30-day total by service, plus cost-allocation-tag status (`--with-costs`) |
@@ -5786,8 +6172,8 @@ Kubernetes API, so both are opt-in flags.
 **Section status vocabulary.** Every section carries a `status`; anything that
 is not `ok` or `empty` also carries a human-readable `reason` and the raw
 `errors`. The distinction between `empty` and `unavailable` is the point:
-"there are no jobs" and "I could not find out whether there are jobs" lead to
-opposite decisions.
+"the queue is empty" and "I could not find out whether the queue is empty" lead
+to opposite decisions.
 
 | Status | Meaning |
 |--------|---------|
@@ -5982,13 +6368,17 @@ gco storage sync analytics-studio ./studio-output --direction upload --dry-run
   directory name itself is not added. A single file maps to
   `PREFIX/<file-name>`.
 - Upload incrementality uses a SHA-256 digest stored as S3 user metadata named
-  `gco-sync-sha256`. The same precomputed whole-file digest is sent as the
-  base64 `ChecksumSHA256`, so S3 rejects an upload whose received bytes differ
-  from the file that was planned. A remote object is skipped only when its size
-  and digest metadata match the local file; skipped objects are checked again
-  before a successful non-dry-run result. ETags are intentionally not used
-  because multipart and SSE-KMS ETags are not reliable whole-file digests.
-  Existing objects without this metadata are uploaded once to establish it.
+  `gco-sync-sha256`. Every upload also carries a whole-file checksum computed
+  while planning, so S3 rejects an upload whose received bytes differ from the
+  file that was planned: files under 8 MiB are sent in one request with the
+  same digest as `ChecksumSHA256`; larger files are sent as a multipart upload
+  with a full-object `ChecksumCRC32` (S3 accepts full-object checksums on
+  multipart uploads only for CRC algorithms) and a CRC-32 per part. A remote
+  object is skipped only when its size and digest metadata match the local
+  file; skipped objects are checked again before a successful non-dry-run
+  result. ETags are intentionally not used because multipart and SSE-KMS ETags
+  are not reliable whole-file digests. Existing objects without this metadata
+  are uploaded once to establish it.
 - Upload planning rejects top-level or descendant symlinks, non-regular files,
   and unsafe relative names before the first PUT. It hashes every source file
   during planning and rejects a file if its identity, size, or timestamps
@@ -6202,6 +6592,9 @@ gco tasks list [OPTIONS]
 - `-n, --limit INTEGER` — Maximum tasks to show (default: 20)
 - `--json` — Emit raw JSON instead of a table
 
+`--json` and the root `gco -o json` / `-o yaml` print one `{"tasks": [...]}`
+document, `{"tasks": []}` when nothing is recorded.
+
 ```bash
 gco tasks list
 gco tasks list -n 5
@@ -6233,8 +6626,7 @@ gco tasks tail TASK_ID [OPTIONS]
 **Options:**
 
 - `-n, --lines INTEGER` — Lines to show from the end of the log (default: 100)
-- `-f, --follow` — Stream new lines as they're written
-- `--interval FLOAT` — Polling interval in seconds when `--follow` is set (default: 1.0)
+- `-f, --follow` — Stream new lines as they're written, polling the log every half second, until the task is no longer running
 
 ```bash
 gco tasks tail deploy_all-1747683123-42
@@ -6382,6 +6774,10 @@ gco templates run TEMPLATE_NAME [OPTIONS]
 | `--namespace` | | Kubernetes namespace |
 | `--param` | `-p` | Parameter override (key=value), can be repeated |
 
+When the rendered manifest is rejected (an untrusted registry, a namespace
+outside the allowlist, a resource cap), the API answers `400` and the command
+prints each validation error and exits 1.
+
 **Example:**
 
 ```bash
@@ -6417,6 +6813,8 @@ Runs inside a git checkout of the repository and:
    container runtime and the image are both present;
 3. checks that the checkout's deployable sources are readable by every user —
    the check `gco stacks deploy` makes, run here before anything is torn down —
+   and loads `cdk.json` with the new release's configuration loader (with the
+   `--enable` overrides), printing each of its warnings,
    then scales the workload tier to zero: the monitoring stack is updated in
    place with `--context gco:control-plane-only=true` so it stops referencing
    the regional stacks, then every regional API bridge and regional stack is
@@ -6469,6 +6867,10 @@ gco upgrade [OPTIONS]
   command before the teardown with no stack changed; make them readable
   ([Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask))
   and rerun `gco upgrade --skip-checkout`.
+- A `cdk.json` the new release's configuration loader rejects (a value it now
+  validates more strictly) stops the command the same way, with no stack
+  changed and the loader's message, which names the key to fix. Fix it and rerun
+  `gco upgrade --skip-checkout` ([If it stops halfway](UPGRADING.md#if-it-stops-halfway)).
 - The running `gco` process keeps executing the previous release's CLI code until
   you open a new shell (the dev-container shell function starts a fresh container
   from the rebuilt image). The deployed stacks are on the new release either way.
@@ -6515,9 +6917,27 @@ cluster-shared bucket are chunked and embedded by the
 `lambda/vector-ingest` Lambda automatically; `gco vector ingest` is a
 convenience wrapper around that upload.
 
-Corpus lifecycle notes: re-uploading a file overwrites its chunks in place
-(deterministic ids), deleting an S3 object does **not** delete its items,
-and adopting a newer `vector_store.embedding_model_id` means re-ingesting
+The commands read the deployment the CLI configuration names. The global
+stack publishes the table, index and bucket names as SSM parameters under
+`/{project_name}/` in `deployment_regions.global` only, so `gco vector`
+looks them up there and reads that Region's table unless `--region` names
+a replica. The project and Region come from `cdk.json` (`project_name`,
+`deployment_regions.global`), the config file, or `GCO_PROJECT_NAME` /
+`GCO_GLOBAL_REGION`; `DYNAMODB_REGION` or `GLOBAL_REGION`, when set, take
+precedence over the configured Region. `AWS_REGION` and the profile Region
+only choose where `gco vector search` calls Bedrock to embed the query
+(after `DYNAMODB_REGION` and `GLOBAL_REGION`).
+
+Corpus lifecycle notes: `gco vector ingest` uploads each file to the corpus
+prefix plus its file name (the directory is dropped), so ingesting a name
+that is already in the corpus replaces that document, and two files with
+the same name in one call are refused before anything is uploaded.
+Re-uploading overwrites the chunks in place (deterministic ids), but a file
+that makes fewer chunks than the one it replaces leaves the old file's last
+chunks behind until the corpus is re-created (see [Corpus lifecycle and
+limits](CUSTOMIZATION.md#corpus-lifecycle-and-limits)). Deleting an S3
+object does **not** delete its items, and adopting a newer
+`vector_store.embedding_model_id` means re-ingesting
 the corpus — vectors are only comparable to vectors from the model that
 wrote them. After the first enabled deploy the vector index takes several
 minutes to build; searches answer a "still building" hint until it is
@@ -6545,8 +6965,19 @@ Upload `.txt`/`.md`/`.jsonl` files to the corpus prefix for ingestion.
 Uploading IS ingestion — the S3 event notification invokes the ingest
 Lambda, and global-table replication fans the embedded chunks out to every
 replica region. `.jsonl` files are pre-chunked (`{"text": "...", "title":
-"optional"}` per line); `.txt`/`.md` go through the deterministic paragraph
-chunker.
+"optional"}` per line, each text at most 2,000 characters); `.txt`/`.md` go
+through the deterministic paragraph chunker (chunks of up to 2,000
+characters).
+
+The ingest Lambda refuses an object over 4 MiB, or one that makes more
+than 500 chunks (about 1 MB of text), before any Bedrock call; split a
+longer document into several files. `gco vector ingest` applies both limits
+before it uploads anything and refuses such a file by name. An object the
+Lambda refuses anyway (an invalid `.jsonl` line, text that is not UTF-8, or
+an object put under the prefix some other way) never becomes searchable, so
+`--wait` times out on it; the Lambda's log names the reason (for example
+`too_large`), and the S3 event ends up in its dead-letter queue. See [Configure the Vector
+Store](CUSTOMIZATION.md#configure-the-vector-store) for every limit.
 
 ```bash
 gco vector ingest docs/RUNBOOKS.md operations-notes.txt
@@ -6655,17 +7086,27 @@ gco webhooks create [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--url` | `-u` | Webhook URL (required) |
+| `--url` | `-u` | Webhook URL (required; also read from `$GCO_WEBHOOK_URL`, which keeps a URL that embeds a token off the command line) |
 | `--event` | `-e` | Event type (job.started, job.completed, job.failed), can be repeated |
 | `--namespace` | `-n` | Filter events by namespace |
-| `--secret` | `-s` | HMAC secret for signature verification |
+| `--secret` | `-s` | HMAC secret for signature verification (also read from `$GCO_WEBHOOK_SECRET`; see below) |
 | `--region` | `-r` | Region to create in |
+
+A secret typed after `--secret` lands in shell history and in the process list
+while the command runs. Two ways keep it out of both: set `$GCO_WEBHOOK_SECRET`,
+or leave both unset on a terminal, and the command asks for the secret with
+hidden input (typed twice; press Enter at both prompts to register without a
+secret). The prompt is written to stderr, so it never mixes with JSON or YAML
+output. Without a terminal on stdin (scripts, CI, the MCP server) it never asks
+and registers the webhook without a secret. A script that runs on a terminal
+and wants no secret passes `--secret ''`.
 
 **Example:**
 
 ```bash
 gco webhooks create --url https://example.com/webhook -e job.completed -e job.failed
 gco webhooks create -u https://slack.com/webhook -e job.failed -n gco-jobs
+GCO_WEBHOOK_SECRET="$(cat secret.txt)" gco webhooks create -u https://example.com/hook -e job.failed
 ```
 
 #### `gco webhooks delete`
@@ -6697,7 +7138,21 @@ The CLI looks for `.gco.yaml` or `.gco.json` in the current directory, then
 `~/.gco/config.yaml` or `~/.gco/config.json`; `gco --config PATH` (`-c`)
 points at a file explicitly. Keys mirror the `GCOConfig` fields in
 `cli/config.py`; unknown keys are ignored, so the region *list* still comes
-from `cdk.json` (`deployment_regions`), not from this file:
+from `cdk.json` (`deployment_regions`), not from this file.
+
+Each setting takes the value of the last of these sources that sets it:
+
+1. Built-in defaults.
+2. The `cdk.json` in the current directory: `project_name`, the
+   `deployment_regions` entries, and its first `regional` entry as
+   `default_region`.
+3. The config file.
+4. `GCO_*` environment variables (see [Environment Variables](#environment-variables)).
+5. The root options `-r`, `-o`, `-v` and `--regional-api`/`--global-api`.
+
+A config-file key therefore overrides the `cdk.json` of every checkout you
+run the CLI in. Keep `project_name` and the Regions out of `~/.gco/config.yaml`
+unless you mean that; `gco config-cmd init` never writes them.
 
 ```yaml
 default_region: us-east-1
@@ -6755,6 +7210,7 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_LOG_LEVEL` | Level for GCO's own loggers (`DEBUG`, `INFO`, `WARNING`, ...); `-v` is `DEBUG`. Leaves the AWS SDK loggers alone |
 | `GCO_CACHE_DIR` | Directory for cached lookups (default `~/.gco/cache`) |
 | `GCO_REGIONAL_API` | Use regional API endpoints (`true`/`false`) |
+| `K8S_API_TIMEOUT` | Seconds one Kubernetes API request attempt from `gco costs workloads` may take (default `30`) |
 | `CDK_DOCKER` | Docker command (`docker` or `finch`) |
 | `GCO_AUTOPILOT_ENGINE` | Select `claude-code` (default), `codex`, or `opencode`; top-level `--engine` wins. |
 | `GCO_AUTOPILOT_MODEL` | Shared Bedrock model override: Claude uses it directly, Codex uses it after `GCO_AUTOPILOT_CODEX_MODEL`, and OpenCode after `GCO_AUTOPILOT_OPENCODE_MODEL`; top-level `--model` wins. See [Autopilot](AUTOPILOT.md). |
@@ -6868,6 +7324,15 @@ gco capacity status
 # Ensure AWS credentials are configured
 aws sts get-caller-identity
 ```
+
+**"Regional stack discovery could not read stack 'gco-REGION' in REGION"**
+
+The CLI could not read a regional stack in one of the `cdk.json` regions, so it
+does not claim the stack is absent. The message names the AWS error
+(`Throttling`, `AccessDenied`, an expired session, a network failure). Fix that
+and rerun; only CloudFormation's "does not exist" answer is reported as a missing
+stack. The same message from the account-wide scan (no `cdk.json` regions) means
+no stack was found and some regions could not be read.
 
 **"Endpoint request timed out"**
 

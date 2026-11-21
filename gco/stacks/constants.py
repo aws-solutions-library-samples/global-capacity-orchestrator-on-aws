@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from functools import lru_cache
 from types import MappingProxyType
+from typing import Any
 
 # Resource-governance defaults live in gco.resource_governance (a
 # runtime-shippable module) because the manifest/queue processors need the
@@ -220,18 +221,15 @@ MAX_CONFIGURABLE_REQUEST_BODY_BYTES = 10 * 1024 * 1024
 # The cross-region aggregator has a deliberately read-mostly regional contract.
 # Keep both its identity policy and each regional API resource policy generated
 # from this exact allowlist so a compromised aggregator cannot reach unrelated
-# control-plane mutations exposed by the regional greedy route.
+# control-plane mutations exposed by the regional greedy route. The entries are
+# exactly the regional routes lambda/cross-region-aggregator/handler.py calls;
+# other callers (for example ``gco jobs policy`` reading GET api/v1/policy)
+# sign with their own identity, not the aggregator's role.
 AGGREGATOR_REGIONAL_API_ROUTES = (
     ("GET", "api/v1/jobs"),
     ("DELETE", "api/v1/jobs"),
     ("GET", "api/v1/health"),
     ("GET", "api/v1/status"),
-    # Read-only introspection of the region's deployed job validation policy.
-    # Callers need it before submission to know whether a manifest will be
-    # admitted; it exposes the same class of deployment metadata as
-    # api/v1/status (which already reports the caps and namespace allowlist)
-    # and mutates nothing.
-    ("GET", "api/v1/policy"),
 )
 
 
@@ -571,6 +569,23 @@ def regional_shared_ssm_parameter_prefix(project_name: str) -> str:
     For ``project_name="gco"`` this renders ``/gco/regional-shared-bucket``.
     """
     return f"/{project_name}/regional-shared-bucket"
+
+
+def s3_bucket_kms_conditions(*, region: str, bucket_arn: str, url_suffix: str) -> dict[str, Any]:
+    """KMS conditions confining a ``Resource: *`` key grant to S3's use for one bucket.
+
+    For a bucket whose key ARN the granting stack cannot see (it lives in
+    another stack): ``kms:ViaService`` admits only requests S3 makes in the
+    bucket's region, and ``kms:EncryptionContext:aws:s3:arn`` only those for
+    this bucket. S3 sends the bucket ARN as the context when the bucket uses
+    an S3 Bucket Key and the object ARN when it does not, so both forms match.
+    Used for the cluster-shared and model buckets by the regional stack's
+    roles and by the analytics stack's SageMaker execution role.
+    """
+    return {
+        "StringEquals": {"kms:ViaService": f"s3.{region}.{url_suffix}"},
+        "StringLike": {"kms:EncryptionContext:aws:s3:arn": [bucket_arn, f"{bucket_arn}/*"]},
+    }
 
 
 MOONCAKE_COLD_TIER_KEY_PREFIX = "mooncake-kv"

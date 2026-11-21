@@ -170,12 +170,13 @@ def metrics_result(
     return result
 
 
-def error_envelope(code: str, **details: object) -> dict[str, Any]:
+def error_envelope(code: str, /, **details: object) -> dict[str, Any]:
     """Assemble the structured failure shape: ``{"code": code, "details": {...}}``.
 
     The returned object never carries a top-level ``metrics`` key, so a
     consumer that merges only ``metrics``-shaped results skips it and leaves
     the corresponding check undecided rather than acting on bad data. Any
-    diagnostic context is nested under ``details``.
+    diagnostic context is nested under ``details``. ``code`` is
+    positional-only, so a details field may itself be named ``code``.
     """
     return {"code": code, "details": dict(details)}
