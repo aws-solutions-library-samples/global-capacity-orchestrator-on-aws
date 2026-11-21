@@ -45,7 +45,7 @@ from .jobs import (
 
 KEEP_WARM_MANIFEST = "keep-warm-smoke-job.yaml"
 #: The manifest's placeholder for which of the two Jobs it is.
-STEP_TOKEN = "__KEEP_WARM_STEP__"
+STEP_PLACEHOLDER = "__KEEP_WARM_STEP__"
 STEPS = ("first", "second")
 #: The health monitor records on a 30-second loop; three loops and a margin.
 RECORD_TIMEOUT_SECONDS = 180
@@ -187,10 +187,10 @@ def run_keep_warm_probe(ctx: RunContext, kubectl: KubectlRunner) -> dict[str, An
             manifest_filename=KEEP_WARM_MANIFEST,
             path=_step_path(step),
             marker_prefix="KEEP_WARM",
-            tokens={STEP_TOKEN: step},
+            tokens={STEP_PLACEHOLDER: step},
             delete=False,
         )
-        _, name, namespace = _load_manifest(ctx, KEEP_WARM_MANIFEST, {STEP_TOKEN: step})
+        _, name, namespace = _load_manifest(ctx, KEEP_WARM_MANIFEST, {STEP_PLACEHOLDER: step})
         records[step] = _register_job(
             ctx,
             name=name,

@@ -25,8 +25,8 @@ from gco.keep_warm import (
     KEEP_WARM_DEFAULTS,
     KEEP_WARM_MAX_WINDOW_SECONDS,
     KEEP_WARM_MIN_WINDOW_SECONDS,
-    KEEP_WARM_WINDOW_SECONDS_TOKEN,
-    KEEP_WARM_WINDOW_TOKEN,
+    KEEP_WARM_WINDOW_PLACEHOLDER,
+    KEEP_WARM_WINDOW_SECONDS_PLACEHOLDER,
     MAX_IDLE_RECORDS,
     KeepWarmConfigError,
     compute_keep_warm_replacements,
@@ -102,12 +102,12 @@ class TestReplacements:
     def test_render_both_tokens(self) -> None:
         config = validate_keep_warm_config({"window": "1h30m"})
         assert compute_keep_warm_replacements(config) == {
-            KEEP_WARM_WINDOW_TOKEN: "1h30m",
-            KEEP_WARM_WINDOW_SECONDS_TOKEN: "5400",
+            KEEP_WARM_WINDOW_PLACEHOLDER: "1h30m",
+            KEEP_WARM_WINDOW_SECONDS_PLACEHOLDER: "5400",
         }
 
     def test_default_rendering_for_readers_other_than_the_applier(self) -> None:
-        text = f"a: {KEEP_WARM_WINDOW_TOKEN}\nb: {KEEP_WARM_WINDOW_SECONDS_TOKEN}\n"
+        text = f"a: {KEEP_WARM_WINDOW_PLACEHOLDER}\nb: {KEEP_WARM_WINDOW_SECONDS_PLACEHOLDER}\n"
         assert render_keep_warm_defaults(text) == "a: 10m\nb: 600\n"
 
 

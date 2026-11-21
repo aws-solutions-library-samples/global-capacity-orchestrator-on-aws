@@ -135,7 +135,7 @@ class Scenario:
 
     def run_lifecycle(self, ctx: Any, **kwargs: Any) -> dict[str, Any]:
         self.lifecycle_calls.append(kwargs)
-        step = kwargs["tokens"][probe.STEP_TOKEN]
+        step = kwargs["tokens"][probe.STEP_PLACEHOLDER]
         ctx.checkpoint.state.setdefault("jobs", [])
         return self.lifecycles[step]
 
@@ -352,7 +352,7 @@ class TestSharedLifecycle:
             manifests, name, namespace = checks_jobs._load_manifest(
                 ctx,  # type: ignore[arg-type]
                 probe.KEEP_WARM_MANIFEST,
-                {probe.STEP_TOKEN: step},
+                {probe.STEP_PLACEHOLDER: step},
             )
             assert (name, namespace) == (f"gco-live-keep-warm-{step}-run-123", "gco-jobs")
             labels = manifests[0]["metadata"]["labels"]

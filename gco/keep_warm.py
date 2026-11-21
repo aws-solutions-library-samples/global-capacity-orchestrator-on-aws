@@ -72,8 +72,8 @@ KEEP_WARM_MIN_WINDOW_SECONDS = 30
 KEEP_WARM_MAX_WINDOW_SECONDS = 24 * 60 * 60
 #: The manifest placeholders the window renders into: the NodePool's
 #: ``consolidateAfter`` and the health monitor's environment.
-KEEP_WARM_WINDOW_TOKEN = "{{GPU_KEEP_WARM_WINDOW}}"
-KEEP_WARM_WINDOW_SECONDS_TOKEN = "{{GPU_KEEP_WARM_WINDOW_SECONDS}}"
+KEEP_WARM_WINDOW_PLACEHOLDER = "{{GPU_KEEP_WARM_WINDOW}}"
+KEEP_WARM_WINDOW_SECONDS_PLACEHOLDER = "{{GPU_KEEP_WARM_WINDOW_SECONDS}}"
 
 #: Annotation on a Job: a JSON list of the idle intervals its pods left.
 IDLE_ANNOTATION = "gco.aws/keep-warm-idle"
@@ -153,8 +153,8 @@ def validate_keep_warm_config(raw: object) -> dict[str, Any]:
 def compute_keep_warm_replacements(config: Mapping[str, Any]) -> dict[str, str]:
     """Render a validated block as the manifests' ``{{TOKEN}}`` replacements."""
     return {
-        KEEP_WARM_WINDOW_TOKEN: str(config["window"]),
-        KEEP_WARM_WINDOW_SECONDS_TOKEN: str(config["window_seconds"]),
+        KEEP_WARM_WINDOW_PLACEHOLDER: str(config["window"]),
+        KEEP_WARM_WINDOW_SECONDS_PLACEHOLDER: str(config["window_seconds"]),
     }
 
 

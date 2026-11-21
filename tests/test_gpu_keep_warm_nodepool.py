@@ -28,8 +28,8 @@ from gco.keep_warm import (
     KEEP_WARM_NODEPOOL,
     KEEP_WARM_TOLERATION,
     KEEP_WARM_VALUE,
-    KEEP_WARM_WINDOW_SECONDS_TOKEN,
-    KEEP_WARM_WINDOW_TOKEN,
+    KEEP_WARM_WINDOW_PLACEHOLDER,
+    KEEP_WARM_WINDOW_SECONDS_PLACEHOLDER,
     render_keep_warm_defaults,
 )
 
@@ -104,7 +104,7 @@ class TestKeepWarmNodePool:
     def test_empty_nodes_wait_for_the_configured_window(self) -> None:
         disruption = _nodepool(POOL)["spec"]["disruption"]
         assert disruption["consolidationPolicy"] == "WhenEmpty"
-        assert disruption["consolidateAfter"] == KEEP_WARM_WINDOW_TOKEN
+        assert disruption["consolidateAfter"] == KEEP_WARM_WINDOW_PLACEHOLDER
 
         rendered = _nodepool(POOL, render=True)["spec"]["disruption"]["consolidateAfter"]
         assert rendered == "10m"
@@ -235,8 +235,8 @@ class TestHealthMonitorAccess:
         assert env["KEEP_WARM_LEASE_NAME"] == "gco-health-monitor-keep-warm"
         assert env["KEEP_WARM_LEASE_DURATION"] == "90"
         text = (MANIFESTS / "30-health-monitor.yaml").read_text(encoding="utf-8")
-        assert f'value: "{KEEP_WARM_WINDOW_SECONDS_TOKEN}"' in text
-        assert render_keep_warm_defaults(KEEP_WARM_WINDOW_SECONDS_TOKEN) == "600"
+        assert f'value: "{KEEP_WARM_WINDOW_SECONDS_PLACEHOLDER}"' in text
+        assert render_keep_warm_defaults(KEEP_WARM_WINDOW_SECONDS_PLACEHOLDER) == "600"
 
 
 class TestSchemaValidationStub:
