@@ -150,7 +150,7 @@ The copy step needs no change — it mirrors whatever `collect_source_refs()` re
 ## Operational Notes
 
 - **Fail-fast on deploy.** If an enabled mirror can't complete during `gco stacks deploy` (no container runtime, no network, missing credentials), the deploy aborts **before** CloudFormation runs — rather than bringing up a cluster whose Volcano images aren't in ECR yet.
-- **Static, version-pinned mirror.** When you bump Volcano's chart `version` / `image_tag_version` in `charts.yaml`, the next `gco stacks deploy` mirrors the new tag automatically (or run `gco images mirror` to do it out of band). Old tags are left in place.
+- **Static, version-pinned mirror.** When you bump Volcano's chart `version` / `image_tag_version` in `charts.yaml`, the next `gco stacks deploy` mirrors the new tag automatically (or run `gco images mirror` to do it out of band). Old tags are left in place. The two move together: `image_tag_version` is `v<chart version>`, and [`.github/scripts/validate_helm_charts.py`](../.github/scripts/validate_helm_charts.py) fails CI when they differ, because the chart's templates are written for its own release's components.
 - **Pull-path only.** The mirror changes only *where* images are pulled from. Volcano's behavior, versions, and configuration are unchanged.
 - **Per-region.** ECR is regional, so the mirror runs once per target region. `deploy-all` mirrors each region in `cdk.json`'s `regional` block; a single-region deploy mirrors just that region.
 - **Idempotent and cheap to repeat.** Already-mirrored tags are skipped (`skip_existing`), so a steady-state deploy adds only a couple of ECR lookups.

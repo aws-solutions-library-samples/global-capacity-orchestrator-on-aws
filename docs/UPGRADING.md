@@ -47,6 +47,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Analytics roles act on their own domain](#analytics-roles-act-on-their-own-domain)
   - [`Project` tag on PCS instances](#project-tag-on-pcs-instances)
   - [Add-on replay input in parts](#add-on-replay-input-in-parts)
+  - [Volcano Jobs get their pods](#volcano-jobs-get-their-pods)
   - [CLI exit codes, output and prompts](#cli-exit-codes-output-and-prompts)
   - [MCP server tools](#mcp-server-tools)
   - [Pre-commit hook for contributors](#pre-commit-hook-for-contributors)
@@ -1007,6 +1008,25 @@ and EKS capabilities enabled, are one configuration that reaches that size.
   `gco stacks addons install` cannot read the header and exits 1 with
   `Could not read /<project>/addons/<region>/_input`. Only an input too large
   for the earlier releases to deploy is split.
+
+### Volcano Jobs get their pods
+
+Releases from v8.18.1 to v8.23.0 install the Volcano 1.16.0 chart with
+v1.15.2 images. The chart registers the PodGroup validating webhook for
+updates as well as creations, and the v1.15.2 webhook manager rejects every
+update; the `volcano-scheduler` log repeats
+`admission webhook "validatepodgroup.volcano.sh" denied the request: unsupported operation UPDATE`.
+The scheduler cannot move a PodGroup to `Inqueue`, so a Volcano Job
+(`batch.volcano.sh/v1alpha1`) stays `Pending` with no pods. Kubernetes Jobs
+whose pods set `schedulerName: volcano` are still scheduled.
+
+- **Volcano runs its 1.16.0 images.** The redeploy rolls the Volcano
+  controller, scheduler and admission deployments once. With
+  `volcano_image_mirror` enabled, the deploy mirrors the `v1.16.0` images
+  into ECR first, as for any tag change.
+- **Pending Volcano Jobs can start.** A Volcano Job left pending by the old
+  images can get its pods once the new scheduler runs. Delete any you no
+  longer want before you redeploy.
 
 ### CLI exit codes, output and prompts
 
