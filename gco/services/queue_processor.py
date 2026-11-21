@@ -128,8 +128,8 @@ from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobStore
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T14:17:34Z
-# Generated from Git commit: d0db0066b3e8f603134a252ab3753efd40d90493
+# Generated at (UTC): 2026-11-21T20:42:53Z
+# Generated from Git commit: 1d908f3fa649c16f69e32c2af36f5992f62d94d7
 # Flowchart(s) generated from this file:
 #   * ``validate_manifest`` -> ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.png``)

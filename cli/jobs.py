@@ -22,8 +22,8 @@ from .aws_client import APIRequestError, api_path_segment, get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T14:17:34Z
-# Generated from Git commit: d0db0066b3e8f603134a252ab3753efd40d90493
+# Generated at (UTC): 2026-11-21T20:42:53Z
+# Generated from Git commit: 1d908f3fa649c16f69e32c2af36f5992f62d94d7
 # Flowchart(s) generated from this file:
 #   * ``JobManager.submit_job`` -> ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.html``
 #     (PNG: ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.png``)
