@@ -110,6 +110,10 @@
       "healthy_threshold": 2,
       "unhealthy_threshold": 2
     },
+    "_comment_gpu_keep_warm": "Keep-warm GPU NodePool (gpu-keep-warm-pool, lambda/kubectl-applier-simple/manifests/47-nodepool-gpu-keep-warm.yaml) for workloads that run many short GPU Jobs back to back, such as a hyperparameter search. A Job opts in with 'gco jobs submit --keep-warm' (or the gco.aws/keep-warm node selector and toleration), and Karpenter keeps an empty node of the pool for window after its last pod instead of gpu-x86-pool's 30 seconds, so the next keep-warm GPU Job that fits is scheduled onto the waiting node with no new NodeClaim and its image cached. window: a duration of hours, minutes and seconds such as 10m or 1h30m, from 30 seconds to 24 hours (default 10m). An idle node is billed at its full instance price for up to the window; the health monitor records each idle interval on the Job whose pod left the node idle (the gco.aws/keep-warm-idle annotation, reported by Get Job). See docs/GPU_KEEP_WARM.md.",
+    "gpu_keep_warm": {
+      "window": "10m"
+    },
     "_comment_api_gateway": "Authenticated API behavior. In the commercial 'aws' partition the global REST API is edge-optimized and its control/inference proxies use Global Accelerator; in other partitions it is regional and aggregate-only, the Global Accelerator proxy routes are omitted, and the always-deployed regional API bridges are the workload ingress. Every IAM-authorized route, on the global API or a regional bridge, needs the caller's own execute-api:Invoke permission: the global API's resource policy admits only GET /studio/* (the analytics sign-in pages, which carry no IAM identity) and each bridge's only the cross-region aggregator role. throttle/logging/metrics/tracing settings apply in every partition. The former regional_api_enabled key has no effect; the synth warns about it and ignores it (see docs/UPGRADING.md).",
     "api_gateway": {
       "throttle_rate_limit": 1000,

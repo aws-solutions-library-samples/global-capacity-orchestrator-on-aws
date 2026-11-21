@@ -132,6 +132,18 @@ reads the same `effective_kubernetes_version` and skips below 1.36, the first
 minor with Nitro Sandboxes; a 1.36+ run in a Region without them fails with
 the API's missing-RuntimeClass rejection, since that run cannot validate them.
 
+The `keep-warm` action (`actions/keep_warm.py`, the probe in
+`checks/keep_warm.py`) submits `manifests/keep-warm-smoke-job.yaml` twice,
+`__KEEP_WARM_STEP__` set to `first` and then `second`, through the same
+API-transport lifecycle with `delete=False`, because the idle record it checks
+lives on each Job. Inside one tunnelled kubectl session it compares the
+`gpu-keep-warm-pool` NodeClaims before and after the second Job, polls Get
+Job's `keep_warm` block for the first Job's `reused` interval, waits for the
+node to go, and polls for the second Job's `reclaimed` interval against the
+cdk.json window (see [GPU_KEEP_WARM.md](../../docs/GPU_KEEP_WARM.md)). It
+deletes both Jobs once every check passes; a failed check leaves them to the
+teardown.
+
 The two cluster-facing actions share their kubectl plumbing in
 `checks/cluster.py` (the same access-entry-plus-SSM-tunnel session and isolated
 kubeconfig the `inference` action uses, and a fail-closed JSON read that

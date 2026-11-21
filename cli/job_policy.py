@@ -35,6 +35,7 @@ from typing import Any
 
 from gco.job_admission import (
     JobValidationPolicy,
+    check_keep_warm,
     check_resource_caps,
     check_sandbox,
     check_security_context,
@@ -66,6 +67,7 @@ CHECK_CAPS = "resource_caps"
 CHECK_SECURITY = "security_context"
 CHECK_TOLERATIONS = "tolerations"
 CHECK_SANDBOX = "sandbox"
+CHECK_KEEP_WARM = "keep_warm"
 
 #: An AWS ECR registry hostname, e.g. 123456789012.dkr.ecr.us-east-2.amazonaws.com
 #: (also matching the .cn and ISO partition suffixes).
@@ -282,6 +284,10 @@ def evaluate_manifest(
     ok, message = check_sandbox(manifest)
     if not ok:
         issues.append(AdmissionIssue(CHECK_SANDBOX, message or "Nitro Sandbox constraint", label))
+
+    ok, message = check_keep_warm(manifest)
+    if not ok:
+        issues.append(AdmissionIssue(CHECK_KEEP_WARM, message or "keep-warm constraint", label))
 
     return issues
 

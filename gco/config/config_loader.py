@@ -81,6 +81,11 @@ from gco.inference_proxy_config import (
     INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION_DEFAULT,
 )
 from gco.k8s_quantity import memory_bytes
+from gco.keep_warm import (
+    KEEP_WARM_CONTEXT_KEY,
+    KeepWarmConfigError,
+    validate_keep_warm_config,
+)
 from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.models import ClusterConfig, ResourceThresholds
 from gco.pcs_config import (
@@ -382,6 +387,7 @@ OTHER_CONTEXT_KEYS = frozenset(
         "vpc_endpoints",
         "inference_proxy",
         "gateway_health_check",
+        "gpu_keep_warm",
         "inference_monitor",
         "eks_capabilities",
         "eks_capabilities_overrides",
@@ -1056,6 +1062,8 @@ class ConfigLoader:
 
         # Validate the platform ALB target-group health check
         self._validate_gateway_health_check_config()
+        # Validate the keep-warm GPU pool's window
+        self.get_gpu_keep_warm_config()
 
         # Validate the optional data services: FSx for Lustre (and its
         # per-region overlays), the Valkey cache and Aurora pgvector
@@ -2827,6 +2835,24 @@ class ConfigLoader:
                 self.app.node.try_get_context(GATEWAY_HEALTH_CHECK_CONTEXT_KEY)
             )
         except GatewayHealthCheckConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+
+    def get_gpu_keep_warm_config(self) -> dict[str, Any]:
+        """Return the keep-warm GPU pool's window (:mod:`gco.keep_warm`).
+
+        The ``gpu_keep_warm`` block: ``window``, how long Karpenter keeps an
+        empty node of ``gpu-keep-warm-pool`` after its last pod (a duration
+        such as ``10m``, 30 seconds to 24 hours, default ``10m``). Returns
+        ``{"window": str, "window_seconds": int}``. The regional stack renders
+        the window into the NodePool's ``consolidateAfter`` and the health
+        monitor's environment.
+
+        Raises:
+            ConfigValidationError: If the block is malformed.
+        """
+        try:
+            return validate_keep_warm_config(self.app.node.try_get_context(KEEP_WARM_CONTEXT_KEY))
+        except KeepWarmConfigError as exc:
             raise ConfigValidationError(str(exc)) from exc
 
     def get_manifest_processor_config(self) -> dict[str, Any]:

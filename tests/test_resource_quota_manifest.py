@@ -486,7 +486,13 @@ class TestKueueQueueCoverage:
     ACCELERATOR_RESOURCES = {"nvidia.com/gpu", "aws.amazon.com/neuron", "vpc.amazonaws.com/efa"}
 
     def test_every_accelerator_resource_a_nodepool_taints_for_is_covered(self):
-        """The NodePools taint their nodes with the resource names they offer."""
+        """The NodePools taint their nodes with the resource names they offer.
+
+        The keep-warm pool's second taint names no resource: it keeps pods
+        that did not opt in off the pool's nodes (gco.keep_warm).
+        """
+        from gco.keep_warm import KEEP_WARM_LABEL
+
         taint_keys = set()
         for path in sorted(
             Path("lambda/kubectl-applier-simple/manifests").glob("4*-nodepool-*.yaml")
@@ -497,6 +503,8 @@ class TestKueueQueueCoverage:
                     taint_keys |= {
                         t["key"] for t in doc["spec"]["template"]["spec"].get("taints", [])
                     }
+        assert KEEP_WARM_LABEL in taint_keys
+        taint_keys.discard(KEEP_WARM_LABEL)
         assert taint_keys == self.ACCELERATOR_RESOURCES
         for queue in (_default_queue(), _hyperpod_queue()):
             assert taint_keys <= set(_quotas(queue)), queue["metadata"]["name"]

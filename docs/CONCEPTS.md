@@ -98,6 +98,7 @@ Nodepools define what types of nodes can be provisioned. GCO creates several:
 | `system` | EKS Auto Mode system components | AWS-managed built-in |
 | `general-purpose` | Standard workloads | AWS-managed built-in |
 | `gpu-x86-pool` | NVIDIA x86 GPU workloads | g4dn/g5 and configured GPU families |
+| `gpu-keep-warm-pool` | Short GPU Jobs run back to back (`--keep-warm`) | the `gpu-x86-pool` families; an empty node waits `gpu_keep_warm.window` for the next Job ([GPU_KEEP_WARM.md](GPU_KEEP_WARM.md)) |
 | `gpu-arm-pool` | NVIDIA ARM64 GPU workloads | g5g |
 | `gpu-inference-pool` | Long-running inference endpoints | conservative disruption/consolidation |
 | `gpu-efa-pool` | Distributed GPU workloads | EFA-capable GPU families |

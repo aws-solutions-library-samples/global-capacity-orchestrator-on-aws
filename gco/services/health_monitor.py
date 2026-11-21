@@ -40,12 +40,15 @@ from gco.job_admission import parse_cpu_millicores, parse_gpu_count, parse_memor
 from gco.k8s_api_versions import METRICS_API_GROUP, METRICS_API_VERSION
 from gco.k8s_objects import json_object, present
 from gco.k8s_quantity import parse_quantity
+from gco.keep_warm import validate_keep_warm_config
 from gco.models import HealthStatus, RequestedResources, ResourceThresholds, ResourceUtilization
+from gco.services.keep_warm_recorder import KeepWarmRecorder, RecorderPass
 from gco.services.leader_lease import (
     LEASE_MIN_DURATION_SECONDS,
     LEASE_REQUEST_TIMEOUT,
     LeaseElector,
     LeaseIdentity,
+    lease_duration_from_env,
 )
 from gco.services.structured_logging import configure_structured_logging
 
@@ -169,6 +172,7 @@ class HealthMonitor:
         self.networking_v1 = client.NetworkingV1Api()
         self.coordination_v1 = client.CoordinationV1Api()
         self.metrics_v1beta1 = client.CustomObjectsApi()
+        self.batch_v1 = client.BatchV1Api()
 
         # Timeout for Kubernetes API calls (seconds)
         self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
@@ -218,6 +222,34 @@ class HealthMonitor:
             label="ALB-sync",
             request_timeout=_ALB_SYNC_K8S_TIMEOUT,
         )
+
+        # Keep-warm idle intervals (gco.services.keep_warm_recorder): one more
+        # elected duty with its own pre-created Lease, recorded on Jobs.
+        self.keep_warm_recorder = KeepWarmRecorder(
+            self.core_v1,
+            self.batch_v1,
+            self.coordination_v1,
+            elector=LeaseElector(
+                LeaseIdentity(
+                    name=os.environ.get("KEEP_WARM_LEASE_NAME", "gco-health-monitor-keep-warm"),
+                    namespace=self._alb_sync_lease_namespace,
+                    holder=self._alb_sync_holder,
+                    duration_seconds=lease_duration_from_env(
+                        os.environ.get("KEEP_WARM_LEASE_DURATION"),
+                        label="KEEP_WARM_LEASE_DURATION",
+                    ),
+                ),
+                label="keep-warm",
+                request_timeout=_ALB_SYNC_K8S_TIMEOUT,
+            ),
+            window_seconds=_keep_warm_window_seconds_from_env(),
+            job_namespaces=self.job_namespaces,
+            request_timeout=self._k8s_timeout,
+        )
+
+    async def record_keep_warm_idle(self) -> RecorderPass:
+        """Record keep-warm idle intervals on Jobs, off the event loop (elected)."""
+        return await asyncio.to_thread(self.keep_warm_recorder.run_once)
 
     async def get_cluster_metrics(self) -> tuple[ResourceUtilization, int, int, RequestedResources]:
         """Take one complete reading of the cluster.
@@ -706,6 +738,23 @@ class HealthMonitor:
 
         except Exception as exc:
             logger.warning("Gateway ALB sync check failed (non-fatal): %s", exc)
+
+
+def _keep_warm_window_seconds_from_env() -> int:
+    """The keep-warm pool's window from ``GPU_KEEP_WARM_WINDOW_SECONDS``.
+
+    The manifest renders it from the validated cdk.json block; a missing or
+    unreadable value falls back to the default window with a warning rather
+    than stopping the health monitor over a number it only reports.
+    """
+    default = int(validate_keep_warm_config(None)["window_seconds"])
+    raw = os.environ.get("GPU_KEEP_WARM_WINDOW_SECONDS")
+    try:
+        value = int(raw) if raw is not None else default
+    except ValueError:
+        logger.warning("GPU_KEEP_WARM_WINDOW_SECONDS=%r is not an integer; using %s", raw, default)
+        return default
+    return value if value > 0 else default
 
 
 def thresholds_from_env() -> ResourceThresholds:

@@ -1,0 +1,73 @@
+# Keep-warm GPU NodePool: the gpu-x86-pool instance families, for Jobs that
+# want their node kept between runs (gco jobs submit --keep-warm).
+#
+# gpu-x86-pool reclaims an empty node 30 seconds after its last pod, so a
+# workload that runs many short GPU Jobs back to back (a hyperparameter search,
+# say) waits for a new node and an image pull on every Job. This pool keeps an
+# empty node for the cdk.json gpu_keep_warm.window (default 10m) instead:
+# Karpenter restarts that timer whenever a pod lands on the node or leaves it,
+# so the next opted-in pod that fits is scheduled onto the waiting node, with
+# no new NodeClaim and its image already cached, and an unused node goes away
+# one window after its last pod finished.
+#
+# Only opted-in pods come here: the pool carries its own gco.aws/keep-warm
+# taint next to the GPU one, and an opted-in pod selects the matching label.
+# The health monitor records each idle interval on the Job whose pod finished
+# last on the node (the gco.aws/keep-warm-idle annotation, reported by Get
+# Job), so the idle time a caller's Jobs caused is readable. See
+# docs/GPU_KEEP_WARM.md. Keep the instance families equal to
+# 40-nodepool-gpu-x86.yaml (a test holds them together).
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-keep-warm-pool
+spec:
+  template:
+    metadata:
+      labels:
+        workload-type: gpu
+        arch: x86_64
+        project: gco
+        gco.aws/keep-warm: "true"
+    spec:
+      nodeClassRef:
+        group: eks.amazonaws.com
+        kind: NodeClass
+        name: default
+      requirements:
+        - key: "eks.amazonaws.com/instance-family"
+          operator: In
+          values: ["g4dn", "g5", "g6", "g6e", "g6f", "gr6", "gr6f", "g7", "g7e"]
+        - key: "kubernetes.io/arch"
+          operator: In
+          values: ["amd64"]
+        - key: "karpenter.sh/capacity-type"
+          operator: In
+          values: ["on-demand", "spot"]
+        - key: "eks.amazonaws.com/instance-gpu-manufacturer"
+          operator: In
+          values: ["nvidia"]
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+        - key: gco.aws/keep-warm
+          value: "true"
+          effect: NoSchedule
+  limits:
+    cpu: "1000"
+    memory: 4000Gi
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: "{{GPU_KEEP_WARM_WINDOW}}"
+    budgets:
+      # Reclaim every node whose window has passed at once, so a node's idle
+      # time stays bounded by the window however many go idle together.
+      - nodes: "100%"
+        reasons: ["Empty"]
+      # Every other reason may disrupt a node that is running a pod: keep it
+      # as gradual as gpu-x86-pool's single 10% budget. A budget without
+      # reasons would also cap Empty, and a reason no budget names is not
+      # limited at all, so each one is listed.
+      - nodes: "10%"
+        reasons: ["Underutilized", "Drifted", "NodeNotHealthy"]

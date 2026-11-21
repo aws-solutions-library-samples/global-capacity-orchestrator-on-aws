@@ -168,6 +168,11 @@ charts:
         - key: aws.amazon.com/neuron
           operator: Exists
           effect: NoSchedule
+        # The keep-warm GPU pool (47-nodepool-gpu-keep-warm.yaml) runs the
+        # gpu-x86-pool families behind its own taint.
+        - key: gco.aws/keep-warm
+          operator: Exists
+          effect: NoSchedule
 
   # AWS Neuron Device Plugin - Manages Neuron devices for Trainium/Inferentia
   # Advertises aws.amazon.com/neuron and aws.amazon.com/neuroncore resources

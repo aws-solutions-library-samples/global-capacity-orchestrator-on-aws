@@ -3,10 +3,11 @@
 # Runs as a DaemonSet on every NVIDIA GPU node and only there: the nodeSelector
 # is eks.amazonaws.com/instance-gpu-manufacturer=nvidia, the label EKS Auto Mode
 # puts on every node with an NVIDIA GPU whichever pool launched it (the
-# training, Arm, inference, EFA and Mooncake EFA pools in 40-46 require it; the
-# reserved-capacity pools `gco nodepools` creates pin NVIDIA instance types),
-# and it tolerates the taints those pools carry (nvidia.com/gpu, plus
-# vpc.amazonaws.com/efa on the EFA pools). Exposes GPU
+# training, Arm, inference, EFA, Mooncake EFA and keep-warm pools in 40-47
+# require it; the reserved-capacity pools `gco nodepools` creates pin NVIDIA
+# instance types), and it tolerates the taints those pools carry
+# (nvidia.com/gpu, plus vpc.amazonaws.com/efa on the EFA pools and
+# gco.aws/keep-warm on the keep-warm pool). Exposes GPU
 # utilization, memory, temperature, and power on :9400 /metrics for the DCGM
 # ServiceMonitor (post-helm-monitoring-servicemonitors) to scrape and the GPU
 # dashboard to render.
@@ -117,7 +118,8 @@ spec:
       # Every NVIDIA GPU node, whichever pool launched it (see the header):
       # the pools' workload-type labels differ (gpu, inference, gpu-efa,
       # gpu-efa-mooncake, reserved-capacity), the Auto Mode GPU label does
-      # not. The EFA pools add the vpc.amazonaws.com/efa taint.
+      # not. The EFA pools add the vpc.amazonaws.com/efa taint and the
+      # keep-warm pool its gco.aws/keep-warm one.
       nodeSelector:
         eks.amazonaws.com/instance-gpu-manufacturer: nvidia
       tolerations:
@@ -125,6 +127,9 @@ spec:
           operator: Exists
           effect: NoSchedule
         - key: vpc.amazonaws.com/efa
+          operator: Exists
+          effect: NoSchedule
+        - key: gco.aws/keep-warm
           operator: Exists
           effect: NoSchedule
       # DCGM talks to the driver through NVML and never calls the Kubernetes

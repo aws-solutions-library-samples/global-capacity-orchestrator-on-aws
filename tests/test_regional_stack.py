@@ -1007,6 +1007,10 @@ class TestRegionalStackSynthesis:
                 "{{QUEUE_PROCESSOR_IMAGE}}",
             ):
                 assert replacements[token] == mock_image.image_uri, token
+            # The keep-warm GPU pool's window (gco.keep_warm), from a config
+            # without the block: the 10-minute default, in both forms.
+            assert replacements["{{GPU_KEEP_WARM_WINDOW}}"] == "10m"
+            assert replacements["{{GPU_KEEP_WARM_WINDOW_SECONDS}}"] == "600"
 
     def test_default_vpc_endpoints_and_network_policy_enforcement(self):
         """Free S3/DynamoDB gateway endpoints ship by default; enforcement is on.

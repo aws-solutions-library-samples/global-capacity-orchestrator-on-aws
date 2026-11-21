@@ -38,6 +38,13 @@ from gco.hyperpod_config import (
     HYPERPOD_TAINT_KEY,
 )
 from gco.k8s_quantity import cpu_millicores, device_count, memory_bytes
+from gco.keep_warm import (
+    KEEP_WARM_GPU_RESOURCE,
+    KEEP_WARM_LABEL,
+    KEEP_WARM_TOLERATION,
+    KEEP_WARM_VALUE,
+    keep_warm_selector_conflicts,
+)
 from gco.services.structured_logging import sanitize_log_value
 
 logger = logging.getLogger(__name__)
@@ -45,8 +52,10 @@ logger = logging.getLogger(__name__)
 
 # Accelerator resource keys and their corresponding node taint keys. GCO
 # nodepools taint accelerator nodes with these keys (authoritative list:
-# regional_stack._ADDON_NODE_TOLERATIONS), so a job requesting one of these
-# resources must carry a matching toleration or it will never schedule.
+# regional_stack._ADDON_NODE_TOLERATIONS, which also holds the keep-warm
+# pool's gco.aws/keep-warm taint, one that names no resource), so a job
+# requesting one of these resources must carry a matching toleration or it
+# will never schedule.
 # Taint key == resource key for all three. Kept in sync with the mirror in
 # gco/services/queue_processor.py::ACCELERATOR_TAINTS.
 ACCELERATOR_TAINTS = ("nvidia.com/gpu", "aws.amazon.com/neuron", "vpc.amazonaws.com/efa")
@@ -1309,3 +1318,191 @@ def check_sandbox_runtime_class(
         "refused at creation: AWS Nitro Sandboxes need EKS 1.36 or later in a Region where "
         "EKS offers them (docs/NITRO_SANDBOXES.md)",
     )
+
+
+# ---------------------------------------------------------------------------
+# Keep-warm GPU nodes (gco.keep_warm)
+# ---------------------------------------------------------------------------
+
+#: Kinds whose pods finish, which is what a keep-warm node waits between.
+KEEP_WARM_KINDS = ("Job", "CronJob", "Pod")
+#: Kinds whose pods never leave a node by themselves: on the keep-warm pool
+#: they would hold a GPU node for good, so admission refuses them there.
+_KEEP_WARM_LONG_RUNNING_KINDS = ("Deployment", "StatefulSet")
+
+
+def _manifest_name(manifest: dict[str, Any]) -> str:
+    metadata = manifest.get("metadata")
+    name = metadata.get("name") if isinstance(metadata, dict) else None
+    return str(name) if name else "?"
+
+
+def selects_keep_warm(pod_spec: dict[str, Any]) -> bool:
+    """Whether a pod spec's ``nodeSelector`` sends it to the keep-warm pool."""
+    selector = pod_spec.get("nodeSelector")
+    return isinstance(selector, dict) and str(selector.get(KEEP_WARM_LABEL)) == KEEP_WARM_VALUE
+
+
+def _keep_warm_selector_conflicts(selector: dict[str, Any]) -> list[str]:
+    """What else a pod's ``nodeSelector`` asks for that no keep-warm node offers.
+
+    The pool's own fixed labels (:func:`gco.keep_warm.keep_warm_selector_conflicts`)
+    and SageMaker HyperPod's capacity-provider label, which only HyperPod
+    nodes carry.
+    """
+    conflicts = keep_warm_selector_conflicts(selector)
+    if CAPACITY_PROVIDER_LABEL in selector:
+        conflicts.append(f"{CAPACITY_PROVIDER_LABEL}={selector[CAPACITY_PROVIDER_LABEL]}")
+    return conflicts
+
+
+def _keep_warm_refusal(
+    kind: Any, name: str, pod_spec: dict[str, Any], requested: set[str]
+) -> tuple[bool, str | None]:
+    """The verdict on a pod spec that selects the pool (so its ``nodeSelector`` is a mapping)."""
+    tolerations = pod_spec.get("tolerations")
+    if not _toleration_matches(
+        tolerations if isinstance(tolerations, list) else [], KEEP_WARM_LABEL
+    ):
+        return (
+            False,
+            f"{kind} {name} selects {KEEP_WARM_LABEL}={KEEP_WARM_VALUE} without a toleration "
+            f"for the {KEEP_WARM_LABEL}={KEEP_WARM_VALUE}:NoSchedule taint, so it would never "
+            "schedule; add one, or submit with --keep-warm, which adds both",
+        )
+    conflicts = _keep_warm_selector_conflicts(pod_spec["nodeSelector"])
+    if conflicts:
+        return (
+            False,
+            f"{kind} {name} selects {KEEP_WARM_LABEL}={KEEP_WARM_VALUE} and "
+            f"{', '.join(conflicts)}, which no keep-warm node carries, so it would never "
+            "schedule; drop one or the other (docs/GPU_KEEP_WARM.md)",
+        )
+    if KEEP_WARM_GPU_RESOURCE not in requested:
+        return (
+            False,
+            f"{kind} {name} selects {KEEP_WARM_LABEL}={KEEP_WARM_VALUE} but requests no "
+            f"{KEEP_WARM_GPU_RESOURCE}: the keep-warm pool runs NVIDIA GPU nodes only, so "
+            "run it on the default pools instead",
+        )
+    return True, None
+
+
+def _labelled_for_hyperpod_queue(manifest: dict[str, Any]) -> bool:
+    metadata = manifest.get("metadata")
+    labels = metadata.get("labels") if isinstance(metadata, dict) else None
+    return isinstance(labels, dict) and labels.get(KUEUE_QUEUE_NAME_LABEL) == HYPERPOD_LOCAL_QUEUE
+
+
+def check_keep_warm(manifest: dict[str, Any]) -> tuple[bool, str | None]:
+    """Reject a manifest that selects the keep-warm pool but could not use it.
+
+    Runs on every submission path, so a manifest written by hand is held to
+    what ``--keep-warm`` produces. Only pods that select the pool's label are
+    judged; tolerating its taint alone (as DaemonSets that tolerate every
+    taint do) is not selecting it.
+
+    * A Deployment or StatefulSet: its pods never finish, so the node would
+      never be reclaimed.
+    * No toleration for the ``gco.aws/keep-warm`` taint: the pod would stay
+      Pending.
+    * A node selector that also names a label value no keep-warm node
+      carries (another NodePool, workload type or architecture, an instance
+      type outside the pool's families, SageMaker HyperPod's capacity
+      provider), or the HyperPod Kueue queue, whose flavor sends the pods to
+      HyperPod nodes: the pod would stay Pending.
+    * No ``nvidia.com/gpu`` request: the pool runs NVIDIA GPU nodes only, and
+      a pod without a GPU would hold one for nothing.
+
+    A TrainJob is judged on the pod templates its runtime patches set, merged
+    as Kubeflow Trainer merges them (:func:`_trainjob_pod_templates`), with
+    the GPU request taken from any of its pod-spec views (``spec.trainer``
+    carries it). A DaemonSet may select the pool without a GPU: its pods run
+    beside the workload on every node.
+    """
+    kind = manifest.get("kind")
+    name = _manifest_name(manifest)
+    if kind == "TrainJob":
+        selecting = [
+            template
+            for template in _trainjob_pod_templates(manifest)
+            if selects_keep_warm(template)
+        ]
+        views = trainjob_validation_pod_specs(manifest)
+    else:
+        _, pod_spec = pod_template(manifest)
+        selecting = [pod_spec] if pod_spec is not None and selects_keep_warm(pod_spec) else []
+        views = selecting
+    if not selecting or kind == "DaemonSet":
+        return True, None
+    if kind in _KEEP_WARM_LONG_RUNNING_KINDS:
+        return (
+            False,
+            f"{kind} {name} selects {KEEP_WARM_LABEL}={KEEP_WARM_VALUE}, but its pods never "
+            "finish, so the keep-warm node would never be reclaimed; keep-warm nodes are "
+            "for Jobs, CronJobs and Pods (docs/GPU_KEEP_WARM.md)",
+        )
+    if _labelled_for_hyperpod_queue(manifest):
+        return (
+            False,
+            f"{kind} {name} selects {KEEP_WARM_LABEL}={KEEP_WARM_VALUE} but is labelled "
+            f"{KUEUE_QUEUE_NAME_LABEL}={HYPERPOD_LOCAL_QUEUE}, whose flavor sends its pods to "
+            "SageMaker HyperPod nodes, which are not keep-warm nodes; drop one or the other",
+        )
+    requested: set[str] = set()
+    for view in views:
+        requested.update(requested_accelerators(view))
+    for spec in selecting:
+        verdict = _keep_warm_refusal(kind, name, spec, requested)
+        if not verdict[0]:
+            return verdict
+    return True, None
+
+
+def apply_keep_warm(manifests: list[dict[str, Any]]) -> None:
+    """Send every pod a submission creates to the keep-warm GPU pool (``--keep-warm``).
+
+    Adds the ``gco.aws/keep-warm`` node selector and the toleration for the
+    pool's taint to each Job, CronJob and Pod. ConfigMaps and Services pass
+    through. Everything else fails closed with ``ValueError``, on every
+    transport including ``submit-direct``, which skips server-side admission:
+    another kind, a pod template whose node selector names a label value no
+    keep-warm node carries (another NodePool, a non-amd64 architecture, an
+    instance type outside the pool's families), a pod without an
+    ``nvidia.com/gpu`` request, or a submission with nothing to place.
+    """
+    placed = 0
+    for manifest in manifests:
+        kind = manifest.get("kind")
+        if kind in PODLESS_KINDS:
+            continue
+        name = _manifest_name(manifest)
+        _, pod_spec = pod_template(manifest)
+        if kind not in KEEP_WARM_KINDS or pod_spec is None:
+            raise ValueError(
+                f"{kind} {name}: --keep-warm keeps a node between workloads that finish; it "
+                f"applies to Job, CronJob and Pod manifests"
+            )
+        selector = pod_spec.setdefault("nodeSelector", {})
+        if not isinstance(selector, dict):
+            raise ValueError(f"{kind} {name}: nodeSelector must be a mapping")
+        conflicts = _keep_warm_selector_conflicts(selector)
+        if conflicts:
+            raise ValueError(
+                f"{kind} {name} selects {', '.join(conflicts)}, which no keep-warm node "
+                "carries; remove the selector or drop --keep-warm"
+            )
+        selector[KEEP_WARM_LABEL] = KEEP_WARM_VALUE
+        tolerations = pod_spec.setdefault("tolerations", [])
+        if not isinstance(tolerations, list):
+            raise ValueError(f"{kind} {name}: tolerations must be a list")
+        if not _toleration_matches(tolerations, KEEP_WARM_LABEL):
+            tolerations.append(dict(KEEP_WARM_TOLERATION))
+        ok, message = check_keep_warm(manifest)
+        if not ok:
+            raise ValueError(message)
+        placed += 1
+    if not placed:
+        raise ValueError(
+            "--keep-warm found nothing to place: none of the manifests is a Job, CronJob or Pod"
+        )

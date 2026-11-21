@@ -3525,6 +3525,7 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 | `--check-policy` | | Check the manifests against the target region's deployed policy first and report anything that would be rejected (advisory; submission continues). With `-o json` or `-o yaml` the findings go to stderr, so stdout stays the submission document |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--keep-warm` | | Run the GPU pods on the [keep-warm pool](GPU_KEEP_WARM.md), whose empty nodes stay for `gpu_keep_warm.window` (default 10m) so the next keep-warm GPU Job that fits reuses the node; adds the `gco.aws/keep-warm` node selector and toleration to each Job, CronJob and Pod |
 | `--wait` | `-w` | Wait for job completion (exit status below) |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 
@@ -3570,6 +3571,7 @@ gco jobs submit-sqs MANIFEST_PATH [OPTIONS]
 | `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (default: the configured default namespace, `GCO_DEFAULT_NAMESPACE`; manifest `metadata.namespace` takes precedence) |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--keep-warm` | | Run the GPU pods on the [keep-warm pool](GPU_KEEP_WARM.md), whose empty nodes stay for `gpu_keep_warm.window` (default 10m) so the next keep-warm GPU Job that fits reuses the node; adds the `gco.aws/keep-warm` node selector and toleration to each Job, CronJob and Pod |
 
 `--auto-region` reads the manifest before ranking. A manifest routed to
 [SageMaker HyperPod](HYPERPOD.md#how-work-reaches-hyperpod-nodes) (the
@@ -3609,6 +3611,7 @@ gco jobs submit-direct MANIFEST_PATH [OPTIONS]
 | `--dry-run` | | Validate without applying |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--keep-warm` | | Run the GPU pods on the [keep-warm pool](GPU_KEEP_WARM.md), whose empty nodes stay for `gpu_keep_warm.window` (default 10m) so the next keep-warm GPU Job that fits reuses the node; adds the `gco.aws/keep-warm` node selector and toleration to each Job, CronJob and Pod |
 | `--wait` | `-w` | Wait for job completion; follows a Job, else a TrainJob, as [`gco jobs submit`](#gco-jobs-submit) does, with the same exit status |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 
@@ -3645,6 +3648,7 @@ gate), the same namespace rules and the same routing through the global API.
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--keep-warm` | | Run the GPU pods on the [keep-warm pool](GPU_KEEP_WARM.md), whose empty nodes stay for `gpu_keep_warm.window` (default 10m) so the next keep-warm GPU Job that fits reuses the node; adds the `gco.aws/keep-warm` node selector and toleration to each Job, CronJob and Pod |
 | `--max-spot-price` | | Spot price cap in USD/hour (requires `--spot-instance-type`); see [`gco queue submit`](#gco-queue-submit) |
 | `--spot-instance-type` | | EC2 instance type whose spot price gates dispatch (requires `--max-spot-price`) |
 
@@ -4954,6 +4958,7 @@ gco queue submit MANIFEST_PATH [OPTIONS]
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--label` | `-l` | Add labels (`key=value` with a non-empty key; the value may be empty), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--keep-warm` | | Run the GPU pods on the [keep-warm pool](GPU_KEEP_WARM.md), whose empty nodes stay for `gpu_keep_warm.window` (default 10m) so the next keep-warm GPU Job that fits reuses the node; adds the `gco.aws/keep-warm` node selector and toleration to each Job, CronJob and Pod |
 | `--max-spot-price` | | Spot price cap in USD/hour; the job stays queued until the current spot price of `--spot-instance-type` in the target region drops to or below this value. Requires `--spot-instance-type` |
 | `--spot-instance-type` | | EC2 instance type whose spot price gates dispatch (e.g. `g5.xlarge`). Requires `--max-spot-price` |
 

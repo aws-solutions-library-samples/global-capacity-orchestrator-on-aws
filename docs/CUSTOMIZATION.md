@@ -34,6 +34,7 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [Configure Spot Instances](#configure-spot-instances)
   - [Add Taints for GPU Nodes](#add-taints-for-gpu-nodes)
   - [Fractional / Shared GPUs](#fractional--shared-gpus)
+  - [Keep GPU Nodes Between Short Jobs](#keep-gpu-nodes-between-short-jobs)
 - [Customizing Services](#customizing-services)
   - [Health Monitor](#health-monitor)
   - [Manifest Processor](#manifest-processor)
@@ -853,6 +854,25 @@ spec:
 
 GCO runs on [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html), which ships the NVIDIA driver **and** device plugin built into the node (the plugin is not visible as a DaemonSet). GPU sharing via the device plugin's time-slicing ConfigMap is therefore not available: there is no cluster-managed device plugin to configure, and installing the community plugin alongside the built-in one does not work (it cannot initialize NVML on Auto Mode nodes and crash-loops).
 For workloads that don't need a full dedicated GPU, use the fractional-GPU instance sizes already present in the default `gpu-x86-pool` (`g6f` / `gr6f` expose a slice of an L4 as a whole `nvidia.com/gpu` unit), or right-size onto the smallest suitable family (e.g. `g4dn.xlarge`). Constrain placement with `eks.amazonaws.com/instance-family` node selectors as shown above.
+
+### Keep GPU Nodes Between Short Jobs
+
+`gpu-keep-warm-pool` offers the `gpu-x86-pool` families to Jobs submitted with
+`--keep-warm`, and keeps each empty node for `gpu_keep_warm.window` (default
+`10m`) so the next such Job reuses it without a new node or image pull:
+
+```json
+"gpu_keep_warm": {
+  "window": "10m"
+}
+```
+
+The window is a duration from `30s` to `24h`. When you change the pool's
+instance families, keep them equal to `gpu-x86-pool`'s and to
+`KEEP_WARM_INSTANCE_FAMILIES` in `gco/keep_warm.py`, which admission checks
+node selectors against (tests hold the three together). See
+[GPU_KEEP_WARM.md](GPU_KEEP_WARM.md) for the opt-in, the idle records on each
+Job, and the cost of a waiting node.
 
 ## Customizing Services
 

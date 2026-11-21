@@ -246,6 +246,10 @@ _STRUCTURAL_STUBS: dict[str, str] = {
     "{{GATEWAY_HEALTH_CHECK_TIMEOUT_SECONDS}}": "5",
     "{{GATEWAY_HEALTHY_THRESHOLD_COUNT}}": "2",
     "{{GATEWAY_UNHEALTHY_THRESHOLD_COUNT}}": "2",
+    # The keep-warm GPU pool's consolidateAfter (47-nodepool-gpu-keep-warm.yaml):
+    # the NodePool schema's duration pattern refuses the generic stub, so it
+    # renders to the shipped default window of gco/keep_warm.py.
+    "{{GPU_KEEP_WARM_WINDOW}}": "10m",
 }
 
 # Placeholders that sit in a bare (unquoted) numeric scalar position — e.g.

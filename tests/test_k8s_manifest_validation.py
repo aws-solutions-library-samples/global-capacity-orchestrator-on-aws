@@ -124,10 +124,10 @@ class TestBuiltInNodePoolContracts:
                 f"consolidationPolicy {policy!r}"
             )
 
-    def test_the_shipped_nodepool_count_is_the_expected_seven(self) -> None:
+    def test_the_shipped_nodepool_count_is_the_expected_eight(self) -> None:
         """The parametrized guard above runs over the real glob; make sure it
         cannot pass vacuously because the files moved or were renamed."""
-        assert len(list(MANIFESTS_DIR.glob("4*-nodepool-*.yaml"))) == 7
+        assert len(list(MANIFESTS_DIR.glob("4*-nodepool-*.yaml"))) == 8
 
 
 class TestStaticPodTokenBoundaries:

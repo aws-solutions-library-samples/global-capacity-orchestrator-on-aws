@@ -5376,6 +5376,7 @@ class TestSmokeManifestSupplyChain:
                 "slurm",
                 "hyperpod",
                 "nitro-sandbox",
+                "keep-warm",
             )
         }
         assert {path.name for path in probes} == {

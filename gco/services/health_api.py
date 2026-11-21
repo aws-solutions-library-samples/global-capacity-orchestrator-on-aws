@@ -75,7 +75,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Startup
     logger.info("Starting Health API Service")
     try:
-        health_monitor = create_health_monitor_from_env()
+        # Kept locally too: shutdown releases this monitor's keep-warm Lease.
+        monitor = health_monitor = create_health_monitor_from_env()
 
         # Enable structured JSON logging now that we know cluster_id and region
         configure_structured_logging(
@@ -120,6 +121,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         health_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await health_task
+        # Hand the keep-warm Lease over now, not one Lease duration later.
+        await asyncio.to_thread(monitor.keep_warm_recorder.release)
         if webhook_dispatcher:
             await webhook_dispatcher.stop()
             logger.info("Webhook dispatcher stopped")
@@ -170,6 +173,9 @@ async def background_health_monitor() -> None:
 
             # Periodically sync ALB hostname in SSM (self-healing)
             await health_monitor.sync_alb_registration()
+
+            # Record keep-warm GPU nodes' idle intervals on Jobs (elected)
+            await health_monitor.record_keep_warm_idle()
 
             # Publish metrics to CloudWatch for dashboard visibility. The
             # boto3 calls block, so they run off the loop that serves the

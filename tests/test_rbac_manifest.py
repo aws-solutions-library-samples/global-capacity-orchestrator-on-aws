@@ -124,9 +124,13 @@ class TestHealthMonitorRole:
         needed = {grant for call in calls for grant in HEALTH_MONITOR_CALL_GRANTS[call]}
         cluster_role = _find_doc(rbac_docs, "ClusterRole", "gco-health-monitor-role")
         namespaced = _find_doc(rbac_docs, "Role", "gco-health-monitor-self-healing")
-        granted = {("cluster", *grant) for grant in _grants(cluster_role)} | {
-            ("gco-system", *grant) for grant in _grants(namespaced)
-        }
+        keep_warm_records = _find_doc(rbac_docs, "Role", "gco-health-monitor-keep-warm-records")
+        assert keep_warm_records["metadata"]["namespace"] == "gco-jobs"
+        granted = (
+            {("cluster", *grant) for grant in _grants(cluster_role)}
+            | {("gco-system", *grant) for grant in _grants(namespaced)}
+            | {("gco-jobs", *grant) for grant in _grants(keep_warm_records)}
+        )
         assert granted == needed
 
     def test_health_monitor_self_healing_is_exactly_scoped(self, rbac_docs):
@@ -144,11 +148,13 @@ class TestHealthMonitorRole:
 
         lease_rule = rules[(("coordination.k8s.io",), ("leases",))]
         assert set(lease_rule["verbs"]) == {"get", "update"}
-        # One named Lease per elected duty: ALB-hostname sync and webhook
-        # delivery. Both are pre-created below so no `create` grant is needed.
+        # One named Lease per elected duty: ALB-hostname sync, webhook
+        # delivery and the keep-warm idle records. All are pre-created below
+        # so no `create` grant is needed.
         assert lease_rule["resourceNames"] == [
             "gco-health-monitor-alb-sync",
             "gco-health-monitor-webhooks",
+            "gco-health-monitor-keep-warm",
         ]
         assert "create" not in lease_rule["verbs"]
 
@@ -991,6 +997,10 @@ HEALTH_MONITOR_CALL_GRANTS = {
     ("replace_namespaced_lease", None, None): {
         ("gco-system", "coordination.k8s.io", "leases", "update")
     },
+    # Keep-warm idle records: read the Job, then patch its metadata, in the
+    # job namespace the Role gco-health-monitor-keep-warm-records covers.
+    ("read_namespaced_job", None, None): {("gco-jobs", "batch", "jobs", "get")},
+    ("patch_namespaced_job", None, None): {("gco-jobs", "batch", "jobs", "patch")},
 }
 
 _API_CLASSES = (

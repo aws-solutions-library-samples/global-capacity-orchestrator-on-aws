@@ -111,6 +111,9 @@ from gco.job_admission import (
     _untrusted_container_in_pod_spec as _untrusted_container_in_pod_spec,
 )
 from gco.job_admission import (
+    check_keep_warm as check_keep_warm,
+)
+from gco.job_admission import (
     check_resource_caps as check_resource_caps,
 )
 from gco.job_admission import (
@@ -912,6 +915,11 @@ class ManifestProcessor:
                 )
             if not sandbox_valid:
                 return False, f"Nitro Sandbox validation failed: {sandbox_error}"
+
+            # The keep-warm GPU pool takes only GPU pods that finish (gco.keep_warm).
+            keep_warm_valid, keep_warm_error = check_keep_warm(manifest)
+            if not keep_warm_valid:
+                return False, f"Keep-warm validation failed: {keep_warm_error}"
 
             # Validate image sources (prevent pulling from untrusted registries)
             img_valid, img_error = self._validate_image_sources(manifest)

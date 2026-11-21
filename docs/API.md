@@ -755,6 +755,7 @@ gco jobs get training-job -r us-west-2 -n ml-jobs
     "conditions": []
   },
   "computed_status": "running",
+  "keep_warm": null,
   "scheduling": {
     "node_name": "ip-10-0-1-100.ec2.internal",
     "node_instance_type": "g5.2xlarge",
@@ -861,6 +862,39 @@ MCP tool report the counts as unknown (`null`) rather than as `0`.
 Reading node labels requires the `nodes` `get` permission on the
 `gco-manifest-processor-cluster-read` ClusterRole; without it the node name is
 still reported and the labels come back `null`.
+
+**The `keep_warm` block:** a Job whose pods ran on the
+[keep-warm GPU pool](GPU_KEEP_WARM.md) reports the idle time those nodes sat
+through after its pods finished, as the health monitor recorded it on the
+Job's `gco.aws/keep-warm-idle` annotation. It is `null` for every other Job.
+
+```json
+"keep_warm": {
+  "idle": [
+    {
+      "node": "ip-10-0-1-100.ec2.internal",
+      "instance_type": "g6.xlarge",
+      "capacity_type": "on-demand",
+      "pod": "trial-007-x2k8f",
+      "since": "2024-01-15T10:12:40Z",
+      "until": "2024-01-15T10:13:50Z",
+      "seconds": 70,
+      "ended_by": "reused",
+      "window_seconds": 600
+    }
+  ],
+  "idle_seconds": 70,
+  "open": false
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `idle` | One interval per keep-warm node this Job's pod left idle: the `node`, its `instance_type` and `capacity_type`, the `pod` that finished last there, and `since`, the time that pod finished |
+| `idle[].until`, `seconds`, `ended_by` | Set when the interval closed: `reused` when the next pod was bound to the node (`until` is when), `reclaimed` when the node was gone (`until` is when the health monitor found it gone, at most one 30-second loop after the instance stopped). Absent while the node is still waiting |
+| `idle[].window_seconds` | The pool's `gpu_keep_warm.window` when the interval opened |
+| `idle_seconds` | The closed intervals' `seconds`, summed |
+| `open` | Whether an interval is still open |
 
 ### Get Job Logs
 

@@ -846,6 +846,13 @@ CONFIGS.extend(
                 }
             },
         ),
+        # The keep-warm GPU pool's window off its default (rendered into
+        # 47-nodepool-gpu-keep-warm.yaml's consolidateAfter and the health
+        # monitor's environment through the kubectl-applier replacements).
+        (
+            "gpu-keep-warm-window",
+            {"gpu_keep_warm": {"window": "1h30m"}},
+        ),
         # FSx enabled for a subset of a multi-region topology:
         # fsx_lustre_regions gates which regional stacks grow the FSx
         # surface, and only a multi-region deployment exercises the subset.

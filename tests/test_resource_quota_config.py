@@ -374,6 +374,10 @@ class TestManifestTemplatePlaceholderCoverage:
         # target-group health check, cdk.json gateway_health_check) are
         # rendered by compute_gateway_health_check_replacements.
         Path("gco/gateway_health_check_config.py"),
+        # The {{GPU_KEEP_WARM_*}} tokens of 47-nodepool-gpu-keep-warm.yaml
+        # (consolidateAfter) and 30-health-monitor.yaml (the window every idle
+        # record carries) are rendered by compute_keep_warm_replacements.
+        Path("gco/keep_warm.py"),
     )
 
     # Placeholders that are intentionally only provided for specific

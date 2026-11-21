@@ -5,7 +5,7 @@ from typing import Any
 
 import click
 
-from gco.job_admission import SANDBOX_MODES, apply_sandbox
+from gco.job_admission import SANDBOX_MODES, apply_keep_warm, apply_sandbox
 
 from ..config import GCOConfig
 from ..output import confirm, get_output_formatter
@@ -23,6 +23,18 @@ sandbox_option = click.option(
         "Run every pod in an AWS Nitro Sandbox: isolated sets runtimeClassName: "
         "isolated-sandbox on each pod template. Needs EKS 1.36 or later; see "
         "docs/NITRO_SANDBOXES.md"
+    ),
+)
+#: ``--keep-warm`` for every submit command (gco.job_admission.apply_keep_warm),
+#: next to ``--sandbox`` for the same import reason.
+keep_warm_option = click.option(
+    "--keep-warm",
+    is_flag=True,
+    help=(
+        "Run GPU pods on the keep-warm pool, whose empty nodes stay for cdk.json "
+        "gpu_keep_warm.window (default 10m), so the next keep-warm GPU Job that fits "
+        "reuses the node: adds the gco.aws/keep-warm node selector and toleration to "
+        "each Job, CronJob and Pod. See docs/GPU_KEEP_WARM.md"
     ),
 )
 
@@ -99,6 +111,7 @@ def queue(config: Any) -> None:
 )
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
 @sandbox_option
+@keep_warm_option
 @click.option(
     "--max-spot-price",
     type=float,
@@ -124,6 +137,7 @@ def queue_submit(
     priority: Any,
     label: Any,
     sandbox: Any,
+    keep_warm: Any,
     max_spot_price: Any,
     spot_instance_type: Any,
 ) -> None:
@@ -177,6 +191,8 @@ def queue_submit(
         envelope_namespace = _queue_namespace(manifest, namespace, config.default_namespace)
         if sandbox:
             apply_sandbox([manifest], sandbox)
+        if keep_warm:
+            apply_keep_warm([manifest])
 
         # Submit via API
         from ..aws_client import get_aws_client

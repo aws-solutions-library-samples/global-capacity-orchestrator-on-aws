@@ -100,6 +100,7 @@ from gco.hyperpod_config import (
 )
 from gco.job_admission import (
     KUEUE_QUEUE_NAME_LABEL,
+    check_keep_warm,
     check_sandbox,
     check_sandbox_runtime_class,
     hyperpod_routing,
@@ -699,6 +700,12 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
         sandbox_valid, sandbox_error = check_sandbox_runtime_class(m, runtime_class_exists)
     if not sandbox_valid:
         return False, f"Nitro Sandbox validation failed: {sandbox_error}"
+
+    # The keep-warm GPU pool takes only GPU pods that finish: the function the
+    # REST path calls.
+    keep_warm_valid, keep_warm_error = check_keep_warm(m)
+    if not keep_warm_valid:
+        return False, f"Keep-warm validation failed: {keep_warm_error}"
 
     return True, ""
 

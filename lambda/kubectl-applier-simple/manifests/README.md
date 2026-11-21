@@ -67,7 +67,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `00-19` | Foundation & networking | Namespaces, service accounts, RBAC, network policies, resource quotas, priority classes, the kro capability's tenant RBAC, the internal CA's issuance fence, the tenant write fence, SageMaker HyperPod's namespace and RBAC |
 | `20-29` | Storage | [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html), FSx Lustre, cluster-shared bucket, Valkey, Aurora pgvector, observability gp3 |
 | `30-39` | System services | health-monitor, manifest-processor, inference-monitor, inference-proxy, cost-monitor — every Deployment follows the [platform workload contract](#platform-workload-contract) |
-| `40-49` | NodePools | GPU (x86, ARM), inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) (training + mooncake), Neuron, CPU |
+| `40-49` | NodePools | GPU (x86, ARM, keep-warm), inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) (training + mooncake), Neuron, CPU |
 | `50-59` | GPU observability and node health | DCGM exporter, the SageMaker HyperPod health-monitoring agent |
 | `post-helm-*` | Post-Helm | Resources needing Helm CRDs: the cert-manager internal CA and in-cluster TLS certificates, Gateway API entrypoint, KEDA ScaledJob, Prometheus monitors, Grafana dashboards/rotation, Kueue metrics RBAC, the self-managed Argo CD fence and root Application, the Crossplane composition function and RBAC |
 
@@ -79,7 +79,7 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 |------|----------|
 | `00-namespaces.yaml` | `gco-system`, `gco-jobs`, `gco-inference` namespaces |
 | `01-serviceaccounts.yaml` | `gco-service-account` in `gco-jobs` and `gco-inference` ([IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) role-ARN annotation; token automount disabled) |
-| `02-rbac.yaml` | Per-service `ClusterRole`/`Role` + platform-service `ServiceAccount`s + bindings (least-privilege); the two pre-created health-monitor election `Lease`s (`gco-health-monitor-alb-sync`, `gco-health-monitor-webhooks`) so the Role grants `get`/`update` on named objects instead of `create` on every Lease; `gco-mcp-server-read`, bound to the `gco:mcp-server-read` group of the MCP server role's EKS access entry, reads nodes and NodePools (the entry's AmazonEKSViewPolicy covers the rest) |
+| `02-rbac.yaml` | Per-service `ClusterRole`/`Role` + platform-service `ServiceAccount`s + bindings (least-privilege); the three pre-created health-monitor election `Lease`s (`gco-health-monitor-alb-sync`, `gco-health-monitor-webhooks`, `gco-health-monitor-keep-warm`) so the Role grants `get`/`update` on named objects instead of `create` on every Lease; `gco-health-monitor-keep-warm-records`, the health monitor's `get`/`patch` on Jobs in `gco-jobs` for the keep-warm idle records; `gco-mcp-server-read`, bound to the `gco:mcp-server-read` group of the MCP server role's EKS access entry, reads nodes and NodePools (the entry's AmazonEKSViewPolicy covers the rest) |
 | `03-network-policies.yaml` | The network posture of all three namespaces: default-deny ingress in `gco-system` (each platform Deployment admitted on the one TLS port its sidecar serves — 8443 for the [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html)-targeted API sidecars, 9443 for the inference monitor's metrics sidecar — while every plaintext listener stays on pod loopback) and in `gco-jobs` (with everything allowed between job pods), DNS + HTTPS egress, egress to the node's EKS Pod Identity Agent (`169.254.170.23:80`, the credentials behind every Pod Identity association), in-VPC egress for jobs from `vpc_endpoint_cidrs`, and default-deny ingress in `gco-inference`, where the inference proxy reaches model pods on their TLS sidecar port 8443 only, model pods reach each other and the Mooncake master, and any other pod accepts nothing |
 | `04-resource-quotas.yaml` | `ResourceQuota` + `LimitRange` for `gco-jobs` (namespace CPU/memory/GPU/pod caps + per-container defaults) |
 | `05-priority-classes.yaml` | `gco-platform-critical` `PriorityClass` (value 1000000) — referenced by every platform-service pod spec (30–34 + the post-Helm SQS consumer) so control-plane pods preempt default-priority user workloads under node pressure instead of being starved by them |
@@ -135,6 +135,7 @@ no candidate instance types (see
 | `44-nodepool-neuron.yaml` | Neuron pool (trn1, trn1n, trn2, inf1, inf2) — AWS Trainium/Inferentia |
 | `45-nodepool-cpu-general.yaml` | General CPU pool (c/m/r families) — spot-preferred, no GPUs |
 | `46-nodepool-mooncake-efa.yaml` | Mooncake EFA pool (p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200) — disaggregated/store/both inference over RoCE; excludes A100-40GB p4d |
+| `47-nodepool-gpu-keep-warm.yaml` | Keep-warm GPU pool (`gpu-x86-pool`'s families) for `--keep-warm` Jobs: its own `gco.aws/keep-warm` taint and label, and an empty node kept for `{{GPU_KEEP_WARM_WINDOW}}` (cdk.json `gpu_keep_warm.window`) instead of 30 seconds, with every node past its window reclaimed at once ([GPU_KEEP_WARM.md](../../../docs/GPU_KEEP_WARM.md)) |
 
 Every pool states `spec.disruption.consolidationPolicy: WhenEmpty` explicitly,
 and `tests/test_k8s_manifest_validation.py` fails if one leaves it out. On EKS
@@ -151,7 +152,7 @@ than inherited from whatever the platform defaults to at recreate time.
 
 | File | Contents |
 |------|----------|
-| `50-dcgm-exporter.yaml` | DCGM exporter `DaemonSet` on every NVIDIA GPU node (`eks.amazonaws.com/instance-gpu-manufacturer: nvidia`, tolerating the `nvidia.com/gpu` and `vpc.amazonaws.com/efa` taints) + device-counters `ConfigMap` (GPU metrics for Prometheus) — **pruned when observability is disabled** |
+| `50-dcgm-exporter.yaml` | DCGM exporter `DaemonSet` on every NVIDIA GPU node (`eks.amazonaws.com/instance-gpu-manufacturer: nvidia`, tolerating the `nvidia.com/gpu`, `vpc.amazonaws.com/efa` and `gco.aws/keep-warm` taints) + device-counters `ConfigMap` (GPU metrics for Prometheus) — **pruned when observability is disabled** |
 | `51-hyperpod-health-monitoring-agent.yaml` | The [SageMaker HyperPod](../../../docs/HYPERPOD.md) health-monitoring agent: two `DaemonSet`s in `aws-hyperpod` (NVIDIA instance types, and Trainium/Inferentia types with the NVIDIA hooks disabled) bound to `gco.aws/capacity-provider=hyperpod` nodes of HyperPod's `ml.*` instance types, tolerating every taint, running the Region's `{{HYPERPOD_HMA_IMAGE}}` non-root with no capabilities and a read-only root; the host `/var/log`, `/dev/kmsg` and `/etc/localtime` mounts are the agent's contract (it reads the kernel ring buffer and system logs to label faulty nodes for `NodeRecovery`) — **skipped and pruned when HyperPod is disabled** |
 
 There is deliberately no NVIDIA device plugin manifest: EKS Auto Mode ships
