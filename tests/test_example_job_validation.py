@@ -208,6 +208,9 @@ class TestActionRegistry:
                 "hyperpod",
                 # Runs a Job in an AWS Nitro Sandbox on the deployed cluster.
                 "sandboxes",
+                # Runs two GPU Jobs on the deployed keep-warm pool and reads
+                # their idle records back through the deployed API.
+                "keep-warm",
                 "opencost",
                 "convergence",
                 "platform-workloads",
