@@ -1622,7 +1622,8 @@ class TestSchemaDownloadRetries:
             return real_run(cmd, **kwargs)
 
         monkeypatch.setattr(validator.subprocess, "run", spy)
-        monkeypatch.setattr(validator.time, "sleep", sleeps.append)
+        # Only the retry's own pause: time.sleep is also how subprocess waits.
+        monkeypatch.setattr(validator, "_sleep", sleeps.append)
         return calls, sleeps
 
     def test_a_download_that_recovers_passes_and_reuses_one_cache(

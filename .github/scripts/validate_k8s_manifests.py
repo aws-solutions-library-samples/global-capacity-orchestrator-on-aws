@@ -232,6 +232,9 @@ CRD_CATALOG_SCHEMA_LOCATION = (
 # Any other failure is reported at once: repeating a run cannot fix a manifest.
 SCHEMA_DOWNLOAD_ERRORS = ("failed downloading schema at ", "error while downloading schema at ")
 SCHEMA_DOWNLOAD_RETRY_DELAYS = (15, 45)
+# The pause between attempts, under a name of its own: the tests replace it
+# rather than time.sleep, which subprocess also calls while it waits.
+_sleep = time.sleep
 
 _PLACEHOLDER_RE = re.compile(r"\{\{[A-Za-z_]+\}\}")
 
@@ -693,7 +696,7 @@ def run_kubeconform_retrying_downloads(
             f"(attempt {attempt} of {len(retry_delays) + 1}).",
             file=sys.stderr,
         )
-        time.sleep(delay)
+        _sleep(delay)
         rc, result = run_kubeconform(directory, schema_cache=schema_cache, **options)
     return rc, result
 
