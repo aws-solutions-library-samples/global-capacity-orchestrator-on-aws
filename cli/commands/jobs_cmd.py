@@ -9,8 +9,10 @@ import click
 
 from gco.job_admission import apply_sandbox
 
+from ..cluster_tunnel import unreachable_endpoint_hint, via_ssm_options, via_ssm_route
 from ..config import GCOConfig
 from ..jobs import JobInfo, get_job_manager, resolve_submission_identity
+from ..kubectl_helpers import kubectl_could_not_connect
 from ..output import confirm, format_job_table, get_output_formatter
 from .queue_cmd import queue_submit, sandbox_option
 
@@ -278,6 +280,7 @@ def submit_job(
     ),
 )
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
+@via_ssm_options
 @pass_config
 def submit_job_direct(
     config: Any,
@@ -289,6 +292,9 @@ def submit_job_direct(
     sandbox: Any,
     wait: Any,
     timeout: Any,
+    via_ssm: Any,
+    bastion_ttl_minutes: Any,
+    assume_yes: Any,
 ) -> None:
     """Submit a job directly to a regional cluster using kubectl.
 
@@ -300,17 +306,20 @@ def submit_job_direct(
     - AWS credentials with eks:DescribeCluster permission
 
     To configure EKS access, run:
-
         aws eks create-access-entry --cluster-name gco-REGION --principal-arn YOUR_ARN
-
         aws eks associate-access-policy --cluster-name gco-REGION \\
             --principal-arn YOUR_ARN \\
             --policy-arn arn:<partition>:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \\
             --access-scope type=cluster
 
+    The EKS API endpoint is private by default, so from outside the VPC pass
+    --via-ssm auto (or an SSM-managed instance id): the command then tunnels
+    to the endpoint for the submission and closes the tunnel afterwards.
+
     Examples:
         gco jobs submit-direct job.yaml --region us-east-1
         gco jobs submit-direct job.yaml -r us-west-2 -n gco-jobs --wait
+        gco jobs submit-direct job.yaml -r us-east-1 --via-ssm auto -y
 
     \b
     Exit status:
@@ -346,14 +355,23 @@ def submit_job_direct(
 
         formatter.print_info(f"Submitting directly to cluster in {region} via kubectl...")
 
-        result = job_manager.submit_job_direct(
-            manifests=manifest_path,
+        with via_ssm_route(
+            formatter,
+            cluster=f"{config.project_name}-{region}",
             region=region,
-            namespace=namespace,
-            dry_run=dry_run,
-            labels=labels if labels else None,
-            sandbox=sandbox,
-        )
+            via_ssm=via_ssm,
+            bastion_ttl_minutes=bastion_ttl_minutes,
+            assume_yes=assume_yes,
+        ) as route:
+            result = job_manager.submit_job_direct(
+                manifests=manifest_path,
+                region=region,
+                namespace=namespace,
+                dry_run=dry_run,
+                labels=labels if labels else None,
+                sandbox=sandbox,
+                **route,
+            )
 
         if dry_run:
             formatter.print_success("Dry run successful - manifests are valid")
@@ -380,6 +398,8 @@ def submit_job_direct(
 
     except Exception as e:
         formatter.print_error(f"Failed to submit job directly: {e}")
+        if not via_ssm and kubectl_could_not_connect(str(e)):
+            formatter.print_info(unreachable_endpoint_hint(region))
         sys.exit(1)
 
     if wait_target is not None:

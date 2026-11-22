@@ -214,7 +214,7 @@ gco stacks access -r us-east-1
 gco cluster tunnel --via-ssm auto --region us-east-1   # holds the tunnel open; prints the kubectl flags
 ```
 
-The tunnel provisions a self-terminating bastion in the cluster VPC and tears it down on exit. If you would rather expose the endpoint, `gco stacks eks endpoint set PUBLIC_AND_PRIVATE --cidr <your-ip>/32` edits `cdk.json` and the next `gco stacks deploy` applies it; see [EKS Cluster Configuration](docs/CUSTOMIZATION.md#eks-cluster-configuration) for the trade-offs.
+The tunnel provisions a self-terminating bastion in the cluster VPC and tears it down on exit. The commands that run kubectl for you (`gco jobs submit-direct`, `gco files ls` and `gco files download`) take `--via-ssm auto` themselves, so they need only the access entry. If you would rather expose the endpoint, `gco stacks eks endpoint set PUBLIC_AND_PRIVATE --cidr <your-ip>/32` edits `cdk.json` and the next `gco stacks deploy` applies it; see [EKS Cluster Configuration](docs/CUSTOMIZATION.md#eks-cluster-configuration) for the trade-offs.
 
 ## Step 6: Run a Test Job
 
@@ -269,7 +269,7 @@ gco costs summary
 # Run a multi-step pipeline (DAG)
 gco dag run examples/pipeline-dag.yaml --region us-east-1
 
-# Check cluster health
+# Queue depth, running jobs and GPU/CPU utilization per Region
 gco capacity status
 ```
 
@@ -302,7 +302,7 @@ The `inference_monitor` in each target region automatically creates the Kubernet
 
 ## Next Steps
 
-- Follow the [Learning Path](docs/LEARNING_PATH.md) for a staged, guided route from here to productive
+- Follow the [Learning Path](docs/LEARNING_PATH.md) to go from this first job to GPU jobs, shared storage, pipelines and the role tracks
 - Read [README.md](README.md) for full documentation
 - See [docs/INFERENCE.md](docs/INFERENCE.md) for inference serving guide
 - See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for customization options

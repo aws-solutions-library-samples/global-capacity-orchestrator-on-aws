@@ -17,6 +17,7 @@ from botocore.exceptions import ClientError
 
 from ._image_uri import aws_url_suffix
 from .aws_client import get_aws_client
+from .cluster_ui import kubectl_server_flags
 from .config import GCOConfig, get_config
 from .kubectl_helpers import kubectl_context_flags, update_kubeconfig
 
@@ -443,6 +444,8 @@ class FileSystemClient:
         storage_type: str = "efs",
         namespace: str = "gco-jobs",
         pvc_name: str | None = None,
+        server: str | None = None,
+        tls_server_name: str | None = None,
     ) -> dict[str, Any]:
         """
         List contents of EFS/FSx storage using a temporary helper pod.
@@ -457,6 +460,11 @@ class FileSystemClient:
             namespace: Kubernetes namespace (default: gco-jobs)
             pvc_name: PVC name to mount (default: gco-shared-storage for EFS,
                       gco-fsx-storage for FSx)
+            server: kubectl ``--server`` for an SSM tunnel to the private API
+                endpoint (``cli.cluster_tunnel.via_ssm_route``); ``None`` keeps
+                the kubeconfig endpoint
+            tls_server_name: The endpoint host name TLS verifies against
+                through that tunnel
 
         Returns:
             Dict with listing status and contents
@@ -484,7 +492,10 @@ class FileSystemClient:
 
         # Update kubeconfig for the cluster
         cluster_name = f"{self.config.project_name}-{region}"
-        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
+        context_flags = [
+            *kubectl_context_flags(update_kubeconfig(cluster_name, region)),
+            *kubectl_server_flags(server, tls_server_name),
+        ]
 
         # Create helper pod manifest.
         #
@@ -635,6 +646,8 @@ class FileSystemClient:
         storage_type: str = "efs",
         namespace: str = "gco-jobs",
         pvc_name: str | None = None,
+        server: str | None = None,
+        tls_server_name: str | None = None,
     ) -> dict[str, Any]:
         """
         Download files from EFS/FSx storage using a temporary helper pod.
@@ -650,6 +663,11 @@ class FileSystemClient:
             namespace: Kubernetes namespace (default: gco-jobs)
             pvc_name: PVC name to mount (default: gco-shared-storage for EFS,
                       gco-fsx-storage for FSx)
+            server: kubectl ``--server`` for an SSM tunnel to the private API
+                endpoint (``cli.cluster_tunnel.via_ssm_route``); ``None`` keeps
+                the kubeconfig endpoint
+            tls_server_name: The endpoint host name TLS verifies against
+                through that tunnel
 
         Returns:
             Dict with download status and details
@@ -680,7 +698,10 @@ class FileSystemClient:
 
         # Update kubeconfig for the cluster
         cluster_name = f"{self.config.project_name}-{region}"
-        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
+        context_flags = [
+            *kubectl_context_flags(update_kubeconfig(cluster_name, region)),
+            *kubectl_server_flags(server, tls_server_name),
+        ]
 
         # Create helper pod manifest.
         #

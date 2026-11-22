@@ -5,8 +5,10 @@ from typing import Any
 
 import click
 
+from ..cluster_tunnel import unreachable_endpoint_hint, via_ssm_options, via_ssm_route
 from ..config import GCOConfig
 from ..files import get_file_system_client
+from ..kubectl_helpers import kubectl_could_not_connect
 from ..output import format_file_system_table, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
@@ -110,9 +112,18 @@ def list_access_points(config: Any, file_system_id: Any, region: Any) -> None:
     help="Storage type (default: efs)",
 )
 @click.option("--pvc", help="PVC name (default: gco-shared-storage for EFS)")
+@via_ssm_options
 @pass_config
 def list_storage_contents(
-    config: Any, remote_path: Any, region: Any, namespace: Any, storage_type: Any, pvc: Any
+    config: Any,
+    remote_path: Any,
+    region: Any,
+    namespace: Any,
+    storage_type: Any,
+    pvc: Any,
+    via_ssm: Any,
+    bastion_ttl_minutes: Any,
+    assume_yes: Any,
 ) -> None:
     """List contents of EFS/FSx storage.
 
@@ -126,10 +137,14 @@ def list_storage_contents(
     - EKS access entry configured for your IAM principal
     - AWS credentials with eks:DescribeCluster permission
 
+    The EKS API endpoint is private by default, so from outside the VPC pass
+    --via-ssm auto (or an SSM-managed instance id) to tunnel to it.
+
     Examples:
         gco files ls -r us-east-1                    # List root of EFS
         gco files ls efs-output-example -r us-east-1 # List job output directory
         gco files ls -r us-west-2 -t fsx             # List FSx root
+        gco files ls -r us-east-1 --via-ssm auto -y  # From outside the VPC
     """
     formatter = get_output_formatter(config)
     fs_client = get_file_system_client(config)
@@ -137,13 +152,22 @@ def list_storage_contents(
     try:
         formatter.print_info(f"Listing {remote_path} on {storage_type.upper()}...")
 
-        result = fs_client.list_storage_contents(
+        with via_ssm_route(
+            formatter,
+            cluster=f"{config.project_name}-{region}",
             region=region,
-            remote_path=remote_path,
-            storage_type=storage_type,
-            namespace=namespace,
-            pvc_name=pvc,
-        )
+            via_ssm=via_ssm,
+            bastion_ttl_minutes=bastion_ttl_minutes,
+            assume_yes=assume_yes,
+        ) as route:
+            result = fs_client.list_storage_contents(
+                region=region,
+                remote_path=remote_path,
+                storage_type=storage_type,
+                namespace=namespace,
+                pvc_name=pvc,
+                **route,
+            )
 
         if result["status"] == "success":
             formatter.print_success(result["message"])
@@ -163,6 +187,8 @@ def list_storage_contents(
 
     except Exception as e:
         formatter.print_error(f"Failed to list storage contents: {e}")
+        if not via_ssm and kubectl_could_not_connect(str(e)):
+            formatter.print_info(unreachable_endpoint_hint(region))
         sys.exit(1)
 
 
@@ -179,6 +205,7 @@ def list_storage_contents(
     help="Storage type (default: efs)",
 )
 @click.option("--pvc", help="PVC name (default: gco-shared-storage for EFS)")
+@via_ssm_options
 @pass_config
 def download_files(
     config: Any,
@@ -188,6 +215,9 @@ def download_files(
     namespace: Any,
     storage_type: Any,
     pvc: Any,
+    via_ssm: Any,
+    bastion_ttl_minutes: Any,
+    assume_yes: Any,
 ) -> None:
     """Download files from EFS/FSx storage.
 
@@ -201,10 +231,14 @@ def download_files(
     - EKS access entry configured for your IAM principal
     - AWS credentials with eks:DescribeCluster permission
 
+    The EKS API endpoint is private by default, so from outside the VPC pass
+    --via-ssm auto (or an SSM-managed instance id) to tunnel to it.
+
     Examples:
         gco files download efs-output-example/results.json ./results.json -r us-east-1
         gco files download my-job/outputs ./outputs -r us-east-1
         gco files download checkpoints ./checkpoints -r us-west-2 -t fsx
+        gco files download efs-output-example ./results -r us-east-1 --via-ssm auto -y
     """
     formatter = get_output_formatter(config)
     fs_client = get_file_system_client(config)
@@ -214,18 +248,29 @@ def download_files(
             f"Downloading {remote_path} from {storage_type.upper()} to {local_path}..."
         )
 
-        result = fs_client.download_from_storage(
+        with via_ssm_route(
+            formatter,
+            cluster=f"{config.project_name}-{region}",
             region=region,
-            remote_path=remote_path,
-            local_path=local_path,
-            storage_type=storage_type,
-            namespace=namespace,
-            pvc_name=pvc,
-        )
+            via_ssm=via_ssm,
+            bastion_ttl_minutes=bastion_ttl_minutes,
+            assume_yes=assume_yes,
+        ) as route:
+            result = fs_client.download_from_storage(
+                region=region,
+                remote_path=remote_path,
+                local_path=local_path,
+                storage_type=storage_type,
+                namespace=namespace,
+                pvc_name=pvc,
+                **route,
+            )
 
         formatter.print_success(f"Downloaded {result['size_bytes']} bytes to {local_path}")
         formatter.print(result)
 
     except Exception as e:
         formatter.print_error(f"Failed to download files: {e}")
+        if not via_ssm and kubectl_could_not_connect(str(e)):
+            formatter.print_info(unreachable_endpoint_hint(region))
         sys.exit(1)

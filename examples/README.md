@@ -2,7 +2,7 @@
 
 This directory contains example Kubernetes manifests you can use with Global Capacity Orchestrator (GCO). Each example is self-contained and ready to submit.
 
-> **New to GCO?** Follow the [Learning Path](../docs/LEARNING_PATH.md) — it sequences these examples into a staged, hands-on onboarding curriculum.
+> **New to GCO?** The [Learning Path](../docs/LEARNING_PATH.md) runs these examples in order, from a first CPU job to GPU jobs, shared storage and pipelines.
 
 ## Table of Contents
 
@@ -329,6 +329,8 @@ gco files ls -r us-east-1
 gco files download efs-output-example ./efs-results -r us-east-1
 cat ./efs-results/results.json
 ```
+
+These commands run kubectl: run `gco stacks access -r us-east-1` once for an EKS access entry, and from outside the VPC add `--via-ssm auto` to each of them to reach the private API endpoint.
 
 **Features:** Mounts shared EFS at `/outputs`, creates output directory using job name, results persist after job completion, other pods can read the outputs.
 

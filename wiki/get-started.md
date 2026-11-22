@@ -51,8 +51,8 @@ need to read source code to get past this step.
     `deploy-all` creates real, paid infrastructure: an EKS Auto Mode cluster,
     VPC and NAT gateways, an internal ALB, API Gateway, Lambda functions, and
     the global control plane. It stays billable until you
-    [tear down](#6-tear-down). Fixed platform cost is roughly $210/month for
-    one Region before any GPU instance runs — see
+    [tear down](#6-tear-down). Fixed platform cost is roughly $565/month
+    (about $0.77 an hour) for one Region before any GPU instance runs — see
     [Evaluating & deploying](evaluating-and-deploying.md#what-it-costs).
 
 ```bash
@@ -163,6 +163,10 @@ platform cost accrues while the stacks exist.
 
 ## Where to go next
 
+- The
+  [Learning Path](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/LEARNING_PATH.md)
+  — the same ground one level at a time, then GPU jobs, shared storage,
+  pipelines and a track for your role
 - [Evaluating & deploying](evaluating-and-deploying.md) — what it costs,
   what you can customize, and how upgrades work
 - [What you can run](what-you-can-run.md) — the workload catalog
