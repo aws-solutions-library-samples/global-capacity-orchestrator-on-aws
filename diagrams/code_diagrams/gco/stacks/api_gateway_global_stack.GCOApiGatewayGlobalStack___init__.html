@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
-        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
-        <meta name="gco-flow-digest" content="ac7bd49ac7714f6a">
+        <meta name="gco-generated-at" content="2026-11-22T17:59:03Z">
+        <meta name="gco-source-commit" content="db3de8225c3e025f659096135ffaa4ea72d25097">
+        <meta name="gco-flow-digest" content="992eafaf31bd2410">
         <title>API Gateway stack constructor (REST API + IAM + WAF)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,65 +208,65 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub606=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op608=>operation: self.project_name = project_name
-op610=>operation: self.ga_dns = str(global_accelerator_dns).strip() if global_accelerator_dns else None
-op612=>operation: self.registry_region = registry_region or self.region
-op614=>operation: self.certificate_regions = tuple(dict.fromkeys(certificate_regions if certificate_regions is not None else ['us-east-1']))
-op616=>operation: default_backend_tls_config: dict[str, int] = {'root_generation': 1, 'root_validity_days': 3650, 'root_rotate_before_days': 180, 'root_activation_delay_hours': 24, 'root_overlap_days': 45, 'leaf_validity_days': 30, 'leaf_rotate_before_days': 10, 'rotation_schedule_hours': 12, 'trust_cache_ttl_seconds': 300, 'trust_cache_max_stale_seconds': 3600}
-op618=>operation: self.backend_tls_config = {**default_backend_tls_config, **(backend_tls_config or {})}
-op620=>operation: self.backend_tls_server_name = backend_tls_server_name(self.project_name)
-op622=>operation: self.backend_tls_root_ca_parameter_name = backend_tls_root_ca_parameter_name(self.project_name)
-op624=>operation: self.backend_tls_certificate_parameter_prefix = backend_tls_certificate_parameter_prefix(self.project_name)
-op626=>operation: self.max_request_body_bytes = validated_request_body_limit(max_request_body_bytes)
-op628=>operation: default_api_gateway_config: dict[str, Any] = {'throttle_rate_limit': 1000, 'throttle_burst_limit': 2000, 'log_level': 'INFO', 'metrics_enabled': True, 'tracing_enabled': True}
-cond631=>condition: if api_gateway_config is not None
-op635=>operation: configured_api_gateway = api_gateway_config
-op644=>operation: self.api_gateway_config = {**default_api_gateway_config, **configured_api_gateway}
-op646=>operation: self.analytics_config: AnalyticsApiConfig | None = analytics_config
-sub648=>subroutine: self._create_backend_tls()
-op650=>operation: self.secret = self._create_secret()
-op652=>operation: self.proxy_lambda = self._create_proxy_lambda() if self.ga_dns is not None else None
-op654=>operation: self.inference_proxy_lambda = self._create_inference_proxy_lambda() if self.ga_dns is not None else None
-op656=>operation: self.aggregator_lambda = self._create_aggregator_lambda()
-op658=>operation: self.api = self._create_api_gateway()
-sub660=>subroutine: self._create_waf()
-sub662=>subroutine: self._create_outputs()
-cond665=>operation: self._create_api_alarms() if  monitoring_region is not None and monitoring_region != self.region
-cond676=>operation: self._wire_studio_routes() if  self.analytics_config is not None
-sub686=>subroutine: self._apply_nag_suppressions()
-op639=>operation: context_config = self.node.try_get_context('api_gateway')
-op641=>operation: configured_api_gateway = context_config if isinstance(context_config, dict) else {}
+        <div><textarea id="code" style="width: 100%;" rows="11">sub231=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op233=>operation: self.project_name = project_name
+op235=>operation: self.ga_dns = str(global_accelerator_dns).strip() if global_accelerator_dns else None
+op237=>operation: self.registry_region = registry_region or self.region
+op239=>operation: self.certificate_regions = tuple(dict.fromkeys(certificate_regions if certificate_regions is not None else ['us-east-1']))
+op241=>operation: default_backend_tls_config: dict[str, int] = {'root_generation': 1, 'root_validity_days': 3650, 'root_rotate_before_days': 180, 'root_activation_delay_hours': 24, 'root_overlap_days': 45, 'leaf_validity_days': 30, 'leaf_rotate_before_days': 10, 'rotation_schedule_hours': 12, 'trust_cache_ttl_seconds': 300, 'trust_cache_max_stale_seconds': 3600}
+op243=>operation: self.backend_tls_config = {**default_backend_tls_config, **(backend_tls_config or {})}
+op245=>operation: self.backend_tls_server_name = backend_tls_server_name(self.project_name)
+op247=>operation: self.backend_tls_root_ca_parameter_name = backend_tls_root_ca_parameter_name(self.project_name)
+op249=>operation: self.backend_tls_certificate_parameter_prefix = backend_tls_certificate_parameter_prefix(self.project_name)
+op251=>operation: self.max_request_body_bytes = validated_request_body_limit(max_request_body_bytes)
+op253=>operation: default_api_gateway_config: dict[str, Any] = {'throttle_rate_limit': 1000, 'throttle_burst_limit': 2000, 'log_level': 'INFO', 'metrics_enabled': True, 'tracing_enabled': True, 'ip_address_type': 'ipv4'}
+cond256=>condition: if api_gateway_config is not None
+op260=>operation: configured_api_gateway = api_gateway_config
+op269=>operation: self.api_gateway_config = {**default_api_gateway_config, **configured_api_gateway}
+op271=>operation: self.analytics_config: AnalyticsApiConfig | None = analytics_config
+sub273=>subroutine: self._create_backend_tls()
+op275=>operation: self.secret = self._create_secret()
+op277=>operation: self.proxy_lambda = self._create_proxy_lambda() if self.ga_dns is not None else None
+op279=>operation: self.inference_proxy_lambda = self._create_inference_proxy_lambda() if self.ga_dns is not None else None
+op281=>operation: self.aggregator_lambda = self._create_aggregator_lambda()
+op283=>operation: self.api = self._create_api_gateway()
+sub285=>subroutine: self._create_waf()
+sub287=>subroutine: self._create_outputs()
+cond290=>operation: self._create_api_alarms() if  monitoring_region is not None and monitoring_region != self.region
+cond301=>operation: self._wire_studio_routes() if  self.analytics_config is not None
+sub311=>subroutine: self._apply_nag_suppressions()
+op264=>operation: context_config = self.node.try_get_context('api_gateway')
+op266=>operation: configured_api_gateway = context_config if isinstance(context_config, dict) else {}
 
-sub606->op608
-op608->op610
-op610->op612
-op612->op614
-op614->op616
-op616->op618
-op618->op620
-op620->op622
-op622->op624
-op624->op626
-op626->op628
-op628->cond631
-cond631(yes)->op635
-op635->op644
-op644->op646
-op646->sub648
-sub648->op650
-op650->op652
-op652->op654
-op654->op656
-op656->op658
-op658->sub660
-sub660->sub662
-sub662->cond665
-cond665->cond676
-cond676->sub686
-cond631(no)->op639
-op639->op641
-op641->op644
+sub231->op233
+op233->op235
+op235->op237
+op237->op239
+op239->op241
+op241->op243
+op243->op245
+op245->op247
+op247->op249
+op249->op251
+op251->op253
+op253->cond256
+cond256(yes)->op260
+op260->op269
+op269->op271
+op271->sub273
+sub273->op275
+op275->op277
+op277->op279
+op279->op281
+op281->op283
+op283->sub285
+sub285->sub287
+sub287->cond290
+cond290->cond301
+cond301->sub311
+cond256(no)->op264
+op264->op266
+op266->op269
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -276,17 +276,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
-        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
+        <!-- Generated at (UTC): 2026-11-22T17:59:03Z -->
+        <!-- Generated from Git commit: db3de8225c3e025f659096135ffaa4ea72d25097 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
+            Generated at (UTC): <time datetime="2026-11-22T17:59:03Z">2026-11-22T17:59:03Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
+            Source commit: <code>db3de8225c3e025f659096135ffaa4ea72d25097</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>ac7bd49ac7714f6a</code>
+            Flow content SHA-256: <code>992eafaf31bd2410</code>
           </p>
           <div id="canvas"></div>
         </div>

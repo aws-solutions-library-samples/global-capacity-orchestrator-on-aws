@@ -25,8 +25,8 @@ import shutil
 import subprocess
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-22T15:51:09Z
-# Generated from Git commit: fc67f4bb3c1769af5821cfc5e76f964561a5729b
+# Generated at (UTC): 2026-11-22T17:59:03Z
+# Generated from Git commit: db3de8225c3e025f659096135ffaa4ea72d25097
 # Flowchart(s) generated from this file:
 #   * ``detect_container_runtime`` -> ``diagrams/code_diagrams/cli/_container_runtime.detect_container_runtime.html``
 #     (PNG: ``diagrams/code_diagrams/cli/_container_runtime.detect_container_runtime.png``)
