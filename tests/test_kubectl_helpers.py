@@ -309,3 +309,20 @@ class TestKubeconfigContext:
 
         assert kubectl_context_flags(None) == []
         assert kubectl_context_flags(self._ARN) == [f"--context={self._ARN}"]
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("Unable to connect to the server: dial tcp 10.0.1.5:443: i/o timeout", True),
+        ("Unable to connect to the server: net/http: TLS handshake timeout", True),
+        ("dial tcp: lookup ABC.gr7.us-east-1.eks.amazonaws.com: no such host", True),
+        ('Error from server (Forbidden): jobs.batch "x" is forbidden', False),
+        ("error: You must be logged in to the server (Unauthorized)", False),
+    ],
+)
+def test_kubectl_could_not_connect_tells_reachability_from_refusal(stderr, expected):
+    """Only failures that never reached the API server count as unreachable."""
+    from cli.kubectl_helpers import kubectl_could_not_connect
+
+    assert kubectl_could_not_connect(stderr) is expected

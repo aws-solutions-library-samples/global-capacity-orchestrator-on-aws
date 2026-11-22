@@ -1487,6 +1487,44 @@ class TestFileOperationsTargetTheClusterContext:
         assert [call[1] for call in calls] == [f"--context={self.CONTEXT}"] * 4
         assert [call[2] for call in calls] == ["apply", "get", "cp", "delete"]
 
+    TUNNEL = {
+        "server": "https://127.0.0.1:8443",
+        "tls_server_name": "ABC.gr7.us-east-1.eks.amazonaws.com",
+    }
+
+    def test_list_storage_contents_through_a_tunnel(self) -> None:
+        """An SSM route's address and TLS name ride on every call, after the context."""
+        calls: list[list[str]] = []
+        with (
+            patch("cli.files.update_kubeconfig", return_value=self.CONTEXT),
+            patch("subprocess.run", side_effect=self._run(calls)),
+        ):
+            self._client().list_storage_contents("us-east-1", "/", **self.TUNNEL)
+        flags = [
+            f"--context={self.CONTEXT}",
+            "--server",
+            self.TUNNEL["server"],
+            "--tls-server-name",
+            self.TUNNEL["tls_server_name"],
+        ]
+        assert [call[1:6] for call in calls] == [flags] * 4
+        assert [call[6] for call in calls] == ["apply", "get", "exec", "delete"]
+
+    def test_download_from_storage_through_a_tunnel(self, tmp_path: Path) -> None:
+        local = tmp_path / "result.json"
+        calls: list[list[str]] = []
+        with (
+            patch("cli.files.update_kubeconfig", return_value=self.CONTEXT),
+            patch("subprocess.run", side_effect=self._run(calls, local=local)),
+        ):
+            self._client().download_from_storage(
+                "us-east-1", "/run/result.json", str(local), **self.TUNNEL
+            )
+        assert [call[2:6] for call in calls] == [
+            ["--server", self.TUNNEL["server"], "--tls-server-name", self.TUNNEL["tls_server_name"]]
+        ] * 4
+        assert [call[6] for call in calls] == ["apply", "get", "cp", "delete"]
+
     def test_unknown_context_keeps_the_plain_kubectl_argv(self, tmp_path: Path) -> None:
         local = tmp_path / "out.bin"
         calls: list[list[str]] = []

@@ -12,6 +12,7 @@ import click
 from gco.fsx_lustre_config import FSX_DEFAULT_THROUGHPUT, FSX_THROUGHPUT_CHOICES
 
 from ..config import GCOConfig, _load_cdk_json
+from ..kubectl_helpers import kubectl_could_not_connect
 from ..output import confirm, get_output_formatter, interactive_echo
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
@@ -814,28 +815,6 @@ def stack_outputs(config: Any, stack_name: Any, region: Any) -> None:
         sys.exit(1)
 
 
-#: kubectl's wording when it never reached the API server (connect, DNS, TLS
-#: and request timeouts); kubectl prefixes most of them with the first phrase.
-_KUBECTL_CONNECT_FAILURES = (
-    "unable to connect to the server",
-    "i/o timeout",
-    "no route to host",
-    "connection refused",
-    "dial tcp",
-    "tls handshake timeout",
-    "context deadline exceeded",
-    "client.timeout exceeded",
-    "no such host",
-    "network is unreachable",
-)
-
-
-def _kubectl_could_not_connect(stderr: str) -> bool:
-    """Return whether a failed kubectl call never reached the API server."""
-    lowered = stderr.lower()
-    return any(phrase in lowered for phrase in _KUBECTL_CONNECT_FAILURES)
-
-
 @stacks.command("access")
 @click.option("--cluster", "-c", help="Cluster name (default: <project_name>-<region>)")
 @click.option("--region", "-r", help="AWS region (default: first deployment region)")
@@ -1095,7 +1074,7 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
             if table:
                 print(result.stdout)
             formatter.print_info(f"Access configured successfully. {node_count} node(s) ready.")
-        elif _kubectl_could_not_connect(stderr):
+        elif kubectl_could_not_connect(stderr):
             # Reachability is a property of this host's network path, not of
             # the access just granted, so it warns rather than fails.
             formatter.print_info(f"kubectl: {stderr}")

@@ -3581,3 +3581,127 @@ class TestSpotPricesEmpty:
             )
             assert result.exit_code == 0
             assert "No spot price data" in result.output
+
+
+class TestKubectlPathCommandsReachAPrivateEndpointViaSsm:
+    """``jobs submit-direct``, ``files ls`` and ``files download`` tunnel only when asked.
+
+    The EKS API endpoint is private by default. ``--via-ssm`` hands the SSM
+    tunnel's address and TLS name to the kubectl calls; without it nothing is
+    resolved or announced, and kubectl keeps the kubeconfig endpoint.
+    """
+
+    SERVER = "https://127.0.0.1:8443"
+    SNI = "ABC.gr7.us-east-1.eks.amazonaws.com"
+    UNREACHABLE = (
+        "kubectl apply failed: Unable to connect to the server: dial tcp 10.0.1.5:443: i/o timeout"
+    )
+
+    @pytest.fixture(autouse=True)
+    def _tunnel(self, monkeypatch):
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+
+        self.routes = []
+
+        @contextmanager
+        def fake_tunnel(formatter, **kwargs):
+            self.routes.append(kwargs)
+            yield SimpleNamespace(server=self.SERVER, tls_server_name=self.SNI)
+
+        monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", fake_tunnel)
+
+    def _invoke(self, command, tmp_path, extra=(), side_effect=None):
+        """Run one kubectl-path command with its backend mocked; return the result and call."""
+        from cli.main import cli
+
+        if command == "submit-direct":
+            manifest = tmp_path / "job.yaml"
+            manifest.write_text("apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: hello\n")
+            target, method = "cli.commands.jobs_cmd.get_job_manager", "submit_job_direct"
+            argv = ["jobs", "submit-direct", str(manifest), "-r", "us-east-1"]
+            value = {"job_name": "hello", "status": "success"}
+        elif command == "ls":
+            target, method = (
+                "cli.commands.files_cmd.get_file_system_client",
+                "list_storage_contents",
+            )
+            argv = ["files", "ls", "-r", "us-east-1"]
+            value = {"status": "success", "message": "Found 0 items", "contents": []}
+        else:
+            target, method = (
+                "cli.commands.files_cmd.get_file_system_client",
+                "download_from_storage",
+            )
+            argv = ["files", "download", "out", str(tmp_path / "out"), "-r", "us-east-1"]
+            value = {"status": "success", "size_bytes": 4}
+        backend = MagicMock()
+        getattr(backend, method).return_value = value
+        getattr(backend, method).side_effect = side_effect
+        with patch(target, return_value=backend):
+            result = CliRunner().invoke(cli, [*argv, *extra])
+        return result, getattr(backend, method)
+
+    @pytest.mark.parametrize("command", ["submit-direct", "ls", "download"])
+    def test_via_ssm_hands_the_tunnel_to_the_kubectl_calls(self, command, tmp_path):
+        result, call = self._invoke(
+            command, tmp_path, ["--via-ssm", "auto", "-y", "--bastion-ttl-minutes", "30"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert self.routes == [
+            {
+                "cluster": "gco-us-east-1",
+                "region": "us-east-1",
+                "via_ssm": "auto",
+                "bastion_ttl_minutes": 30,
+                "assume_yes": True,
+            }
+        ]
+        assert call.call_args.kwargs["server"] == self.SERVER
+        assert call.call_args.kwargs["tls_server_name"] == self.SNI
+
+    @pytest.mark.parametrize("command", ["submit-direct", "ls", "download"])
+    def test_an_instance_id_keeps_the_bastion_prompt_and_default_ttl(self, command, tmp_path):
+        result, _call = self._invoke(command, tmp_path, ["--via-ssm", "i-0123456789abcdef0"])
+
+        assert result.exit_code == 0, result.output
+        assert self.routes[0]["via_ssm"] == "i-0123456789abcdef0"
+        assert self.routes[0]["assume_yes"] is False
+        assert self.routes[0]["bastion_ttl_minutes"] == 120
+
+    @pytest.mark.parametrize("command", ["submit-direct", "ls", "download"])
+    def test_without_via_ssm_nothing_is_resolved(self, command, tmp_path):
+        result, call = self._invoke(command, tmp_path)
+
+        assert result.exit_code == 0, result.output
+        assert self.routes == []
+        assert "server" not in call.call_args.kwargs
+        assert "tls_server_name" not in call.call_args.kwargs
+
+    @pytest.mark.parametrize("command", ["submit-direct", "ls", "download"])
+    def test_an_unreachable_endpoint_names_the_via_ssm_route(self, command, tmp_path):
+        result, _call = self._invoke(command, tmp_path, side_effect=RuntimeError(self.UNREACHABLE))
+
+        assert result.exit_code == 1
+        assert "PRIVATE by default" in result.output
+        assert "--via-ssm auto" in result.output
+        assert "gco stacks access -r us-east-1" in result.output
+        assert "gco cluster doctor --region us-east-1" in result.output
+
+    @pytest.mark.parametrize("command", ["submit-direct", "ls", "download"])
+    def test_the_hint_is_left_out_when_it_does_not_apply(self, command, tmp_path):
+        tunnelled, _call = self._invoke(
+            command,
+            tmp_path,
+            ["--via-ssm", "auto", "-y"],
+            side_effect=RuntimeError(self.UNREACHABLE),
+        )
+        refused, _call = self._invoke(
+            command, tmp_path, side_effect=RuntimeError("Error from server (Forbidden): jobs")
+        )
+
+        assert tunnelled.exit_code == 1
+        assert refused.exit_code == 1
+        assert "PRIVATE by default" not in tunnelled.output
+        assert "PRIVATE by default" not in refused.output

@@ -1404,8 +1404,8 @@ in another shell. With `--print` it instead emits the ready-to-run tunnel +
 
 SIGTERM and SIGHUP (`kill`, a supervisor's timeout, closing the terminal) end
 this command, and every other command that holds a tunnel (`monitoring open`,
-`costs dashboard`, `gitops`, `crossplane`, `slurm shell|output`, `nodepools`
-with `--via-ssm`), the way Ctrl-C does: the port-forward and the SSM session
+`costs dashboard`, `gitops`, `crossplane`, `slurm shell|output`, and `nodepools`,
+`jobs submit-direct` and `files ls|download` with `--via-ssm`), the way Ctrl-C does: the port-forward and the SSM session
 are stopped and an `auto` bastion is terminated, also while it is still
 waiting to register with SSM, before the command exits with status 143 or
 129. A handler a calling program installed for those signals, or the SIGHUP
@@ -1429,7 +1429,7 @@ gco cluster tunnel [OPTIONS]
 |--------|-------------|
 | `--region` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel through an existing SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down on exit. An existing instance must carry the cluster security group (`ClusterSecurityGroupId` stack output) or one that group admits on 443; the cluster security group admits no VPC CIDR. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included (see [Route selection](#route-selection)). |
-| `--local-port` | Local port to bind for the API tunnel (default `8443`). A port another process already listens on is refused, and the tunnel counts as open only once the Session Manager plugin reports its own listener there, so kubectl never reaches another process by mistake. The other commands that open a tunnel (`monitoring open`, `gitops`, `crossplane`, `costs dashboard`, `slurm`) use `8443` and refuse it the same way while it is taken, for example by a running `gco cluster tunnel`. |
+| `--local-port` | Local port to bind for the API tunnel (default `8443`). A port another process already listens on is refused, and the tunnel counts as open only once the Session Manager plugin reports its own listener there, so kubectl never reaches another process by mistake. The other commands that open a tunnel (`monitoring open`, `gitops`, `crossplane`, `costs dashboard`, `slurm`, `nodepools`, and `jobs submit-direct` and `files ls\|download` with `--via-ssm`) use `8443` and refuse it the same way while it is taken, for example by a running `gco cluster tunnel`. |
 | `--print` | Print the tunnel + `kubectl` connection plan instead of opening the tunnel. |
 | `--bastion-ttl-minutes` | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`). |
 | `--yes` / `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
@@ -1467,6 +1467,11 @@ needs no allowlist. An explicit `--via-ssm` also fails, before any bastion is
 launched, when the cluster's access mode cannot be read. `auto` keeps its
 confirmation prompt, TTL backstop, and teardown on every route. `--print`
 follows the same table.
+
+`jobs submit-direct`, `files ls` and `files download` take the same route when
+given `--via-ssm`. Without it they run kubectl against the endpoint in your
+kubeconfig, as they always have, print no `Route:` line, and on a failure to
+connect suggest `--via-ssm auto`.
 
 **Example:**
 
@@ -2379,6 +2384,9 @@ gco files ls [REMOTE_PATH] [OPTIONS]
 | `--namespace` | `-n` | Kubernetes namespace (default: `gco-jobs`) |
 | `--storage-type` | `-t` | Storage type: `efs` or `fsx` (default: `efs`) |
 | `--pvc` | | PVC to list (default: `gco-shared-storage` for EFS) |
+| `--via-ssm` | | `INSTANCE_ID` or `auto`: reach the private API endpoint through an SSM-managed instance, or a self-terminating ephemeral bastion that `auto` provisions and tears down afterwards ([Route selection](#route-selection)). Without it, kubectl uses the endpoint in your kubeconfig |
+| `--bastion-ttl-minutes` | | Self-terminate backstop for an `--via-ssm auto` bastion (default: `120`) |
+| `--yes` | `-y` | Skip the confirmation prompt for an `--via-ssm auto` bastion |
 
 **Example:**
 
@@ -2386,6 +2394,7 @@ gco files ls [REMOTE_PATH] [OPTIONS]
 gco files ls -r us-east-1
 gco files ls efs-output-example -r us-east-1
 gco files ls -r us-west-2 -t fsx
+gco files ls efs-output-example -r us-east-1 --via-ssm auto -y   # from outside the VPC
 ```
 
 #### `gco files download`
@@ -2404,12 +2413,16 @@ gco files download REMOTE_PATH LOCAL_PATH [OPTIONS]
 | `--namespace` | `-n` | Kubernetes namespace (default: `gco-jobs`) |
 | `--storage-type` | `-t` | Storage type: `efs` or `fsx` (default: `efs`) |
 | `--pvc` | | PVC to read from (default: `gco-shared-storage` for EFS) |
+| `--via-ssm` | | `INSTANCE_ID` or `auto`: reach the private API endpoint through an SSM-managed instance, or a self-terminating ephemeral bastion that `auto` provisions and tears down afterwards ([Route selection](#route-selection)). Without it, kubectl uses the endpoint in your kubeconfig |
+| `--bastion-ttl-minutes` | | Self-terminate backstop for an `--via-ssm auto` bastion (default: `120`) |
+| `--yes` | `-y` | Skip the confirmation prompt for an `--via-ssm auto` bastion |
 
 **Example:**
 
 ```bash
 gco files download my-job/outputs ./results -r us-east-1
 gco files download training-run ./checkpoints -r us-west-2 -t fsx
+gco files download efs-output-example ./results -r us-east-1 --via-ssm auto -y   # from outside the VPC
 ```
 
 #### `gco files get`
@@ -3611,6 +3624,16 @@ gco jobs submit-direct MANIFEST_PATH [OPTIONS]
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 | `--wait` | `-w` | Wait for job completion; follows a Job, else a TrainJob, as [`gco jobs submit`](#gco-jobs-submit) does, with the same exit status |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
+| `--via-ssm` | | `INSTANCE_ID` or `auto`: reach the private API endpoint through an SSM-managed instance, or a self-terminating ephemeral bastion that `auto` provisions and tears down afterwards ([Route selection](#route-selection)). Without it, kubectl uses the endpoint in your kubeconfig |
+| `--bastion-ttl-minutes` | | Self-terminate backstop for an `--via-ssm auto` bastion (default: `120`) |
+| `--yes` | `-y` | Skip the confirmation prompt for an `--via-ssm auto` bastion |
+
+The EKS API endpoint is `PRIVATE` by default, so from outside the VPC pass
+`--via-ssm auto`: the command opens an SSM tunnel for the submission and
+closes it, and the bastion it started, before `--wait` follows the job through
+the API. kubectl still needs an EKS access entry (`gco stacks access -r
+<region>`). Without `--via-ssm`, a submission that cannot reach the endpoint
+fails with that advice.
 
 `submit-direct` skips GCO's server-side admission, so `--sandbox` runs the
 [sandbox checks](NITRO_SANDBOXES.md#what-gco-checks-at-submission) itself before
@@ -3620,6 +3643,7 @@ calling kubectl.
 
 ```bash
 gco jobs submit-direct examples/simple-job.yaml --region us-east-1 -n gco-jobs
+gco jobs submit-direct examples/efs-output-job.yaml -r us-east-1 --via-ssm auto -y   # from outside the VPC
 ```
 
 #### `gco jobs submit-queue`

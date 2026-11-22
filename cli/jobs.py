@@ -446,6 +446,8 @@ class JobManager:
         dry_run: bool = False,
         labels: dict[str, str] | None = None,
         sandbox: str | None = None,
+        server: str | None = None,
+        tls_server_name: str | None = None,
     ) -> dict[str, Any]:
         """
         Submit a job directly to a regional cluster using kubectl.
@@ -468,6 +470,11 @@ class JobManager:
             labels: Additional labels to add to manifests
             sandbox: Run every pod in an AWS Nitro Sandbox of this mode
                 (``gco.job_admission.SANDBOX_MODES``)
+            server: kubectl ``--server`` for an SSM tunnel to the private API
+                endpoint (``cli.cluster_tunnel.via_ssm_route``); ``None`` keeps
+                the kubeconfig endpoint
+            tls_server_name: The endpoint host name TLS verifies against
+                through that tunnel
 
         Returns:
             Submission result dictionary
@@ -507,9 +514,13 @@ class JobManager:
         # Update kubeconfig for the cluster. Every kubectl call below names the
         # cluster's context: with a tunnel-pinned entry the current context can
         # belong to another cluster.
+        from .cluster_ui import kubectl_server_flags
         from .kubectl_helpers import kubectl_context_flags, update_kubeconfig
 
-        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
+        context_flags = [
+            *kubectl_context_flags(update_kubeconfig(cluster_name, region)),
+            *kubectl_server_flags(server, tls_server_name),
+        ]
 
         # Handle existing Job resources before applying
         warnings: list[str] = []
