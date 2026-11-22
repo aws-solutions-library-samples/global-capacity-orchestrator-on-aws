@@ -10,9 +10,25 @@ the branch is pinned here.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
+import cli._container_runtime as container_runtime
 from cli._container_runtime import container_runtime_error_message
+
+
+@pytest.fixture(autouse=True)
+def _outside_the_dev_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Judge the host branches the same way wherever the suite runs.
+
+    ``Dockerfile.dev`` sets ``GCO_DEV_CONTAINER=1`` and, in older images, the
+    npm prefix ``cli.stacks._running_in_dev_container`` also accepts, so a
+    run inside ``gco-dev`` would otherwise take the container branch.
+    """
+    monkeypatch.delenv("GCO_DEV_CONTAINER", raising=False)
+    monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
 
 
 def _which(*present: str):
@@ -80,3 +96,61 @@ class TestCdkDockerHint:
     def test_offered_in_the_not_installed_branch_too(self) -> None:
         with patch("shutil.which", _which()):
             assert "CDK_DOCKER" in container_runtime_error_message(allow_cdk_docker=True)
+
+
+class TestInsideTheDevContainer:
+    """In ``gco-dev`` the advice is about the socket the ``gco`` function mounts.
+
+    The container's PATH has the Docker CLI, so the host branch would name
+    Docker as installed-but-stopped and say to start Docker Desktop, even on a
+    Finch host, where the function mounts no socket at all. A walkthrough of
+    the Learning Path on a Finch host got exactly that from `deploy-all`.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _in_dev_container(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("GCO_DEV_CONTAINER", "1")
+        self.socket = tmp_path / "docker.sock"
+        monkeypatch.setattr(container_runtime, "DEV_CONTAINER_SOCKET", str(self.socket))
+
+    def test_no_socket_names_the_finch_route_and_the_setup_script(self) -> None:
+        with patch("shutil.which", _which("docker")):
+            message = container_runtime_error_message()
+        assert "No container runtime is reachable from the gco-dev container" in message
+        assert "CDK_DOCKER=finch" in message
+        assert "Installing on your host instead" in message
+        assert "./scripts/setup-dev-alias.sh" in message
+        assert "open -a Docker" not in message
+        assert "docs.docker.com" not in message
+
+    def test_a_mounted_socket_points_at_the_runtime_behind_it(self) -> None:
+        self.socket.touch()
+        with patch("shutil.which", _which("docker")):
+            message = container_runtime_error_message()
+        assert (
+            f"answered on the socket the gco function mounts in the gco-dev container ({self.socket})"
+            in message
+        )
+        assert "colima start" in message
+        assert "podman machine start" in message
+        assert "CDK_DOCKER=finch" not in message
+
+    def test_an_image_from_before_the_marker_counts_as_the_dev_container(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("GCO_DEV_CONTAINER")
+        monkeypatch.setenv("NPM_CONFIG_PREFIX", "/root/.npm-global")
+        assert "gco-dev container" in container_runtime_error_message()
+
+    def test_no_cdk_docker_path_hint_in_the_container(self) -> None:
+        """A binary path cannot reach a daemon the container has no socket for."""
+        with patch("shutil.which", _which("docker")):
+            assert "CDK_DOCKER=<path>" not in container_runtime_error_message(allow_cdk_docker=True)
+
+    def test_both_messages_start_like_the_host_ones(self) -> None:
+        """Callers and tests match on the shared opening words."""
+        without_socket = container_runtime_error_message()
+        self.socket.touch()
+        with_socket = container_runtime_error_message()
+        assert without_socket.startswith("No container runtime")
+        assert with_socket.startswith("No container runtime")

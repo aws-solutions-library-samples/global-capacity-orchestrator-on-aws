@@ -124,6 +124,50 @@ def _detect_container_runtime_uncached() -> str | None:
     return None
 
 
+#: Where the ``gco`` shell function from ``scripts/setup-dev-alias.sh`` mounts
+#: the host runtime's socket in the ``gco-dev`` container (Docker's, or
+#: Podman's). With Finch it mounts none: Finch's VM shares no socket with
+#: containers.
+DEV_CONTAINER_SOCKET = "/var/run/docker.sock"
+
+
+def _dev_container_error_message() -> str:
+    """The "no runtime" advice for a command running in the ``gco-dev`` container.
+
+    The container has no daemon of its own and reaches the host's runtime only
+    through the socket the ``gco`` function mounts, so install or start hints
+    for runtimes found on the container's PATH (its Docker CLI) miss the point.
+    A host using Finch mounts no socket at all, and a command that builds
+    images has to run from a host install there.
+    """
+    if os.path.exists(DEV_CONTAINER_SOCKET):
+        return "\n".join(
+            [
+                "No container runtime answered on the socket the gco function mounts "
+                f"in the gco-dev container ({DEV_CONTAINER_SOCKET}).",
+                "",
+                "Start the runtime on the host (Docker Desktop, `colima start`, or "
+                "`podman machine start`) and retry. If you have switched runtimes since "
+                "installing the gco function, re-run ./scripts/setup-dev-alias.sh on the "
+                "host first.",
+            ]
+        )
+    return "\n".join(
+        [
+            "No container runtime is reachable from the gco-dev container: the gco "
+            "function mounted no runtime socket, and this command needs a runtime to "
+            "build images.",
+            "",
+            "  - Finch: its VM shares no socket with containers, so run this command "
+            "from a host install of GCO with Finch as the builder (CDK_DOCKER=finch); "
+            'see QUICKSTART.md, "Installing on your host instead".',
+            "  - Docker Desktop, Colima or Podman: start it, then re-run "
+            "./scripts/setup-dev-alias.sh on the host so the gco function mounts its "
+            "socket.",
+        ]
+    )
+
+
 def container_runtime_error_message(*, allow_cdk_docker: bool = False) -> str:
     """Build an actionable "no runtime" message for the situation on this host.
 
@@ -135,8 +179,17 @@ def container_runtime_error_message(*, allow_cdk_docker: bool = False) -> str:
 
     So: if a runtime binary is on PATH but did not answer, say so and give the
     command that starts it. Only suggest installing when nothing is present.
+
+    In the ``gco-dev`` container neither hint applies: the Docker CLI on its
+    PATH talks only to the socket the ``gco`` function mounts, so the message
+    explains that socket instead (:func:`_dev_container_error_message`).
     """
     import shutil
+
+    from cli.stacks import _running_in_dev_container  # cli.stacks imports this module
+
+    if _running_in_dev_container():
+        return _dev_container_error_message()
 
     installed = [name for name in ("docker", "finch", "podman") if shutil.which(name)]
 
