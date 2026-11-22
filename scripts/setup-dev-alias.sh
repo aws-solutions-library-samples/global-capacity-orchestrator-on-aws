@@ -191,20 +191,56 @@ resolve_runtime() {
     detect_runtime
 }
 
+# Finch runs its containers in a VM, so a bind-mount source is a path in that
+# VM, not on the host. From v1.8.0, Finch runs finch-daemon there: a Docker
+# Engine API on /run/finch.sock, which the VM also links from
+# /var/run/docker.sock. Mounting that VM path gives the container's Docker CLI
+# a daemon to drive, so build-heavy commands work in the container on Finch too.
+FINCH_VM_DOCKER_SOCKET="/var/run/docker.sock"
+
+# Whether the Finch VM serves a Docker-compatible socket the dev image can
+# use. Runs the image once with --mount, which, unlike -v, fails when the
+# source path is missing instead of creating an empty directory in its place.
+# An older Finch with no finch-daemon, or no local image yet, reads as no.
+finch_vm_socket_available() {
+    finch run --rm \
+        --mount "type=bind,source=$FINCH_VM_DOCKER_SOCKET,target=/run/gco-runtime.sock" \
+        "$1" test -S /run/gco-runtime.sock >/dev/null 2>&1
+}
+
+# Socket arguments for `<runtime> run`. Docker and Podman are static. Finch
+# depends on the VM, so the caller passes whether finch_vm_socket_available
+# said yes. finch-daemon has no BuildKit API, so DOCKER_BUILDKIT=0 makes
+# `docker build` send the context to it, and finch-daemon runs the build on
+# Finch's own BuildKit and stores the image where `finch` sees it. With the
+# Buildx default instead, the result stays in a builder container that CDK
+# never loads from.
 socket_args_for() {
-    local mount=""
+    local mount="" extra=""
     case "$1" in
         docker) mount="/var/run/docker.sock:/var/run/docker.sock" ;;
         podman) mount="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock:/var/run/docker.sock" ;;
+        finch)
+            [ "${2:-0}" -eq 1 ] || return 0
+            mount="$FINCH_VM_DOCKER_SOCKET:/var/run/docker.sock"
+            extra="-e DOCKER_BUILDKIT=0 "
+            ;;
         *) return 0 ;;
     esac
-    printf -- '-v %s ' "$(shell_quote "$mount")"
+    printf -- '-v %s %s' "$(shell_quote "$mount")" "$extra"
 }
 
 socket_desc_for() {
     case "$1" in
         docker) printf '%s' "host Docker socket -> /var/run/docker.sock" ;;
         podman) printf '%s' "Podman socket (${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock) -> /var/run/docker.sock" ;;
+        finch)
+            if [ "${2:-0}" -eq 1 ]; then
+                printf '%s' "Finch VM's Docker-compatible socket (finch-daemon, $FINCH_VM_DOCKER_SOCKET) -> /var/run/docker.sock"
+            else
+                printf '%s' "none (this Finch VM serves no Docker-compatible socket)"
+            fi
+            ;;
         *) printf '%s' "none ($1 has no host socket to share)" ;;
     esac
 }
@@ -382,6 +418,7 @@ if [ "$runtime" = "podman" ]; then
     require_single_line "XDG_RUNTIME_DIR" "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 fi
 
+finch_socket=0
 socket="$(socket_args_for "$runtime")"
 
 # Podman does not resolve a bare, locally-built image name: an image built with
@@ -411,10 +448,14 @@ else
     aws_mount_opts="ro${mount_suffix}"
 fi
 
-block="$(emit_block "$runtime" "$socket" "$image_ref" "$(forwarded_env_args)" "$aws_mount_opts")"
-
 if [ "$PRINT_ONLY" -eq 1 ]; then
-    printf '%s\n' "$block"
+    # The Finch check needs the dev image; before the first build it reads as
+    # no socket, which the install run then corrects.
+    if [ "$runtime" = "finch" ] && finch_vm_socket_available "$image_ref"; then
+        finch_socket=1
+        socket="$(socket_args_for "$runtime" "$finch_socket")"
+    fi
+    emit_block "$runtime" "$socket" "$image_ref" "$(forwarded_env_args)" "$aws_mount_opts"
     exit 0
 fi
 
@@ -428,13 +469,18 @@ else
     build_image "$runtime"
 fi
 
+if [ "$runtime" = "finch" ] && finch_vm_socket_available "$image_ref"; then
+    finch_socket=1
+    socket="$(socket_args_for "$runtime" "$finch_socket")"
+fi
+block="$(emit_block "$runtime" "$socket" "$image_ref" "$(forwarded_env_args)" "$aws_mount_opts")"
 rc="$(choose_rc_file)"
 install_block "$rc" "$block"
 
 log "Installed the 'gco' dev-container function."
 log ""
 log "  Container runtime : $runtime"
-log "  Socket mount      : $(socket_desc_for "$runtime")"
+log "  Socket mount      : $(socket_desc_for "$runtime" "$finch_socket")"
 log "  Dev image         : $image_ref"
 log "  Shell profile     : $rc"
 log "  AWS credentials   : ~/.aws mounted $([ "$AWS_WRITABLE" -eq 1 ] && printf 'read-write' || printf 'read-only') + AWS_PROFILE/AWS_REGION/keys/session"
@@ -458,15 +504,29 @@ fi
 log ""
 log "Activate it in this shell:  source \"$rc\""
 log "Then try:                   gco --help"
-if [ -z "$socket" ]; then
+if [ "$finch_socket" -eq 1 ]; then
     log ""
-    log "Note: $runtime runs containers inside a VM and exposes no host daemon socket the"
-    log "container can reach (a bind-mounted socket connects to nothing across the VM"
-    log "boundary), so the function omits the socket mount. Everyday commands — jobs,"
-    log "status, costs, inference, and non-build stacks operations — work as-is."
+    log "Note: the function mounts the Docker-compatible socket that finch-daemon serves"
+    log "in the Finch VM, so build-heavy commands such as 'gco stacks deploy-all' and"
+    log "'gco images build' run in the container too. It also sets DOCKER_BUILDKIT=0:"
+    log "finch-daemon has no BuildKit API, so 'docker build' hands each build to"
+    log "finch-daemon, which runs it on Finch's own BuildKit."
+elif [ -z "$socket" ]; then
     log ""
-    log "Build-heavy commands ('gco stacks deploy-all', image builds) need a container"
-    log "daemon at CDK synth time, so run them on the host with $runtime as the builder:"
+    log "Note: this $runtime VM serves no Docker-compatible socket the container can"
+    log "reach (a host socket connects to nothing across the VM boundary), so the"
+    log "function omits the socket mount. Everyday commands (jobs, status, costs,"
+    log "inference, and stacks operations that build nothing) work as-is."
+    log ""
+    if [ "$runtime" = "finch" ]; then
+        log "From v1.8.0, Finch runs finch-daemon in its VM; after upgrading Finch, re-run"
+        log "this script and the function mounts its socket. Until then, run build-heavy"
+        log "commands ('gco stacks deploy-all', image builds) from a host install with"
+        log "Finch as the builder:"
+    else
+        log "Build-heavy commands ('gco stacks deploy-all', image builds) need a container"
+        log "daemon at CDK synth time, so run them on the host with $runtime as the builder:"
+    fi
     log ""
     log "    CDK_DOCKER=$runtime gco stacks deploy-all -y"
     log ""

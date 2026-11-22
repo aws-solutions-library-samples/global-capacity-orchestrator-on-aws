@@ -14,16 +14,19 @@ load 'helpers.sh'
 SCRIPT="$REPO_ROOT/scripts/setup-dev-alias.sh"
 
 # Make a fake runtime executable on PATH. It answers `<rt> info` with the exit
-# code requested via $3 (so detection can be steered) and `<rt> build` with the
-# optional exit code in $4 (default 0, so a build failure can be simulated),
-# exits 0 otherwise, and logs every invocation's args to $GCO_SHIM_LOG when set.
+# code requested via $3 (so detection can be steered), `<rt> build` with the
+# optional exit code in $4 (default 0, so a build failure can be simulated) and
+# `<rt> run` with the optional exit code in $5 (default 0; the Finch socket
+# check is a `finch run`), exits 0 otherwise, and logs every invocation's args
+# to $GCO_SHIM_LOG when set.
 make_shim() {
-    local dir="$1" name="$2" code="$3" build_code="${4:-0}"
+    local dir="$1" name="$2" code="$3" build_code="${4:-0}" run_code="${5:-0}"
     cat > "$dir/$name" <<SHIM
 #!/usr/bin/env bash
 if [ -n "\${GCO_SHIM_LOG:-}" ]; then printf '%s\n' "\$*" >> "\$GCO_SHIM_LOG"; fi
 if [ "\$1" = "info" ]; then exit $code; fi
 if [ "\$1" = "build" ]; then exit $build_code; fi
+if [ "\$1" = "run" ]; then exit $run_code; fi
 exit 0
 SHIM
     chmod +x "$dir/$name"
@@ -71,11 +74,44 @@ teardown() {
     [[ "$output" == *'gco "$@"'* ]]
 }
 
-@test "--print --runtime finch omits the docker socket mount" {
-    run bash "$SCRIPT" --print --runtime finch
+@test "--print --runtime finch omits the socket when the Finch VM serves none" {
+    make_shim "$SHIMDIR" finch 0 0 1
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --print --runtime finch
     [ "$status" -eq 0 ]
     [[ "$output" == *"finch run"* ]]
     [[ "$output" != *"/var/run/docker.sock"* ]]
+    [[ "$output" != *"DOCKER_BUILDKIT"* ]]
+}
+
+@test "--print --runtime finch mounts finch-daemon's VM socket and the classic builder" {
+    make_shim "$SHIMDIR" finch 0
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --print --runtime finch
+    [ "$status" -eq 0 ]
+    tty_line="$(printf '%s\n' "$output" | grep -- 'run --rm -it')"
+    notty_line="$(printf '%s\n' "$output" | grep -- 'run --rm -i ')"
+    for line in "$tty_line" "$notty_line"; do
+        [[ "$line" == *"finch run"* ]]
+        [[ "$line" == *"-v '/var/run/docker.sock:/var/run/docker.sock' -e DOCKER_BUILDKIT=0 "* ]]
+    done
+}
+
+@test "the Finch socket check uses --mount, so a missing socket is never created" {
+    make_shim "$SHIMDIR" finch 0 0 1
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --print --runtime finch --image my-dev
+    [ "$status" -eq 0 ]
+    grep -qx 'run --rm --mount type=bind,source=/var/run/docker.sock,target=/run/gco-runtime.sock my-dev test -S /run/gco-runtime.sock' "$GCO_SHIM_LOG"
+    ! grep -q -- '-v /var/run/docker.sock' "$GCO_SHIM_LOG"
+}
+
+@test "docker and podman never set DOCKER_BUILDKIT" {
+    local rt
+    for rt in docker podman; do
+        run bash "$SCRIPT" --print --runtime "$rt"
+        [ "$status" -eq 0 ]
+        [[ "$output" != *"DOCKER_BUILDKIT"* ]]
+    done
 }
 
 @test "--print --runtime podman maps the podman socket onto docker.sock" {
@@ -711,12 +747,38 @@ SHIM
     [[ "$output" == *"only readable in the container when it lives under ~/.aws"* ]]
 }
 
-@test "install on a VM-backed runtime explains the missing socket and the host-side builder" {
+@test "install on Finch without finch-daemon explains the missing socket and the host-side builder" {
+    make_shim "$SHIMDIR" finch 0 0 1
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime finch --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : none (this Finch VM serves no Docker-compatible socket)"* ]]
+    [[ "$output" == *"Note: this finch VM serves no Docker-compatible socket the container can"* ]]
+    [[ "$output" == *"From v1.8.0, Finch runs finch-daemon in its VM; after upgrading Finch, re-run"* ]]
+    [[ "$output" == *"CDK_DOCKER=finch gco stacks deploy-all -y"* ]]
+    [[ "$output" == *"so the pinned aws-cdk-lib / cdk-nag are used."* ]]
+    ! grep -q '/var/run/docker.sock' "$RCFILE"
+}
+
+@test "install on Finch with finch-daemon mounts its socket and says builds run in the container" {
     make_shim "$SHIMDIR" finch 0
     PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime finch --no-build --rc "$RCFILE"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Socket mount      : none (finch has no host socket to share)"* ]]
-    [[ "$output" == *"Note: finch runs containers inside a VM and exposes no host daemon socket"* ]]
-    [[ "$output" == *"CDK_DOCKER=finch gco stacks deploy-all -y"* ]]
-    [[ "$output" == *"so the pinned aws-cdk-lib / cdk-nag are used."* ]]
+    [[ "$output" == *"Socket mount      : Finch VM's Docker-compatible socket (finch-daemon, /var/run/docker.sock) -> /var/run/docker.sock"* ]]
+    [[ "$output" == *"so build-heavy commands such as 'gco stacks deploy-all' and"* ]]
+    [[ "$output" == *"It also sets DOCKER_BUILDKIT=0"* ]]
+    [[ "$output" != *"CDK_DOCKER=finch gco stacks deploy-all -y"* ]]
+    grep -q -- "-v '/var/run/docker.sock:/var/run/docker.sock' -e DOCKER_BUILDKIT=0 " "$RCFILE"
+}
+
+@test "on Finch the socket is checked after the image build, against the built image" {
+    make_shim "$SHIMDIR" finch 0
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime finch --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    build_line="$(grep -n '^build ' "$GCO_SHIM_LOG" | head -1 | cut -d: -f1)"
+    probe_line="$(grep -n '^run --rm --mount ' "$GCO_SHIM_LOG" | head -1 | cut -d: -f1)"
+    [ -n "$build_line" ]
+    [ -n "$probe_line" ]
+    [ "$build_line" -lt "$probe_line" ]
 }

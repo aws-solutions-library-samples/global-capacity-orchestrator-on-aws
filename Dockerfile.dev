@@ -66,6 +66,14 @@
 #         (b) change the bind mount target, e.g.
 #             -v ~/.colima/default/docker.sock:/var/run/docker.sock
 #       See https://github.com/abiosoft/colima for current defaults.
+#     - Finch (macOS): `finch run` mounts paths from Finch's VM, and from
+#       v1.8.0 finch-daemon serves a Docker-compatible API there on
+#       /var/run/docker.sock, so the same -v flag works. Add
+#       `-e DOCKER_BUILDKIT=0`: finch-daemon has no BuildKit API, so the
+#       Docker CLI's classic `docker build` hands each build to finch-daemon,
+#       which runs it on Finch's own BuildKit and keeps the image where CDK
+#       pushes it from. scripts/setup-dev-alias.sh checks for the socket and
+#       adds both.
 
 # checkov:skip=CKV_DOCKER_2:An interactive contributor shell has no service to
 # health-check.

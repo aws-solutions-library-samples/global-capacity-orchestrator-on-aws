@@ -66,7 +66,7 @@ The image is multi-arch — it builds natively on `linux/amd64` (Intel/x86_64 ho
 
 Why a function and not an alias: it forwards arguments and pipes correctly, attaches a TTY only when one is present, mounts your current directory at `/workspace`, and bakes in the correct socket for the runtime you actually have. Re-run the script whenever you switch runtimes; `--print` previews the function, `--runtime <name>` forces one, `--rc <path>` targets a specific profile, and `--no-build` skips the image build.
 
-> **Security note:** the function shares your host Docker socket with the container so `cdk deploy` can build Lambda assets and mirror images through your host daemon. That is host-socket pass-through, not Docker-in-Docker: anyone with access to the container has root-equivalent access to the host Docker daemon, so only use this on trusted hosts. Finch runs in its own VM with no host socket to share, so the function omits the mount there; everyday commands work as-is and build-heavy ones like `deploy-all` run on the host with Finch as the CDK builder.
+> **Security note:** the function shares your host Docker socket with the container so `cdk deploy` can build Lambda assets and mirror images through your host daemon. That is host-socket pass-through, not Docker-in-Docker: anyone with access to the container has root-equivalent access to the host Docker daemon, so only use this on trusted hosts. With Finch, the function mounts the Docker-compatible socket that finch-daemon serves in Finch's VM (Finch v1.8.0 and later), which gives the container the same access to Finch's containers and images. On a Finch VM without finch-daemon, the script omits the mount and says how to run build-heavy commands such as `deploy-all` instead.
 
 ## Step 2: Run the GCO CLI
 
@@ -92,7 +92,7 @@ docker run -it --rm \
 gco --version
 ```
 
-Colima and Finch users: the host Docker socket may live somewhere other than `/var/run/docker.sock` — see the header of [`Dockerfile.dev`](Dockerfile.dev) for the right `-v` flag (Finch has none to mount).
+Colima users: the host Docker socket may live somewhere other than `/var/run/docker.sock`; see the header of [`Dockerfile.dev`](Dockerfile.dev) for the right `-v` flag. Finch users: run the same command with `finch run` and add `-e DOCKER_BUILDKIT=0`. There `/var/run/docker.sock` is finch-daemon's socket in Finch's VM, and finch-daemon builds only through the classic `docker build` path.
 
 </details>
 
@@ -176,18 +176,14 @@ gco stacks bootstrap -r us-east-1
 Run this from your shell — the `gco` function from [Step 1](#step-1-clone-and-build-the-dev-container) executes it inside the dev container (or run it from an interactive container shell, see [Step 2](#step-2-run-the-gco-cli)):
 
 ```bash
+# Start Finch VM (if using Finch on the host — Docker Desktop & Colima need no equivalent)
+finch vm start
+
 # Deploy all stacks
 gco stacks deploy-all -y
 ```
 
-> **Using Finch?** The dev container builds the deployment's images through the Docker or Podman socket the `gco` function mounts, and Finch's VM shares no socket with containers. Run this step from a [host install](#installing-on-your-host-instead-advanced) instead, with Finch as the builder:
->
-> ```bash
-> finch vm start                              # if the Finch VM is not running
-> CDK_DOCKER=finch gco stacks deploy-all -y
-> ```
->
-> The same applies to `gco stacks deploy`, `gco upgrade` and `gco images build|push`. The other steps in this guide work through the `gco` function.
+> **Using Finch?** The dev container builds the deployment's images through finch-daemon, the Docker-compatible API in Finch's VM. If the setup script said your Finch VM serves no such socket, upgrade Finch to v1.8.0 or later and re-run `./scripts/setup-dev-alias.sh`, or run this step from a [host install](#installing-on-your-host-instead-advanced) as `CDK_DOCKER=finch gco stacks deploy-all -y`. The same applies to `gco stacks deploy`, `gco upgrade` and `gco images build|push`.
 
 Or deploy a single region:
 

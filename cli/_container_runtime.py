@@ -125,9 +125,9 @@ def _detect_container_runtime_uncached() -> str | None:
 
 
 #: Where the ``gco`` shell function from ``scripts/setup-dev-alias.sh`` mounts
-#: the host runtime's socket in the ``gco-dev`` container (Docker's, or
-#: Podman's). With Finch it mounts none: Finch's VM shares no socket with
-#: containers.
+#: the host runtime's socket in the ``gco-dev`` container: Docker's, Podman's,
+#: or the Docker-compatible socket that finch-daemon serves in Finch's VM. A
+#: Finch VM without finch-daemon has none to mount.
 DEV_CONTAINER_SOCKET = "/var/run/docker.sock"
 
 
@@ -137,8 +137,10 @@ def _dev_container_error_message() -> str:
     The container has no daemon of its own and reaches the host's runtime only
     through the socket the ``gco`` function mounts, so install or start hints
     for runtimes found on the container's PATH (its Docker CLI) miss the point.
-    A host using Finch mounts no socket at all, and a command that builds
-    images has to run from a host install there.
+    With no socket mounted, the function was installed before the runtime
+    could share one: re-running the setup script mounts it, except on a Finch
+    VM without finch-daemon, where a command that builds images has to run
+    from a host install.
     """
     if os.path.exists(DEV_CONTAINER_SOCKET):
         return "\n".join(
@@ -146,10 +148,11 @@ def _dev_container_error_message() -> str:
                 "No container runtime answered on the socket the gco function mounts "
                 f"in the gco-dev container ({DEV_CONTAINER_SOCKET}).",
                 "",
-                "Start the runtime on the host (Docker Desktop, `colima start`, or "
-                "`podman machine start`) and retry. If you have switched runtimes since "
-                "installing the gco function, re-run ./scripts/setup-dev-alias.sh on the "
-                "host first.",
+                "Start or restart the runtime on the host (Docker Desktop, "
+                "`colima start`, `podman machine start`, or for Finch's finch-daemon "
+                "`finch vm stop && finch vm start`) and retry. If you have switched "
+                "runtimes since installing the gco function, re-run "
+                "./scripts/setup-dev-alias.sh on the host first.",
             ]
         )
     return "\n".join(
@@ -158,9 +161,11 @@ def _dev_container_error_message() -> str:
             "function mounted no runtime socket, and this command needs a runtime to "
             "build images.",
             "",
-            "  - Finch: its VM shares no socket with containers, so run this command "
-            "from a host install of GCO with Finch as the builder (CDK_DOCKER=finch); "
-            'see QUICKSTART.md, "Installing on your host instead".',
+            "  - Finch: re-run ./scripts/setup-dev-alias.sh on the host so the gco "
+            "function mounts the Docker-compatible socket of finch-daemon, which Finch "
+            "runs in its VM from v1.8.0. With an older Finch, upgrade it, or run this "
+            "command from a host install of GCO with Finch as the builder "
+            '(CDK_DOCKER=finch); see QUICKSTART.md, "Installing on your host instead".',
             "  - Docker Desktop, Colima or Podman: start it, then re-run "
             "./scripts/setup-dev-alias.sh on the host so the gco function mounts its "
             "socket.",

@@ -163,7 +163,7 @@ aws service-quotas get-service-quota --service-code ec2 --quota-code L-DB2E81BA 
 gco stacks deploy-all -y
 ```
 
-With Finch, run this one step from a host install of GCO instead, as `CDK_DOCKER=finch gco stacks deploy-all -y`. The dev container builds the deployment's images through the Docker or Podman socket the `gco` function mounts, and Finch shares none. The [Quick Start](../QUICKSTART.md#installing-on-your-host-instead-advanced) has the host install, and every other step here works through the `gco` function.
+On Finch, the dev container builds the deployment's images through finch-daemon, the Docker-compatible API in Finch's VM. If the setup script said your Finch VM has none, the [Quick Start](../QUICKSTART.md#step-4-deploy-infrastructure) says what to do instead.
 
 With the `cdk.json` in the repository, this deploys GCO's global control plane in `us-east-2` (the global API, the job queue and template tables, monitoring) and one workload Region, `us-east-1`, with a VPC, an EKS Auto Mode cluster, an internal load balancer and the GCO services. It bootstraps CDK where needed and takes about an hour. To use other Regions, edit `deployment_regions` in `cdk.json` first or run `gco stacks regions add <region>`.
 

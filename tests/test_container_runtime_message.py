@@ -103,8 +103,8 @@ class TestInsideTheDevContainer:
 
     The container's PATH has the Docker CLI, so the host branch would name
     Docker as installed-but-stopped and say to start Docker Desktop, even on a
-    Finch host, where the function mounts no socket at all. A walkthrough of
-    the Learning Path on a Finch host got exactly that from `deploy-all`.
+    Finch host whose function mounted no socket. A walkthrough of the Learning
+    Path on a Finch host got exactly that from `deploy-all`.
     """
 
     @pytest.fixture(autouse=True)
@@ -117,6 +117,7 @@ class TestInsideTheDevContainer:
         with patch("shutil.which", _which("docker")):
             message = container_runtime_error_message()
         assert "No container runtime is reachable from the gco-dev container" in message
+        assert "finch-daemon, which Finch runs in its VM from v1.8.0" in message
         assert "CDK_DOCKER=finch" in message
         assert "Installing on your host instead" in message
         assert "./scripts/setup-dev-alias.sh" in message
@@ -133,6 +134,7 @@ class TestInsideTheDevContainer:
         )
         assert "colima start" in message
         assert "podman machine start" in message
+        assert "finch vm stop && finch vm start" in message
         assert "CDK_DOCKER=finch" not in message
 
     def test_an_image_from_before_the_marker_counts_as_the_dev_container(
