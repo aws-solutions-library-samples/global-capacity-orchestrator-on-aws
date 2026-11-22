@@ -7,14 +7,14 @@ from typing import Any
 
 import click
 
-from gco.job_admission import apply_sandbox
+from gco.job_admission import apply_keep_warm, apply_sandbox
 
 from ..cluster_tunnel import unreachable_endpoint_hint, via_ssm_options, via_ssm_route
 from ..config import GCOConfig
 from ..jobs import JobInfo, get_job_manager, resolve_submission_identity
 from ..kubectl_helpers import kubectl_could_not_connect
 from ..output import confirm, format_job_table, get_output_formatter
-from .queue_cmd import queue_submit, sandbox_option
+from .queue_cmd import keep_warm_option, queue_submit, sandbox_option
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +146,7 @@ def jobs(config: Any) -> None:
 )
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
 @sandbox_option
+@keep_warm_option
 @click.option(
     "--wait",
     "-w",
@@ -166,6 +167,7 @@ def submit_job(
     check_policy: Any,
     label: Any,
     sandbox: Any,
+    keep_warm: Any,
     wait: Any,
     timeout: Any,
 ) -> None:
@@ -206,6 +208,7 @@ def submit_job(
             namespace=namespace,
             target_region=target_region,
             sandbox=sandbox,
+            keep_warm=keep_warm,
         )
 
     wait_target: tuple[str, str] | None = None
@@ -217,6 +220,7 @@ def submit_job(
             dry_run=dry_run,
             labels=labels if labels else None,
             sandbox=sandbox,
+            keep_warm=keep_warm,
         )
 
         if dry_run:
@@ -270,6 +274,7 @@ def submit_job(
 @click.option("--dry-run", is_flag=True, help="Validate without applying")
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
 @sandbox_option
+@keep_warm_option
 @click.option(
     "--wait",
     "-w",
@@ -290,6 +295,7 @@ def submit_job_direct(
     dry_run: Any,
     label: Any,
     sandbox: Any,
+    keep_warm: Any,
     wait: Any,
     timeout: Any,
     via_ssm: Any,
@@ -370,6 +376,7 @@ def submit_job_direct(
                 dry_run=dry_run,
                 labels=labels if labels else None,
                 sandbox=sandbox,
+                keep_warm=keep_warm,
                 **route,
             )
 
@@ -424,6 +431,7 @@ def submit_job_direct(
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
 @click.option("--priority", "-p", default=0, help="Job priority (higher = more important)")
 @sandbox_option
+@keep_warm_option
 @click.option(
     "--auto-region",
     is_flag=True,
@@ -441,6 +449,7 @@ def submit_job_sqs(
     label: Any,
     priority: Any,
     sandbox: Any,
+    keep_warm: Any,
     auto_region: Any,
 ) -> None:
     """Submit a job to a regional SQS queue for processing.
@@ -516,6 +525,7 @@ def submit_job_sqs(
             labels=labels if labels else None,
             priority=priority,
             sandbox=sandbox,
+            keep_warm=keep_warm,
         )
 
         formatter.print_success(f"Job queued successfully in {region}")
@@ -727,6 +737,32 @@ def _print_job_placement(job: JobInfo) -> None:
             print(f"    {key}: {job.node_labels[key]}")
 
 
+def _print_keep_warm_idle(job: JobInfo) -> None:
+    """Print the keep-warm GPU node idle time this Job's pods left behind.
+
+    One row per interval the health monitor recorded on the Job: the node,
+    when it went idle, when the next pod took it or it was reclaimed, and the
+    seconds in between. An interval still open has no end yet.
+    """
+    summary = job.keep_warm or {}
+    records = [entry for entry in summary.get("idle") or [] if isinstance(entry, dict)]
+    if not records:
+        return
+    print("\n  Keep-warm idle time")
+    print("  " + "-" * 78)
+    print("  NODE                          INSTANCE TYPE  SINCE                 SECONDS  ENDED BY")
+    print("  " + "-" * 78)
+    for entry in records:
+        name = str(entry.get("node") or "-")[:29]
+        instance_type = str(entry.get("instance_type") or "-")[:14]
+        since = str(entry.get("since") or "-")[:21]
+        seconds = str(entry["seconds"]) if entry.get("until") else "-"
+        ended_by = str(entry.get("ended_by") or "still idle")
+        print(f"  {name:<29} {instance_type:<14} {since:<21} {seconds:<8} {ended_by}")
+    open_note = " (one or more still open)" if summary.get("open") else ""
+    print(f"  Closed idle time: {summary.get('idle_seconds', 0)} s{open_note}")
+
+
 def _print_unscheduled_pods(job: JobInfo) -> None:
     """Print the pods that have no node yet, and why Kubernetes says so.
 
@@ -780,6 +816,7 @@ def get_job(config: Any, job_name: Any, namespace: Any, region: Any) -> None:
             if config.output_format == "table" and isinstance(job, JobInfo):
                 _print_job_placement(job)
                 _print_unscheduled_pods(job)
+                _print_keep_warm_idle(job)
         else:
             formatter.print_error(f"Job {job_name} not found")
             sys.exit(1)
@@ -1458,6 +1495,7 @@ def _run_pre_submit_policy_check(
     namespace: str | None,
     target_region: str | None,
     sandbox: str | None = None,
+    keep_warm: bool = False,
 ) -> None:
     """Advisory pre-submit check against the target region's live policy.
 
@@ -1484,6 +1522,9 @@ def _run_pre_submit_policy_check(
         if sandbox:
             # Judge what will be sent: --sandbox changes the pod templates.
             apply_sandbox(manifests, sandbox)
+        if keep_warm:
+            # And so does --keep-warm.
+            apply_keep_warm(manifests)
 
         regions = [target_region] if target_region else _policy_regions(config, None)
         policies = fetch_region_policies(job_manager._aws_client, regions)

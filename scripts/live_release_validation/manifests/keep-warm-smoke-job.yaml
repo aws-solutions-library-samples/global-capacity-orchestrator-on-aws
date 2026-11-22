@@ -1,0 +1,87 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # The keep-warm action submits this Job twice, back to back: __KEEP_WARM_STEP__
+  # is "first", then "second" (scripts/live_release_validation/checks/keep_warm.py).
+  name: gco-live-keep-warm-__KEEP_WARM_STEP__-__RUN_TOKEN__
+  namespace: gco-jobs
+  annotations:
+    # The cluster-managed gco-jobs/default-deny-ingress policy selects all pods.
+    checkov.io/skip1: CKV2_K8S_6=Protected by the cluster-managed gco-jobs default-deny-ingress NetworkPolicy
+  labels:
+    app.kubernetes.io/name: gco-live-release-validation
+    gco.aws/validation-run: __RUN_TOKEN__
+    gco.aws/validation-path: keep-warm-__KEEP_WARM_STEP__
+spec:
+  backoffLimit: 0
+  # A node drain is not a workload failure: a pod evicted through the Eviction
+  # API carries the DisruptionTarget condition, and with a zero backoff limit
+  # that eviction alone would fail the Job. A real non-zero exit still fails it.
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+            status: "True"
+  # The idle record lives on the Job, so the Job must outlast its node: the
+  # action reads the second Job's record after the window has passed and the
+  # node is gone, then deletes both Jobs itself.
+  ttlSecondsAfterFinished: 7200
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gco-live-release-validation
+        gco.aws/validation-run: __RUN_TOKEN__
+        gco.aws/validation-path: keep-warm-__KEEP_WARM_STEP__
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      # What --keep-warm adds (docs/GPU_KEEP_WARM.md), plus the pins that make
+      # the second Job fit the node the first one leaves: the same instance
+      # type, and on-demand capacity, which no Spot reclaim takes away during
+      # the window.
+      nodeSelector:
+        gco.aws/keep-warm: "true"
+        node.kubernetes.io/instance-type: g4dn.xlarge
+        karpenter.sh/capacity-type: on-demand
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: gco.aws/keep-warm
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: smoke
+          # BusyBox 1.38.0 multi-platform index from the official Docker Hub tag API:
+          # https://hub.docker.com/v2/repositories/library/busybox/tags/1.38.0
+          image: docker.io/library/busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+          imagePullPolicy: IfNotPresent
+          # The Job proves placement, not CUDA: the GPU request is what sends
+          # it to a GPU node, and the device count is printed as evidence.
+          command:
+            - sh
+            - -c
+            - >-
+              echo "gpu_devices=$(ls /dev | grep -c '^nvidia[0-9]')";
+              echo GCO_LIVE_KEEP_WARM___RUN_TOKEN__
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              nvidia.com/gpu: 1

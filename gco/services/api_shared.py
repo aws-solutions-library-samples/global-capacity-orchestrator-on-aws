@@ -30,6 +30,7 @@ from gco.hyperpod_config import (
     NODE_HEALTH_STATUS_LABEL,
 )
 from gco.k8s_objects import present
+from gco.keep_warm import KEEP_WARM_LABEL, keep_warm_summary
 from gco.services.manifest_processor import ManifestProcessor
 from gco.services.metrics_publisher import ManifestProcessorMetrics
 from gco.services.request_context import current_request_id
@@ -365,6 +366,9 @@ def _parse_job_to_dict(job: V1Job) -> dict[str, Any]:
             ],
         },
         "computed_status": computed_status,
+        # Idle intervals of keep-warm GPU nodes this Job's pods left behind,
+        # recorded by the health monitor (gco.keep_warm); null when none.
+        "keep_warm": keep_warm_summary(metadata.annotations),
     }
 
 
@@ -536,6 +540,7 @@ _REPORTED_NODE_LABELS: tuple[str, ...] = (
     "topology.kubernetes.io/region",
     "kubernetes.io/arch",
     "karpenter.sh/nodepool",
+    KEEP_WARM_LABEL,
     CAPACITY_PROVIDER_LABEL,
     INSTANCE_GROUP_LABEL,
     NODE_HEALTH_STATUS_LABEL,

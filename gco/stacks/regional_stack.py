@@ -16,8 +16,9 @@ Resources Created:
     EKS Cluster (Auto Mode):
         - Managed control plane with full logging (API, Audit, Authenticator, Controller Manager, Scheduler)
         - Built-in NodePools: system, general-purpose
-        - Custom NodePools: gpu-x86-pool, gpu-arm-pool, gpu-inference-pool,
-          gpu-efa-pool, mooncake-efa-pool, neuron-pool, cpu-general-pool
+        - Custom NodePools: gpu-x86-pool, gpu-keep-warm-pool, gpu-arm-pool,
+          gpu-inference-pool, gpu-efa-pool, mooncake-efa-pool, neuron-pool,
+          cpu-general-pool
         - IRSA roles for service accounts (Secrets Manager, SQS, DynamoDB, CloudWatch, S3, EFS)
 
     Load Balancing:
@@ -158,6 +159,12 @@ from gco.hyperpod_config import (
 from gco.inference_proxy_config import (
     compute_inference_proxy_tls_replacements as _compute_inference_proxy_tls_replacements,
 )
+from gco.keep_warm import (
+    KEEP_WARM_CONTEXT_KEY,
+    KEEP_WARM_LABEL,
+    compute_keep_warm_replacements,
+    validate_keep_warm_config,
+)
 from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.pcs_config import compute_pcs_replacements, pcs_enabled, validate_pcs_config
 from gco.resource_governance import kueue_efa_quota, validated_resource_quota
@@ -197,8 +204,8 @@ from gco.stacks.lambda_assets import lambda_source_code
 from gco.stacks.pcs_cluster import PcsCluster
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T16:50:06Z
-# Generated from Git commit: 682ef1b5797ef18690cfc2a021264ed06b70f252
+# Generated at (UTC): 2026-11-21T20:42:53Z
+# Generated from Git commit: 1d908f3fa649c16f69e32c2af36f5992f62d94d7
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -1946,6 +1953,8 @@ class GCORegionalStack(Stack):
         # - 42-nodepool-inference.yaml: inference-optimized GPU instances
         # - 43-nodepool-efa.yaml: EFA-enabled instances (p4d, p4de, p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200)
         # - 44-nodepool-neuron.yaml: Trainium/Inferentia instances
+        # - 47-nodepool-gpu-keep-warm.yaml: the 40 families for --keep-warm Jobs, whose
+        #   empty nodes stay for cdk.json gpu_keep_warm.window
         # These will be applied by the kubectl Lambda custom resource (created below)
 
         # Developer access entries (eks_cluster.developer_access). The cluster
@@ -2235,6 +2244,19 @@ class GCORegionalStack(Stack):
             self.node.try_get_context(GATEWAY_HEALTH_CHECK_CONTEXT_KEY)
         )
 
+    def _gpu_keep_warm_config(self) -> dict[str, Any]:
+        """The validated ``gpu_keep_warm`` block (the keep-warm pool's window).
+
+        Same optional-accessor posture as :meth:`_gateway_health_check_config`:
+        a config double without ``get_gpu_keep_warm_config`` resolves this
+        stack's own context, so an absent block yields the 10-minute default.
+        """
+        getter = getattr(self.config, "get_gpu_keep_warm_config", None)
+        raw = getter() if callable(getter) else None
+        if isinstance(raw, dict):
+            return raw
+        return validate_keep_warm_config(self.node.try_get_context(KEEP_WARM_CONTEXT_KEY))
+
     def _transaction_search_active(self) -> bool:
         """Whether this region's stack manages CloudWatch Transaction Search."""
         tracing = self._tracing_config()
@@ -2414,10 +2436,11 @@ class GCORegionalStack(Stack):
 
     # ── Shared toleration config for EKS add-ons ──────────────────────────
     # All GCO nodepools apply taints (nvidia.com/gpu, aws.amazon.com/neuron,
-    # vpc.amazonaws.com/efa) that prevent DaemonSet pods from scheduling.
-    # Every add-on component that runs as a DaemonSet (storage drivers' node
-    # agents, metrics/log agents, node exporters) must tolerate these taints
-    # so infrastructure works on every node type.
+    # vpc.amazonaws.com/efa, and gco.aws/keep-warm on the keep-warm GPU pool)
+    # that prevent DaemonSet pods from scheduling. Every add-on component that
+    # runs as a DaemonSet (storage drivers' node agents, metrics/log agents,
+    # node exporters) must tolerate these taints so infrastructure works on
+    # every node type.
     #
     # Deployment-shaped add-on components (metrics-server, the CSI
     # *controllers*) must NOT carry these tolerations: a toleration makes
@@ -2431,6 +2454,7 @@ class GCORegionalStack(Stack):
         {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
         {"key": "aws.amazon.com/neuron", "operator": "Exists", "effect": "NoSchedule"},
         {"key": "vpc.amazonaws.com/efa", "operator": "Exists", "effect": "NoSchedule"},
+        {"key": KEEP_WARM_LABEL, "operator": "Exists", "effect": "NoSchedule"},
     ]
 
     def _create_pod_identity_agent_addon(self) -> None:
@@ -4498,6 +4522,9 @@ class GCORegionalStack(Stack):
             # bare YAML integers from cdk.json gateway_health_check. Always
             # emitted: the Gateway file must never be skipped.
             **compute_gateway_health_check_replacements(self._gateway_health_check_config()),
+            # The keep-warm GPU pool's consolidateAfter (47-nodepool-gpu-keep-warm.yaml)
+            # and the health monitor's copy of it, from cdk.json gpu_keep_warm.
+            **compute_keep_warm_replacements(self._gpu_keep_warm_config()),
             # Manifest-processor sizing is an operator decision made in
             # cdk.json (validated in ConfigLoader): the fixed replica count and
             # the application container's limits render verbatim. The optional

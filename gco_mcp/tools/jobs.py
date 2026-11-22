@@ -64,6 +64,7 @@ def submit_job_sqs(
     namespace: str | None = None,
     priority: int | None = None,
     sandbox: Literal["isolated"] | None = None,
+    keep_warm: bool = False,
 ) -> str:
     """Submit a job via SQS queue (recommended for production).
 
@@ -75,6 +76,9 @@ def submit_job_sqs(
         priority: Job priority (0-100, higher = more important).
         sandbox: "isolated" runs every pod in an AWS Nitro Sandbox (EKS 1.36+,
             CPU only; see docs/NITRO_SANDBOXES.md).
+        keep_warm: Run the GPU pods on the keep-warm pool, whose empty nodes
+            are kept for cdk.json gpu_keep_warm.window so the next keep-warm
+            GPU Job reuses the node (see docs/GPU_KEEP_WARM.md).
     """
     rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
     if rejected is not None:
@@ -86,6 +90,8 @@ def submit_job_sqs(
         args += ["--priority", str(priority)]
     if sandbox:
         args += ["--sandbox", sandbox]
+    if keep_warm:
+        args.append("--keep-warm")
     return cli_runner._run_cli(*args)
 
 
@@ -95,6 +101,7 @@ def submit_job_api(
     manifest_path: str,
     namespace: str | None = None,
     sandbox: Literal["isolated"] | None = None,
+    keep_warm: bool = False,
 ) -> str:
     """Submit a job via the authenticated API Gateway (SigV4).
 
@@ -104,6 +111,9 @@ def submit_job_api(
         namespace: Override the namespace in the manifest.
         sandbox: "isolated" runs every pod in an AWS Nitro Sandbox (EKS 1.36+,
             CPU only; see docs/NITRO_SANDBOXES.md).
+        keep_warm: Run the GPU pods on the keep-warm pool, whose empty nodes
+            are kept for cdk.json gpu_keep_warm.window so the next keep-warm
+            GPU Job reuses the node (see docs/GPU_KEEP_WARM.md).
     """
     rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
     if rejected is not None:
@@ -113,6 +123,8 @@ def submit_job_api(
         args += ["-n", namespace]
     if sandbox:
         args += ["--sandbox", sandbox]
+    if keep_warm:
+        args.append("--keep-warm")
     return cli_runner._run_cli(*args)
 
 

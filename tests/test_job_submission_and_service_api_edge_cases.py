@@ -1890,6 +1890,7 @@ async def test_health_api_background_monitor_wait_publish_failure_and_cancel_pat
     monitor = MagicMock()
     monitor.get_health_status = AsyncMock(return_value=status)
     monitor.sync_alb_registration = AsyncMock()
+    monitor.record_keep_warm_idle = AsyncMock()
     metrics = MagicMock()
     api.health_monitor = monitor
     api.health_metrics = metrics
@@ -1920,6 +1921,7 @@ async def test_health_api_publishes_cloudwatch_metrics_off_the_event_loop() -> N
     monitor = MagicMock()
     monitor.get_health_status = AsyncMock(return_value=status)
     monitor.sync_alb_registration = AsyncMock()
+    monitor.record_keep_warm_idle = AsyncMock()
     metrics = MagicMock()
     metrics.publish_resource_utilization.side_effect = lambda **_kwargs: time.sleep(0.4)
     metrics.publish_health_status.side_effect = lambda **_kwargs: time.sleep(0.4)

@@ -29,6 +29,7 @@ from .final_inventory import action_final_inventory
 from .hyperpod import action_hyperpod
 from .inference import action_inference
 from .jobs import action_api_lifecycle, action_sqs_lifecycle
+from .keep_warm import action_keep_warm
 from .network_posture import action_network_posture
 from .opencost import action_opencost
 from .platform_workloads import action_platform_workloads
@@ -50,6 +51,7 @@ __all__ = [
     "action_final_inventory",
     "action_hyperpod",
     "action_inference",
+    "action_keep_warm",
     "action_network_posture",
     "action_opencost",
     "action_platform_workloads",

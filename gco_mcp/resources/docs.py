@@ -1493,6 +1493,24 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["KUEUE", "CLI", "ARCHITECTURE"],
     },
+    "GPU_KEEP_WARM": {
+        "summary": "Keep-warm GPU nodes for many short GPU Jobs run back to back, such as a hyperparameter search: --keep-warm on gco jobs submit, submit-sqs, submit-direct and queue submit (and keep_warm on the MCP submit tools) sends the pods to gpu-keep-warm-pool, whose empty nodes Karpenter keeps for cdk.json gpu_keep_warm.window (default 10m, 30s to 24h) so the next Job reuses the node with no new NodeClaim and its image cached; the submission paths refuse a manifest that selects the pool but could not run there; the health monitor records each idle interval on the Job that left the node idle (the gco.aws/keep-warm-idle annotation, closed as reused or reclaimed), which Get Job reports as a keep_warm block; and the cost of a waiting node.",
+        "topics": ["jobs", "gpu", "nodepools", "cost"],
+        "keywords": [
+            "keep warm",
+            "keep-warm",
+            "warm pool",
+            "gpu-keep-warm-pool",
+            "idle node",
+            "idle time",
+            "node reuse",
+            "consolidateAfter",
+            "hyperparameter search",
+            "short jobs",
+            "nodeclaim",
+        ],
+        "related": ["CUSTOMIZATION", "CLI", "API"],
+    },
     "TROUBLESHOOTING": {
         "summary": "Troubleshooting guide — common installation, deployment, kubectl, and pod issues with their resolutions.",
         "topics": [

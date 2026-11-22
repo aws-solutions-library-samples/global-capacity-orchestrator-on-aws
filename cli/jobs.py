@@ -14,7 +14,7 @@ from typing import Any
 import requests
 import yaml
 
-from gco.job_admission import apply_sandbox
+from gco.job_admission import apply_keep_warm, apply_sandbox
 from gco.job_envelope import build_job_message
 from gco.services.manifest_processor import TRAINJOB_API_VERSION, safe_load_all_yaml
 
@@ -22,8 +22,8 @@ from .aws_client import APIRequestError, api_path_segment, get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-22T02:28:01Z
-# Generated from Git commit: 34e7819b18b99ba49e76dc693f59f39d055ec75e
+# Generated at (UTC): 2026-11-22T03:37:11Z
+# Generated from Git commit: 48a025595c9abc4e56eb2aea0c215243e4a28d21
 # Flowchart(s) generated from this file:
 #   * ``JobManager.submit_job`` -> ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.html``
 #     (PNG: ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.png``)
@@ -308,6 +308,10 @@ class JobInfo:
     # Why node hardware is missing when it is (RBAC refusal, node reclaimed,
     # pod listing failed). Evidence for the caller, never folded into ``status``.
     node_lookup_error: str | None = None
+    # Idle intervals of keep-warm GPU nodes this Job's pods left behind
+    # (``{"idle": [...], "idle_seconds": int, "open": bool}``, gco.keep_warm),
+    # or None when there are none or the regional bridge predates them.
+    keep_warm: dict[str, Any] | None = None
 
     @property
     def is_complete(self) -> bool:
@@ -388,6 +392,7 @@ class JobManager:
         dry_run: bool = False,
         labels: dict[str, str] | None = None,
         sandbox: str | None = None,
+        keep_warm: bool = False,
     ) -> dict[str, Any]:
         """
         Submit a job to GCO.
@@ -405,6 +410,8 @@ class JobManager:
             labels: Additional labels to add to manifests
             sandbox: Run every pod in an AWS Nitro Sandbox of this mode
                 (``gco.job_admission.SANDBOX_MODES``)
+            keep_warm: Run on the keep-warm GPU pool
+                (``gco.job_admission.apply_keep_warm``)
 
         Returns:
             Submission result dictionary
@@ -429,6 +436,8 @@ class JobManager:
 
         if sandbox:
             apply_sandbox(manifest_list, sandbox)
+        if keep_warm:
+            apply_keep_warm(manifest_list)
 
         # Submit via API
         return self._aws_client.submit_manifests(
@@ -446,6 +455,7 @@ class JobManager:
         dry_run: bool = False,
         labels: dict[str, str] | None = None,
         sandbox: str | None = None,
+        keep_warm: bool = False,
         server: str | None = None,
         tls_server_name: str | None = None,
     ) -> dict[str, Any]:
@@ -470,6 +480,8 @@ class JobManager:
             labels: Additional labels to add to manifests
             sandbox: Run every pod in an AWS Nitro Sandbox of this mode
                 (``gco.job_admission.SANDBOX_MODES``)
+            keep_warm: Run on the keep-warm GPU pool
+                (``gco.job_admission.apply_keep_warm``)
             server: kubectl ``--server`` for an SSM tunnel to the private API
                 endpoint (``cli.cluster_tunnel.via_ssm_route``); ``None`` keeps
                 the kubeconfig endpoint
@@ -503,6 +515,8 @@ class JobManager:
 
         if sandbox:
             apply_sandbox(manifest_list, sandbox)
+        if keep_warm:
+            apply_keep_warm(manifest_list)
 
         # Get cluster name from stack
         stack = self._aws_client.get_regional_stack(region)
@@ -827,6 +841,9 @@ class JobManager:
             completions=spec.get("completions", 1),
             labels=metadata.get("labels", {}),
             image_refs=_extract_image_refs(spec),
+            keep_warm=(
+                job_data["keep_warm"] if isinstance(job_data.get("keep_warm"), dict) else None
+            ),
             **_extract_scheduling(job_data),
         )
 
@@ -1406,6 +1423,7 @@ class JobManager:
         labels: dict[str, str] | None = None,
         priority: int = 0,
         sandbox: str | None = None,
+        keep_warm: bool = False,
     ) -> dict[str, Any]:
         """
         Submit a job to a regional SQS queue for processing.
@@ -1429,6 +1447,8 @@ class JobManager:
             priority: Job priority (higher = more important)
             sandbox: Run every pod in an AWS Nitro Sandbox of this mode
                 (``gco.job_admission.SANDBOX_MODES``)
+            keep_warm: Run on the keep-warm GPU pool
+                (``gco.job_admission.apply_keep_warm``)
 
         Returns:
             Submission result dictionary with message_id and queue info
@@ -1458,6 +1478,8 @@ class JobManager:
 
         if sandbox:
             apply_sandbox(manifest_list, sandbox)
+        if keep_warm:
+            apply_keep_warm(manifest_list)
 
         # Get queue URL from stack
         stack = self._aws_client.get_regional_stack(region)

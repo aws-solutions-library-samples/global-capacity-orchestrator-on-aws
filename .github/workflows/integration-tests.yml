@@ -2130,6 +2130,7 @@ jobs:
           from pathlib import Path
 
           from gco.inference_proxy_config import compute_inference_proxy_tls_replacements
+          from gco.keep_warm import compute_keep_warm_replacements, validate_keep_warm_config
           from gco.pcs_config import compute_pcs_replacements
 
           manifests = Path("lambda/kubectl-applier-simple/manifests")
@@ -2150,6 +2151,9 @@ jobs:
               **compute_pcs_replacements(
                   {}, enabled=False, slinky_enabled=False, cluster_id="", vpc_cidr="10.0.0.0/16"
               ),
+              # The keep-warm pool's window off its default, from the same pure
+              # function: the health monitor reads GPU_KEEP_WARM_WINDOW_SECONDS.
+              **compute_keep_warm_replacements(validate_keep_warm_config({"window": "15m"})),
               "{{HEALTH_MONITOR_IMAGE}}": "health-monitor:ci",
               "{{MANIFEST_PROCESSOR_IMAGE}}": "manifest-processor:ci",
               "{{INFERENCE_MONITOR_IMAGE}}": "inference-monitor:ci",

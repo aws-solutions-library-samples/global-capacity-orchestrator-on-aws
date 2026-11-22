@@ -77,6 +77,9 @@ Each region contains:
 - Auto-scaling compute via built-in and custom NodePools:
   - `system`, `general-purpose`: EKS Auto Mode built-ins
   - `gpu-x86-pool`: NVIDIA x86 GPU workloads
+  - `gpu-keep-warm-pool`: the `gpu-x86-pool` instances for Jobs submitted with
+    `--keep-warm`, whose empty nodes stay for `gpu_keep_warm.window` so the next
+    such Job reuses them ([GPU_KEEP_WARM.md](GPU_KEEP_WARM.md))
   - `gpu-arm-pool`: NVIDIA ARM64 GPU workloads
   - `gpu-inference-pool`: long-running inference workloads
   - `gpu-efa-pool`: EFA-enabled distributed GPU workloads

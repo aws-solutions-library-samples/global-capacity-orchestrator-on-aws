@@ -3,6 +3,7 @@
 #
 # Roles:
 #   gco-health-monitor-role          (ClusterRole)  — read-only cluster-wide
+#   gco-health-monitor-keep-warm-records (Role)     — keep-warm idle records on Jobs in gco-jobs
 #   gco-manifest-processor-role      (Role)         — write in gco-jobs namespace
 #   gco-manifest-processor-cluster-read (ClusterRole) — the cluster-scoped reads it makes
 #   gco-inference-monitor-role       (Role)         — write in gco-inference namespace
@@ -112,8 +113,9 @@ subjects:
 # Pre-create the election Leases so the service account needs no broad
 # `create leases` permission. Only the named Leases and platform Gateway are
 # readable by the elected paths; all replicas keep serving health endpoints.
-# Two duties, two Leases: the ALB-hostname write to SSM and webhook delivery
-# each run in exactly one of the two health-monitor replicas.
+# Three duties, three Leases: the ALB-hostname write to SSM, webhook delivery
+# and the keep-warm idle records each run in exactly one of the two
+# health-monitor replicas.
 ---
 apiVersion: coordination.k8s.io/v1
 kind: Lease
@@ -137,6 +139,17 @@ metadata:
 spec:
   leaseDurationSeconds: 90
 ---
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: gco-health-monitor-keep-warm
+  namespace: gco-system
+  labels:
+    app: health-monitor
+    project: gco
+spec:
+  leaseDurationSeconds: 90
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -152,7 +165,10 @@ rules:
     verbs: ["get"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    resourceNames: ["gco-health-monitor-alb-sync", "gco-health-monitor-webhooks"]
+    resourceNames:
+      - gco-health-monitor-alb-sync
+      - gco-health-monitor-webhooks
+      - gco-health-monitor-keep-warm
     verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -172,6 +188,44 @@ subjects:
     name: gco-health-monitor-sa
     namespace: gco-system
 
+# ─── Health Monitor: keep-warm idle records on Jobs in gco-jobs ────
+# The elected replica writes the idle interval a keep-warm GPU node sat
+# through onto the Job whose pod finished last on it: the
+# gco.aws/keep-warm-idle annotation and gco.aws/keep-warm-idle-open label
+# (gco/services/keep_warm_recorder.py). It reads the Job first and patches
+# its metadata only, with the resourceVersion it read. Another job namespace
+# in job_validation_policy.allowed_namespaces needs this Role and binding
+# there too (docs/GPU_KEEP_WARM.md).
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-health-monitor-keep-warm-records
+  namespace: gco-jobs
+  labels:
+    app: health-monitor
+    project: gco
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-health-monitor-keep-warm-records
+  namespace: gco-jobs
+  labels:
+    app: health-monitor
+    project: gco
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gco-health-monitor-keep-warm-records
+subjects:
+  - kind: ServiceAccount
+    name: gco-health-monitor-sa
+    namespace: gco-system
 # ─── Manifest Processor: namespace-scoped write in gco-jobs ────────
 ---
 apiVersion: rbac.authorization.k8s.io/v1

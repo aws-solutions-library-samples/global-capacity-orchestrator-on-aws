@@ -3538,6 +3538,7 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 | `--check-policy` | | Check the manifests against the target region's deployed policy first and report anything that would be rejected (advisory; submission continues). With `-o json` or `-o yaml` the findings go to stderr, so stdout stays the submission document |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--keep-warm` | | Run the GPU pods on the [keep-warm pool](GPU_KEEP_WARM.md), whose empty nodes stay for `gpu_keep_warm.window` (default 10m) so the next keep-warm GPU Job that fits reuses the node; adds the `gco.aws/keep-warm` node selector and toleration to each Job, CronJob and Pod |
 | `--wait` | `-w` | Wait for job completion (exit status below) |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 
@@ -3583,6 +3584,7 @@ gco jobs submit-sqs MANIFEST_PATH [OPTIONS]
 | `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (default: the configured default namespace, `GCO_DEFAULT_NAMESPACE`; manifest `metadata.namespace` takes precedence) |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--keep-warm` | | Run the GPU pods on the [keep-warm pool](GPU_KEEP_WARM.md), whose empty nodes stay for `gpu_keep_warm.window` (default 10m) so the next keep-warm GPU Job that fits reuses the node; adds the `gco.aws/keep-warm` node selector and toleration to each Job, CronJob and Pod |
 
 `--auto-region` reads the manifest before ranking. A manifest routed to
 [SageMaker HyperPod](HYPERPOD.md#how-work-reaches-hyperpod-nodes) (the
@@ -3622,6 +3624,7 @@ gco jobs submit-direct MANIFEST_PATH [OPTIONS]
 | `--dry-run` | | Validate without applying |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--keep-warm` | | Run the GPU pods on the [keep-warm pool](GPU_KEEP_WARM.md), whose empty nodes stay for `gpu_keep_warm.window` (default 10m) so the next keep-warm GPU Job that fits reuses the node; adds the `gco.aws/keep-warm` node selector and toleration to each Job, CronJob and Pod |
 | `--wait` | `-w` | Wait for job completion; follows a Job, else a TrainJob, as [`gco jobs submit`](#gco-jobs-submit) does, with the same exit status |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 | `--via-ssm` | | `INSTANCE_ID` or `auto`: reach the private API endpoint through an SSM-managed instance, or a self-terminating ephemeral bastion that `auto` provisions and tears down afterwards ([Route selection](#route-selection)). Without it, kubectl uses the endpoint in your kubeconfig |
@@ -3669,6 +3672,7 @@ gate), the same namespace rules and the same routing through the global API.
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--keep-warm` | | Run the GPU pods on the [keep-warm pool](GPU_KEEP_WARM.md), whose empty nodes stay for `gpu_keep_warm.window` (default 10m) so the next keep-warm GPU Job that fits reuses the node; adds the `gco.aws/keep-warm` node selector and toleration to each Job, CronJob and Pod |
 | `--max-spot-price` | | Spot price cap in USD/hour (requires `--spot-instance-type`); see [`gco queue submit`](#gco-queue-submit) |
 | `--spot-instance-type` | | EC2 instance type whose spot price gates dispatch (requires `--max-spot-price`) |
 
@@ -3774,12 +3778,31 @@ training without a second `gco jobs events` call:
     message: 0/6 nodes are available: 6 Insufficient nvidia.com/gpu. preemption: 0/6 nodes are available: 6 No preemption victims found for incoming pod.
 ```
 
-`--output json` exposes the same facts as top-level `node_name`,
-`node_instance_type`, `node_capacity_type`, `node_labels` and `nodes` fields,
-plus `pod_phase` (the phase every pod shares; `null` when they disagree),
-`pod_phases` (count per phase), `scheduled_pods`, `unscheduled_pods`,
-`unscheduled` (one entry per unplaced pod with `reason`, `message`, `since`)
-and `node_lookup_error`. They are absent rather than guessed when nothing is
+**Keep-warm idle time:** for a Job whose pods ran on the
+[keep-warm pool](GPU_KEEP_WARM.md), a `Keep-warm idle time` block lists each
+interval a node sat idle after the Job's pod finished on it, how the interval
+ended (`reused` by the next pod, or `reclaimed` with the node), and the total
+of the closed intervals:
+
+```text
+  Keep-warm idle time
+  ------------------------------------------------------------------------------
+  NODE                          INSTANCE TYPE  SINCE                 SECONDS  ENDED BY
+  ------------------------------------------------------------------------------
+  ip-10-0-1-100.ec2.internal    g5.2xlarge     2026-11-21T18:01:40Z  70       reused
+  ip-10-0-1-100.ec2.internal    g5.2xlarge     2026-11-21T18:09:12Z  -        still idle
+  Closed idle time: 70 s (one or more still open)
+```
+
+`--output json` and `--output yaml` expose the same facts as top-level
+`node_name`, `node_instance_type`, `node_capacity_type`, `node_labels` and
+`nodes` fields, plus `pod_phase` (the phase every pod shares; `null` when they
+disagree), `pod_phases` (count per phase), `scheduled_pods`,
+`unscheduled_pods`, `unscheduled` (one entry per unplaced pod with `reason`,
+`message`, `since`), `node_lookup_error` and `keep_warm` (the keep-warm idle
+intervals as `idle`, `idle_seconds` and `open`; `null` when there are none).
+The blocks above are printed only in table mode, so the structured output stays
+one document. The fields are absent rather than guessed when nothing is
 scheduled yet or the pods have already been garbage-collected, and the counts
 are `null`, not `0`, when the region's bridge predates them. See
 [Get Job](API.md#get-job) for the field-by-field reference.
@@ -4978,6 +5001,7 @@ gco queue submit MANIFEST_PATH [OPTIONS]
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--label` | `-l` | Add labels (`key=value` with a non-empty key; the value may be empty), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--keep-warm` | | Run the GPU pods on the [keep-warm pool](GPU_KEEP_WARM.md), whose empty nodes stay for `gpu_keep_warm.window` (default 10m) so the next keep-warm GPU Job that fits reuses the node; adds the `gco.aws/keep-warm` node selector and toleration to each Job, CronJob and Pod |
 | `--max-spot-price` | | Spot price cap in USD/hour; the job stays queued until the current spot price of `--spot-instance-type` in the target region drops to or below this value. Requires `--spot-instance-type` |
 | `--spot-instance-type` | | EC2 instance type whose spot price gates dispatch (e.g. `g5.xlarge`). Requires `--max-spot-price` |
 

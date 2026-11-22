@@ -818,6 +818,7 @@ def test_dcgm_exporter_runs_on_every_nvidia_gpu_pool_and_nowhere_else(dcgm_pod_s
     }
     assert nvidia_pools == {
         "gpu-x86-pool",
+        "gpu-keep-warm-pool",
         "gpu-arm-pool",
         "gpu-inference-pool",
         "gpu-efa-pool",
@@ -870,6 +871,7 @@ def test_dcgm_exporter_tolerates_only_the_nvidia_pools_taints(dcgm_pod_spec) -> 
         (toleration["key"], toleration["operator"], toleration["effect"])
         for toleration in dcgm_pod_spec["tolerations"]
     ) == [
+        ("gco.aws/keep-warm", "Exists", "NoSchedule"),
         ("nvidia.com/gpu", "Exists", "NoSchedule"),
         ("vpc.amazonaws.com/efa", "Exists", "NoSchedule"),
     ]

@@ -49,6 +49,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Add-on replay input in parts](#add-on-replay-input-in-parts)
   - [Volcano Jobs get their pods](#volcano-jobs-get-their-pods)
   - [Kueue's controller is not preempted](#kueues-controller-is-not-preempted)
+  - [The keep-warm GPU pool](#the-keep-warm-gpu-pool)
   - [CLI exit codes, output and prompts](#cli-exit-codes-output-and-prompts)
   - [MCP server tools](#mcp-server-tools)
   - [Pre-commit hook for contributors](#pre-commit-hook-for-contributors)
@@ -1041,6 +1042,29 @@ preempted it. Until its replacement started, Job submissions failed with
 - **The controller runs at `system-cluster-critical`**, like the AWS Load
   Balancer Controller and Volcano's admission webhook. The redeploy rolls it
   once.
+
+### The keep-warm GPU pool
+
+The release adds `gpu-keep-warm-pool`, which keeps an empty GPU node for a
+window so that short GPU Jobs run back to back reuse it
+([GPU_KEEP_WARM.md](GPU_KEEP_WARM.md)).
+
+- **The pool launches nothing by itself.** Its nodes take only pods that
+  select `gco.aws/keep-warm` and tolerate its taint, so running Jobs stay
+  where they are. Without a `gpu_keep_warm` block in `cdk.json` the window is
+  10 minutes, so an earlier release's `cdk.json` deploys unchanged.
+- **The health monitor rolls once.** It gets a third pre-created election
+  Lease, `gco-health-monitor-keep-warm`, and the Role
+  `gco-health-monitor-keep-warm-records`, which lets it read and patch Jobs in
+  `gco-jobs` to write their idle records.
+- **Node agents tolerate one more taint.** The CloudWatch Observability, EFS
+  CSI, FSx CSI and Pod Identity Agent add-ons, node-exporter, the DCGM
+  exporter and the EFA device plugin tolerate `gco.aws/keep-warm`. The
+  redeploy updates those add-ons' configuration and rolls their DaemonSets
+  once.
+- **Admission judges manifests that select the pool.** A manifest that
+  selects `gco.aws/keep-warm` but could never run on the pool is refused on
+  every submission path. Manifests that don't select it are judged as before.
 
 ### CLI exit codes, output and prompts
 

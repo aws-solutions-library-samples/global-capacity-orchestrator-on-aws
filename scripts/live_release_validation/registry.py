@@ -28,6 +28,7 @@ from .actions import (
     action_final_inventory,
     action_hyperpod,
     action_inference,
+    action_keep_warm,
     action_network_posture,
     action_opencost,
     action_platform_workloads,
@@ -128,6 +129,12 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "Prove a Kueue-queued Job runs inside an AWS Nitro Sandbox",
             ("topology",),
             action_sandboxes,
+        ),
+        ActionDefinition(
+            "keep-warm",
+            "Prove back-to-back keep-warm GPU Jobs share one node and their idle time is recorded",
+            ("topology",),
+            action_keep_warm,
         ),
         ActionDefinition(
             "opencost",

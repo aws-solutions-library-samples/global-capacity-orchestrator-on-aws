@@ -225,7 +225,7 @@ gco jobs logs gpu-test-job -r us-east-1     # the nvidia-smi table
 gco jobs delete gpu-test-job -r us-east-1 -y
 ```
 
-This example sets no TTL, so delete the Job yourself. The GPU node does not wait for that: EKS Auto Mode removes a GPU node once its last pod has finished (after 30 seconds in the batch GPU pools, 5 minutes in the inference pool), and its cost stops with it.
+This example sets no TTL, so delete the Job yourself. The GPU node does not wait for that: EKS Auto Mode starts removing a GPU node 30 seconds after its last pod finishes (5 minutes in the inference pool), and its cost stops when the instance terminates a few minutes later. For many short GPU jobs in a row, `--keep-warm` keeps the node for a window instead ([Keep-Warm GPU Nodes](GPU_KEEP_WARM.md)).
 
 **Done when:** the logs show the `nvidia-smi` table, and `gco jobs get` told you the instance type the job ran on.
 
@@ -310,6 +310,7 @@ Each track picks up after Level 3. Follow the ones that match your work.
   ```
 
 - **Distributed training.** [`examples/kubeflow-trainjob.yaml`](../examples/kubeflow-trainjob.yaml) runs a two-node PyTorch job through the Kubeflow Trainer `TrainJob` API, sized for CPUs so it needs no GPU quota. Submit it with `gco jobs submit-sqs examples/kubeflow-trainjob.yaml -r us-east-1`, read each rank's logs with `gco jobs logs kubeflow-trainjob-example -r us-east-1 --node 1`, and delete it with `gco jobs delete kubeflow-trainjob-example -r us-east-1 -y`. [Distributed Training](DISTRIBUTED_TRAINING.md) covers GPU variants, EFA and Spot.
+- **Many short GPU jobs.** For a hyperparameter search or other back-to-back GPU trials, add `--keep-warm` to the submit command. The job runs on the keep-warm pool, which keeps an empty node for a window (10 minutes by default), so the next job starts on the same node without waiting for a new instance or pulling its image again. A waiting node bills at its full price; [Keep-Warm GPU Nodes](GPU_KEEP_WARM.md) explains the window, the idle-time records and the cost.
 - **Experiment tracking.** [`examples/mlflow-tracking-job.yaml`](../examples/mlflow-tracking-job.yaml) logs a run to the bundled MLflow server and reads it back. Submit it with `gco jobs submit-direct examples/mlflow-tracking-job.yaml -r us-east-1 --via-ssm auto -y`. [Monitoring](MONITORING.md) explains the MLflow and Grafana UIs and how to open them.
 - **Schedulers.** Kueue (quotas and queueing) and Volcano (gang scheduling) are on by default. The [Schedulers overview](SCHEDULERS.md) helps you choose, and [`examples/`](../examples/README.md) has a manifest for each.
 - **AWS accelerators.** [`examples/trainium-job.yaml`](../examples/trainium-job.yaml) and [`examples/inferentia-job.yaml`](../examples/inferentia-job.yaml) request `aws.amazon.com/neuron`, which starts a node from the Neuron pool.

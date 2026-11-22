@@ -138,6 +138,15 @@ spec:
               value: "gco-health-monitor-webhooks"
             - name: WEBHOOK_LEASE_DURATION
               value: "90"
+            # Keep-warm idle records (gco.services.keep_warm_recorder): the same
+            # pre-created Lease pattern, and the keep-warm pool's window from
+            # cdk.json gpu_keep_warm, which every record carries.
+            - name: KEEP_WARM_LEASE_NAME
+              value: "gco-health-monitor-keep-warm"
+            - name: KEEP_WARM_LEASE_DURATION
+              value: "90"
+            - name: GPU_KEEP_WARM_WINDOW_SECONDS
+              value: "{{GPU_KEEP_WARM_WINDOW_SECONDS}}"
             - name: AUTH_SECRET_ARN
               value: "{{AUTH_SECRET_ARN}}"
             - name: DYNAMODB_REGION

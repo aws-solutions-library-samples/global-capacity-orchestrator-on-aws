@@ -6,6 +6,7 @@ import copy
 import hashlib
 import re
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, cast
 from urllib.parse import quote
@@ -36,23 +37,29 @@ def _run_token(run_id: str) -> str:
     return token
 
 
-def _replace_token(value: Any, token: str) -> Any:
+def _replace_token(value: Any, token: str, extra: Mapping[str, str] | None = None) -> Any:
+    """Substitute ``__RUN_TOKEN__``, then each of ``extra``'s placeholders, in every string."""
     if isinstance(value, str):
-        return value.replace("__RUN_TOKEN__", token)
+        value = value.replace("__RUN_TOKEN__", token)
+        for placeholder, replacement in (extra or {}).items():
+            value = value.replace(placeholder, replacement)
+        return value
     if isinstance(value, list):
-        return [_replace_token(item, token) for item in value]
+        return [_replace_token(item, token, extra) for item in value]
     if isinstance(value, dict):
-        return {key: _replace_token(item, token) for key, item in value.items()}
+        return {key: _replace_token(item, token, extra) for key, item in value.items()}
     return value
 
 
-def _load_manifest(ctx: RunContext, filename: str) -> tuple[list[dict[str, Any]], str, str]:
+def _load_manifest(
+    ctx: RunContext, filename: str, tokens: Mapping[str, str] | None = None
+) -> tuple[list[dict[str, Any]], str, str]:
     # _MANIFEST_DIR is anchored at the package root by constants.py; never
     # resolve manifests relative to this module's __file__ (that is exactly
     # what failed in run retry1-8002d6c80f62 when this helper moved here).
     path = _MANIFEST_DIR / filename
     manifests = ctx.job_manager.load_manifests(str(path))
-    manifests = _replace_token(manifests, _run_token(ctx.settings.run_id))
+    manifests = _replace_token(manifests, _run_token(ctx.settings.run_id), tokens)
     job = next(item for item in manifests if item.get("kind") == "Job")
     name = str(job["metadata"]["name"])
     namespace = str(job["metadata"]["namespace"])
@@ -525,7 +532,13 @@ def _complete_job_lifecycle(
     *,
     record: dict[str, Any],
     marker: str,
+    delete: bool = True,
 ) -> dict[str, Any]:
+    """Observe the Job through completion, its log marker and its pods, then delete it.
+
+    With ``delete=False`` the Job is left for the caller, whose checks need
+    it after completion; the run's teardown deletes it if the caller does not.
+    """
     appeared = _wait_for_owned_job_appearance(ctx, record)
     actual_name, actual_namespace = _effective_job_identity(record)
     if appeared is None:
@@ -568,6 +581,8 @@ def _complete_job_lifecycle(
     with ctx.state_lock:
         record["validation_evidence"] = copy.deepcopy(evidence)
         ctx.persist_callback(ctx.checkpoint)
+    if not delete:
+        return evidence
     deletion = _delete_owned_job(ctx, record)
     return {**evidence, "deletion": deletion}
 
@@ -600,6 +615,8 @@ def _run_api_transport_lifecycle(
     manifest_filename: str,
     path: str,
     marker_prefix: str,
+    tokens: Mapping[str, str] | None = None,
+    delete: bool = True,
 ) -> dict[str, Any]:
     """Run one manifest's complete authenticated-API Job lifecycle.
 
@@ -608,9 +625,11 @@ def _run_api_transport_lifecycle(
     reconcile any escaped prior submission, submit through the manifest API,
     then observe appearance, completion, the log marker, and deletion. The
     marker is ``GCO_LIVE_<MARKER_PREFIX>_<run token>`` and must be emitted by
-    the manifest's workload.
+    the manifest's workload. ``tokens`` substitutes further placeholders of
+    the manifest, after the run token; ``delete=False`` leaves the completed
+    Job in place (:func:`_complete_job_lifecycle`).
     """
-    manifests, name, namespace = _load_manifest(ctx, manifest_filename)
+    manifests, name, namespace = _load_manifest(ctx, manifest_filename, tokens)
     token = _run_token(ctx.settings.run_id)
     marker = f"GCO_LIVE_{marker_prefix}_{token}"
     execution_region = ctx.deployment_regions[0]
@@ -707,6 +726,6 @@ def _run_api_transport_lifecycle(
             appearance_timeout_seconds=_job_appearance_timeout(ctx),
         )
 
-    lifecycle = _complete_job_lifecycle(ctx, record=record, marker=marker)
+    lifecycle = _complete_job_lifecycle(ctx, record=record, marker=marker, delete=delete)
     lifecycle["submission"] = submission or {"reconciled_existing_job": True}
     return lifecycle

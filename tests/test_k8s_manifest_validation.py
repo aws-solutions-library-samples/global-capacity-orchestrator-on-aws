@@ -124,10 +124,32 @@ class TestBuiltInNodePoolContracts:
                 f"consolidationPolicy {policy!r}"
             )
 
-    def test_the_shipped_nodepool_count_is_the_expected_seven(self) -> None:
+    def test_the_shipped_nodepool_count_is_the_expected_eight(self) -> None:
         """The parametrized guard above runs over the real glob; make sure it
         cannot pass vacuously because the files moved or were renamed."""
-        assert len(list(MANIFESTS_DIR.glob("4*-nodepool-*.yaml"))) == 7
+        assert len(list(MANIFESTS_DIR.glob("4*-nodepool-*.yaml"))) == 8
+
+    def test_every_budget_reason_is_one_eks_auto_mode_accepts(self) -> None:
+        """Budget reasons are EKS Auto Mode's names, which the clusters accept.
+
+        kubeconform checks them against upstream Karpenter's schema after
+        apply_auto_mode_budget_reasons() renames them, so it would also pass
+        upstream's Unhealthy, which an Auto Mode API server refuses.
+        """
+        named = set()
+        for path in sorted(MANIFESTS_DIR.glob("4*-nodepool-*.yaml")):
+            for document in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+                for budget in (
+                    ((document or {}).get("spec") or {}).get("disruption", {}).get("budgets", [])
+                ):
+                    named.update(budget.get("reasons", []))
+        assert named <= validator.AUTO_MODE_BUDGET_REASONS
+        assert "NodeNotHealthy" in named, "the keep-warm pool names node repair"
+        # Every rename starts from an Auto Mode name and ends outside them.
+        assert set(validator._UPSTREAM_BUDGET_REASONS) <= validator.AUTO_MODE_BUDGET_REASONS
+        assert not set(validator._UPSTREAM_BUDGET_REASONS.values()) & (
+            validator.AUTO_MODE_BUDGET_REASONS
+        )
 
 
 class TestStaticPodTokenBoundaries:
@@ -560,6 +582,93 @@ class TestApiServerDefaults:
 
 
 # ── format_failures ────────────────────────────────────────────────────────────
+
+
+# ── apply_auto_mode_budget_reasons ────────────────────────────────────────────
+
+_AUTO_MODE_POOL = """\
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: demo
+spec:
+  disruption:
+    budgets:
+      - nodes: "100%"
+        reasons: ["Empty"]
+      - nodes: "10%"
+        reasons: ["Underutilized", "NodeNotHealthy", 5]
+      - nodes: "5"
+      - not-a-budget
+"""
+
+
+class TestAutoModeBudgetReasons:
+    """The rendered copy names EKS Auto Mode's node-repair reason as upstream does.
+
+    The catalog's NodePool schema is upstream Karpenter's, which calls the
+    reason Unhealthy; an Auto Mode cluster accepts only NodeNotHealthy.
+    """
+
+    def test_the_auto_mode_reason_gets_the_upstream_name(self) -> None:
+        expected = yaml.safe_load(_AUTO_MODE_POOL)
+        expected["spec"]["disruption"]["budgets"][1]["reasons"] = ["Underutilized", "Unhealthy", 5]
+        rendered = validator.apply_auto_mode_budget_reasons(_AUTO_MODE_POOL)
+        assert list(yaml.safe_load_all(rendered)) == [expected]
+
+    def test_text_without_an_auto_mode_reason_is_untouched(self) -> None:
+        text = _AUTO_MODE_POOL.replace(', "NodeNotHealthy"', "")
+        assert validator.apply_auto_mode_budget_reasons(text) == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # The name outside a NodePool's budgets.
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\ndata:\n  r: NodeNotHealthy\n",
+            # Another NodePool version, and NodePools without budgets to rename.
+            _AUTO_MODE_POOL.replace("karpenter.sh/v1", "karpenter.sh/v1beta1"),
+            "apiVersion: karpenter.sh/v1\nkind: NodePool\nspec: [NodeNotHealthy]\n",
+            "apiVersion: karpenter.sh/v1\nkind: NodePool\nspec:\n  r: NodeNotHealthy\n",
+            "apiVersion: karpenter.sh/v1\nkind: NodePool\nspec:\n  disruption:\n"
+            "    budgets: {reasons: [NodeNotHealthy]}\n",
+            # An empty document and a comment.
+            "---\n---\n# NodeNotHealthy\n",
+        ],
+        ids=["other-kind", "other-version", "spec-list", "no-disruption", "budgets-map", "empty"],
+    )
+    def test_anything_but_a_nodepool_budget_is_untouched(self, text: str) -> None:
+        assert validator.apply_auto_mode_budget_reasons(text) == text
+
+    def test_text_that_is_not_yaml_is_left_for_kubeconform_to_report(self) -> None:
+        text = "kind: NodePool\nreasons: [NodeNotHealthy\n"
+        assert validator.apply_auto_mode_budget_reasons(text) == text
+
+    def test_every_other_document_of_the_file_is_kept(self) -> None:
+        config_map = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n"
+        text = f"---\n{config_map}---\n---\n{_AUTO_MODE_POOL}"
+        documents = list(yaml.safe_load_all(validator.apply_auto_mode_budget_reasons(text)))
+        assert len(documents) == 2, "only the empty document may be dropped"
+        assert documents[0] == yaml.safe_load(config_map)
+        assert "Unhealthy" in documents[1]["spec"]["disruption"]["budgets"][1]["reasons"]
+
+    def test_the_shipped_keep_warm_pool_is_rendered_with_the_upstream_name(
+        self, tmp_path: Path
+    ) -> None:
+        source = MANIFESTS_DIR / "47-nodepool-gpu-keep-warm.yaml"
+        assert '"NodeNotHealthy"' in source.read_text(encoding="utf-8")
+        rendered_path = validator.render_tree([source], tmp_path)[0]
+        (pool,) = [
+            document
+            for document in yaml.safe_load_all(rendered_path.read_text(encoding="utf-8"))
+            if document
+        ]
+        reasons = [
+            reason
+            for budget in pool["spec"]["disruption"]["budgets"]
+            for reason in budget["reasons"]
+        ]
+        assert reasons == ["Empty", "Underutilized", "Drifted", "Unhealthy"]
+        assert pool["spec"]["disruption"]["consolidateAfter"] == "10m"
 
 
 class TestFormatFailures:
