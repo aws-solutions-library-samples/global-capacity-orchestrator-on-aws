@@ -513,17 +513,21 @@ if [ "$finch_socket" -eq 1 ]; then
     log "finch-daemon, which runs it on Finch's own BuildKit."
 elif [ -z "$socket" ]; then
     log ""
-    log "Note: this $runtime VM serves no Docker-compatible socket the container can"
-    log "reach (a host socket connects to nothing across the VM boundary), so the"
-    log "function omits the socket mount. Everyday commands (jobs, status, costs,"
-    log "inference, and stacks operations that build nothing) work as-is."
-    log ""
     if [ "$runtime" = "finch" ]; then
+        log "Note: this Finch VM serves no Docker-compatible socket the container can reach"
+        log "(a host socket connects to nothing across the VM boundary), so the function"
+        log "omits the socket mount. Everyday commands (jobs, status, costs, inference, and"
+        log "stacks operations that build nothing) work as-is."
+        log ""
         log "From v1.8.0, Finch runs finch-daemon in its VM; after upgrading Finch, re-run"
         log "this script and the function mounts its socket. Until then, run build-heavy"
         log "commands ('gco stacks deploy-all', image builds) from a host install with"
         log "Finch as the builder:"
     else
+        log "Note: this script knows no socket of $runtime to share with the container, so"
+        log "the function omits the socket mount. Everyday commands (jobs, status, costs,"
+        log "inference, and stacks operations that build nothing) work as-is."
+        log ""
         log "Build-heavy commands ('gco stacks deploy-all', image builds) need a container"
         log "daemon at CDK synth time, so run them on the host with $runtime as the builder:"
     fi

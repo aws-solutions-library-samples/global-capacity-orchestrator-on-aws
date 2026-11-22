@@ -752,10 +752,23 @@ SHIM
     PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime finch --no-build --rc "$RCFILE"
     [ "$status" -eq 0 ]
     [[ "$output" == *"Socket mount      : none (this Finch VM serves no Docker-compatible socket)"* ]]
-    [[ "$output" == *"Note: this finch VM serves no Docker-compatible socket the container can"* ]]
+    [[ "$output" == *"Note: this Finch VM serves no Docker-compatible socket the container can reach"* ]]
     [[ "$output" == *"From v1.8.0, Finch runs finch-daemon in its VM; after upgrading Finch, re-run"* ]]
     [[ "$output" == *"CDK_DOCKER=finch gco stacks deploy-all -y"* ]]
     [[ "$output" == *"so the pinned aws-cdk-lib / cdk-nag are used."* ]]
+    ! grep -q '/var/run/docker.sock' "$RCFILE"
+}
+
+@test "install with a runtime the script has no socket for omits the mount and names the host-side builder" {
+    make_shim "$SHIMDIR" nerdctl 0
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime nerdctl --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : none (nerdctl has no host socket to share)"* ]]
+    [[ "$output" == *"Note: this script knows no socket of nerdctl to share with the container, so"* ]]
+    [[ "$output" == *"run them on the host with nerdctl as the builder:"* ]]
+    [[ "$output" == *"CDK_DOCKER=nerdctl gco stacks deploy-all -y"* ]]
+    [[ "$output" != *"finch-daemon"* ]]
+    [[ "$output" != *"VM serves no"* ]]
     ! grep -q '/var/run/docker.sock' "$RCFILE"
 }
 
