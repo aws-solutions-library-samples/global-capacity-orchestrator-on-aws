@@ -15,11 +15,11 @@
 #   - integration:autopilot:claude-code-boot      — `gco autopilot` self-installs the pin + boots MCP/Bedrock to the cred boundary
 #   - integration:autopilot:codex-boot            — `gco autopilot --engine codex` self-installs the pin + boots MCP/Bedrock to the cred boundary
 #   - integration:autopilot:opencode-boot         — `gco autopilot --engine opencode` self-installs the pin + boots MCP/Bedrock to the cred boundary
-#   - integration:dev-alias:docker                — verify runner Docker, build gco-dev, prove the generated `gco` alias runs and builds through the shared socket
+#   - integration:dev-alias:docker                — runner Docker: build gco-dev, run the generated `gco` alias, build through its socket
 #   - integration:dev-alias:docker-custom-socket  — run dockerd off /var/run/docker.sock, prove socket discovery finds it through DOCKER_HOST
-#   - integration:dev-alias:finch                 — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs and builds through finch-daemon
+#   - integration:dev-alias:finch                 — latest Finch (rootful): build gco-dev, run the alias, build through finch-daemon
 #   - integration:dev-alias:none                  — prove setup-dev-alias.sh refuses cleanly when no runtime is installed
-#   - integration:dev-alias:podman                — install latest Podman, build gco-dev, prove the generated `gco` alias runs and builds through Podman's API
+#   - integration:dev-alias:podman                — latest Podman: build gco-dev, run the alias, build through Podman's API
 #   - integration:docker:cost-monitor             — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:dev-container            — Dockerfile.dev native-arch matrix (amd64 + arm64 runners)
 #   - integration:docker:health-monitor           — build + import smoke + functional boot/probe/shutdown contract
