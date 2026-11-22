@@ -120,6 +120,7 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [How It Works](#how-it-works-1)
   - [Using Regional APIs](#using-regional-apis)
   - [Security Considerations](#security-considerations)
+- [API Gateway IP Address Type](#api-gateway-ip-address-type)
 - [Queue Processor (SQS Consumer)](#queue-processor-sqs-consumer)
   - [Queue Processor Configuration](#configuration)
   - [Disabling the Built-In Consumer](#disabling-the-built-in-consumer)
@@ -2990,6 +2991,50 @@ Regional APIs preserve the backend authentication model used by the global path:
 - Runtime verification of the SSM-registered internal ALB
 - Public SSM trust only; the root private key remains in the certificate-manager's KMS-encrypted secret
 - No public exposure of the ALB or EKS API
+
+## API Gateway IP Address Type
+
+The global API and every regional API bridge accept IPv4 clients unless
+`api_gateway.ip_address_type` in `cdk.json` is `dualstack`:
+
+```json
+"api_gateway": {
+  "throttle_rate_limit": 1000,
+  "throttle_burst_limit": 2000,
+  "log_level": "INFO",
+  "metrics_enabled": true,
+  "tracing_enabled": true,
+  "ip_address_type": "dualstack"
+}
+```
+
+After the next `gco stacks deploy-all -y`, API Gateway answers each API's
+`execute-api` host name with IPv6 (AAAA) records as well as IPv4 (A) records,
+so clients on IPv6-only or IPv6-preferring networks reach GCO directly. The
+endpoint URLs stay the same, and the change takes effect when the stack update
+finishes. `ipv4`, the default, removes the IPv6 records again. Both endpoint
+types GCO creates take either value: the edge-optimized global API in the
+`aws` partition and the Regional APIs everywhere else.
+
+Before you switch:
+
+- **`aws:SourceIp` conditions.** A caller whose identity-based policy limits
+  `execute-api:Invoke` to IPv4 ranges with `aws:SourceIp` is refused once it
+  connects over IPv6. Add the caller's IPv6 ranges first. GCO's own resource
+  policies have no such condition.
+- **The WAF rate limit.** The rate-based rule behind `waf.per_ip_rate_limit`
+  counts requests per source address. A client usually holds a whole IPv6
+  prefix and can send from many of its addresses, each with its own budget,
+  so the rule limits an IPv6 client less than an IPv4 one.
+
+To check the result, look up the host's AAAA records, for example
+`dig AAAA <api-id>.execute-api.us-east-2.amazonaws.com`. The host names are
+in the `ApiEndpoint` output of the `gco-api-gateway` stack and the
+`RegionalApiEndpoint` output of each `gco-regional-api-REGION` stack.
+
+The setting covers only the API Gateway endpoints that clients call. GCO's
+VPCs, EKS clusters, internal ALBs and Global Accelerator stay IPv4, and so do
+the proxy Lambdas' connections to them.
 
 ---
 

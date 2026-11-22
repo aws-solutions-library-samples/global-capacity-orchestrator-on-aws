@@ -114,15 +114,16 @@
     "gpu_keep_warm": {
       "window": "10m"
     },
-    "_comment_api_gateway": "Authenticated API behavior. In the commercial 'aws' partition the global REST API is edge-optimized and its control/inference proxies use Global Accelerator; in other partitions it is regional and aggregate-only, the Global Accelerator proxy routes are omitted, and the always-deployed regional API bridges are the workload ingress. Every IAM-authorized route, on the global API or a regional bridge, needs the caller's own execute-api:Invoke permission: the global API's resource policy admits only GET /studio/* (the analytics sign-in pages, which carry no IAM identity) and each bridge's only the cross-region aggregator role. throttle/logging/metrics/tracing settings apply in every partition. The former regional_api_enabled key has no effect; the synth warns about it and ignores it (see docs/UPGRADING.md).",
+    "_comment_api_gateway": "Authenticated API behavior. In the commercial 'aws' partition the global REST API is edge-optimized and its control/inference proxies use Global Accelerator; in other partitions it is regional and aggregate-only, the Global Accelerator proxy routes are omitted, and the always-deployed regional API bridges are the workload ingress. Every IAM-authorized route, on the global API or a regional bridge, needs the caller's own execute-api:Invoke permission: the global API's resource policy admits only GET /studio/* (the analytics sign-in pages, which carry no IAM identity) and each bridge's only the cross-region aggregator role. throttle/logging/metrics/tracing settings apply in every partition. The former regional_api_enabled key has no effect; the synth warns about it and ignores it (see docs/UPGRADING.md). ip_address_type is ipv4 (the default) or dualstack, for the global API and every regional API bridge: dualstack adds IPv6 (AAAA) answers to their execute-api host names and keeps the endpoint URLs. Before switching, add IPv6 ranges to any aws:SourceIp condition in your callers' policies. GCO's VPCs, clusters and internal load balancers stay IPv4 either way. See docs/CUSTOMIZATION.md (API Gateway IP Address Type).",
     "api_gateway": {
       "throttle_rate_limit": 1000,
       "throttle_burst_limit": 2000,
       "log_level": "INFO",
       "metrics_enabled": true,
-      "tracing_enabled": true
+      "tracing_enabled": true,
+      "ip_address_type": "ipv4"
     },
-    "_comment_waf": "WAFv2 web ACL in front of API Gateway. per_ip_rate_limit is the WAF rate-based rule's request budget per source IP over a 5-minute window. See https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-rate-based.html.",
+    "_comment_waf": "WAFv2 web ACL in front of API Gateway. per_ip_rate_limit is the WAF rate-based rule's request budget per source IP over a 5-minute window. With api_gateway.ip_address_type dualstack, each IPv6 address a client sends from has its own budget. See https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-rate-based.html.",
     "waf": {
       "per_ip_rate_limit": 100
     },

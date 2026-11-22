@@ -248,6 +248,7 @@ BLOCK_KEYS: dict[str, frozenset[str]] = {
             "log_level",
             "metrics_enabled",
             "tracing_enabled",
+            "ip_address_type",
             "regional_api_enabled",  # deprecated (DEPRECATED_BLOCK_KEYS)
         }
     ),
@@ -747,6 +748,13 @@ def parse_block_flag(
         f"{problem} Earlier releases read an empty string here as false, so this setting "
         "has been off. Write false to keep it off, or true to turn it on."
     )
+
+
+#: The IP address types API Gateway accepts for the global API and the regional
+#: API bridges (``api_gateway.ip_address_type``). ``dualstack`` adds IPv6
+#: (AAAA) answers to the default execute-api host names; GCO's VPCs, clusters
+#: and internal load balancers stay IPv4.
+API_GATEWAY_IP_ADDRESS_TYPES = ("ipv4", "dualstack")
 
 
 def _is_ipv4_cidr(value: object) -> bool:
@@ -1645,6 +1653,13 @@ class ConfigLoader:
         for flag in ("metrics_enabled", "tracing_enabled"):
             if flag in api_gw_config and not isinstance(api_gw_config[flag], bool):
                 raise ConfigValidationError(f"api_gateway.{flag} must be a boolean")
+
+        ip_address_type = api_gw_config.get("ip_address_type", "ipv4")
+        if ip_address_type not in API_GATEWAY_IP_ADDRESS_TYPES:
+            raise ConfigValidationError(
+                "api_gateway.ip_address_type must be one of "
+                f"{list(API_GATEWAY_IP_ADDRESS_TYPES)}, got {ip_address_type!r}"
+            )
 
     def _validate_eks_cluster_config(self) -> None:
         """Validate EKS cluster configuration"""
@@ -2950,6 +2965,9 @@ class ConfigLoader:
             - log_level: CloudWatch logging level (OFF, ERROR, INFO)
             - metrics_enabled: Enable CloudWatch metrics
             - tracing_enabled: Enable X-Ray tracing
+            - ip_address_type: "ipv4" (default) or "dualstack", the IP
+              address types that can invoke the global API and the regional
+              API bridges
 
             A deprecated ``regional_api_enabled`` key is passed through
             unread (:data:`DEPRECATED_BLOCK_KEYS`): callers reach the
@@ -2962,6 +2980,7 @@ class ConfigLoader:
             "log_level": "INFO",
             "metrics_enabled": True,
             "tracing_enabled": True,
+            "ip_address_type": "ipv4",
         }
         return {**default_config, **(self.app.node.try_get_context("api_gateway") or {})}
 

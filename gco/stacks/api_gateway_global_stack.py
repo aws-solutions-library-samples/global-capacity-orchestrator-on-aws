@@ -66,6 +66,7 @@ from aws_cdk import aws_wafv2 as wafv2
 from aws_cdk import custom_resources as cr
 from constructs import Construct
 
+from gco.stacks.api_ip_address_type import api_ip_address_type
 from gco.stacks.constants import (
     AGGREGATOR_REGIONAL_API_ROUTES,
     DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -205,6 +206,7 @@ class GCOApiGatewayGlobalStack(Stack):
             "log_level": "INFO",
             "metrics_enabled": True,
             "tracing_enabled": True,
+            "ip_address_type": "ipv4",
         }
         if api_gateway_config is not None:
             configured_api_gateway = api_gateway_config
@@ -1116,12 +1118,16 @@ class GCOApiGatewayGlobalStack(Stack):
             if self.ga_dns is not None
             else apigateway.EndpointType.REGIONAL
         )
+        ip_address_type = str(self.api_gateway_config.get("ip_address_type", "ipv4"))
         api = apigateway.RestApi(
             self,
             "GCOGlobalApi",
             rest_api_name=f"{self.project_name}-global-api",
             description="Authenticated global aggregation API for GCO",
-            endpoint_types=[endpoint_type],
+            endpoint_configuration=apigateway.EndpointConfiguration(
+                types=[endpoint_type],
+                ip_address_type=api_ip_address_type(ip_address_type),
+            ),
             deploy=True,
             deploy_options=apigateway.StageOptions(
                 stage_name="prod",
