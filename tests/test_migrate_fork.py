@@ -150,6 +150,27 @@ def test_aws_solutions_guidance_page_is_preserved(migrate: Any, rules: tuple[Any
         assert [o.rule.name for o in report.preserved] == ["aws-solutions-guidance-page"]
 
 
+def test_aws_startups_case_study_is_preserved(migrate: Any, rules: tuple[Any, ...]) -> None:
+    """The AWS Startups case study of the project keeps its address.
+
+    Like the guidance page, its slug ends in the repository name after a
+    hyphen, and the page belongs to AWS and describes the upstream project.
+    """
+    url = (
+        "https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-"
+        "with-mber-2-using-global-capacity-orchestrator-on-aws"
+    )
+    for line in (
+        f"The [AWS Startups case study]({url}) describes how.",
+        f"| [Manifold Bio accelerates protein design with mBER-2]({url}) | Production |",
+        f"[case study]({url}#overview)",
+    ):
+        report = migrate.Report()
+        assert migrate.rewrite_text(line, "README.md", rules, report) == line
+        assert report.rewrites == [], f"rewrote the case study link: {line}"
+        assert [o.rule.name for o in report.preserved] == ["aws-startups-case-study"]
+
+
 def test_original_org_references_survive_untouched(migrate: Any, rules: tuple[Any, ...]) -> None:
     """References from the project's original ``awslabs`` home never rewrite.
 

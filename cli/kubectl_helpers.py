@@ -122,6 +122,28 @@ def kubectl_context_flags(context: str | None) -> list[str]:
     return [] if context is None else [f"--context={context}"]
 
 
+#: kubectl's wording when it never reached the API server (connect, DNS, TLS
+#: and request timeouts); kubectl prefixes most of them with the first phrase.
+KUBECTL_CONNECT_FAILURES = (
+    "unable to connect to the server",
+    "i/o timeout",
+    "no route to host",
+    "connection refused",
+    "dial tcp",
+    "tls handshake timeout",
+    "context deadline exceeded",
+    "client.timeout exceeded",
+    "no such host",
+    "network is unreachable",
+)
+
+
+def kubectl_could_not_connect(stderr: str) -> bool:
+    """Return whether a failed kubectl call never reached the API server."""
+    lowered = stderr.lower()
+    return any(phrase in lowered for phrase in KUBECTL_CONNECT_FAILURES)
+
+
 def update_kubeconfig(cluster_name: str, region: str) -> str | None:
     """Update kubeconfig for an EKS cluster, preserving an active tunnel pin.
 

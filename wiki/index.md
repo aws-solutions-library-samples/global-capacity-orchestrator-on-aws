@@ -64,12 +64,40 @@ has the side-by-side comparison with running clusters yourself, and
 [Core Concepts](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/CONCEPTS.md)
 explains the ideas behind it.
 
+## In production
+
+Manifold Bio runs its protein design campaigns on GCO through Regatta, a
+scheduler its engineers built on GCO's API. At its peak the system held
+**4,540 GPUs at once across nine AWS Regions**:
+
+![World map of the 4,540 GPUs Manifold Bio held at one moment across nine AWS Regions, by Region and GPU type](assets/images/manifold-bio-gpus-across-regions.jpg)
+*Peak GPUs held at one moment, by Region and GPU type. Chart from the AWS
+Startups case study
+[Manifold Bio accelerates protein design with mBER-2 using Global Capacity Orchestrator on AWS](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws),
+reproduced with attribution.*
+
+Compared with its earlier single-Region setup, Manifold reports:
+
+- campaigns approaching 100 million designs, up from about 10 million, on
+  up to 4,540 GPUs instead of about 256;
+- campaigns that finish in about a week instead of a month, and iteration
+  cycles of two days instead of one week;
+- half the compute cost per designed binder, with price-aware Spot use
+  across 10 Regions.
+
+The
+[case study](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws)
+tells the whole story, and the README's
+[In production](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#in-production-at-manifold-bio)
+section has the numbers side by side.
+
 ## What it costs
 
 A single-Region deployment with default settings carries roughly
-**$210/month of fixed platform cost** (EKS control plane, NAT gateways, the
-internal ALB, Global Accelerator, CloudWatch); GPU instances dominate real
-spend and scale with usage, and multi-Region deployments scale linearly.
+**$565/month of fixed platform cost** (the EC2 nodes that run GCO's own
+services, the EKS control plane, NAT gateways, the internal ALB, Global
+Accelerator, CloudWatch); GPU instances dominate real spend and scale with
+usage, and multi-Region deployments scale linearly.
 Optional add-ons cost nothing until you enable them. The README's
 [sample cost table](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#sample-cost-table)
 carries the itemized numbers and their pricing date.
@@ -92,9 +120,10 @@ on GitHub — the
 and the
 [documentation index](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/README.md)
 — so the deep material is always one click away and never duplicated here.
-New to Kubernetes itself? The
+Want to learn it hands-on? The
 [Learning Path](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/LEARNING_PATH.md)
-adds a primer and role-based tracks. Every trade-off in the project is
+goes one level at a time, from a free first look to GPU jobs and shared
+storage, with a Kubernetes primer and tracks for each role. Every trade-off in the project is
 resolved against ten prioritized
 [tenets](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/TENETS.md),
 beginning with *Protect Workloads, Data, and Accounts*.

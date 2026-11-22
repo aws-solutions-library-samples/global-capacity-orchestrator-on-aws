@@ -1153,14 +1153,18 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         "related": ["SCHEDULERS", "VOLCANO", "YUNIKORN"],
     },
     "LEARNING_PATH": {
-        "summary": "Staged, hands-on onboarding path for users new to GCO or Kubernetes — a Kubernetes primer, cost-boundary milestones, and role-based tracks that sequence the other guides.",
+        "summary": "Hands-on path through GCO in five levels (a free first look, a first job, a GPU job, keeping job outputs, pipelines) with a Kubernetes primer, the cost of each level, and tracks for ML engineers, operators, platform engineers, builders and contributors.",
         "topics": [
+            "getting-started",
             "concepts",
             "quickstart",
             "cli",
             "jobs",
+            "gpu",
+            "storage",
             "inference",
             "schedulers",
+            "cost",
         ],
         "keywords": [
             "learning path",
@@ -1172,9 +1176,12 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
             "beginner",
             "kubernetes",
             "first job",
+            "first gpu job",
+            "gpu quota",
+            "job outputs",
             "role based",
         ],
-        "related": ["CONCEPTS", "CLI", "SCHEDULERS"],
+        "related": ["CONCEPTS", "CLI", "SCHEDULERS", "INFERENCE", "CLUSTER_SHARED_BUCKET"],
     },
     "LIVE_RELEASE_VALIDATION": {
         "summary": "Local operator deploy-test-destroy harness for exact-commit live validation, guaranteed cleanup, and manually attached pull request reports.",
@@ -1331,7 +1338,7 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         "related": ["ARCHITECTURE", "RUNBOOKS", "CLI", "INFERENCE"],
     },
     "README": {
-        "summary": "Documentation index — the top-level guide map for the rest of the docs/ tree.",
+        "summary": "Documentation index — the top-level guide map for the rest of the docs/ tree, and the case studies of GCO in production (Manifold Bio's protein design campaigns).",
         "topics": ["concepts", "multi-region", "gpu", "capacity", "inference", "quickstart"],
         "keywords": [
             "index",
@@ -1340,6 +1347,8 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
             "documentation",
             "table of contents",
             "getting started",
+            "case study",
+            "production",
         ],
         "related": ["CONCEPTS", "ARCHITECTURE"],
     },

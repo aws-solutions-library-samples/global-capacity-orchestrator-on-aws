@@ -9,6 +9,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 - [Guides](#guides)
 - [Schedulers & Orchestrators](#schedulers--orchestrators)
 - [Supplementary](#supplementary)
+- [Case Studies](#case-studies)
 - [Reading Order](#reading-order)
 
 ## Guides
@@ -17,7 +18,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 |----------|----------|-------------|
 | [Project Tenets](../TENETS.md) | Everyone | Normative north star and prioritized decision guidance for safety, truth, security, accelerator policy, operations, and maintainability |
 | [Core Concepts](CONCEPTS.md) | New users | What GCO is, the problems it solves, and how the key components work together |
-| [Learning Path](LEARNING_PATH.md) | New users / new to Kubernetes | A staged, hands-on path from zero to productive, with a Kubernetes primer and role-based tracks |
+| [Learning Path](LEARNING_PATH.md) | New users / new to Kubernetes | A hands-on path in five levels, from a free first look to GPU jobs, shared storage and pipelines, with a Kubernetes primer, the cost of each level, and tracks for ML engineers, operators, platform engineers, builders and contributors |
 | [Architecture](ARCHITECTURE.md) | Engineers | Deep dive into the multi-region infrastructure, security layers (including verified in-cluster TLS), data flow, and scale characteristics |
 | [Quick Start](../QUICKSTART.md) | New users | Get running in under 60 minutes — install, deploy, submit your first job |
 | [CLI Reference](CLI.md) | Operators | Complete command reference for all `gco` CLI commands |
@@ -73,12 +74,18 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [openapi/](openapi/) | Generated OpenAPI documents for every HTTP surface — the four services (`scripts/generate_openapi.py`), the two AWS API Gateways read out of the synthesized CDK stacks (`scripts/generate_api_gateway_openapi.py`) and the in-cluster Gateway composed from its HTTPRoute (`scripts/generate_cluster_gateway_openapi.py`); rendered into spec sheets, an interaction diagram and Swagger UI consoles under [`diagrams/api_specs/`](../diagrams/api_specs/README.md) and on the project site |
 | [iam-policies/](iam-policies/) | [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) policy templates for different access levels |
 
+## Case Studies
+
+| Case study | Description |
+|------------|-------------|
+| [Manifold Bio accelerates protein design with mBER-2](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws) | GCO's first production deployment (AWS Startups). Manifold Bio's protein design campaigns run on GCO through Regatta, a scheduler Manifold's engineers built on GCO's API, and held up to 4,540 GPUs at once across nine AWS Regions. Manifold reports campaigns 10 times larger, finished in about a week instead of a month, at half the compute cost per designed binder. The [README](../README.md#in-production-at-manifold-bio) has the numbers side by side |
+
 ## Reading Order
 
 If you're new to GCO:
 
 1. [Project Tenets](../TENETS.md) — understand the north star and how trade-offs are resolved
-2. [Learning Path](LEARNING_PATH.md) — the guided route through the docs below, with a Kubernetes primer for newcomers
+2. [Learning Path](LEARNING_PATH.md) — learn GCO hands-on, one level at a time, with a Kubernetes primer for newcomers
 3. [Core Concepts](CONCEPTS.md) — understand what it does
 4. [Quick Start](../QUICKSTART.md) — get it running
 5. [CLI Reference](CLI.md) — learn the commands

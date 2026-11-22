@@ -3357,6 +3357,48 @@ def test_cli_direct_submission_ignores_blank_kubectl_output_lines() -> None:
     assert result["resources"] == ["configmap/a created", "secret/b created"]
 
 
+def test_cli_direct_submission_through_a_tunnel_reaches_every_kubectl_call() -> None:
+    """The existing-Job lookup, its replacement and the apply all use the SSM route."""
+    import json
+
+    manager = _manager()
+    manager._aws_client.get_regional_stack.return_value = SimpleNamespace(
+        cluster_name="gco-us-east-1"
+    )
+    calls: list[list[str]] = []
+    finished = {"status": {"conditions": [{"type": "Complete", "status": "True"}]}}
+
+    def run(cmd: list[str], **_kwargs: Any) -> SimpleNamespace:
+        calls.append(list(cmd))
+        stdout = json.dumps(finished) if "get" in cmd else "job.batch/hello created\n"
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    manifests = [
+        {"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "hello"}, "spec": {}}
+    ]
+    with (
+        patch("cli.kubectl_helpers.update_kubeconfig", return_value="ctx"),
+        patch("subprocess.run", side_effect=run),
+    ):
+        result = manager.submit_job_direct(
+            manifests,
+            "us-east-1",
+            server="https://127.0.0.1:8443",
+            tls_server_name="ABC.gr7.us-east-1.eks.amazonaws.com",
+        )
+
+    flags = [
+        "--context=ctx",
+        "--server",
+        "https://127.0.0.1:8443",
+        "--tls-server-name",
+        "ABC.gr7.us-east-1.eks.amazonaws.com",
+    ]
+    assert [call[1:6] for call in calls] == [flags] * 3
+    assert [call[6] for call in calls] == ["get", "delete", "apply"]
+    assert result["job_name"] == "hello"
+
+
 def test_job_store_expired_claim_dedup_ignores_an_older_reappearance() -> None:
     from gco.services.template_store import JobStatus
 

@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from types import FrameType
 from typing import Any
 
+import click
+
 from . import ephemeral_bastion, kubectl_helpers, ssm_tunnel
 from .output import confirm
 
@@ -545,3 +547,79 @@ def open_api_server_tunnel(
             finally:
                 if created_bastion is not None:
                     teardown_bastion(formatter, created_bastion, region, project_name)
+
+
+def via_ssm_options(func: Callable[..., Any]) -> Callable[..., Any]:
+    """``--via-ssm``, ``--bastion-ttl-minutes`` and ``--yes`` for a kubectl-path command.
+
+    For the commands that run kubectl against the kubeconfig endpoint unless
+    asked to tunnel (``jobs submit-direct``, ``files ls`` and ``files
+    download``). :func:`via_ssm_route` opens the route they ask for.
+    """
+    func = click.option(
+        "--yes",
+        "-y",
+        "assume_yes",
+        is_flag=True,
+        help="Skip the confirmation prompt for an `--via-ssm auto` bastion",
+    )(func)
+    func = click.option(
+        "--bastion-ttl-minutes",
+        type=int,
+        default=ephemeral_bastion.DEFAULT_TTL_MINUTES,
+        show_default=True,
+        help="Self-terminate backstop (minutes) for an `--via-ssm auto` bastion.",
+    )(func)
+    func = click.option(
+        "--via-ssm",
+        "via_ssm",
+        metavar="INSTANCE_ID|auto",
+        help=(
+            "Reach the private API endpoint through an SSM-managed instance: an instance "
+            "id, or 'auto' to provision a self-terminating ephemeral bastion and tear it "
+            "down afterwards. Without it, kubectl uses the endpoint in your kubeconfig."
+        ),
+    )(func)
+    return func
+
+
+@contextmanager
+def via_ssm_route(
+    formatter: Any,
+    *,
+    cluster: str,
+    region: str,
+    via_ssm: str | None,
+    bastion_ttl_minutes: int | None = None,
+    assume_yes: bool = False,
+) -> Iterator[dict[str, str | None]]:
+    """Yield kubectl's ``server``/``tls_server_name`` overrides for an opt-in SSM route.
+
+    Without ``via_ssm`` nothing is resolved or announced, and the empty mapping
+    leaves kubectl on the kubeconfig endpoint, as these commands always did.
+    With it, :func:`open_api_server_tunnel` picks and opens the route the way
+    ``gco cluster tunnel`` does, and closes the tunnel and any ``auto`` bastion
+    when the ``with`` body exits.
+    """
+    if not via_ssm:
+        yield {}
+        return
+    with open_api_server_tunnel(
+        formatter,
+        cluster=cluster,
+        region=region,
+        via_ssm=via_ssm,
+        bastion_ttl_minutes=bastion_ttl_minutes,
+        assume_yes=assume_yes,
+    ) as session:
+        yield {"server": session.server, "tls_server_name": session.tls_server_name}
+
+
+def unreachable_endpoint_hint(region: str) -> str:
+    """What to try when kubectl, run without ``--via-ssm``, never reached the API server."""
+    return (
+        "kubectl could not reach the cluster's API endpoint, which is PRIVATE by default. "
+        "Re-run with --via-ssm auto to reach it through a self-terminating SSM bastion; "
+        f"kubectl also needs an EKS access entry (gco stacks access -r {region}). "
+        f"gco cluster doctor --region {region} checks both."
+    )

@@ -30,10 +30,13 @@
 
 <p>
   <a href="QUICKSTART.md"><b>Quick Start</b></a> ·
+  <a href="docs/LEARNING_PATH.md"><b>Learning Path</b></a> ·
   <a href="docs/README.md"><b>Documentation</b></a> ·
   <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/"><b>Wiki</b></a> ·
   <a href="examples/README.md"><b>Examples</b></a> ·
-  <a href="docs/CLI.md"><b>CLI Reference</b></a> ·
+  <a href="docs/API.md"><b>API</b></a> ·
+  <a href="docs/CLI.md"><b>CLI</b></a> ·
+  <a href="gco_mcp/README.md"><b>MCP</b></a> ·
   <a href="CONTRIBUTING.md"><b>Contributing</b></a>
 </p>
 
@@ -41,9 +44,40 @@
 
 **Global Capacity Orchestrator (GCO)** runs accelerated workloads — LLM training and inference, batch ML, HPC — on [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) clusters in as many AWS Regions as you configure, behind one [IAM](https://aws.amazon.com/iam/)-authenticated [API](docs/API.md), [CLI](docs/CLI.md) and [MCP server](gco_mcp/README.md). It finds where NVIDIA GPU, [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/), [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) and CPU capacity actually is, places jobs there, and serves inference endpoints with automatic cross-Region failover. [AWS Parallel Computing Service](docs/PCS.md) (Slurm) and [Amazon SageMaker HyperPod](docs/HYPERPOD.md) are available as optional additional compute backends.
 
+**In production:** Manifold Bio held **4,540 GPUs at once across nine AWS Regions** through GCO, and its protein design campaigns now finish in about a week instead of a month. [See the numbers](#in-production-at-manifold-bio).
+
 ![A recorded gco session: fleet status, capacity discovery, four schedulers, shared storage, a vector search and live LLM inference](demo/live_demo.gif)
 
 <sub>A real `gco` session, reproducible from [`demo/live_demo.sh`](demo/live_demo.sh): fleet status, capacity discovery, four schedulers plus KEDA, shared storage, a globally replicated vector store and live LLM inference. More recordings are under [See it running](#see-it-running).</sub>
+
+## In production at Manifold Bio
+
+[Manifold Bio](https://manifold.bio/) designs protein therapeutics with AI and tests them at a scale where one experiment covered a million designs, so the GPUs that design candidates set the pace of its research. Its engineers built Regatta, a scheduler that sends each design run to GCO's API, and GCO places the work in a Region where accelerators are available. That system is GCO's first production deployment. The [AWS Startups case study](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws) tells the story, and the numbers below are Manifold's.
+
+<p align="center">
+  <img src="images/manifold-bio-gpus-across-regions.jpg" alt="World map of the 4,540 GPUs Manifold Bio held at one moment across nine AWS Regions: Oregon 407, Ohio 852, Virginia 460, London 457, Frankfurt 834, Stockholm 281, Mumbai 398, Seoul 145 and Tokyo 706. By GPU type: T4 54%, RTX PRO 6000 20%, L40S 16%, A10G 6% and A100 4%." width="49%">
+  <img src="images/manifold-bio-regatta-scaling.jpg" alt="Stacked area chart of the GPUs Regatta held by Region during one campaign of about five hours, adding 2,018 GPUs in 28.5 minutes on the way to a peak of 4,540: Americas 1,719, Europe 1,572 and Asia Pacific 1,249." width="49%">
+</p>
+
+<sub>Left: the GPUs Manifold held at one moment, by Region and GPU type. Right: the GPUs held during one campaign, by Region. Charts from the AWS Startups case study [Manifold Bio accelerates protein design with mBER-2 using Global Capacity Orchestrator on AWS](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws), reproduced with attribution.</sub>
+
+| | Before GCO and Regatta | With GCO and Regatta |
+|---|---|---|
+| GPUs for a campaign | About 256, in one Region | Up to **4,540** at once, across nine Regions |
+| Campaign size | About 10 million designs | Approaching **100 million** designs |
+| Time to finish a campaign | About a month | About **a week** |
+| One iteration cycle | About a week | **Two days** |
+| Compute cost per designed binder | Baseline | **Half**, with price-aware Spot use across 10 Regions |
+| Designs in the best hour¹ | 10,441 | **826,691** |
+| Designs in the best 24 hours¹ | 212,330 | **4.6 million** |
+
+One campaign added **2,018 GPUs in 28.5 minutes** on its way to that peak, and a production campaign reached **1.8 million new designs an hour**, counted without length adjustment. One scientist or engineer can now launch a multi-Region run on hundreds of GPUs in minutes, and increasingly hands that launch to an agent working under their direction.
+
+> "We needed a clean engineering solution that could enable tens of millions of protein designs in a week."
+>
+> — Erik Swanson, AI/ML Team Lead, Manifold Bio
+
+<sub>¹ Length-adjusted (384-residue equivalents) and counted only on runs comparable with the earlier baseline. These two gains also include a newer mBER protocol that saves more designs per design task.</sub>
 
 ## Why GCO?
 
@@ -72,6 +106,7 @@ Running accelerated workloads across Regions means finding capacity, standing up
 **When to use GCO:**
 
 - You need to run GPU workloads (training, inference, batch processing)
+- You run bursts of GPU work that outgrow one Region's capacity, like [Manifold Bio's protein design campaigns](#in-production-at-manifold-bio)
 - You want to deploy inference endpoints across multiple regions with a single command
 - You want multi-region redundancy without managing multiple clusters
 - You prefer [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) authentication over kubeconfig management
@@ -82,11 +117,13 @@ Running accelerated workloads across Regions means finding capacity, standing up
 
 A Region can also attach an [AWS PCS](docs/PCS.md) cluster — Slurm's controller run by AWS, EC2 node groups launched from zero, reached through the same `gco slurm` surface as Slinky — and a [SageMaker HyperPod](docs/HYPERPOD.md) cluster whose instance groups join the EKS cluster as nodes with HyperPod's deep health checks and automatic node replacement.
 
-**Why it's different.** Capacity-aware placement tools and auto-region workflows, partition-aware authenticated routing, full-stack observability ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) dashboards, alarms, [SNS](https://docs.aws.amazon.com/sns/latest/dg/welcome.html)), and a [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app validated across the full curated configuration matrix in CI. Read [Core Concepts](docs/CONCEPTS.md) for the ideas behind it and the [Learning Path](docs/LEARNING_PATH.md) if Kubernetes is new to you.
+**Why it's different.** Capacity-aware placement tools and auto-region workflows, partition-aware authenticated routing, full-stack observability ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) dashboards, alarms, [SNS](https://docs.aws.amazon.com/sns/latest/dg/welcome.html)), and a [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app validated across the full curated configuration matrix in CI. Read [Core Concepts](docs/CONCEPTS.md) for the ideas behind it, and follow the [Learning Path](docs/LEARNING_PATH.md) to learn it hands-on, Kubernetes included.
 
 </details>
 
 ## Get started
+
+The steps below are the fast path. To learn GCO one idea at a time instead, follow the [Learning Path](docs/LEARNING_PATH.md): it starts with a level that costs nothing, then takes you through a first job, a GPU job, shared storage and pipelines, and on to tracks for ML engineers, operators, platform engineers and builders.
 
 ### Prerequisites
 
@@ -208,7 +245,7 @@ Submit a job using whichever path fits your setup — via SQS (recommended), via
 gco jobs submit-sqs examples/simple-job.yaml --region us-east-1
 gco queue submit examples/simple-job.yaml --region us-east-1
 gco jobs submit examples/simple-job.yaml -n gco-jobs
-gco jobs submit-direct examples/simple-job.yaml -r us-east-1
+gco jobs submit-direct examples/simple-job.yaml -r us-east-1   # kubectl; add --via-ssm auto from outside the VPC
 ```
 
 For work you repeat, save a manifest with `{{parameter}}` placeholders as a template and run jobs from it, chain dependent jobs into a pipeline, and get a call when a job finishes:
@@ -563,7 +600,7 @@ GCO is published in the AWS Solutions Library as the [Guidance for EKS AutoMode 
 
 ## Sample Cost Table
 
-A single-Region deployment with default settings carries roughly **$210 a month of fixed platform cost** before any workload runs. GPU instances dominate real spend and scale with the hours they run (one on-demand `g5.xlarge` around the clock is about $734 a month in `us-east-1`), and multi-Region deployments scale linearly. `gco costs summary` tracks what you actually spend.
+A single-Region deployment with default settings costs roughly **$565 a month** (about $0.77 an hour) before any workload runs. About $210 of that is managed services, mainly the EKS control plane, two NAT gateways, the internal ALB and Global Accelerator. The rest is the EC2 capacity that runs GCO's own services, schedulers and observability stack: their pods request about 7 vCPU and 12 GiB, which EKS Auto Mode places on about five `c6a.large` nodes. GPU instances dominate real spend and scale with the hours they run (one On-Demand `g5.xlarge` around the clock is about $792 a month in `us-east-1`, with its EKS Auto Mode fee), and multi-Region deployments scale linearly. `gco costs summary` tracks what you actually spend.
 
 <details>
 <summary><b>Itemized monthly estimate</b>, US East (N. Virginia) pricing</summary>
@@ -573,7 +610,9 @@ The following estimates are for a single-region deployment with default settings
 | Resource | Configuration | Estimated Monthly Cost (USD) |
 |----------|--------------|------------------------------|
 | EKS cluster | 1 cluster (Auto Mode) | ~$73 |
-| NAT Gateways | 2 (high availability) | ~$65 |
+| Platform nodes | ~5 `c6a.large` in the Auto Mode `general-purpose` NodePool for GCO's services, schedulers and observability stack: $0.0765/hr each plus $0.0092/hr Auto Mode management | ~$313 |
+| EBS volumes | An 80 GiB gp3 root volume per platform node, plus 75 GiB of gp3 for Prometheus, Grafana, MLflow and Alertmanager | ~$38 |
+| NAT Gateways | 2 (high availability) | ~$66 |
 | Application Load Balancer | 1 (shared by all services) | ~$22 |
 | Global Accelerator | 1 accelerator + data transfer | ~$18 + transfer |
 | Lambda functions | 17 functions, minimal invocations | < $1 (often $0 within free tier) |
@@ -585,17 +624,18 @@ The following estimates are for a single-region deployment with default settings
 | CloudWatch | Logs, metrics, Container Insights | ~$15 |
 | ECR | Image storage + replication | ~$5 |
 | Secrets Manager | 2 secrets with managed lifecycle (HMAC key and backend TLS root) | < $2 |
-| **Subtotal (platform, no GPU workloads)** | | **~$210/month** |
-| GPU instances (example) | 1× g5.xlarge on-demand, 24/7 (us-east-1) | ~$734 |
-| GPU instances (spot) | 1× g5.xlarge spot, 24/7 (us-east-1) | ~$250 |
+| **Subtotal (platform, no GPU workloads)** | | **~$565/month** |
+| GPU instances (example) | 1× g5.xlarge On-Demand, 24/7 (us-east-1), with Auto Mode management | ~$792 |
+| GPU instances (Spot) | 1× g5.xlarge Spot, 24/7 (us-east-1), with Auto Mode management | ~$550–$710 |
 
 **Notes:**
 
-- Platform costs (~$210/month) are fixed regardless of workload volume.
+- The platform subtotal (~$565/month) is what an idle deployment costs. It grows only a little with load, when the API services scale out.
+- The platform node count follows from the resource requests of the default services and add-ons. Optional schedulers and features add nodes: a deployment with every optional scheduler enabled ran eight.
 - GPU costs dominate and scale with the number of instances and hours run. Use `gco costs summary` to track actual spend.
-- GPU estimates assume an on-demand g5.xlarge in us-east-1 at \~$1.006/hr (\~$734/month over 730 hours); rates vary by region and instance type.
+- GPU estimates assume a g5.xlarge in us-east-1: $1.006/hr On-Demand, $0.68 to $0.89/hr on Spot depending on the Availability Zone (Spot prices change hourly), plus $0.0785/hr of EKS Auto Mode management, over 730 hours.
 - Optional services (FSx, Valkey, Aurora, EKS Capabilities — billed per capability-hour) add additional cost depending on configuration.
-- The cost table above uses US East (N. Virginia) pricing as of June 2025.
+- The cost table above uses US East (N. Virginia) prices from the AWS Price List API and Spot price history as of November 2026.
 
 </details>
 
@@ -632,8 +672,8 @@ GPU instance availability varies by region. Use `gco capacity check -i <instance
 | Your Goal | Read This |
 |-----------|-----------|
 | Deploy GCO and run a first job | [Quick Start Guide](QUICKSTART.md) |
+| Learn GCO step by step, from a free first look to GPU jobs, shared storage and inference | [Learning Path](docs/LEARNING_PATH.md) |
 | Understand what GCO does and the ideas behind it | [Core Concepts](docs/CONCEPTS.md) |
-| Learn Kubernetes and GCO along a guided path | [Learning Path](docs/LEARNING_PATH.md) |
 | See how the system fits together | [Architecture Details](docs/ARCHITECTURE.md) |
 | Read the official AWS Solutions Library overview and reference architecture | [AWS Solutions Guidance](https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/) |
 | Let Claude Code, OpenAI Codex, or OpenCode drive GCO from your terminal | [Autopilot Guide](docs/AUTOPILOT.md) |

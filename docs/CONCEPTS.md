@@ -465,15 +465,19 @@ gco jobs list -r us-east-1 -n gco-jobs
 ### Save Job Outputs
 
 ```bash
-# Submit job that writes to EFS
+# Submit a job that writes efs-output-example/results.json to EFS
 gco jobs submit-direct examples/efs-output-job.yaml -r us-east-1
 
 # Wait for completion
 gco jobs list -r us-east-1 -n gco-jobs
 
-# Download outputs (works even after pod is deleted)
-gco files download my-job-outputs ./local-dir -r us-east-1
+# Download outputs (works even after the pod is deleted)
+gco files download efs-output-example ./efs-results -r us-east-1
 ```
+
+Both commands run kubectl, so they need an EKS access entry (`gco stacks access -r us-east-1`).
+The API endpoint is private by default: from outside the VPC, add `--via-ssm auto` to each of
+them to reach it through a self-terminating SSM bastion.
 
 ### Submit via Global Job Queue
 
@@ -513,7 +517,7 @@ See [Inference Guide](INFERENCE.md) for the full guide including model weight ma
 
 **Next Steps:**
 
-- [Learning Path](LEARNING_PATH.md) - Follow the guided, staged path from here to productive
+- [Learning Path](LEARNING_PATH.md) - Learn GCO hands-on, one level at a time, starting with a level that costs nothing
 - [Quick Start Guide](../QUICKSTART.md) - Get running in under 60 minutes
 - [Architecture Details](ARCHITECTURE.md) - Deep dive into the system
 - [CLI Reference](CLI.md) - Complete command documentation

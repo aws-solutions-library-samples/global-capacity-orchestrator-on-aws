@@ -22,8 +22,8 @@ from .aws_client import APIRequestError, api_path_segment, get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-21T20:42:53Z
-# Generated from Git commit: 1d908f3fa649c16f69e32c2af36f5992f62d94d7
+# Generated at (UTC): 2026-11-22T02:28:01Z
+# Generated from Git commit: 34e7819b18b99ba49e76dc693f59f39d055ec75e
 # Flowchart(s) generated from this file:
 #   * ``JobManager.submit_job`` -> ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.html``
 #     (PNG: ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.png``)
@@ -456,6 +456,8 @@ class JobManager:
         labels: dict[str, str] | None = None,
         sandbox: str | None = None,
         keep_warm: bool = False,
+        server: str | None = None,
+        tls_server_name: str | None = None,
     ) -> dict[str, Any]:
         """
         Submit a job directly to a regional cluster using kubectl.
@@ -480,6 +482,11 @@ class JobManager:
                 (``gco.job_admission.SANDBOX_MODES``)
             keep_warm: Run on the keep-warm GPU pool
                 (``gco.job_admission.apply_keep_warm``)
+            server: kubectl ``--server`` for an SSM tunnel to the private API
+                endpoint (``cli.cluster_tunnel.via_ssm_route``); ``None`` keeps
+                the kubeconfig endpoint
+            tls_server_name: The endpoint host name TLS verifies against
+                through that tunnel
 
         Returns:
             Submission result dictionary
@@ -521,9 +528,13 @@ class JobManager:
         # Update kubeconfig for the cluster. Every kubectl call below names the
         # cluster's context: with a tunnel-pinned entry the current context can
         # belong to another cluster.
+        from .cluster_ui import kubectl_server_flags
         from .kubectl_helpers import kubectl_context_flags, update_kubeconfig
 
-        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
+        context_flags = [
+            *kubectl_context_flags(update_kubeconfig(cluster_name, region)),
+            *kubectl_server_flags(server, tls_server_name),
+        ]
 
         # Handle existing Job resources before applying
         warnings: list[str] = []
