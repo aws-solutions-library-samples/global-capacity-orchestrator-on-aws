@@ -7,9 +7,9 @@
       "source_commit": "1e6de1636d5418ba50126d6619a9bafc70839dad"
     },
     "cli/_container_runtime.py": {
-      "digest": "f890f6ecbdfcd4cbc89490d7362b4675e20d41ef931655dfac396736b9fc3869",
-      "generated_at": "2026-09-18T02:11:36Z",
-      "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+      "digest": "6ea3b43a1d887a61099fbdbb33fc355df3d70de3818ce5abcccc99542f74b0a5",
+      "generated_at": "2026-11-22T15:51:09Z",
+      "source_commit": "fc67f4bb3c1769af5821cfc5e76f964561a5729b"
     },
     "cli/_image_mirror.py": {
       "digest": "04dd5a014e6a43a770ddec4d6ab224fff3f6ad3c55a13b3d5bd37faae744e530",
