@@ -59,6 +59,13 @@ need to read source code to get past this step.
 gco stacks deploy-all -y   # CDK bootstrap runs automatically for every Region in cdk.json
 ```
 
+!!! note "Using Finch?"
+    The dev container builds the deployment's images through the Docker or
+    Podman socket the `gco` function mounts, and Finch shares none. Run
+    `CDK_DOCKER=finch gco stacks deploy-all -y` from a
+    [host install](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/QUICKSTART.md#installing-on-your-host-instead-advanced)
+    instead; every other step works through the `gco` function.
+
 By default this deploys the global control plane in `us-east-2` and one
 workload Region, `us-east-1`; edit `deployment_regions` in `cdk.json` (or run
 `gco stacks regions add <region>`) before deploying if you want a different

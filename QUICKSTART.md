@@ -176,12 +176,18 @@ gco stacks bootstrap -r us-east-1
 Run this from your shell — the `gco` function from [Step 1](#step-1-clone-and-build-the-dev-container) executes it inside the dev container (or run it from an interactive container shell, see [Step 2](#step-2-run-the-gco-cli)):
 
 ```bash
-# Start Finch VM (if using Finch on the host — Docker Desktop & Colima need no equivalent)
-finch vm start
-
 # Deploy all stacks
 gco stacks deploy-all -y
 ```
+
+> **Using Finch?** The dev container builds the deployment's images through the Docker or Podman socket the `gco` function mounts, and Finch's VM shares no socket with containers. Run this step from a [host install](#installing-on-your-host-instead-advanced) instead, with Finch as the builder:
+>
+> ```bash
+> finch vm start                              # if the Finch VM is not running
+> CDK_DOCKER=finch gco stacks deploy-all -y
+> ```
+>
+> The same applies to `gco stacks deploy`, `gco upgrade` and `gco images build|push`. The other steps in this guide work through the `gco` function.
 
 Or deploy a single region:
 

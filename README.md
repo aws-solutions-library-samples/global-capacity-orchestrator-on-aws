@@ -142,7 +142,7 @@ source ~/.zshrc                # or ~/.bashrc — the script prints which file i
 gco stacks deploy-all -y       # stands up every Region in cdk.json; billing starts here
 ```
 
-`deploy-all` bootstraps CDK where needed, deploys the global control plane and one regional stack per Region, and then installs the cluster add-ons in the background.
+`deploy-all` bootstraps CDK where needed, deploys the global control plane and one regional stack per Region, and then installs the cluster add-ons in the background. With Finch, which shares no socket with the dev container, run `deploy-all` from a host install instead (*More ways to run GCO* below).
 
 ### Run your first workload
 
