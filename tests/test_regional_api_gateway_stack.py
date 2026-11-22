@@ -209,7 +209,7 @@ class TestRegionalApiGatewayStack:
             "AWS::ApiGateway::RestApi",
             {
                 "Name": "gco-regional-api-us-east-1",
-                "EndpointConfiguration": {"Types": ["REGIONAL"], "IpAddressType": "ipv4"},
+                "EndpointConfiguration": {"Types": ["REGIONAL"], "IpAddressType": "dualstack"},
             },
         )
         template.has_resource_properties(
@@ -1021,7 +1021,7 @@ class TestRegionalApiClientIntegration:
         with (
             patch.object(client, "get_regional_api_endpoint", return_value=regional_endpoint),
             patch.object(client, "get_api_endpoint") as mock_global,
-            patch("cli.aws_client.requests") as mock_requests,
+            patch("cli.aws_client._http_request") as mock_request,
             patch.object(client, "_session") as mock_session,
         ):
             mock_creds = MagicMock()
@@ -1032,7 +1032,7 @@ class TestRegionalApiClientIntegration:
 
             mock_response = MagicMock()
             mock_response.ok = True
-            mock_requests.request.return_value = mock_response
+            mock_request.return_value = mock_response
 
             client.make_authenticated_request(
                 method="GET",
@@ -1044,5 +1044,5 @@ class TestRegionalApiClientIntegration:
             mock_global.assert_not_called()
 
             # Should use regional endpoint URL
-            call_args = mock_requests.request.call_args
+            call_args = mock_request.call_args
             assert "regional.execute-api" in call_args.kwargs["url"]

@@ -1,12 +1,13 @@
 """The IP address type of the API Gateway REST APIs GCO creates.
 
 ``api_gateway.ip_address_type`` in ``cdk.json`` applies to the global API and
-to every regional API bridge. ``dualstack`` makes API Gateway answer the
-default ``execute-api`` host names with IPv6 (AAAA) records as well as IPv4,
-so clients on IPv6-only or IPv6-preferring networks reach GCO directly.
-API Gateway applies a change of IP address type to the existing endpoint,
-without a new deployment of the API. Nothing behind API Gateway changes:
-GCO's VPCs, clusters and internal load balancers stay IPv4.
+to every regional API bridge. ``dualstack``, the default, makes API Gateway
+answer the default ``execute-api`` host names with IPv6 (AAAA) records as well
+as IPv4, so clients on IPv6-only or IPv6-preferring networks reach GCO
+directly; ``ipv4`` keeps them IPv4-only. API Gateway applies a change of IP
+address type to the existing endpoint, without a new deployment of the API.
+Nothing behind API Gateway changes: GCO's VPCs, clusters and internal load
+balancers stay IPv4.
 """
 
 from __future__ import annotations
@@ -17,6 +18,9 @@ _IP_ADDRESS_TYPES = {
     "ipv4": apigateway.IpAddressType.IPV4,
     "dualstack": apigateway.IpAddressType.DUAL_STACK,
 }
+
+#: The IP address type of both APIs when ``cdk.json`` sets none.
+DEFAULT_IP_ADDRESS_TYPE = "dualstack"
 
 
 def api_ip_address_type(value: str) -> apigateway.IpAddressType:

@@ -757,10 +757,10 @@ class TestApiGatewayValidation:
         with pytest.raises(ConfigValidationError, match="metrics_enabled must be a boolean"):
             ConfigLoader(app)
 
-    def test_ip_address_type_defaults_to_ipv4(self, valid_context):
+    def test_ip_address_type_defaults_to_dualstack(self, valid_context):
         valid_context["api_gateway"].pop("ip_address_type", None)
         config = ConfigLoader(MockApp(valid_context))
-        assert config.get_api_gateway_config()["ip_address_type"] == "ipv4"
+        assert config.get_api_gateway_config()["ip_address_type"] == "dualstack"
 
     @pytest.mark.parametrize("value", ["ipv4", "dualstack"])
     def test_ip_address_type_accepts_api_gateways_values(self, valid_context, value):
@@ -778,17 +778,21 @@ class TestApiGatewayValidation:
             ConfigLoader(MockApp(valid_context))
 
     def test_ip_address_type_values_match_the_stacks(self):
-        """Config validation and synthesis accept exactly the same values."""
-        from gco.config.config_loader import API_GATEWAY_IP_ADDRESS_TYPES
-        from gco.stacks.api_ip_address_type import _IP_ADDRESS_TYPES
+        """Config validation and synthesis accept the same values and share a default."""
+        from gco.config.config_loader import (
+            API_GATEWAY_IP_ADDRESS_TYPES,
+            DEFAULT_API_GATEWAY_IP_ADDRESS_TYPE,
+        )
+        from gco.stacks.api_ip_address_type import _IP_ADDRESS_TYPES, DEFAULT_IP_ADDRESS_TYPE
 
         assert set(API_GATEWAY_IP_ADDRESS_TYPES) == set(_IP_ADDRESS_TYPES)
+        assert DEFAULT_API_GATEWAY_IP_ADDRESS_TYPE == DEFAULT_IP_ADDRESS_TYPE == "dualstack"
 
-    def test_shipped_cdk_json_keeps_the_api_ipv4_only(self):
+    def test_shipped_cdk_json_makes_the_apis_dual_stack(self):
         import json
 
         context = json.loads(Path("cdk.json").read_text(encoding="utf-8"))["context"]
-        assert context["api_gateway"]["ip_address_type"] == "ipv4"
+        assert context["api_gateway"]["ip_address_type"] == "dualstack"
 
     @pytest.mark.parametrize("value", [True, False, "yes"])
     def test_regional_api_enabled_warns_and_is_ignored(self, valid_context, value):

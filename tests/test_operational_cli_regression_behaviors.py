@@ -125,7 +125,7 @@ def test_retry_closes_transient_response_before_backoff_when_credentials_disappe
     with (
         patch("cli.aws_client.get_config") as get_config,
         patch("cli.aws_client.boto3.Session") as session_factory,
-        patch("cli.aws_client.requests.request") as request,
+        patch("cli.aws_client._http_request") as request,
         patch("cli.aws_client.SigV4Auth"),
         patch("cli.aws_client.time.sleep", side_effect=lambda _seconds: events.append("sleep")),
     ):

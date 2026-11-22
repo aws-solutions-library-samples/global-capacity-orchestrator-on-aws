@@ -48,6 +48,7 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `analytics_user_mgmt.py` | Cognito user management and Studio login for the analytics environment |
 | `monitoring_user_mgmt.py` | Grafana user management over the admin HTTP API (`gco monitoring users`) |
 | `_container_runtime.py` | Container runtime detection (Docker, Finch, Podman) shared by image builds and mirroring |
+| `_dual_stack_http.py` | HTTPS requests to the GCO APIs that alternate IPv6 and IPv4 addresses and bound each connect attempt, so a network that drops IPv6 does not stall the CLI |
 | `_image_mirror.py` | Shared core that mirrors third-party images into the project ECR (`gco images mirror`, deploy-time auto-mirror, MCP tools) |
 | `_image_reference.py` | Linear-time validation of immutable container image references |
 | `_image_uri.py` | ECR image URI helpers backed by local AWS partition metadata |

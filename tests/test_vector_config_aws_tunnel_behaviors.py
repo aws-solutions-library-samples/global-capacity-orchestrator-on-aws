@@ -499,7 +499,7 @@ def test_403_refresh_returns_original_response_when_new_session_has_no_credentia
     response = MagicMock(status_code=403)
 
     with (
-        patch("cli.aws_client.requests.request", return_value=response),
+        patch("cli.aws_client._http_request", return_value=response),
         patch("cli.aws_client.SigV4Auth"),
         patch("cli.aws_client.boto3.Session") as session_factory,
     ):

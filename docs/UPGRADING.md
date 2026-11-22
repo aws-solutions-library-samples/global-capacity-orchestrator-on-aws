@@ -30,6 +30,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [vLLM endpoints deployed with MODEL](#vllm-endpoints-deployed-with-model)
   - [Stricter cdk.json validation](#stricter-cdkjson-validation)
   - [API calls need an IAM permission](#api-calls-need-an-iam-permission)
+  - [The APIs answer over IPv6 too](#the-apis-answer-over-ipv6-too)
   - [Workload pods reach fewer AWS resources](#workload-pods-reach-fewer-aws-resources)
   - [In-VPC hosts need the cluster security group](#in-vpc-hosts-need-the-cluster-security-group)
   - [MCP server role and its access entry](#mcp-server-role-and-its-access-entry)
@@ -592,6 +593,27 @@ IAM-authorized route without an `execute-api:Invoke` permission of its own.
 - **The analytics `/studio/*` pages keep working.** Their requests carry no IAM
   identity, so the resource policy still admits `GET /studio/*`; the Cognito
   authorizer decides who signs in.
+
+### The APIs answer over IPv6 too
+
+The global API and every regional API bridge are now dual-stack by default
+(`api_gateway.ip_address_type`, see
+[CUSTOMIZATION.md → API Gateway IP Address Type](CUSTOMIZATION.md#api-gateway-ip-address-type)).
+The redeploy updates both APIs in place: their endpoint URLs stay the same,
+and their host names start answering with IPv6 (AAAA) records next to the
+IPv4 ones, so callers with IPv6 connectivity start connecting over IPv6.
+
+- **Callers limited to IPv4 source ranges are refused (403) over IPv6.** If an
+  identity-based policy or a service control policy limits `execute-api:Invoke`
+  with IPv4-only `aws:SourceIp` ranges, add the caller's IPv6 ranges before
+  redeploying, or set `"ip_address_type": "ipv4"` in the `api_gateway` block of
+  your `cdk.json` to keep the APIs IPv4-only.
+- **IPv6 clients get a separate WAF budget per address.** The per-IP rate rule
+  counts each IPv6 address on its own.
+- **Older CLIs on networks that drop IPv6 can stall.** This release's CLI and
+  MCP server alternate between IPv6 and IPv4 addresses, so such a network costs
+  them about two seconds per new connection. Upgrade every machine that runs
+  `gco` against the deployment.
 
 ### Workload pods reach fewer AWS resources
 

@@ -45,7 +45,7 @@ from aws_cdk import aws_logs as logs
 from constructs import Construct
 
 from gco.config.config_loader import ConfigLoader
-from gco.stacks.api_ip_address_type import api_ip_address_type
+from gco.stacks.api_ip_address_type import DEFAULT_IP_ADDRESS_TYPE, api_ip_address_type
 from gco.stacks.constants import (
     AGGREGATOR_REGIONAL_API_ROUTES,
     DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -447,7 +447,7 @@ class GCORegionalApiGatewayStack(Stack):
             )
 
         # Create regional REST API
-        ip_address_type = str(api_config.get("ip_address_type", "ipv4"))
+        ip_address_type = str(api_config.get("ip_address_type", DEFAULT_IP_ADDRESS_TYPE))
         api = apigateway.RestApi(
             self,
             "RegionalApi",

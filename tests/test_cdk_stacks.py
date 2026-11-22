@@ -590,7 +590,7 @@ class TestApiGatewayStackSynth:
 
     @pytest.mark.parametrize(
         ("configured", "rendered"),
-        [(None, "ipv4"), ("ipv4", "ipv4"), ("dualstack", "dualstack")],
+        [(None, "dualstack"), ("ipv4", "ipv4"), ("dualstack", "dualstack")],
     )
     def test_global_api_endpoint_carries_the_configured_ip_address_type(self, configured, rendered):
         (api,) = [

@@ -2994,8 +2994,11 @@ Regional APIs preserve the backend authentication model used by the global path:
 
 ## API Gateway IP Address Type
 
-The global API and every regional API bridge accept IPv4 clients unless
-`api_gateway.ip_address_type` in `cdk.json` is `dualstack`:
+The global API and every regional API bridge are dual-stack by default: API
+Gateway answers each API's `execute-api` host name with IPv6 (AAAA) records as
+well as IPv4 (A) records, so clients on IPv6-only or IPv6-preferring networks
+reach GCO directly, and IPv4 clients reach it as before.
+`api_gateway.ip_address_type` in `cdk.json` sets it:
 
 ```json
 "api_gateway": {
@@ -3008,24 +3011,29 @@ The global API and every regional API bridge accept IPv4 clients unless
 }
 ```
 
-After the next `gco stacks deploy-all -y`, API Gateway answers each API's
-`execute-api` host name with IPv6 (AAAA) records as well as IPv4 (A) records,
-so clients on IPv6-only or IPv6-preferring networks reach GCO directly. The
-endpoint URLs stay the same, and the change takes effect when the stack update
-finishes. `ipv4`, the default, removes the IPv6 records again. Both endpoint
-types GCO creates take either value: the edge-optimized global API in the
-`aws` partition and the Regional APIs everywhere else.
+`ipv4` answers with A records only. A change takes effect when the next
+`gco stacks deploy-all -y` has updated the API stacks, and the endpoint URLs
+stay the same either way. Both endpoint types GCO creates take either value:
+the edge-optimized global API in the `aws` partition and the Regional APIs
+everywhere else.
 
-Before you switch:
+Consider these before you keep the default:
 
-- **`aws:SourceIp` conditions.** A caller whose identity-based policy limits
-  `execute-api:Invoke` to IPv4 ranges with `aws:SourceIp` is refused once it
-  connects over IPv6. Add the caller's IPv6 ranges first. GCO's own resource
-  policies have no such condition.
+- **`aws:SourceIp` conditions.** A caller whose identity-based policy or a
+  service control policy limits `execute-api:Invoke` to IPv4 ranges with
+  `aws:SourceIp` is refused once it connects over IPv6. Add the caller's IPv6
+  ranges, or set `ipv4`. GCO's own resource policies have no such condition.
 - **The WAF rate limit.** The rate-based rule behind `waf.per_ip_rate_limit`
   counts requests per source address. A client usually holds a whole IPv6
   prefix and can send from many of its addresses, each with its own budget,
   so the rule limits an IPv6 client less than an IPv4 one.
+- **Clients on networks that drop IPv6.** A client with an IPv6 address tries
+  the IPv6 records first. The GCO CLI and MCP server alternate between IPv6
+  and IPv4 addresses and give each address but the last two seconds to
+  connect, so a network that hands out IPv6 addresses but drops IPv6 traffic
+  costs them about two seconds per new connection. Browsers and curl race the
+  two families. Other HTTP clients may wait out their whole connect timeout
+  on each IPv6 address first.
 
 To check the result, look up the host's AAAA records, for example
 `dig AAAA <api-id>.execute-api.us-east-2.amazonaws.com`. The host names are
