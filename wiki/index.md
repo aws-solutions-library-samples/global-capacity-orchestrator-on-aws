@@ -94,9 +94,10 @@ section has the numbers side by side.
 ## What it costs
 
 A single-Region deployment with default settings carries roughly
-**$210/month of fixed platform cost** (EKS control plane, NAT gateways, the
-internal ALB, Global Accelerator, CloudWatch); GPU instances dominate real
-spend and scale with usage, and multi-Region deployments scale linearly.
+**$565/month of fixed platform cost** (the EC2 nodes that run GCO's own
+services, the EKS control plane, NAT gateways, the internal ALB, Global
+Accelerator, CloudWatch); GPU instances dominate real spend and scale with
+usage, and multi-Region deployments scale linearly.
 Optional add-ons cost nothing until you enable them. The README's
 [sample cost table](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#sample-cost-table)
 carries the itemized numbers and their pricing date.
@@ -119,9 +120,10 @@ on GitHub — the
 and the
 [documentation index](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/README.md)
 — so the deep material is always one click away and never duplicated here.
-New to Kubernetes itself? The
+Want to learn it hands-on? The
 [Learning Path](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/LEARNING_PATH.md)
-adds a primer and role-based tracks. Every trade-off in the project is
+goes one level at a time, from a free first look to GPU jobs and shared
+storage, with a Kubernetes primer and tracks for each role. Every trade-off in the project is
 resolved against ten prioritized
 [tenets](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/TENETS.md),
 beginning with *Protect Workloads, Data, and Accounts*.

@@ -18,7 +18,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 |----------|----------|-------------|
 | [Project Tenets](../TENETS.md) | Everyone | Normative north star and prioritized decision guidance for safety, truth, security, accelerator policy, operations, and maintainability |
 | [Core Concepts](CONCEPTS.md) | New users | What GCO is, the problems it solves, and how the key components work together |
-| [Learning Path](LEARNING_PATH.md) | New users / new to Kubernetes | A staged, hands-on path from zero to productive, with a Kubernetes primer and role-based tracks |
+| [Learning Path](LEARNING_PATH.md) | New users / new to Kubernetes | A hands-on path in five levels, from a free first look to GPU jobs, shared storage and pipelines, with a Kubernetes primer, the cost of each level, and tracks for ML engineers, operators, platform engineers, builders and contributors |
 | [Architecture](ARCHITECTURE.md) | Engineers | Deep dive into the multi-region infrastructure, security layers (including verified in-cluster TLS), data flow, and scale characteristics |
 | [Quick Start](../QUICKSTART.md) | New users | Get running in under 60 minutes — install, deploy, submit your first job |
 | [CLI Reference](CLI.md) | Operators | Complete command reference for all `gco` CLI commands |
@@ -84,7 +84,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 If you're new to GCO:
 
 1. [Project Tenets](../TENETS.md) — understand the north star and how trade-offs are resolved
-2. [Learning Path](LEARNING_PATH.md) — the guided route through the docs below, with a Kubernetes primer for newcomers
+2. [Learning Path](LEARNING_PATH.md) — learn GCO hands-on, one level at a time, with a Kubernetes primer for newcomers
 3. [Core Concepts](CONCEPTS.md) — understand what it does
 4. [Quick Start](../QUICKSTART.md) — get it running
 5. [CLI Reference](CLI.md) — learn the commands
