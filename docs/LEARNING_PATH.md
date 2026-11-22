@@ -198,7 +198,7 @@ The same manifest goes through GCO's other front doors:
 
 ```bash
 gco jobs submit examples/simple-job.yaml -r us-east-1 --wait   # the SigV4-authenticated REST API
-gco queue submit examples/simple-job.yaml -r us-east-1          # the global job queue
+gco queue submit examples/simple-job.yaml -r us-east-1         # the global job queue
 gco queue list
 ```
 
@@ -225,7 +225,7 @@ gco jobs logs gpu-test-job -r us-east-1     # the nvidia-smi table
 gco jobs delete gpu-test-job -r us-east-1 -y
 ```
 
-This example sets no TTL, so delete the Job yourself. The GPU node does not wait for that: EKS Auto Mode removes it 30 seconds after its last pod finishes, which ends its cost.
+This example sets no TTL, so delete the Job yourself. The GPU node does not wait for that: EKS Auto Mode removes a GPU node once its last pod has finished (after 30 seconds in the batch GPU pools, 5 minutes in the inference pool), and its cost stops with it.
 
 **Done when:** the logs show the `nvidia-smi` table, and `gco jobs get` told you the instance type the job ran on.
 
