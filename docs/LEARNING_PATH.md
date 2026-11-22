@@ -225,7 +225,7 @@ gco jobs logs gpu-test-job -r us-east-1     # the nvidia-smi table
 gco jobs delete gpu-test-job -r us-east-1 -y
 ```
 
-This example sets no TTL, so delete the Job yourself. The GPU node does not wait for that: EKS Auto Mode removes a GPU node once its last pod has finished (after 30 seconds in the default GPU pools, 5 minutes in the inference pool), and its cost stops with it. For many short GPU jobs in a row, `--keep-warm` keeps the node for a window instead ([Keep-Warm GPU Nodes](GPU_KEEP_WARM.md)).
+This example sets no TTL, so delete the Job yourself. The GPU node does not wait for that: EKS Auto Mode starts removing a GPU node 30 seconds after its last pod finishes (5 minutes in the inference pool), and its cost stops when the instance terminates a few minutes later. For many short GPU jobs in a row, `--keep-warm` keeps the node for a window instead ([Keep-Warm GPU Nodes](GPU_KEEP_WARM.md)).
 
 **Done when:** the logs show the `nvidia-smi` table, and `gco jobs get` told you the instance type the job ran on.
 

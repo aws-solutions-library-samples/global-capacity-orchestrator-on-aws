@@ -31,7 +31,7 @@ offers the same instance families as `gpu-x86-pool`. It differs in three ways:
   it has had no pod added or removed for `consolidateAfter`, which is set from
   the cdk.json `gpu_keep_warm.window` (default 10 minutes). A finished Job's
   pod counts as removed, and DaemonSet pods do not count at all.
-- **Reclaim bounded by the window.** The pool's disruption budget lets
+- **Expired nodes reclaimed together.** The pool's disruption budget lets
   Karpenter remove every node whose window has passed at once, so idle time is
   not stretched by a 10% budget when many nodes go idle together. Other
   disruption reasons, such as drift, stay limited to 10% of the nodes, as on
@@ -126,7 +126,9 @@ Each interval starts when that Job's pod finished. It ends in one of two ways:
 
 `idle_seconds` totals the closed intervals, so a caller that runs many Jobs
 can add up its idle node time Job by Job. The idle time after a run's last
-Job is about the window. The interval stays open until the node is gone.
+Job is the window plus the time EKS Auto Mode takes to remove the node: in a
+live validation run with the default 600-second window, that interval read
+1,057 seconds. The interval stays open until the node is gone.
 
 The health monitor rebuilds the intervals on every loop from the pods each
 node still lists. An interval shorter than one loop is therefore recorded
@@ -163,12 +165,14 @@ needs to decide what to run next.
 
 ## Cost
 
-A waiting node is billed at its full instance price. Each run's last node
-idles for the whole window before Karpenter removes it, and so does every node
-that no later Job fits. With a 10-minute window, a `g6.xlarge` costs about a
-sixth of its hourly price in idle time at the end of every run. Spot nodes
-can still be interrupted while they wait. The interval then ends as
-`reclaimed`, and the next Job gets a new node.
+A waiting node is billed at its full instance price until its instance
+terminates. Each run's last node idles for the whole window and then for the
+minutes Karpenter takes to remove it, and so does every node that no later Job
+fits. In a live validation run with the default 10-minute window, the last
+node sat idle for 1,057 seconds, about 17.5 minutes. At that rate a
+`g6.xlarge` adds about 30% of its hourly price in idle time at the end of
+every run. Spot nodes can still be interrupted while they wait. The interval
+then ends as `reclaimed`, and the next Job gets a new node.
 
 ## Limits
 
