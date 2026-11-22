@@ -84,8 +84,8 @@ from gco.stacks.control_plane_alarms import add_api_alarms, create_alert_topic
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-22T17:59:03Z
-# Generated from Git commit: db3de8225c3e025f659096135ffaa4ea72d25097
+# Generated at (UTC): 2026-11-22T20:50:27Z
+# Generated from Git commit: c904dd4dd0b819014ff781aa5d888d6c579a8868
 # Flowchart(s) generated from this file:
 #   * ``GCOApiGatewayGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.png``)
