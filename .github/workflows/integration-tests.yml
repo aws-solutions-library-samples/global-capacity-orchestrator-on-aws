@@ -15,10 +15,11 @@
 #   - integration:autopilot:claude-code-boot      — `gco autopilot` self-installs the pin + boots MCP/Bedrock to the cred boundary
 #   - integration:autopilot:codex-boot            — `gco autopilot --engine codex` self-installs the pin + boots MCP/Bedrock to the cred boundary
 #   - integration:autopilot:opencode-boot         — `gco autopilot --engine opencode` self-installs the pin + boots MCP/Bedrock to the cred boundary
-#   - integration:dev-alias:docker                — verify runner Docker, build gco-dev, prove the generated `gco` alias runs
-#   - integration:dev-alias:finch                 — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs
+#   - integration:dev-alias:docker                — verify runner Docker, build gco-dev, prove the generated `gco` alias runs and builds through the shared socket
+#   - integration:dev-alias:docker-custom-socket  — run dockerd off /var/run/docker.sock, prove socket discovery finds it through DOCKER_HOST
+#   - integration:dev-alias:finch                 — install latest Finch (rootful), build gco-dev, prove the generated `gco` alias runs and builds through finch-daemon
 #   - integration:dev-alias:none                  — prove setup-dev-alias.sh refuses cleanly when no runtime is installed
-#   - integration:dev-alias:podman                — install latest Podman, build gco-dev, prove the generated `gco` alias runs
+#   - integration:dev-alias:podman                — install latest Podman, build gco-dev, prove the generated `gco` alias runs and builds through Podman's API
 #   - integration:docker:cost-monitor             — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:dev-container            — Dockerfile.dev native-arch matrix (amd64 + arm64 runners)
 #   - integration:docker:health-monitor           — build + import smoke + functional boot/probe/shutdown contract
@@ -6761,7 +6762,11 @@ jobs:
   # container runtime, then runs scripts/setup-dev-alias.sh end to end — proving
   # it builds the gco-dev image AND that the `gco` shell function it emits
   # actually launches the runtime and runs the real CLI — closing the gap left
-  # by the mocked tests/BATS/test_setup_dev_alias.bats suite. Logic lives in
+  # by the mocked tests/BATS/test_setup_dev_alias.bats suite. Each job also pins
+  # the runtime socket the script's discovery must choose (--expect-socket),
+  # and proves that the CLI in the container finds a daemon through it and that
+  # a `docker build` there lands in the runtime's own image store, where CDK
+  # pushes deployment images from. Logic lives in
   # .github/scripts/dev_alias_live.sh so it can be run locally too.
   # --------------------------------------------------------------------------
 
@@ -6784,7 +6789,43 @@ jobs:
       - name: Live-prove the generated gco function against Docker
         # Runner user is in the docker group, so the emitted `docker run`
         # (no sudo) works as-is.
-        run: .github/scripts/dev_alias_live.sh docker
+        run: .github/scripts/dev_alias_live.sh docker --expect-socket /var/run/docker.sock
+
+  integration-dev-alias-docker-custom-socket:
+    name: "integration:dev-alias:docker-custom-socket"
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Live-prove socket discovery with dockerd off /var/run/docker.sock
+        # Rootless Docker, a dockerd started with its own -H, and a Docker
+        # context all point the CLI at a socket other than
+        # /var/run/docker.sock. Run the runner's dockerd on its own socket
+        # only, so setup-dev-alias.sh has to find it through DOCKER_HOST after
+        # /var/run/docker.sock fails its probe. dockerd and the proof share a
+        # step because a step's background processes do not outlive it.
+        run: |
+          set -euo pipefail
+          sudo systemctl stop docker.socket docker.service
+          sudo rm -f /var/run/docker.sock
+          sudo install -d -m 0755 /run/gco-docker
+          sudo sh -c 'nohup dockerd --host unix:///run/gco-docker/docker.sock --group docker \
+            --pidfile /run/gco-docker/dockerd.pid >/run/gco-docker/dockerd.log 2>&1 &'
+          export DOCKER_HOST=unix:///run/gco-docker/docker.sock
+          for _ in $(seq 1 30); do
+            docker version >/dev/null 2>&1 && break
+            sleep 1
+          done
+          if ! docker version; then
+            sudo tail -60 /run/gco-docker/dockerd.log || true
+            exit 1
+          fi
+          [ ! -e /var/run/docker.sock ]
+          .github/scripts/dev_alias_live.sh docker --expect-socket /run/gco-docker/docker.sock
 
   integration-dev-alias-podman:
     name: "integration:dev-alias:podman"
@@ -6818,10 +6859,9 @@ jobs:
         run: |
           set -euo pipefail
           # The emitted podman function bind-mounts the rootless API socket
-          # ($XDG_RUNTIME_DIR/podman/podman.sock) onto /var/run/docker.sock.
-          # Pin XDG_RUNTIME_DIR and start the API service so the bind-mount
-          # source exists (the test image never uses it, but `podman run`
-          # needs the source path present).
+          # ($XDG_RUNTIME_DIR/podman/podman.sock) onto /var/run/docker.sock,
+          # and the proof builds an image through it, so the API service must
+          # be running: pin XDG_RUNTIME_DIR and start it.
           #
           # The runtime dir must be /run/user/<uid>, the one podman assumes
           # when the variable is unset. Rootless podman's network backend,
@@ -6846,8 +6886,11 @@ jobs:
             [ -S "$XDG_RUNTIME_DIR/podman/podman.sock" ] && break
             sleep 1
           done
-          # Fallback so the bind-mount source always exists.
-          [ -e "$XDG_RUNTIME_DIR/podman/podman.sock" ] || : >"$XDG_RUNTIME_DIR/podman/podman.sock"
+          if [ ! -S "$XDG_RUNTIME_DIR/podman/podman.sock" ]; then
+            echo "::error::Podman's API service did not create its socket" >&2
+            cat "$RUNNER_TEMP/podman-api.log" >&2 || true
+            exit 1
+          fi
 
           # Two OCI runtime configurations are viable here and each fails in a
           # way the other survives, so try both rather than depending on which
@@ -6860,7 +6903,7 @@ jobs:
           for runtime in crun runc; do
             echo "::group::podman dev-alias attempt with ${runtime}"
             .github/scripts/podman_ci_config.sh "${runtime}"
-            if .github/scripts/dev_alias_live.sh podman; then
+            if .github/scripts/dev_alias_live.sh podman --expect-socket "$XDG_RUNTIME_DIR/podman/podman.sock"; then
               echo "::endgroup::"
               echo "dev-alias succeeded with the ${runtime} configuration"
               exit 0
@@ -6946,11 +6989,22 @@ jobs:
             exit 1
           fi
           sudo finch info
+          # The finch CLI drives containerd directly; finch-daemon, which the
+          # dev container builds through, answers on its own socket.
+          for _ in $(seq 1 20); do
+            sudo curl -fsS --unix-socket /run/finch.sock http://localhost/_ping >/dev/null 2>&1 && break
+            sleep 3
+          done
+          if ! sudo curl -fsS --unix-socket /run/finch.sock http://localhost/_ping; then
+            echo "::error::finch-daemon does not answer on /run/finch.sock"
+            sudo systemctl --no-pager status finch.socket finch 2>&1 | tail -40 || true
+            exit 1
+          fi
       - name: Live-prove the generated gco function against Finch
         # Linux finch talks to a root-owned daemon, so the whole script runs as
         # root. setup-dev-alias.sh emits a plain `finch run` (no sudo); running
         # the generated function as root is what makes it work on Linux.
-        run: sudo --preserve-env=PATH .github/scripts/dev_alias_live.sh finch
+        run: sudo --preserve-env=PATH .github/scripts/dev_alias_live.sh finch --expect-socket /run/finch.sock
 
   integration-dev-alias-none:
     name: "integration:dev-alias:none"
@@ -6991,6 +7045,7 @@ jobs:
       - integration-autopilot-codex-boot
       - integration-autopilot-opencode-boot
       - integration-dev-alias-docker
+      - integration-dev-alias-docker-custom-socket
       - integration-dev-alias-finch
       - integration-dev-alias-none
       - integration-dev-alias-podman
