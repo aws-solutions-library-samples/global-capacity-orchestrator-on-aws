@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import socket
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+import urllib3
 from botocore.exceptions import ClientError
 from fastapi import HTTPException
 from kubernetes import config as k8s_config
@@ -3317,6 +3319,189 @@ async def test_jobs_log_read_kubernetes_failure_is_reported_as_bad_gateway() -> 
     ):
         await routes.get_job_logs("gco-jobs", "trainer", None, 10, False, None, False)
     assert error.value.status_code == 502
+
+
+def _logs_processor(node: Any = None, node_error: Exception | None = None) -> MagicMock:
+    """A processor whose Job has one finished pod bound to node ``ip-10-0-1-5``."""
+    processor = _api_processor()
+    processor.batch_v1.read_namespaced_job.return_value = MagicMock()
+    pod = _pod(phase="Succeeded")
+    pod.spec.node_name = "ip-10-0-1-5.ec2.internal"
+    processor.core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+    if node_error is not None:
+        processor.core_v1.read_node.side_effect = node_error
+    else:
+        processor.core_v1.read_node.return_value = node
+    raw = MagicMock()
+    raw.data = b"Tue Nov 22 16:45:40 2026  NVIDIA-SMI\n"
+    processor.core_v1.read_namespaced_pod_log.return_value = raw
+    return processor
+
+
+def _node(ready: str = "True", deleting: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            deletion_timestamp=datetime(2026, 11, 22, tzinfo=UTC) if deleting else None
+        ),
+        status=SimpleNamespace(
+            conditions=[
+                SimpleNamespace(type="MemoryPressure", status="False"),
+                SimpleNamespace(type="Ready", status=ready),
+            ]
+        ),
+    )
+
+
+async def _job_logs(processor: MagicMock) -> Any:
+    import gco.services.api_routes.jobs as routes
+
+    with (
+        patch.object(routes, "_check_processor", return_value=processor),
+        patch.object(routes, "_check_namespace"),
+    ):
+        return await routes.get_job_logs("gco-jobs", "trainer", None, 10, False, None, False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("node", "node_error", "problem"),
+    [
+        (None, ApiException(status=404, reason="Not Found"), "has been removed"),
+        (_node(deleting=True), None, "is being removed"),
+        (_node(ready="Unknown"), None, "is not ready"),
+        (_node(ready="False"), None, "is not ready"),
+    ],
+)
+async def test_jobs_logs_of_a_pod_whose_node_cannot_serve_them_say_so_without_reading(
+    node: Any, node_error: Exception | None, problem: str
+) -> None:
+    """A removed, deleting or not-Ready node answers 404 at once, naming CloudWatch.
+
+    EKS Auto Mode terminates an empty GPU node a minute after its last pod
+    finishes, and the log read then waited on the dead kubelet until API
+    Gateway gave up with a bare 504.
+    """
+    import gco.services.api_routes.jobs as routes
+
+    processor = _logs_processor(node=node, node_error=node_error)
+    with pytest.raises(HTTPException) as error:
+        await _job_logs(processor)
+
+    assert error.value.status_code == 404
+    assert routes.NODE_CANNOT_SERVE_LOGS in error.value.detail
+    assert f"node 'ip-10-0-1-5.ec2.internal' {problem}" in error.value.detail
+    assert "CloudWatch Logs" in error.value.detail
+    processor.core_v1.read_node.assert_called_once_with(name="ip-10-0-1-5.ec2.internal")
+    processor.core_v1.read_namespaced_pod_log.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("node", "node_error"),
+    [
+        (_node(), None),
+        (SimpleNamespace(metadata=SimpleNamespace(), status=SimpleNamespace()), None),
+        (None, ApiException(status=403, reason="Forbidden")),
+        (None, RuntimeError("API server unavailable")),
+    ],
+)
+async def test_jobs_logs_read_the_pod_log_when_the_node_can_serve_it_or_is_unknown(
+    node: Any, node_error: Exception | None
+) -> None:
+    """A Ready node, or one the API cannot judge, leaves the decision to the bounded log read."""
+    import gco.services.api_routes.jobs as routes
+
+    processor = _logs_processor(node=node, node_error=node_error)
+    response = await _job_logs(processor)
+
+    assert response.status_code == 200
+    kwargs = processor.core_v1.read_namespaced_pod_log.call_args.kwargs
+    assert kwargs["_request_timeout"] == routes.POD_LOG_READ_TIMEOUT_SECONDS
+    assert routes.POD_LOG_READ_TIMEOUT_SECONDS < 29  # API Gateway's integration limit
+
+
+@pytest.mark.asyncio
+async def test_jobs_logs_skip_the_node_check_for_a_pod_with_no_node() -> None:
+    processor = _logs_processor(node=_node())
+    processor.core_v1.list_namespaced_pod.return_value.items[0].spec.node_name = None
+
+    response = await _job_logs(processor)
+
+    assert response.status_code == 200
+    processor.core_v1.read_node.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_jobs_logs_read_past_the_deadline_answers_404_naming_cloudwatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadline covers the whole read, so urllib3's retries cannot outlast API Gateway.
+
+    The answer is a 404, which neither the proxy Lambdas nor the CLI replay:
+    a replayed 504 would wait on the same unanswering kubelet again.
+    """
+    import gco.services.api_routes.jobs as routes
+
+    monkeypatch.setattr(routes, "POD_LOG_READ_TIMEOUT_SECONDS", 0.05)
+    processor = _logs_processor(node=_node())
+    answer = processor.core_v1.read_namespaced_pod_log.return_value
+    release = threading.Event()
+
+    def stalled_read(**_kwargs: Any) -> Any:
+        release.wait(5)
+        return answer
+
+    processor.core_v1.read_namespaced_pod_log.side_effect = stalled_read
+    started = time.monotonic()
+    try:
+        with pytest.raises(HTTPException) as raised:
+            await _job_logs(processor)
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 2
+    assert raised.value.status_code == 404
+    assert routes.POD_LOG_READ_TIMED_OUT in raised.value.detail
+    assert "within 0.05s (pod 'pod-1')" in raised.value.detail
+    assert "CloudWatch Logs" in raised.value.detail
+
+
+@pytest.mark.asyncio
+async def test_jobs_logs_transport_failure_inside_the_deadline_stays_an_internal_error() -> None:
+    processor = _logs_processor(node=_node())
+    processor.core_v1.read_namespaced_pod_log.side_effect = urllib3.exceptions.MaxRetryError(
+        None, "/log", urllib3.exceptions.ReadTimeoutError(None, "/log", "read timed out")
+    )
+    with pytest.raises(HTTPException) as raised:
+        await _job_logs(processor)
+
+    assert raised.value.status_code == 500
+
+
+def test_job_logs_node_answers_use_a_status_no_layer_replays() -> None:
+    """The proxy Lambdas and the CLI replay these statuses to a GET; 404 is not one of them."""
+    from cli import aws_client
+    from tests._lambda_imports import load_lambda_module
+
+    proxy_utils = load_lambda_module("proxy-shared", "proxy_utils", shared_dirs=["tls-shared"])
+    assert 404 not in proxy_utils._RETRYABLE_STATUS_CODES
+    assert 404 not in aws_client._RETRYABLE_STATUS_CODES
+
+
+@pytest.mark.parametrize("answer", ["NODE_CANNOT_SERVE_LOGS", "POD_LOG_READ_TIMED_OUT"])
+def test_cli_job_logs_fall_back_to_cloudwatch_on_the_apis_node_answers(answer: str) -> None:
+    """The CLI's fallback words are the API's own constants, so they cannot drift apart."""
+    import gco.services.api_routes.jobs as routes
+
+    manager = _manager()
+    detail = f"Logs of pod 'trainer-x' are {getattr(routes, answer)}: node 'n' is gone"
+    manager._aws_client.get_job_logs.side_effect = RuntimeError(detail)
+    with (
+        patch.object(manager, "_get_trainjob_node_logs", side_effect=RuntimeError("no trainjob")),
+        patch.object(manager, "_get_cloudwatch_logs", return_value="from cloudwatch") as cloudwatch,
+    ):
+        assert manager.get_job_logs("trainer", "gco-jobs", "us-east-1") == "from cloudwatch"
+    cloudwatch.assert_called_once()
 
 
 def test_cli_cloudwatch_logs_ignore_rows_without_a_message_field() -> None:

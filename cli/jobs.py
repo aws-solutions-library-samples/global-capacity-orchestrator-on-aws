@@ -1079,10 +1079,20 @@ class JobManager:
                     )
                 except Exception as tj_err:
                     logger.debug("TrainJob logs fallback failed: %s", tj_err)
-            # If the pod is gone or pending, try CloudWatch
+            # If the pod is gone or pending, or its node can no longer serve
+            # its log (the API's NODE_CANNOT_SERVE_LOGS and POD_LOG_READ_TIMED_OUT
+            # answers in gco/services/api_routes/jobs.py), try CloudWatch
             if any(
                 hint in lowered
-                for hint in ["not found", "pending", "no pods", "terminated", "completed"]
+                for hint in [
+                    "not found",
+                    "pending",
+                    "no pods",
+                    "terminated",
+                    "completed",
+                    "no longer on its node",
+                    "could not read the pod's log from its node",
+                ]
             ):
                 logger.info("Pod not available, falling back to CloudWatch Logs")
                 try:

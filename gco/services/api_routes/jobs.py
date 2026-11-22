@@ -58,11 +58,66 @@ def _decode_pod_log_response(response: Any) -> str:
             release_conn()
 
 
+#: Longest a job-logs request waits for the pod's log. The API server fetches
+#: it from the node's kubelet, and API Gateway ends a request after 29 seconds,
+#: so a kubelet that cannot answer would otherwise turn the request into API
+#: Gateway's bare "Endpoint request timed out". The limit is a deadline for the
+#: whole read, because urllib3 retries a GET whose read times out and the
+#: attempts of a per-request timeout add up past API Gateway's limit.
+POD_LOG_READ_TIMEOUT_SECONDS = 20
+
+#: Words in the 404 a job-logs request returns when the pod's node can no longer
+#: serve its log. ``cli.jobs.JobManager.get_job_logs`` falls back to CloudWatch
+#: Logs on them.
+NODE_CANNOT_SERVE_LOGS = "no longer on its node"
+
+#: Words in the 404 a job-logs request returns when the pod's log has not
+#: arrived within POD_LOG_READ_TIMEOUT_SECONDS; the CLI falls back to
+#: CloudWatch Logs on them too. It is a 404 rather than a 504 because the
+#: proxy Lambdas and the CLI replay a 504 to a GET, and each replay would wait
+#: on the same unanswering kubelet again.
+POD_LOG_READ_TIMED_OUT = "could not read the pod's log from its node"
+
+
 def _read_pod_log(processor: Any, log_kwargs: dict[str, Any]) -> str:
-    """Read one pod's log and decode it; both steps wait on the API server."""
+    """Read one pod's log and decode it; both steps wait on the API server.
+
+    Each attempt is bounded as well as the caller's deadline, so a read the
+    caller has stopped waiting for still ends within urllib3's retries.
+    """
     return _decode_pod_log_response(
-        processor.core_v1.read_namespaced_pod_log(**log_kwargs, _preload_content=False)
+        processor.core_v1.read_namespaced_pod_log(
+            **log_kwargs,
+            _preload_content=False,
+            _request_timeout=POD_LOG_READ_TIMEOUT_SECONDS,
+        )
     )
+
+
+def _node_cannot_serve_logs(processor: Any, node_name: str) -> str | None:
+    """Why ``node_name`` cannot serve a pod's log through its kubelet, or None.
+
+    EKS Auto Mode removes an empty node shortly after its last pod finishes:
+    the instance terminates while the Node object waits on its finalizer, and
+    the finished pod stays bound to it. Reading the log then waits on a kubelet
+    that no longer answers. A Node being deleted, gone, or not Ready is
+    reported instead; a Node that cannot be read is left to the log read.
+    """
+    from kubernetes.client.exceptions import ApiException as K8sApiException
+
+    try:
+        node = processor.core_v1.read_node(name=node_name)
+    except K8sApiException as error:
+        return "has been removed" if error.status == 404 else None
+    except Exception:
+        return None
+    if isinstance(getattr(node.metadata, "deletion_timestamp", None), datetime):
+        return "is being removed"
+    conditions = getattr(node.status, "conditions", None)
+    for condition in conditions if isinstance(conditions, list) else []:
+        if condition.type == "Ready" and condition.status != "True":
+            return "is not ready"
+    return None
 
 
 def _parse_exact_label_selector(selector: str | None) -> list[tuple[str, str]]:
@@ -414,8 +469,35 @@ async def get_job_logs(
             log_kwargs["since_seconds"] = since_seconds
         pod_spec = present(pod.spec, "pod.spec")
 
+        node_name = getattr(pod_spec, "node_name", None)
+        if isinstance(node_name, str) and node_name:
+            node_problem = await asyncio.to_thread(_node_cannot_serve_logs, processor, node_name)
+            if node_problem is not None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"Logs of pod '{pod_metadata.name}' are {NODE_CANNOT_SERVE_LOGS}: "
+                        f"node '{node_name}' {node_problem}, so the API server cannot read "
+                        "them from its kubelet. The container's output is in CloudWatch "
+                        "Logs, where 'gco jobs logs' reads it."
+                    ),
+                )
+
         try:
-            logs = await asyncio.to_thread(_read_pod_log, processor, log_kwargs)
+            logs = await asyncio.wait_for(
+                asyncio.to_thread(_read_pod_log, processor, log_kwargs),
+                timeout=POD_LOG_READ_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as e:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"The API {POD_LOG_READ_TIMED_OUT} within {POD_LOG_READ_TIMEOUT_SECONDS}s "
+                    f"(pod '{pod_metadata.name}'), which happens when the node's kubelet no "
+                    "longer answers. The container's output is in CloudWatch Logs, where "
+                    "'gco jobs logs' reads it."
+                ),
+            ) from e
         except K8sApiException as e:
             if e.status == 400:
                 error_body = str(e.body) if e.body else str(e.reason)
