@@ -27,6 +27,8 @@ PRINT_ONLY=0
 NO_BUILD=0
 AWS_WRITABLE=0
 UNINSTALL=0
+SOCKET_OVERRIDE=""
+NO_SOCKET=0
 
 # Host environment variables forwarded into the container in bare `-e NAME`
 # form. Every runtime (Docker, Finch/nerdctl, and Podman) passes a variable only
@@ -117,6 +119,11 @@ Usage: scripts/setup-dev-alias.sh [options]
       --aws-writable   Mount ~/.aws read-write so `aws sso login` can run in
                        the container and cache its token for the host (default:
                        read-only).
+      --socket PATH    Share this Docker-compatible API socket with the container
+                       instead of discovering one. PATH is as the runtime's
+                       containers see it (inside its VM, for a VM-based runtime).
+      --no-socket      Share no runtime socket. Build-heavy commands then need a
+                       host install of the CLI.
       --uninstall      Remove the managed block from the rc file and exit.
   -h, --help           Show this help and exit.
 
@@ -124,6 +131,15 @@ By default the script builds (or refreshes) the dev image from Dockerfile.dev
 with the detected runtime, then installs the `gco` function. Detection prefers
 docker, then finch, then podman (the first whose daemon answers `<rt> info`).
 GCO_CONTAINER_RUNTIME or CDK_DOCKER override detection.
+
+Runtime socket: build-heavy commands (`gco stacks deploy-all`, `gco images
+build`) drive the runtime from inside the container through its Docker-compatible
+API socket. The script tries the runtime's usual socket paths (Docker's, the
+current Docker context's, Podman's API service, finch-daemon's in the Finch VM),
+keeps the first one a Docker CLI in the dev image can reach, and mounts it at
+/var/run/docker.sock. For a daemon without BuildKit (Podman, finch-daemon) the
+function also sets DOCKER_BUILDKIT=0, and where SELinux keeps containers off the
+socket (Podman machines, Fedora) it disables label separation for the container.
 
 AWS credentials: the function mounts ~/.aws and forwards the standard AWS
 environment variables (AWS_PROFILE, AWS_REGION, static keys, session tokens,
@@ -150,6 +166,9 @@ while [ "$#" -gt 0 ]; do
         --image=*) IMAGE="${1#*=}"; shift ;;
         --no-build) NO_BUILD=1; shift ;;
         --aws-writable) AWS_WRITABLE=1; shift ;;
+        --socket) [ "$#" -ge 2 ] || die "--socket needs a value"; SOCKET_OVERRIDE="$2"; shift 2 ;;
+        --socket=*) SOCKET_OVERRIDE="${1#*=}"; shift ;;
+        --no-socket) NO_SOCKET=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
@@ -191,58 +210,149 @@ resolve_runtime() {
     detect_runtime
 }
 
-# Finch runs its containers in a VM, so a bind-mount source is a path in that
-# VM, not on the host. From v1.8.0, Finch runs finch-daemon there: a Docker
-# Engine API on /run/finch.sock, which the VM also links from
-# /var/run/docker.sock. Mounting that VM path gives the container's Docker CLI
-# a daemon to drive, so build-heavy commands work in the container on Finch too.
-FINCH_VM_DOCKER_SOCKET="/var/run/docker.sock"
+# -- Runtime socket ------------------------------------------------------------
+#
+# A bind-mount source is a path as the runtime's daemon sees it: inside the VM
+# of Docker Desktop, Colima, OrbStack, a Podman machine or Finch, on the host
+# otherwise. So the candidates below are daemon-side paths, and each one is
+# proven by running the dev image with it mounted rather than by looking for a
+# file on this host.
 
-# Whether the Finch VM serves a Docker-compatible socket the dev image can
-# use. Runs the image once with --mount, which, unlike -v, fails when the
-# source path is missing instead of creating an empty directory in its place.
-# An older Finch with no finch-daemon, or no local image yet, reads as no.
-finch_vm_socket_available() {
-    finch run --rm \
-        --mount "type=bind,source=$FINCH_VM_DOCKER_SOCKET,target=/run/gco-runtime.sock" \
-        "$1" test -S /run/gco-runtime.sock >/dev/null 2>&1
+# The filesystem path of a unix:// endpoint (a Docker context, DOCKER_HOST,
+# Podman's remote socket); nothing for tcp://, ssh:// or a named pipe.
+endpoint_path() {
+    case "$1" in
+        unix://*) printf '%s\n' "${1#unix://}" ;;
+        /*) printf '%s\n' "$1" ;;
+    esac
 }
 
-# Socket arguments for `<runtime> run`. Docker and Podman are static. Finch
-# depends on the VM, so the caller passes whether finch_vm_socket_available
-# said yes. finch-daemon has no BuildKit API, so DOCKER_BUILDKIT=0 makes
-# `docker build` send the context to it, and finch-daemon runs the build on
-# Finch's own BuildKit and stores the image where `finch` sees it. With the
-# Buildx default instead, the result stays in a builder container that CDK
-# never loads from.
-socket_args_for() {
-    local mount="" extra=""
+# Socket paths to try for a runtime, most likely first, one per line:
+#   docker  /var/run/docker.sock, which Docker Desktop, Colima and OrbStack
+#           serve inside their VMs and rootful Linux Docker on the host; then
+#           DOCKER_HOST and the current context's socket (rootless Docker).
+#   podman  the API socket `podman info` reports (inside the machine on macOS
+#           and Windows), then the usual rootless and rootful paths.
+#   finch   finch-daemon's /run/finch.sock (in the Finch VM on macOS, on the
+#           host on Linux), then the VM's /var/run/docker.sock link to it.
+socket_candidates_for() {
     case "$1" in
-        docker) mount="/var/run/docker.sock:/var/run/docker.sock" ;;
-        podman) mount="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock:/var/run/docker.sock" ;;
-        finch)
-            [ "${2:-0}" -eq 1 ] || return 0
-            mount="$FINCH_VM_DOCKER_SOCKET:/var/run/docker.sock"
-            extra="-e DOCKER_BUILDKIT=0 "
+        docker)
+            printf '%s\n' /var/run/docker.sock
+            endpoint_path "${DOCKER_HOST:-}"
+            endpoint_path "$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
             ;;
-        *) return 0 ;;
-    esac
-    printf -- '-v %s %s' "$(shell_quote "$mount")" "$extra"
+        podman)
+            endpoint_path "$(podman info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)"
+            printf '%s\n' "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" /run/podman/podman.sock
+            ;;
+        finch)
+            printf '%s\n' /run/finch.sock /var/run/docker.sock
+            ;;
+    esac | awk 'NF && !seen[$0]++'
 }
 
-socket_desc_for() {
-    case "$1" in
-        docker) printf '%s' "host Docker socket -> /var/run/docker.sock" ;;
-        podman) printf '%s' "Podman socket (${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock) -> /var/run/docker.sock" ;;
-        finch)
-            if [ "${2:-0}" -eq 1 ]; then
-                printf '%s' "Finch VM's Docker-compatible socket (finch-daemon, $FINCH_VM_DOCKER_SOCKET) -> /var/run/docker.sock"
-            else
-                printf '%s' "none (this Finch VM serves no Docker-compatible socket)"
-            fi
-            ;;
-        *) printf '%s' "none ($1 has no host socket to share)" ;;
+# Run inside the dev image with a candidate mounted at /var/run/docker.sock: a
+# Docker CLI must reach a daemon there, and the daemon's /_ping headers say what
+# it is. Docker Engine answers `Server: Docker/<version>`; Podman answers
+# `Server: Libpod/<version>` and finch-daemon no Server header, and neither has
+# a BuildKit API.
+SOCKET_PROBE='docker version --format "{{.Server.Version}}" >/dev/null 2>&1 || exit 3; curl -fsS -o /dev/null -D - --unix-socket /var/run/docker.sock http://localhost/_ping 2>/dev/null | tr -d "\r" | sed -n "s/^[Ss]erver: */server=/p"; echo gco-socket-ok'
+
+# probe_socket RUNTIME IMAGE PATH [RUN ARGS...]: print the probe's answer and
+# succeed when the daemon behind PATH answered. --mount, unlike -v, fails on a
+# missing source instead of creating an empty directory in its place.
+probe_socket() {
+    local rt="$1" image="$2" mount="type=bind,source=$3,target=/var/run/docker.sock" out
+    shift 3
+    out="$("$rt" run --rm "$@" --mount "$mount" "$image" sh -c "$SOCKET_PROBE" 2>/dev/null)" || return 1
+    case "$out" in
+        *gco-socket-ok*) printf '%s\n' "$out" ;;
+        *) return 1 ;;
     esac
+}
+
+# discover_socket RUNTIME IMAGE: set SOCKET_PATH, SOCKET_LABEL_OFF and
+# SOCKET_BUILDKIT for the first candidate (or --socket) that answers, or leave
+# SOCKET_PATH empty with SOCKET_NONE_REASON saying why. SELinux (Podman
+# machines, Fedora) keeps a container off a socket it did not label, so a
+# candidate that fails is tried again with label separation disabled. Finch's
+# nerdctl has no SELinux labels to disable.
+SOCKET_PATH=""
+SOCKET_LABEL_OFF=0
+SOCKET_BUILDKIT=0
+SOCKET_TRIED=""
+SOCKET_NONE_REASON=""
+# Probe the candidate paths read from stdin, keeping the first that answers.
+probe_candidates() {
+    local rt="$1" image="$2" candidate out
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        SOCKET_TRIED="${SOCKET_TRIED:+$SOCKET_TRIED, }$candidate"
+        if out="$(probe_socket "$rt" "$image" "$candidate")"; then
+            SOCKET_LABEL_OFF=0
+        elif [ "$rt" != "finch" ] && out="$(probe_socket "$rt" "$image" "$candidate" --security-opt label=disable)"; then
+            SOCKET_LABEL_OFF=1
+        else
+            continue
+        fi
+        SOCKET_PATH="$candidate"
+        case "$out" in
+            *"server=Docker/"*) SOCKET_BUILDKIT=1 ;;
+            *) SOCKET_BUILDKIT=0 ;;
+        esac
+        return 0
+    done
+    return 1
+}
+
+discover_socket() {
+    local rt="$1" image="$2" candidates
+    if [ "$NO_SOCKET" -eq 1 ]; then
+        SOCKET_NONE_REASON="--no-socket"
+        return 0
+    fi
+    if [ -n "$SOCKET_OVERRIDE" ]; then
+        candidates="$SOCKET_OVERRIDE"
+    else
+        candidates="$(socket_candidates_for "$rt")"
+    fi
+    probe_candidates "$rt" "$image" <<< "$candidates" && return 0
+    if [ -z "$SOCKET_TRIED" ]; then
+        SOCKET_NONE_REASON="$rt has no host socket to share"
+    elif [ "$rt" = "finch" ]; then
+        SOCKET_NONE_REASON="this Finch VM serves no Docker-compatible socket"
+    else
+        SOCKET_NONE_REASON="no Docker-compatible API answered at $SOCKET_TRIED"
+    fi
+}
+
+# Arguments for `<runtime> run` that share the discovered socket.
+socket_args() {
+    [ -n "$SOCKET_PATH" ] || return 0
+    printf -- '-v %s ' "$(shell_quote "$SOCKET_PATH:/var/run/docker.sock")"
+    if [ "$SOCKET_LABEL_OFF" -eq 1 ]; then
+        printf -- '--security-opt label=disable '
+    fi
+    if [ "$SOCKET_BUILDKIT" -eq 0 ]; then
+        printf -- '-e DOCKER_BUILDKIT=0 '
+    fi
+}
+
+socket_desc() {
+    if [ -z "$SOCKET_PATH" ]; then
+        printf 'none (%s)' "$SOCKET_NONE_REASON"
+        return 0
+    fi
+    printf '%s -> /var/run/docker.sock' "$SOCKET_PATH"
+    if [ "$SOCKET_BUILDKIT" -eq 1 ]; then
+        printf ' (BuildKit)'
+    else
+        printf ' (classic builder: DOCKER_BUILDKIT=0)'
+    fi
+    if [ "$SOCKET_LABEL_OFF" -eq 1 ]; then
+        printf ', SELinux label separation off'
+    fi
 }
 
 choose_rc_file() {
@@ -418,9 +528,6 @@ if [ "$runtime" = "podman" ]; then
     require_single_line "XDG_RUNTIME_DIR" "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 fi
 
-finch_socket=0
-socket="$(socket_args_for "$runtime")"
-
 # Podman does not resolve a bare, locally-built image name: an image built with
 # `podman build -t gco-dev` is stored as `localhost/gco-dev`, but `podman run
 # gco-dev` treats the unqualified name as remote and searches the configured
@@ -448,14 +555,20 @@ else
     aws_mount_opts="ro${mount_suffix}"
 fi
 
+if [ -n "$SOCKET_OVERRIDE" ]; then
+    require_single_line "--socket" "$SOCKET_OVERRIDE"
+    [ "$NO_SOCKET" -eq 0 ] || die "--socket and --no-socket cannot be combined"
+fi
+
 if [ "$PRINT_ONLY" -eq 1 ]; then
-    # The Finch check needs the dev image; before the first build it reads as
-    # no socket, which the install run then corrects.
-    if [ "$runtime" = "finch" ] && finch_vm_socket_available "$image_ref"; then
-        finch_socket=1
-        socket="$(socket_args_for "$runtime" "$finch_socket")"
+    # The socket check runs the dev image, so before the first build the
+    # printed function shares no socket; the install run then finds it.
+    if [ "$NO_SOCKET" -eq 0 ] && ! "$runtime" image inspect "$image_ref" >/dev/null 2>&1; then
+        warn "'$image_ref' is not built yet, so no runtime socket could be checked; the printed function shares none (run without --print to build the image)"
+        NO_SOCKET=1
     fi
-    emit_block "$runtime" "$socket" "$image_ref" "$(forwarded_env_args)" "$aws_mount_opts"
+    discover_socket "$runtime" "$image_ref"
+    emit_block "$runtime" "$(socket_args)" "$image_ref" "$(forwarded_env_args)" "$aws_mount_opts"
     exit 0
 fi
 
@@ -469,18 +582,16 @@ else
     build_image "$runtime"
 fi
 
-if [ "$runtime" = "finch" ] && finch_vm_socket_available "$image_ref"; then
-    finch_socket=1
-    socket="$(socket_args_for "$runtime" "$finch_socket")"
-fi
-block="$(emit_block "$runtime" "$socket" "$image_ref" "$(forwarded_env_args)" "$aws_mount_opts")"
+discover_socket "$runtime" "$image_ref"
+require_single_line "socket path" "$SOCKET_PATH"
+block="$(emit_block "$runtime" "$(socket_args)" "$image_ref" "$(forwarded_env_args)" "$aws_mount_opts")"
 rc="$(choose_rc_file)"
 install_block "$rc" "$block"
 
 log "Installed the 'gco' dev-container function."
 log ""
 log "  Container runtime : $runtime"
-log "  Socket mount      : $(socket_desc_for "$runtime" "$finch_socket")"
+log "  Socket mount      : $(socket_desc)"
 log "  Dev image         : $image_ref"
 log "  Shell profile     : $rc"
 log "  AWS credentials   : ~/.aws mounted $([ "$AWS_WRITABLE" -eq 1 ] && printf 'read-write' || printf 'read-only') + AWS_PROFILE/AWS_REGION/keys/session"
@@ -504,16 +615,31 @@ fi
 log ""
 log "Activate it in this shell:  source \"$rc\""
 log "Then try:                   gco --help"
-if [ "$finch_socket" -eq 1 ]; then
+if [ -n "$SOCKET_PATH" ]; then
     log ""
-    log "Note: the function mounts the Docker-compatible socket that finch-daemon serves"
-    log "in the Finch VM, so build-heavy commands such as 'gco stacks deploy-all' and"
-    log "'gco images build' run in the container too. It also sets DOCKER_BUILDKIT=0:"
-    log "finch-daemon has no BuildKit API, so 'docker build' hands each build to"
-    log "finch-daemon, which runs it on Finch's own BuildKit."
-elif [ -z "$socket" ]; then
+    log "Note: the function shares $runtime's Docker-compatible API socket with the"
+    log "container, so build-heavy commands such as 'gco stacks deploy-all' and"
+    log "'gco images build' run in the container too."
+    if [ "$SOCKET_BUILDKIT" -eq 0 ]; then
+        log "This daemon has no BuildKit API, so the function also sets DOCKER_BUILDKIT=0:"
+        log "'docker build' then hands each build to the daemon, which stores the image"
+        log "where CDK tags and pushes it from."
+    fi
+    if [ "$SOCKET_LABEL_OFF" -eq 1 ]; then
+        log "SELinux keeps containers off the socket on this daemon's host, so the function"
+        log "also passes '--security-opt label=disable'. Access to the socket already gives"
+        log "the container root-equivalent control of $runtime."
+    fi
+else
     log ""
-    if [ "$runtime" = "finch" ]; then
+    if [ "$NO_SOCKET" -eq 1 ]; then
+        log "Note: the function shares no runtime socket with the container, so it cannot"
+        log "build images. Everyday commands (jobs, status, costs, inference, and stacks"
+        log "operations that build nothing) work as-is."
+        log ""
+        log "Build-heavy commands ('gco stacks deploy-all', image builds) need a container"
+        log "daemon at CDK synth time, so run them on the host with $runtime as the builder:"
+    elif [ "$runtime" = "finch" ]; then
         log "Note: this Finch VM serves no Docker-compatible socket the container can reach"
         log "(a host socket connects to nothing across the VM boundary), so the function"
         log "omits the socket mount. Everyday commands (jobs, status, costs, inference, and"
@@ -523,6 +649,22 @@ elif [ -z "$socket" ]; then
         log "this script and the function mounts its socket. Until then, run build-heavy"
         log "commands ('gco stacks deploy-all', image builds) from a host install with"
         log "Finch as the builder:"
+    elif [ -n "$SOCKET_TRIED" ]; then
+        log "Note: no Docker-compatible API answered from inside the dev image at"
+        log "$SOCKET_TRIED, so the function omits the socket mount. Everyday"
+        log "commands (jobs, status, costs, inference, and stacks operations that build"
+        log "nothing) work as-is."
+        log ""
+        if [ "$runtime" = "podman" ]; then
+            log "Start Podman's API service and re-run this script: a Podman machine runs it"
+            log "while the machine is up; on Linux, 'systemctl --user enable --now podman.socket'"
+            log "(rootful: 'sudo systemctl enable --now podman.socket'). Or pass --socket PATH."
+        else
+            log "Start the daemon, or pass --socket PATH with the path its containers see, and"
+            log "re-run this script."
+        fi
+        log "Until then, run build-heavy commands ('gco stacks deploy-all', image builds)"
+        log "from a host install with $runtime as the builder:"
     else
         log "Note: this script knows no socket of $runtime to share with the container, so"
         log "the function omits the socket mount. Everyday commands (jobs, status, costs,"

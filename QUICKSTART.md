@@ -66,7 +66,7 @@ The image is multi-arch — it builds natively on `linux/amd64` (Intel/x86_64 ho
 
 Why a function and not an alias: it forwards arguments and pipes correctly, attaches a TTY only when one is present, mounts your current directory at `/workspace`, and bakes in the correct socket for the runtime you actually have. Re-run the script whenever you switch runtimes; `--print` previews the function, `--runtime <name>` forces one, `--rc <path>` targets a specific profile, and `--no-build` skips the image build.
 
-> **Security note:** the function shares your host Docker socket with the container so `cdk deploy` can build Lambda assets and mirror images through your host daemon. That is host-socket pass-through, not Docker-in-Docker: anyone with access to the container has root-equivalent access to the host Docker daemon, so only use this on trusted hosts. With Finch, the function mounts the Docker-compatible socket that finch-daemon serves in Finch's VM (Finch v1.8.0 and later), which gives the container the same access to Finch's containers and images. On a Finch VM without finch-daemon, the script omits the mount and says how to run build-heavy commands such as `deploy-all` instead.
+> **Security note:** the function shares your container runtime's Docker-compatible API socket with the container so `cdk deploy` can build Lambda assets and mirror images through your host daemon. That is host-socket pass-through, not Docker-in-Docker: anyone with access to the container has root-equivalent access to that daemon, so only use this on trusted hosts. The script finds the socket by running the dev image with each likely path mounted: `/var/run/docker.sock` (Docker Desktop, Colima, OrbStack and Linux Docker), the socket of `DOCKER_HOST` or the current Docker context (rootless Docker), the API service `podman info` reports, and finch-daemon's socket in Finch's VM (Finch v1.8.0 and later). For Podman and finch-daemon, which have no BuildKit API, the function also sets `DOCKER_BUILDKIT=0`, and where SELinux keeps containers off the socket (Podman machines, Fedora) it disables label separation for the container. `--socket PATH` names the socket yourself, and `--no-socket` shares none.
 
 ## Step 2: Run the GCO CLI
 
@@ -92,7 +92,7 @@ docker run -it --rm \
 gco --version
 ```
 
-Colima users: the host Docker socket may live somewhere other than `/var/run/docker.sock`; see the header of [`Dockerfile.dev`](Dockerfile.dev) for the right `-v` flag. Finch users: run the same command with `finch run` and add `-e DOCKER_BUILDKIT=0`. There `/var/run/docker.sock` is finch-daemon's socket in Finch's VM, and finch-daemon builds only through the classic `docker build` path.
+Docker Desktop, Colima and OrbStack serve `/var/run/docker.sock` inside their VMs, so the command works as written. For rootless Docker, Podman and Finch, `./scripts/setup-dev-alias.sh --print` shows the socket mount and flags to use, and the header of [`Dockerfile.dev`](Dockerfile.dev) explains them.
 
 </details>
 
@@ -183,7 +183,7 @@ finch vm start
 gco stacks deploy-all -y
 ```
 
-> **Using Finch?** The dev container builds the deployment's images through finch-daemon, the Docker-compatible API in Finch's VM. If the setup script said your Finch VM serves no such socket, upgrade Finch to v1.8.0 or later and re-run `./scripts/setup-dev-alias.sh`, or run this step from a [host install](#installing-on-your-host-instead-advanced) as `CDK_DOCKER=finch gco stacks deploy-all -y`. The same applies to `gco stacks deploy`, `gco upgrade` and `gco images build|push`.
+> **Did the setup script say `Socket mount : none`?** The dev container builds the deployment's images through the runtime socket the `gco` function shares, so fix what the script's note names and re-run `./scripts/setup-dev-alias.sh`: start Docker or Podman's API service (on Linux, `systemctl --user enable --now podman.socket`), upgrade Finch to v1.8.0 or later, or pass `--socket PATH`. Or run this step from a [host install](#installing-on-your-host-instead-advanced) as `CDK_DOCKER=<runtime> gco stacks deploy-all -y`. The same applies to `gco stacks deploy`, `gco upgrade` and `gco images build|push`.
 
 Or deploy a single region:
 

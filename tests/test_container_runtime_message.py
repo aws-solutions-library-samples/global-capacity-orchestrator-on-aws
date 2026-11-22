@@ -121,6 +121,7 @@ class TestInsideTheDevContainer:
         assert "CDK_DOCKER=finch" in message
         assert "Installing on your host instead" in message
         assert "./scripts/setup-dev-alias.sh" in message
+        assert "Installed with --no-socket: re-run ./scripts/setup-dev-alias.sh without it" in message
         assert "open -a Docker" not in message
         assert "docs.docker.com" not in message
 

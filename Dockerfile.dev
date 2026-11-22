@@ -54,26 +54,25 @@
 #   container on a trusted host and avoid mounting the socket when running
 #   untrusted code.
 #
-#   Host compatibility:
-#     - Linux: the socket lives at /var/run/docker.sock by default.
-#     - Docker Desktop (macOS, Windows): /var/run/docker.sock is already
-#       the canonical path — Docker Desktop surfaces the VM daemon there.
-#     - Colima (macOS alternative): the socket lives at
-#         ~/.colima/default/docker.sock        (older Colima)
-#         ~/.colima/docker.sock                (newer Colima)
-#       Either:
-#         (a) symlink it to /var/run/docker.sock, or
-#         (b) change the bind mount target, e.g.
-#             -v ~/.colima/default/docker.sock:/var/run/docker.sock
-#       See https://github.com/abiosoft/colima for current defaults.
-#     - Finch (macOS): `finch run` mounts paths from Finch's VM, and from
-#       v1.8.0 finch-daemon serves a Docker-compatible API there on
-#       /var/run/docker.sock, so the same -v flag works. Add
-#       `-e DOCKER_BUILDKIT=0`: finch-daemon has no BuildKit API, so the
-#       Docker CLI's classic `docker build` hands each build to finch-daemon,
-#       which runs it on Finch's own BuildKit and keeps the image where CDK
-#       pushes it from. scripts/setup-dev-alias.sh checks for the socket and
-#       adds both.
+#   Host compatibility (scripts/setup-dev-alias.sh finds and checks the
+#   socket for you; these are the paths it tries). A bind-mount source is a
+#   path as the daemon sees it, inside the VM for a VM-based runtime:
+#     - Linux Docker, Docker Desktop, Colima and OrbStack:
+#         -v /var/run/docker.sock:/var/run/docker.sock
+#       (the VM-based ones serve that path inside their VMs).
+#     - Rootless Docker, or a daemon on its own socket: the socket of
+#       DOCKER_HOST or the current context, e.g.
+#         -v "$XDG_RUNTIME_DIR/docker.sock:/var/run/docker.sock"
+#     - Podman: the path `podman info --format '{{.Host.RemoteSocket.Path}}'`
+#       prints (inside the machine on macOS and Windows), with
+#         -e DOCKER_BUILDKIT=0 --security-opt label=disable
+#       Podman's Docker API has no BuildKit, so the Docker CLI's classic
+#       `docker build` hands each build to Podman, which stores the image in
+#       its own store; label=disable lets an SELinux-confined container
+#       (Podman machines, Fedora) use the socket.
+#     - Finch (v1.8.0 and later): finch-daemon's /run/finch.sock in the
+#       Finch VM (on the host on Linux), with -e DOCKER_BUILDKIT=0 for the
+#       same reason as Podman.
 
 # checkov:skip=CKV_DOCKER_2:An interactive contributor shell has no service to
 # health-check.

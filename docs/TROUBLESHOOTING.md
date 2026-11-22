@@ -10,6 +10,7 @@ Common issues and their solutions.
 - [Deployment Issues](#deployment-issues)
   - [Stack Creation Fails](#stack-creation-fails)
   - [Deploy Fails on Image Mirror or linux/amd64 Asset Build (Apple Silicon)](#deploy-fails-on-image-mirror-or-linuxamd64-asset-build-apple-silicon)
+  - [Dev Container Shares No Runtime Socket](#dev-container-shares-no-runtime-socket)
   - [Deploy Refuses Owner-Only Sources (Restrictive umask)](#deploy-refuses-owner-only-sources-restrictive-umask)
   - [Deploy Asks for a Different npm (Inference Streaming Lambda)](#deploy-asks-for-a-different-npm-inference-streaming-lambda)
   - [Stack Stuck in REVIEW_IN_PROGRESS](#stack-stuck-in-review_in_progress)
@@ -199,6 +200,35 @@ docker run --rm gco-dev docker buildx version   # confirm Buildx is present
 ```
 
 If you deploy from your host instead, ensure one of `docker buildx`, Finch (`docker pull --all-platforms`), or `skopeo` is on `PATH`.
+
+### Dev Container Shares No Runtime Socket
+
+**Symptom**: `./scripts/setup-dev-alias.sh` prints `Socket mount : none (...)`,
+and `gco stacks deploy-all` in the dev container stops with `No container
+runtime is reachable from the gco-dev container`.
+
+**Cause**: The setup script shares a socket only after a Docker CLI in the dev
+image has reached a daemon through it. The reason in parentheses says what it
+found: no answering API at the paths it tried, a Finch VM without finch-daemon,
+`--no-socket`, or a runtime it has no socket path for.
+
+**Solution**: Make the daemon answer and run the setup script again:
+
+- **Docker**: start Docker Desktop, Colima or OrbStack, or `dockerd`. For a
+  daemon on its own socket, set `DOCKER_HOST` or select its Docker context
+  first, or pass `--socket PATH`.
+- **Podman**: start the machine (`podman machine start`), which runs the API
+  service. On Linux, start the service with
+  `systemctl --user enable --now podman.socket` (rootful:
+  `sudo systemctl enable --now podman.socket`).
+- **Finch**: upgrade to v1.8.0 or later, which runs finch-daemon in its VM.
+- **Other runtimes** (containerd with nerdctl, Rancher Desktop in containerd
+  mode): they serve no Docker API, so run build-heavy commands from a
+  [host install](../QUICKSTART.md#installing-on-your-host-instead-advanced) with
+  `CDK_DOCKER=<runtime>`.
+
+`--socket PATH` takes the path as the runtime's containers see it, which for a
+VM-based runtime is a path inside its VM.
 
 ### Deploy Refuses Owner-Only Sources (Restrictive umask)
 

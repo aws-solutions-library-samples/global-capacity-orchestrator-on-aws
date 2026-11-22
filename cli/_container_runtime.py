@@ -169,6 +169,8 @@ def _dev_container_error_message() -> str:
             "  - Docker Desktop, Colima or Podman: start it, then re-run "
             "./scripts/setup-dev-alias.sh on the host so the gco function mounts its "
             "socket.",
+            "  - Installed with --no-socket: re-run ./scripts/setup-dev-alias.sh without "
+            "it, or run this command from a host install.",
         ]
     )
 
