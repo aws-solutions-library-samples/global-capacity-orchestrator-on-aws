@@ -2139,6 +2139,13 @@ response status line and headers. Only the status code counts: the dispatcher
 never reads the response body, so a receiver should not rely on the
 dispatcher reading anything it sends back.
 
+The URL must use HTTPS, and every address its host resolves to must be
+globally routable unicast; registration and delivery both check this. Each
+attempt then connects to one of those addresses, in turn, using only the
+addresses the cluster has a route to. GCO's clusters are IPv4, so a host's
+IPv6 (AAAA) addresses are skipped, and a host that resolves only to IPv6
+addresses is refused with that reason.
+
 The dispatcher runs inside the health-monitor, which has two replicas for
 availability. Only one of them delivers at a time: the replicas elect a
 deliverer through the pre-created `gco-health-monitor-webhooks` Lease in

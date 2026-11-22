@@ -199,6 +199,23 @@ def _globally_routable_unicast(
     return address
 
 
+def _has_route(address: str, port: int) -> bool:
+    """Whether this host has a route to ``address``, asked of the kernel without traffic.
+
+    Connecting a UDP socket only selects a route and a source address; nothing
+    is sent. GCO's clusters are IPv4, so a pod has no IPv6 route: a webhook
+    host that also publishes AAAA records answers with addresses a delivery
+    attempt could only fail on, one attempt each.
+    """
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as probe:
+            probe.connect((address, port))
+    except OSError:
+        return False
+    return True
+
+
 def _resolve_webhook_target(
     url: str,
     allowed_domains: list[str] | None = None,
@@ -248,13 +265,26 @@ def _resolve_webhook_target(
     if not addresses:
         return None, f"DNS resolution returned no usable addresses for {hostname}"
 
+    # Every address passed the check above; delivery pins only the ones this
+    # pod can reach, so an IPv4 cluster spends no attempt on an IPv6 address.
+    reachable = tuple(sorted(address for address in addresses if _has_route(address, port)))
+    if not reachable:
+        reason = (
+            "an IPv4 cluster cannot reach a host that publishes only IPv6 addresses"
+            if all(":" in address for address in addresses)
+            else "the cluster has no route to any of them"
+        )
+        return None, (
+            f"No address {hostname} resolves to is reachable from this cluster "
+            f"(resolved: {', '.join(sorted(addresses))}); {reason}"
+        )
     return (
         _ValidatedWebhookTarget(
             original_url=url,
             parsed=parsed,
             hostname=hostname,
             port=port,
-            addresses=tuple(sorted(addresses)),
+            addresses=reachable,
         ),
         None,
     )
