@@ -21,6 +21,12 @@ Start with [API Surface at a Glance](#api-surface-at-a-glance): it maps every
 path prefix to the service that answers it, whether the global or regional API
 Gateway exposes it, and which authentication applies.
 
+The `gco` CLI, and the MCP server through it, submit work as SigV4-signed
+requests to this API, and tools of your own can do the same. Manifold Bio's
+Regatta scheduler submits its protein design runs through this API in
+production (see the
+[case study](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws)).
+
 > **Generated inventory.** The endpoint tables in this document are checked
 > against the running applications by
 > [`tests/test_api_docs_coverage.py`](../tests/test_api_docs_coverage.py), which

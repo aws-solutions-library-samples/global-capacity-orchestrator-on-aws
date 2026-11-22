@@ -10,6 +10,7 @@ Screenshots and visual assets for Global Capacity Orchestrator (GCO) documentati
 - [In-Cluster Monitoring Screenshots](#in-cluster-monitoring-screenshots)
 - [Platform Add-on Screenshots](#platform-add-on-screenshots)
 - [SageMaker Studio Screenshots](#sagemaker-studio-screenshots)
+- [Case Study Charts](#case-study-charts)
 
 ## Project Logo
 
@@ -102,3 +103,17 @@ Screenshots of the GCO analytics environment running in [SageMaker](https://docs
 | [sagemaker_studio_emr_serverless.png](sagemaker_studio_emr_serverless.png) | [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html) application visible from the Studio Data panel |
 | [sagemaker_studio_canvas_data_wrangler.png](sagemaker_studio_canvas_data_wrangler.png) | SageMaker Canvas Data Wrangler when the `canvas` sub-toggle is enabled |
 | [sagemaker_studio_mlflow.png](sagemaker_studio_mlflow.png) | SageMaker Studio MLflow application visible from the MLflow panel |
+
+## Case Study Charts
+
+Charts from the AWS Startups case study
+[Manifold Bio accelerates protein design with mBER-2 using Global Capacity Orchestrator on AWS](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws),
+reproduced here with attribution and shown in the top-level README's "In
+production at Manifold Bio" section and on the wiki's home page. They are the
+case study's figures, unchanged: their source is that page, not this
+repository, so replace a file only with a newer copy from it.
+
+| Image | Description |
+|-------|-------------|
+| [manifold-bio-gpus-across-regions.jpg](manifold-bio-gpus-across-regions.jpg) | The 4,540 GPUs Manifold Bio held at one moment across nine AWS Regions, by Region and GPU type |
+| [manifold-bio-regatta-scaling.jpg](manifold-bio-regatta-scaling.jpg) | The GPUs Regatta held by Region during one campaign, including 2,018 added in 28.5 minutes |

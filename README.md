@@ -33,7 +33,9 @@
   <a href="docs/README.md"><b>Documentation</b></a> ·
   <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/"><b>Wiki</b></a> ·
   <a href="examples/README.md"><b>Examples</b></a> ·
-  <a href="docs/CLI.md"><b>CLI Reference</b></a> ·
+  <a href="docs/API.md"><b>API</b></a> ·
+  <a href="docs/CLI.md"><b>CLI</b></a> ·
+  <a href="gco_mcp/README.md"><b>MCP</b></a> ·
   <a href="CONTRIBUTING.md"><b>Contributing</b></a>
 </p>
 
@@ -41,9 +43,40 @@
 
 **Global Capacity Orchestrator (GCO)** runs accelerated workloads — LLM training and inference, batch ML, HPC — on [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) clusters in as many AWS Regions as you configure, behind one [IAM](https://aws.amazon.com/iam/)-authenticated [API](docs/API.md), [CLI](docs/CLI.md) and [MCP server](gco_mcp/README.md). It finds where NVIDIA GPU, [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/), [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) and CPU capacity actually is, places jobs there, and serves inference endpoints with automatic cross-Region failover. [AWS Parallel Computing Service](docs/PCS.md) (Slurm) and [Amazon SageMaker HyperPod](docs/HYPERPOD.md) are available as optional additional compute backends.
 
+**In production:** Manifold Bio held **4,540 GPUs at once across nine AWS Regions** through GCO, and its protein design campaigns now finish in about a week instead of a month. [See the numbers](#in-production-at-manifold-bio).
+
 ![A recorded gco session: fleet status, capacity discovery, four schedulers, shared storage, a vector search and live LLM inference](demo/live_demo.gif)
 
 <sub>A real `gco` session, reproducible from [`demo/live_demo.sh`](demo/live_demo.sh): fleet status, capacity discovery, four schedulers plus KEDA, shared storage, a globally replicated vector store and live LLM inference. More recordings are under [See it running](#see-it-running).</sub>
+
+## In production at Manifold Bio
+
+[Manifold Bio](https://manifold.bio/) designs protein therapeutics with AI and tests them at a scale where one experiment covered a million designs, so the GPUs that design candidates set the pace of its research. Its engineers built Regatta, a scheduler that sends each design run to GCO's API, and GCO places the work in a Region where accelerators are available. That system is GCO's first production deployment. The [AWS Startups case study](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws) tells the story, and the numbers below are Manifold's.
+
+<p align="center">
+  <img src="images/manifold-bio-gpus-across-regions.jpg" alt="World map of the 4,540 GPUs Manifold Bio held at one moment across nine AWS Regions: Oregon 407, Ohio 852, Virginia 460, London 457, Frankfurt 834, Stockholm 281, Mumbai 398, Seoul 145 and Tokyo 706. By GPU type: T4 54%, RTX PRO 6000 20%, L40S 16%, A10G 6% and A100 4%." width="49%">
+  <img src="images/manifold-bio-regatta-scaling.jpg" alt="Stacked area chart of the GPUs Regatta held by Region during one campaign of about five hours, adding 2,018 GPUs in 28.5 minutes on the way to a peak of 4,540: Americas 1,719, Europe 1,572 and Asia Pacific 1,249." width="49%">
+</p>
+
+<sub>Left: the GPUs Manifold held at one moment, by Region and GPU type. Right: the GPUs held during one campaign, by Region. Charts from the AWS Startups case study [Manifold Bio accelerates protein design with mBER-2 using Global Capacity Orchestrator on AWS](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws), reproduced with attribution.</sub>
+
+| | Before GCO and Regatta | With GCO and Regatta |
+|---|---|---|
+| GPUs for a campaign | About 256, in one Region | Up to **4,540** at once, across nine Regions |
+| Campaign size | About 10 million designs | Approaching **100 million** designs |
+| Time to finish a campaign | About a month | About **a week** |
+| One iteration cycle | About a week | **Two days** |
+| Compute cost per designed binder | Baseline | **Half**, with price-aware Spot use across 10 Regions |
+| Designs in the best hour¹ | 10,441 | **826,691** |
+| Designs in the best 24 hours¹ | 212,330 | **4.6 million** |
+
+One campaign added **2,018 GPUs in 28.5 minutes** on its way to that peak, and a production campaign reached **1.8 million new designs an hour**, counted without length adjustment. One scientist or engineer can now launch a multi-Region run on hundreds of GPUs in minutes, and increasingly hands that launch to an agent working under their direction.
+
+> "We needed a clean engineering solution that could enable tens of millions of protein designs in a week."
+>
+> — Erik Swanson, AI/ML Team Lead, Manifold Bio
+
+<sub>¹ Length-adjusted (384-residue equivalents) and counted only on runs comparable with the earlier baseline. These two gains also include a newer mBER protocol that saves more designs per design task.</sub>
 
 ## Why GCO?
 
@@ -72,6 +105,7 @@ Running accelerated workloads across Regions means finding capacity, standing up
 **When to use GCO:**
 
 - You need to run GPU workloads (training, inference, batch processing)
+- You run bursts of GPU work that outgrow one Region's capacity, like [Manifold Bio's protein design campaigns](#in-production-at-manifold-bio)
 - You want to deploy inference endpoints across multiple regions with a single command
 - You want multi-region redundancy without managing multiple clusters
 - You prefer [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) authentication over kubeconfig management

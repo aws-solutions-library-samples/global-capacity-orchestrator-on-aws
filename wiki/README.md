@@ -37,7 +37,7 @@ the site's navigation order, which lives in the `nav` list of
 
 | File | Published at | What it covers |
 |------|--------------|----------------|
-| [`index.md`](index.md) | `/` (Home) | The one-paragraph pitch — one API, every accelerator, any region — with a two-minute "try it", who GCO is for, what it costs, and where to go next. |
+| [`index.md`](index.md) | `/` (Home) | The one-paragraph pitch — one API, every accelerator, any region — with a two-minute "try it", who GCO is for, GCO in production at Manifold Bio (with the case study's map of its 4,540 GPUs across nine Regions), what it costs, and where to go next. |
 | [`how-it-works.md`](how-it-works.md) | `/how-it-works/` | The architecture story at fly-over altitude: the global control plane and per-region stacks, what lives inside a region, how a job flows through the platform, and the security posture; illustrated with the three reference-architecture diagrams. |
 | [`get-started.md`](get-started.md) | `/get-started/` (For users) | The fast path from a clean machine to a running job in well under an hour — clone and build the dev container, a first success with no AWS charges, deploy, run a job, optionally deploy an inference endpoint, tear down — with the point where billing starts marked. |
 | [`evaluating-and-deploying.md`](evaluating-and-deploying.md) | `/evaluating-and-deploying/` (For users) | The questions before and after that fast path: what a deployment needs, the deploy/upgrade/destroy lifecycle, what it costs, and what can be customized. |

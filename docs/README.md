@@ -9,6 +9,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 - [Guides](#guides)
 - [Schedulers & Orchestrators](#schedulers--orchestrators)
 - [Supplementary](#supplementary)
+- [Case Studies](#case-studies)
 - [Reading Order](#reading-order)
 
 ## Guides
@@ -71,6 +72,12 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [client-examples/](client-examples/) | API client examples in Python, curl, and AWS CLI |
 | [openapi/](openapi/) | Generated OpenAPI documents for every HTTP surface — the four services (`scripts/generate_openapi.py`), the two AWS API Gateways read out of the synthesized CDK stacks (`scripts/generate_api_gateway_openapi.py`) and the in-cluster Gateway composed from its HTTPRoute (`scripts/generate_cluster_gateway_openapi.py`); rendered into spec sheets, an interaction diagram and Swagger UI consoles under [`diagrams/api_specs/`](../diagrams/api_specs/README.md) and on the project site |
 | [iam-policies/](iam-policies/) | [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) policy templates for different access levels |
+
+## Case Studies
+
+| Case study | Description |
+|------------|-------------|
+| [Manifold Bio accelerates protein design with mBER-2](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws) | GCO's first production deployment (AWS Startups). Manifold Bio's protein design campaigns run on GCO through Regatta, a scheduler Manifold's engineers built on GCO's API, and held up to 4,540 GPUs at once across nine AWS Regions. Manifold reports campaigns 10 times larger, finished in about a week instead of a month, at half the compute cost per designed binder. The [README](../README.md#in-production-at-manifold-bio) has the numbers side by side |
 
 ## Reading Order
 

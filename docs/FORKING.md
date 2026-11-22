@@ -95,7 +95,7 @@ resolved from a package registry at runtime by `mcp.json`. They are published
 package identifiers, not repository references; rewriting them means `uvx`
 cannot find the package and the servers fail to start.
 
-A blanket replacement of the repository name breaks one more:
+A blanket replacement of the repository name breaks two more:
 
 **The AWS Solutions Library guidance page.** GCO is published as official AWS
 Solutions Guidance at
@@ -103,6 +103,11 @@ Solutions Guidance at
 whose slug ends in the repository name. AWS owns that page and it describes the
 upstream project, so the tool leaves every link to it alone; drop or replace
 those links yourself if your fork should not point there.
+
+**The AWS Startups case study.** AWS Startups published a
+[case study of GCO in production at Manifold Bio](https://startups.aws.com/learn/manifold-bio-accelerates-protein-design-with-mber-2-using-global-capacity-orchestrator-on-aws)
+at a page whose slug also ends in the repository name. The tool leaves links to
+it alone for the same reason.
 
 Three files keep their upstream references on purpose, because they define or
 explain the upstream identity: `scripts/migrate_fork.py`,
