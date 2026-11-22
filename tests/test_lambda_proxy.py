@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import logging
+import socket
 import time
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlsplit
@@ -23,6 +24,18 @@ import urllib3
 from botocore.exceptions import ClientError
 
 from tests._lambda_imports import load_lambda_module
+
+
+def _one_test_net_address(host, port, *args, **kwargs):
+    """``socket.getaddrinfo`` for proxy tests: one documentation address, no DNS."""
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.10", port))]
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_target_lookup(monkeypatch):
+    """forward_request counts the target's addresses; keep that lookup off the network."""
+    monkeypatch.setattr(socket, "getaddrinfo", _one_test_net_address)
+
 
 # ============================================================================
 # proxy_utils

@@ -67,6 +67,16 @@ or read timeout in `504 Gateway timeout`, the same mapping as the Node
 streaming proxy. TLS failures return bounded errors without exposing trust
 state.
 
+urllib3 tries each address the target resolves to in turn and gives each the
+whole connect timeout, so each attempt's per-address connect limit is the
+smaller of `PROXY_CONNECT_TIMEOUT_SECONDS` (default 5, bounds 0.5–28) and the
+attempt's remaining budget divided by the number of addresses
+(`_connect_timeout`). Global Accelerator answers with two addresses, and in
+the minutes after a Region's load balancer first joins the accelerator both
+can leave the connection unanswered; without the split, one attempt outlasted
+the Lambda's timeout and API Gateway answered `Endpoint request timed out`
+with nothing logged.
+
 ### `has_dot_segment(path)`
 
 Whether the request path has a `.` or `..` segment, literal or

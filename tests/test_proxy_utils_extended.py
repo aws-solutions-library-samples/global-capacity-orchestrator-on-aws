@@ -18,6 +18,7 @@ failure.
 import hashlib
 import hmac
 import json
+import socket
 import time
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlsplit
@@ -26,6 +27,17 @@ import pytest
 import urllib3
 
 from tests._lambda_imports import load_lambda_module
+
+
+def _one_test_net_address(host, port, *args, **kwargs):
+    """``socket.getaddrinfo`` for proxy tests: one documentation address, no DNS."""
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.10", port))]
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_target_lookup(monkeypatch):
+    """forward_request counts the target's addresses; keep that lookup off the network."""
+    monkeypatch.setattr(socket, "getaddrinfo", _one_test_net_address)
 
 
 @pytest.fixture
@@ -1274,3 +1286,87 @@ class TestBuildTargetUrlValidation:
         pu, _ = proxy_module
         with pytest.raises(ValueError, match="HTTPS on port 443"):
             pu.build_target_url(endpoint, "/api", None)
+
+
+def _addresses(*ips):
+    return lambda host, port, *args, **kwargs: [
+        (socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))
+        for ip in ips
+    ]
+
+
+class TestConnectBudgetAcrossAddresses:
+    """urllib3 spends the connect timeout on each resolved address in turn.
+
+    Global Accelerator answers with two anycast addresses; in the minutes after
+    a Region's load balancer first joins it, both can black-hole the connect.
+    An attempt then ran twice its budget, the Lambda hit its own timeout, and
+    API Gateway answered "Endpoint request timed out" with nothing logged.
+    """
+
+    @pytest.mark.parametrize(
+        ("ips", "remaining", "expected"),
+        [
+            (("198.51.100.1",), 20.0, 5.0),
+            (("198.51.100.1", "198.51.100.2"), 20.0, 5.0),
+            (("198.51.100.1", "198.51.100.2"), 6.0, 3.0),
+            (("10.0.1.5", "10.0.2.5", "10.0.3.5", "10.0.4.5", "10.0.5.5", "10.0.6.5"), 12.0, 2.0),
+            (("198.51.100.1", "198.51.100.1", "2001:db8::1"), 9.0, 4.5),
+        ],
+    )
+    def test_the_per_address_limit_keeps_every_address_inside_the_budget(
+        self, packaged_proxy_module, monkeypatch, ips, remaining, expected
+    ):
+        monkeypatch.setattr(socket, "getaddrinfo", _addresses(*ips))
+        assert packaged_proxy_module._connect_timeout(
+            "https://accelerator.example/api", remaining
+        ) == pytest.approx(expected)
+
+    def test_a_failed_lookup_counts_as_one_address(self, packaged_proxy_module, monkeypatch):
+        def fail(*_args, **_kwargs):
+            raise socket.gaierror("name or service not known")
+
+        monkeypatch.setattr(socket, "getaddrinfo", fail)
+        assert packaged_proxy_module._connect_timeout("https://x.example/api", 3.0) == 3.0
+
+    def test_the_lookup_uses_urllib3s_address_family_and_port_443(
+        self, packaged_proxy_module, monkeypatch
+    ):
+        seen = []
+
+        def record(host, port, family, socktype, *args, **kwargs):
+            seen.append((host, port, family, socktype))
+            return []
+
+        monkeypatch.setattr(socket, "getaddrinfo", record)
+        packaged_proxy_module._connect_timeout("https://accelerator.example/api", 4.0)
+        assert seen == [
+            (
+                "accelerator.example",
+                443,
+                urllib3.util.connection.allowed_gai_family(),
+                socket.SOCK_STREAM,
+            )
+        ]
+
+    def test_each_attempt_gets_the_split_connect_limit_and_the_shared_total(
+        self, proxy_module, monkeypatch
+    ):
+        pu, _ = proxy_module
+        monkeypatch.setattr(socket, "getaddrinfo", _addresses("198.51.100.1", "198.51.100.2"))
+        mock_http = MagicMock()
+        mock_http.request.side_effect = urllib3.exceptions.ConnectTimeoutError("timed out")
+
+        with (
+            patch.object(pu, "_http", mock_http),
+            patch.object(pu.time, "monotonic", side_effect=[0.0, 0.0, 6.0, 6.0, 8.0]),
+            patch.object(pu.time, "sleep"),
+        ):
+            result = pu.forward_request(
+                "https://accelerator.example/api", "GET", {}, None, timeout=8.0
+            )
+
+        assert result["statusCode"] == 504
+        timeouts = [call.kwargs["timeout"] for call in mock_http.request.call_args_list]
+        assert [t.total for t in timeouts] == pytest.approx([8.0, 2.0])
+        assert [t.connect_timeout for t in timeouts] == pytest.approx([4.0, 1.0])
