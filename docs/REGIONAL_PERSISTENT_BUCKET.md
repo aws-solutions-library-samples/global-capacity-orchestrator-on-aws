@@ -112,8 +112,9 @@ gco storage sync regional-persistent:us-east-1 ./staged --prefix upgrade/$(date 
 
 From the cluster, a Job in `gco-jobs` running as `gco-service-account` can
 write to the bucket directly, which avoids a round trip through your machine.
-This one copies the `outputs/` directory of the `gco-shared-storage` EFS
-volume into the bucket:
+This one copies every file on the `gco-shared-storage` EFS volume, where
+[`examples/efs-output-job.yaml`](../examples/efs-output-job.yaml) writes its
+results, into the bucket under `upgrade/efs/`:
 
 ```yaml
 apiVersion: batch/v1
@@ -143,10 +144,10 @@ spec:
           sys.path.insert(0, "/tmp/pylib")
           import boto3
           s3 = boto3.client("s3", region_name=os.environ["persistentBucketRegion"])
-          root = pathlib.Path("/efs/outputs")
+          root = pathlib.Path("/outputs")
           for path in root.rglob("*"):
               if path.is_file():
-                  key = f"upgrade/efs-outputs/{path.relative_to(root)}"
+                  key = f"upgrade/efs/{path.relative_to(root)}"
                   s3.upload_file(str(path), os.environ["persistentBucketName"], key)
                   print(f"staged {key}")
         envFrom:
@@ -154,7 +155,7 @@ spec:
             name: gco-regional-persistent-bucket
         volumeMounts:
         - name: efs
-          mountPath: /efs
+          mountPath: /outputs
           readOnly: true
         securityContext:
           allowPrivilegeEscalation: false
