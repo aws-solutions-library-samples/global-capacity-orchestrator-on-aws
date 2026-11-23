@@ -182,6 +182,7 @@ def _ctx(
         ),
         session=MagicMock(name="session"),
         aws_client=MagicMock(name="aws_client"),
+        stack_manager=MagicMock(name="stack_manager"),
         state_lock=threading.RLock(),
         persist=MagicMock(name="persist"),
         persist_callback=MagicMock(name="persist_callback"),
@@ -1593,6 +1594,8 @@ class TestPreflightChecks:
         # The targets come from this checkout under the base release's cdk.json.
         assert preflight["order"] == ["base", "preflight"]
         assert preflight["targets"] == sorted(_TARGETS)
+        # The strict teardown later lists the same stacks, not `cdk list`'s.
+        ctx.stack_manager.set_stack_list.assert_called_once_with(sorted(_TARGETS))
 
     def test_a_resumed_preflight_adopts_interrupted_phases_first(
         self, tmp_path: Path, preflight: dict[str, Any]

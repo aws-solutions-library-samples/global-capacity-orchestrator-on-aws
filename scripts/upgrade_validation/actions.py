@@ -560,6 +560,8 @@ def action_upgrade_preflight(ctx: RunContext) -> dict[str, Any]:
     details = action_preflight(
         ctx, list_target_stacks=lambda: _candidate_stacks_under_base_config(ctx)
     )
+    # Every later listing, the strict teardown's included, sees the same stacks.
+    ctx.stack_manager.set_stack_list(sorted(_target_regions(ctx)))
     candidate_tags = _verify_candidate_stack_tags(ctx)
     state = _state(ctx)
     if state.get("base") not in (None, base):

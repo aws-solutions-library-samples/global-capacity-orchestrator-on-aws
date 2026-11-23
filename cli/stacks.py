@@ -52,7 +52,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
@@ -1687,6 +1687,9 @@ class StackManager:
         # the live release validation harness points the CDK CLI's temporary
         # cloud assemblies (TMPDIR) at a run-scoped directory it removes.
         self._cdk_environment: dict[str, str] = {}
+        # The stacks list_stacks answers instead of `cdk list` (set_stack_list);
+        # the upgrade validation harness lists the stacks gco upgrade deploys.
+        self._stack_list: list[str] | None = None
 
     def set_cdk_environment(self, environment: Mapping[str, str]) -> None:
         """Register environment variables for every subsequent CDK child process.
@@ -1701,6 +1704,17 @@ class StackManager:
                 raise ValueError(f"Invalid CDK environment variable: {key!r}")
             validated[str(key)] = str(value)
         self._cdk_environment = validated
+
+    def set_stack_list(self, stacks: Sequence[str] | None) -> None:
+        """Make :meth:`list_stacks` answer ``stacks`` instead of running ``cdk list``.
+
+        For the upgrade validation harness. ``gco upgrade`` deploys this
+        checkout's app under the base release's cdk.json, so the stacks the
+        harness owns, and that a strict teardown must find in its target
+        map, are that app's, not what ``cdk list`` synthesizes with this
+        checkout's own cdk.json. ``None`` goes back to ``cdk list``.
+        """
+        self._stack_list = None if stacks is None else [str(stack) for stack in stacks]
 
     def set_extra_cdk_context(self, context: Mapping[str, str]) -> None:
         """Register `--context` pairs for every subsequent CDK invocation.
@@ -2518,7 +2532,9 @@ class StackManager:
         )
 
     def list_stacks(self) -> list[str]:
-        """List all available CDK stacks."""
+        """List all available CDK stacks, or the ones :meth:`set_stack_list` named."""
+        if self._stack_list is not None:
+            return list(self._stack_list)
         # stdout is parsed as one stack name per line, so it must carry
         # nothing else. With CI set (every GitHub Actions runner sets it) the
         # CDK CLI routes its own log lines to stdout instead of stderr, and a
