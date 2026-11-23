@@ -767,7 +767,7 @@ def analytics_doctor(config: Any) -> None:
     ):
         ok, remediation = check_stack_complete(region, stack_name)
         _emit(
-            f"{stack_name} is CREATE_COMPLETE",
+            f"{stack_name} is deployed",
             ok,
             remediation or f"deploy with `gco stacks deploy {stack_name}`",
         )
@@ -778,7 +778,7 @@ def analytics_doctor(config: Any) -> None:
         stack_name = f"{config.project_name}-{region}"
         ok, remediation = check_stack_complete(region, stack_name)
         _emit(
-            f"{stack_name} is CREATE_COMPLETE",
+            f"{stack_name} is deployed",
             ok,
             remediation or f"deploy with `gco stacks deploy {stack_name}`",
         )

@@ -364,8 +364,8 @@ class TestAnalyticsVpc:
 
     def test_vpc_has_two_subnets_across_two_azs(self) -> None:
         """At least two subnets across at least two availability
-        zones. ``max_azs=2`` + a single private-isolated subnet
-        configuration yields exactly two subnets.
+        zones. ``max_azs=2`` with a private (egress) and a public subnet
+        tier yields four subnets.
         """
         template = _synth_analytics()
         subnets = template.find_resources("AWS::EC2::Subnet")
@@ -1715,11 +1715,10 @@ class TestCanvasEnabled:
     The Canvas managed policy must be attached to ``SageMaker_Execution_Role``.
     We do **not** inject ``DefaultUserSettings.CanvasAppSettings`` on the
     domain because CloudFormation's ``AWS::SageMaker::Domain`` resource
-    rejects that property (it only belongs on
-    ``AWS::SageMaker::UserProfile``); per-user Canvas configuration, when
-    we need it, will be applied by the presigned-URL Lambda at user-profile
-    creation time. Canvas is still discoverable from Studio purely via IAM
-    — the managed policy attachment is sufficient to surface the tile.
+    rejects that property (so does ``AWS::SageMaker::UserProfile``; only
+    the SageMaker API's user settings carry it). Canvas is still
+    discoverable from Studio purely via IAM — the managed policy
+    attachment is sufficient to surface the tile.
     """
 
     @staticmethod
@@ -1770,7 +1769,7 @@ class TestCanvasEnabled:
             default_user_settings = domain["Properties"].get("DefaultUserSettings", {})
             assert "CanvasAppSettings" not in default_user_settings, (
                 "CanvasAppSettings is not a valid property on "
-                "AWS::SageMaker::Domain — it belongs on UserProfile only. "
+                "AWS::SageMaker::Domain (only the SageMaker API takes it). "
                 f"Got {default_user_settings!r}"
             )
 

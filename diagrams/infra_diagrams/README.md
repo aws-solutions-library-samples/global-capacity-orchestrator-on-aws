@@ -135,7 +135,7 @@ After running the generator, diagrams are saved to `diagrams/infra_diagrams/`:
 - EMR Serverless Spark application
 - Cognito user pool and hosted UI domain
 - Analytics [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) key
-- Private-isolated VPC with SageMaker, [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html), [STS](https://docs.aws.amazon.com/STS/latest/APIReference/), [CloudWatch Logs](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html), and EFS endpoints
+- VPC with private subnets for Studio, EMR Serverless and the endpoints, a public tier holding one NAT gateway for notebook internet egress, and SageMaker, [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html), [STS](https://docs.aws.amazon.com/STS/latest/APIReference/), [CloudWatch Logs](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html), and EFS endpoints
 - Studio EFS file system that Studio spaces can attach, one directory per user
 - Studio-only [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) bucket plus its access-logs sidecar
 - Presigned-URL Lambda that fronts `/studio/login`

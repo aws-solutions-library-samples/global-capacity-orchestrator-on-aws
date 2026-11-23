@@ -66,6 +66,10 @@ When enabled, these resources drive cost:
 - **Studio_EFS** — The EFS file system Studio spaces can attach, one
   directory per user. Charged per GB-month of storage plus per-GB for
   IA-tier transitions.
+- **NAT gateway** — The analytics VPC's one NAT gateway, through which
+  notebooks reach the internet (pip, git), is charged per hour it
+  exists and per GB it processes, whether or not anyone is using Studio.
+  See [Amazon VPC pricing](https://aws.amazon.com/vpc/pricing/).
 - **VPC endpoints** — The analytics VPC creates interface endpoints
   for `SAGEMAKER_API`, `SAGEMAKER_RUNTIME`, `SAGEMAKER_STUDIO`,
   `SAGEMAKER_NOTEBOOK`, `STS`, `CLOUDWATCH_LOGS`, `ECR`, `ECR_DOCKER`,
@@ -83,7 +87,7 @@ gco costs regions --days 7
 Disable the feature at any time with `gco analytics disable` followed
 by `gco stacks destroy gco-analytics`. The analytics resources are all
 `RemovalPolicy.DESTROY` so destroy cleanly removes them without
-orphaned retained resources (see section (l) for the opt-in retain
+orphaned retained resources (see section (k) for the opt-in retain
 override on `Studio_EFS`).
 
 A cleanup Lambda (`lambda/analytics-cleanup/`) runs automatically as a
@@ -162,19 +166,19 @@ deployed, the following resources appear in the API-gateway region
      the EMR Serverless app and executes cells against it.
   3. **Native `boto3`** — for scripted pipelines, call
      `boto3.client("emr-serverless").start_job_run(...)` with the
-     application id (published as a CfnOutput on `gco-analytics`)
+     application id (`list_applications()` returns it; the
+     application is named `<project_name>-spark-<region>`)
      and `executionRoleArn=` set to the role the Studio kernel is
      already assuming. Job inputs can come from either
      `Cluster_Shared_Bucket` (cross-region read via the SageMaker
      role's grant) or `Studio_Only_Bucket`, and outputs can write
      back to either — no extra per-user IAM configuration needed.
 
-  Because the application is idle between jobs you pay zero EMR
-  Serverless cost when no jobs are running; charges start at the
-  first `StartJobRun` and stop when the pre-initialized capacity
-  times out. See the [EMR Serverless pricing
-  page](https://aws.amazon.com/emr/serverless/pricing/) for the
-  current per-vCPU and per-GB rates.
+  The application configures no pre-initialized capacity, so billing
+  is per job run: the vCPU, memory and storage the run's workers use
+  while they run. Nothing is charged while no job runs. See the
+  [EMR Serverless pricing page](https://aws.amazon.com/emr/serverless/pricing/)
+  for the current per-vCPU and per-GB rates.
 
 - **SageMaker-managed [MLflow](https://mlflow.org/docs/latest/index.html) + MLflow Apps** — the SageMaker
   execution role is attached to the AWS-managed
@@ -292,19 +296,21 @@ gco analytics doctor
 ```
 
 `doctor` verifies that `gco-global`, `gco-api-gateway`, and every
-regional stack listed in `deployment_regions.regional` are
-`CREATE_COMPLETE`; that the three `/gco/cluster-shared-bucket/*` SSM
+regional stack listed in `deployment_regions.regional` are deployed
+(`CREATE_COMPLETE`, `UPDATE_COMPLETE` or `IMPORT_COMPLETE`); that the
+three `/gco/cluster-shared-bucket/*` SSM
 parameters are present in the global region; and that no orphaned
 analytics resources are left over from a previous retain-policy
 destroy. Exits non-zero on any failure, with a remediation line per
 check.
 
-Deploy takes about 15-20 minutes end-to-end. After the first
-`gco-analytics` deploy, you must redeploy `gco-api-gateway` once so
-the `/studio/*` routes appear on the existing REST API (cold-start
-ordering — the analytics stack is in the same region as the API
-Gateway stack and the `analytics_config` flows in as a constructor
-parameter):
+Deploy takes about 15-20 minutes end-to-end. When it succeeds,
+`gco stacks deploy gco-analytics` redeploys `gco-api-gateway` itself,
+which adds the `/studio/*` routes to the existing REST API (the API
+Gateway stack imports the Cognito pool and the presigned-URL Lambda
+from the analytics stack), and `gco stacks deploy-all` deploys
+`gco-api-gateway` after `gco-analytics` anyway. Only a plain
+`cdk deploy gco-analytics` leaves that step to you:
 
 ```bash
 gco stacks deploy gco-api-gateway
@@ -787,10 +793,13 @@ Canvas workspaces use Canvas's own default artifact locations
 (typically a Canvas-managed S3 bucket in the analytics region).
 Per-feature Canvas configuration — workspace S3 artifact path,
 Bedrock role for generative AI, time-series forecasting settings,
-direct-deploy / model-register defaults — lives on
-`AWS::SageMaker::UserProfile` rather than `AWS::SageMaker::Domain`,
-so any defaults you want to pin have to be set at the user-profile
-level rather than from CDK.
+direct-deploy / model-register defaults — is the `CanvasAppSettings`
+block of the SageMaker API's user settings (`CreateDomain`,
+`CreateUserProfile`, `UpdateUserProfile`). CloudFormation's
+`AWS::SageMaker::Domain` and `AWS::SageMaker::UserProfile` take no such
+property, so GCO cannot set it from CDK; pin defaults with
+`aws sagemaker update-user-profile --user-settings` on a profile (or
+`update-domain --default-user-settings` for the domain).
 
 Disable Canvas later by flipping the sub-toggle off in `cdk.json`
 and redeploying `gco-analytics`:
@@ -1017,7 +1026,7 @@ global region (default `us-east-2`). If your Studio domain is also
 in `us-east-2` (the default), the notebook-to-S3 calls are
 same-region — no egress charges. Cluster pods, however, may be in
 `us-east-1` or elsewhere — their uploads cross a region boundary.
-See section (n) and
+See section (m) and
 [`docs/CLUSTER_SHARED_BUCKET.md`](CLUSTER_SHARED_BUCKET.md#cross-region-egress)
 for the full discussion.
 
@@ -1139,8 +1148,8 @@ By default, `Studio_EFS` uses `RemovalPolicy.DESTROY`. This means:
 - Everything users stored on `Studio_EFS` is **lost on destroy**, and
   so are their spaces (home directories included), which the cleanup
   Lambda deletes so the domain can be deleted.
-- The iteration loop (section (j)) relies on this — each
-  deploy/destroy cycle leaves no retained EFS behind.
+- Repeated deploy/destroy cycles rely on this: each one leaves no
+  retained EFS behind.
 
 ### Opt-in: retain across destroys
 

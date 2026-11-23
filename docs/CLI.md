@@ -230,7 +230,7 @@ gco analytics enable [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--hyperpod` | | Deprecated, changes nothing: sets `analytics_environment.hyperpod.enabled=true`, which the analytics stack ignores (the SageMaker execution role's `AmazonSageMakerFullAccess` already allows SageMaker training jobs; see [ANALYTICS.md section (g)](ANALYTICS.md#g-submitting-hyperpod-jobs-and-sagemaker-training-jobs-from-studio)). Prints a warning saying so. |
-| `--canvas` | | Also set `analytics_environment.canvas.enabled=true` (attaches `AmazonSageMakerCanvasFullAccess` to the SageMaker execution role and enables the Canvas app on the Studio domain; artifacts land under `Cluster_Shared_Bucket/analytics-canvas/`). |
+| `--canvas` | | Also set `analytics_environment.canvas.enabled=true` (attaches `AmazonSageMakerCanvasFullAccess` to the SageMaker execution role, which is what lights up the Canvas tile in Studio; Canvas keeps its artifacts in its own default locations). |
 | `--yes` | `-y` | Skip the confirmation prompt. |
 
 **Example:**
@@ -474,7 +474,7 @@ Checks performed:
 
 - `cdk.json` is present and parses as JSON
 - `gco-global`, `gco-api-gateway`, and every regional stack are
-  `CREATE_COMPLETE`
+  deployed (`CREATE_COMPLETE`, `UPDATE_COMPLETE` or `IMPORT_COMPLETE`)
 - The three `/gco/cluster-shared-bucket/*` SSM parameters are
   present in the global region
 - No orphaned retained analytics resources are left from a previous

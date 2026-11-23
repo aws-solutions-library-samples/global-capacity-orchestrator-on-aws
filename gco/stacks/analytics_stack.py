@@ -774,9 +774,9 @@ class GCOAnalyticsStack(Stack):
         # change. The trade-off (broader-than-least-privilege inside the
         # role) is acknowledged with a dedicated nag suppression below.
         #
-        # The matching ``CanvasAppSettings`` override on the Studio domain
-        # lives in ``_create_studio_domain`` so the Canvas tile shows up
-        # on the Studio landing page when the toggle is on.
+        # The managed policy alone surfaces the Canvas tile on the Studio
+        # landing page; the domain carries no ``CanvasAppSettings`` (see
+        # ``_create_studio_domain``).
         if self.canvas_enabled:
             self.sagemaker_execution_role.add_managed_policy(
                 iam.ManagedPolicy.from_aws_managed_policy_name("AmazonSageMakerCanvasFullAccess")
@@ -1097,13 +1097,14 @@ class GCOAnalyticsStack(Stack):
         #
         # We intentionally do *not* inject a
         # ``DefaultUserSettings.CanvasAppSettings`` block on the domain.
-        # The CloudFormation ``AWS::SageMaker::Domain`` resource does
-        # not accept that property (only ``AWS::SageMaker::UserProfile``
-        # does), so a property override fails early validation with
+        # ``CanvasAppSettings`` exists only in the SageMaker API's user
+        # settings (CreateDomain, CreateUserProfile, UpdateUserProfile):
+        # neither ``AWS::SageMaker::Domain`` nor ``AWS::SageMaker::UserProfile``
+        # takes it, so a property override fails early validation with
         # ``Unsupported property [CanvasAppSettings]``. Canvas uses its
         # own default workspace artifact locations; operators who want
-        # to pin per-user Canvas defaults can apply
-        # ``CanvasAppSettings`` at the ``UserProfile`` level directly.
+        # to pin Canvas defaults apply ``CanvasAppSettings`` through the
+        # API (``aws sagemaker update-user-profile`` / ``update-domain``).
 
         # The domain validates that the EFS file system has mount targets in
         # every subnet before stabilizing. CDK doesn't infer this dependency
