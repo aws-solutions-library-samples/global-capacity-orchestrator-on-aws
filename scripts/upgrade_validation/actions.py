@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import email.utils
 import json
+import os
 import shutil
 import sys
 from collections.abc import Sequence
@@ -61,6 +62,7 @@ from .workspace import (
     gco_result_document,
     read_cloud_assembly,
     reset_workspace,
+    run_cdk_context,
     run_logged,
     running_command,
     sha256_file,
@@ -84,6 +86,11 @@ from .workspace import (
 STATE_KEY = "upgrade_validation"
 #: Wall-clock cap for each preparation step and for ``gco upgrade --check``.
 STEP_TIMEOUT_SECONDS = 30 * 60
+
+#: The CDK app reads the context the CLI would pass it from this file, and
+#: writes its cloud assembly to ``CDK_OUTDIR`` (``aws_cdk.cx_api``).
+CDK_CONTEXT_FILE_ENV = "CONTEXT_OVERFLOW_LOCATION_ENV"
+CDK_OUTDIR_ENV = "CDK_OUTDIR"
 _GIB = float(1024**3)
 
 
@@ -417,21 +424,82 @@ def _verify_base_release(ctx: RunContext) -> dict[str, Any]:
     }
 
 
+def _base_run_context(ctx: RunContext) -> dict[str, Any]:
+    """The context the base checkout's cdk.json carries once ``prepare`` has written it.
+
+    That is the base release's cdk.json context with the run tag and the
+    run-scoped context added (:func:`run_cdk_context`, the merge
+    ``write_run_context`` applies), read from the repository rather than the
+    clone so the preflight has it before ``prepare`` builds the clone.
+    """
+    settings = _settings(ctx)
+    document = json.loads(_run_git(settings.repo_root, "show", f"{settings.base_commit}:cdk.json"))
+    context = document.get("context") if isinstance(document, dict) else None
+    if not isinstance(context, dict):
+        raise RuntimeError(f"{settings.base_ref}'s cdk.json has no context object")
+    return run_cdk_context(
+        context,
+        run_tag_key=_RUN_STACK_TAG,
+        run_id=settings.run_id,
+        context=settings.base_cdk_context(),
+        source=f"{settings.base_ref}'s cdk.json",
+    )
+
+
+def _candidate_stacks_under_base_config(ctx: RunContext) -> list[str]:
+    """This checkout's stacks as ``gco upgrade`` deploys them: under the base's cdk.json.
+
+    The upgrade keeps the base checkout's cdk.json byte for byte, so it deploys
+    this checkout's app with that file's context, not with this checkout's own
+    cdk.json. A block a release adds and turns on only in its own cdk.json
+    (``regional_persistent_bucket``) is absent from the base's, and the stacks
+    it adds are not part of the upgrade. The app runs as the CDK CLI runs it,
+    with that context from a file and its cloud assembly written to this
+    checkout's ``cdk.out``, which the release preflight reads the expected
+    images from and :func:`_verify_candidate_stack_tags` the stack tags.
+    """
+    settings = _settings(ctx)
+    root = settings.repo_root
+    context_file = settings.report_dir / "base-cdk-context.json"
+    context_file.parent.mkdir(parents=True, exist_ok=True)
+    context_file.write_text(json.dumps(_base_run_context(ctx), indent=2), encoding="utf-8")
+    ctx.stack_manager._ensure_lambda_build()
+    outdir = root / "cdk.out"
+    shutil.rmtree(outdir, ignore_errors=True)
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"CDK_CONTEXT_JSON", "CDK_DEFAULT_ACCOUNT", "CDK_DEFAULT_REGION"}
+    }
+    environment.update({CDK_CONTEXT_FILE_ENV: str(context_file), CDK_OUTDIR_ENV: str(outdir)})
+    result = run_logged(
+        [sys.executable, "app.py"],
+        cwd=root,
+        env=environment,
+        log_path=settings.report_dir / "candidate-synth-under-base-cdk-json.log",
+        timeout_seconds=STEP_TIMEOUT_SECONDS,
+        echo=console_echo("candidate synth"),
+    )
+    if not result.ok:
+        raise RuntimeError(
+            f"Synthesizing this checkout under {settings.base_ref}'s cdk.json failed "
+            f"(exit {result.exit_code}); see {result.log_path}"
+        )
+    return sorted(read_cloud_assembly(root))
+
+
 def _verify_candidate_stack_tags(ctx: RunContext) -> dict[str, Any]:
     """This checkout's app applies cdk.json ``context.tags`` to every target stack.
 
     The upgrade's redeploy passes no ``--tags``: the run tag reaches the stacks
     it recreates only through cdk.json, and a stack without it could never be
-    adopted or destroyed by the run. The release preflight has just
-    synthesized this checkout to list its stacks, so its assembly shows
-    whether the app turns cdk.json's tags into stack tags.
+    adopted or destroyed by the run. The preflight has just synthesized this
+    checkout under the base checkout's cdk.json
+    (:func:`_candidate_stacks_under_base_config`), so its assembly shows
+    whether every stack the upgrade deploys carries that file's tags,
+    the run tag among them.
     """
-    expected = ctx.cdk_context.get("tags")
-    if not isinstance(expected, dict) or not expected:
-        raise RuntimeError(
-            "cdk.json context.tags is empty, so nothing proves this checkout's app tags its "
-            "stacks from cdk.json; the run tag the upgrade's redeploy needs travels that way"
-        )
+    expected: dict[str, Any] = _base_run_context(ctx)["tags"]
     assembly = read_cloud_assembly(_settings(ctx).repo_root)
     untagged = sorted(
         name
@@ -487,8 +555,11 @@ def action_upgrade_preflight(ctx: RunContext) -> dict[str, Any]:
         # yet; the release preflight's ownership reconcile would refuse them.
         _server_time(ctx)
         recovered = _recover_interrupted_phases(ctx)
-    details = action_preflight(ctx)
+    # The base release is pinned first: the targets are synthesized from its cdk.json.
     base = _verify_base_release(ctx)
+    details = action_preflight(
+        ctx, list_target_stacks=lambda: _candidate_stacks_under_base_config(ctx)
+    )
     candidate_tags = _verify_candidate_stack_tags(ctx)
     state = _state(ctx)
     if state.get("base") not in (None, base):
@@ -575,8 +646,9 @@ def action_prepare(ctx: RunContext) -> dict[str, Any]:
     targets = sorted(_target_regions(ctx))
     if sorted(assembly) != targets:
         raise ActionFailure(
-            f"{settings.base_ref} synthesizes {sorted(assembly)}, not this checkout's "
-            f"{targets}; a stack renamed or added between the releases would outlive teardown",
+            f"{settings.base_ref} synthesizes {sorted(assembly)}, but this checkout "
+            f"synthesizes {targets} under the same cdk.json; a stack renamed or added "
+            "between the releases would outlive teardown",
             evidence,
         )
     untagged = sorted(

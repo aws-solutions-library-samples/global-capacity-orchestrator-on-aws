@@ -273,22 +273,41 @@ def write_run_context(
     settings = document.get("context") if isinstance(document, dict) else None
     if not isinstance(settings, dict):
         raise RuntimeError(f"{path} has no context object")
-    tags = settings.get("tags") or {}
-    if not isinstance(tags, dict):
-        raise RuntimeError(f"{path} context.tags must be an object")
-    settings["tags"] = {**tags, run_tag_key: run_id}
-    settings.update(context)
+    document["context"] = run_cdk_context(
+        settings, run_tag_key=run_tag_key, run_id=run_id, context=context, source=str(path)
+    )
     path.write_bytes(serialize_cdk_json(document))
     return {"path": str(path), "sha256": sha256_file(path), "keys": sorted(context)}
 
 
+def run_cdk_context(
+    settings: Mapping[str, Any],
+    *,
+    run_tag_key: str,
+    run_id: str,
+    context: Mapping[str, str],
+    source: str,
+) -> dict[str, Any]:
+    """``settings`` (a cdk.json ``context`` object) as :func:`write_run_context` writes it.
+
+    The run tag joins ``tags`` and the run-scoped ``context`` is merged on top.
+    The upgrade preflight synthesizes this checkout with the same object, so
+    the stacks it plans for are the ones the base checkout's cdk.json yields.
+    ``source`` names the file in the error for a ``tags`` that is not an object.
+    """
+    tags = settings.get("tags") or {}
+    if not isinstance(tags, dict):
+        raise RuntimeError(f"{source} context.tags must be an object")
+    return {**settings, "tags": {**tags, run_tag_key: run_id}, **context}
+
+
 def read_cloud_assembly(clone: Path) -> dict[str, dict[str, Any]]:
-    """Stack artifacts of the clone's synthesized cloud assembly, by stack name."""
+    """Stack artifacts of the cloud assembly synthesized in ``clone``, by stack name."""
     manifest = clone / "cdk.out" / "manifest.json"
     try:
         document = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Could not read the base cloud assembly {manifest}: {exc}") from exc
+        raise RuntimeError(f"Could not read the cloud assembly {manifest}: {exc}") from exc
     artifacts = document.get("artifacts") if isinstance(document, dict) else None
     if not isinstance(artifacts, dict):
         raise RuntimeError(f"{manifest} lists no artifacts")

@@ -567,6 +567,35 @@ class TestRunScopedCdkJson:
             )
 
 
+class TestRunCdkContext:
+    def test_the_run_tag_joins_the_tags_and_the_run_context_goes_on_top(self) -> None:
+        settings = {"tags": {"Project": "GCO"}, "feature": "off", "kept": 1}
+        merged = workspace_module.run_cdk_context(
+            settings,
+            run_tag_key="GcoLiveValidationRun",
+            run_id=_RUN_ID,
+            context={"feature": "on"},
+            source="base",
+        )
+        assert merged == {
+            "tags": {"Project": "GCO", "GcoLiveValidationRun": _RUN_ID},
+            "feature": "on",
+            "kept": 1,
+        }
+        # The input is left as it was.
+        assert settings["tags"] == {"Project": "GCO"}
+
+    def test_tags_that_are_not_an_object_name_their_source(self) -> None:
+        with pytest.raises(RuntimeError, match=re.escape("v1.0.0's cdk.json context.tags")):
+            workspace_module.run_cdk_context(
+                {"tags": ["Project"]},
+                run_tag_key="GcoLiveValidationRun",
+                run_id=_RUN_ID,
+                context={},
+                source="v1.0.0's cdk.json",
+            )
+
+
 class TestCloudAssembly:
     def _write(self, tmp_path: Path, document: Any) -> Path:
         (tmp_path / "cdk.out").mkdir(exist_ok=True)
@@ -612,11 +641,11 @@ class TestCloudAssembly:
         }
 
     def test_an_unreadable_or_empty_manifest_fails(self, tmp_path: Path) -> None:
-        with pytest.raises(RuntimeError, match="Could not read the base cloud assembly"):
+        with pytest.raises(RuntimeError, match="Could not read the cloud assembly"):
             workspace_module.read_cloud_assembly(tmp_path)
         (tmp_path / "cdk.out").mkdir()
         (tmp_path / "cdk.out" / "manifest.json").write_text("{", encoding="utf-8")
-        with pytest.raises(RuntimeError, match="Could not read the base cloud assembly"):
+        with pytest.raises(RuntimeError, match="Could not read the cloud assembly"):
             workspace_module.read_cloud_assembly(tmp_path)
         for document in ([], {"artifacts": []}):
             self._write(tmp_path, document)
@@ -1375,8 +1404,13 @@ class TestCandidateStackTags:
     def test_the_checkouts_app_turns_cdk_json_tags_into_stack_tags(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The tags are the base checkout's cdk.json's, the run tag among them."""
         ctx = _ctx(_settings(tmp_path))
-        ctx.cdk_context["tags"] = {"Project": "GCO", "Tier": 1}
+        monkeypatch.setattr(
+            actions,
+            "_base_run_context",
+            lambda ctx: {"tags": {"Project": "GCO", "Tier": 1}},
+        )
         assembly = {name: {"tags": {"Project": "GCO", "Tier": "1"}} for name in _TARGETS}
         monkeypatch.setattr(actions, "read_cloud_assembly", lambda root: assembly)
         assert actions._verify_candidate_stack_tags(ctx) == {
@@ -1391,14 +1425,86 @@ class TestCandidateStackTags:
             actions._verify_candidate_stack_tags(ctx)
         assert f"{_CONTROL[0]}, {_WORKLOAD[1]}" in str(raised.value)
 
-    @pytest.mark.parametrize("tags", [None, {}, ["Project"]])
-    def test_without_cdk_json_tags_nothing_proves_the_run_tag_survives(
-        self, tmp_path: Path, tags: Any
+
+class TestTargetsUnderTheBaseCdkJson:
+    """``gco upgrade`` deploys this checkout's app under the base checkout's cdk.json."""
+
+    def test_the_base_run_context_is_the_base_cdk_json_with_the_run_context(
+        self, tmp_path: Path, repo: Repo
     ) -> None:
-        ctx = _ctx(_settings(tmp_path))
-        ctx.cdk_context["tags"] = tags
-        with pytest.raises(RuntimeError, match=re.escape("context.tags is empty")):
-            actions._verify_candidate_stack_tags(ctx)
+        settings = _settings(tmp_path, repo)
+        context = actions._base_run_context(_ctx(settings))
+        assert context["tags"] == {"Project": "GCO", "GcoLiveValidationRun": _RUN_ID}
+        assert context["project_name"] == _PROJECT
+        assert context[PROVIDER_LOG_CONTEXT] == "true"
+        assert {key: context[key] for key in settings.base_cdk_context()} == (
+            settings.base_cdk_context()
+        )
+
+    def test_a_base_cdk_json_without_a_context_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(actions, "_run_git", lambda *_args, **_kwargs: "[]")
+        with pytest.raises(RuntimeError, match=re.escape("v1.0.0's cdk.json has no context")):
+            actions._base_run_context(_ctx(_settings(tmp_path)))
+
+    @staticmethod
+    def _synthesizing(
+        monkeypatch: pytest.MonkeyPatch, names: list[str], exit_code: int = 0
+    ) -> list[dict[str, Any]]:
+        """Stand in for the app: write a manifest naming ``names`` to ``CDK_OUTDIR``."""
+        calls: list[dict[str, Any]] = []
+
+        def fake_run(argv: Any, *, cwd: Path, env: dict[str, str], **kwargs: Any) -> Any:
+            calls.append({"argv": list(argv), "cwd": cwd, "env": dict(env), **kwargs})
+            outdir = Path(env[actions.CDK_OUTDIR_ENV])
+            outdir.mkdir(parents=True, exist_ok=True)
+            artifacts = {
+                name: {"type": "aws:cloudformation:stack", "properties": {"stackName": name}}
+                for name in names
+            }
+            (outdir / "manifest.json").write_text(json.dumps({"artifacts": artifacts}))
+            return _result(exit_code, log=kwargs["log_path"])
+
+        monkeypatch.setattr(actions, "run_logged", fake_run)
+        return calls
+
+    def test_this_checkout_is_synthesized_with_that_context(
+        self, tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _settings(tmp_path, repo)
+        ctx = _ctx(settings)
+        ctx.stack_manager = MagicMock(name="stack_manager")
+        stale = repo.root / "cdk.out" / "gco-live-us-east-1-persistent.template.json"
+        stale.parent.mkdir()
+        stale.write_text("{}")
+        monkeypatch.setenv("CDK_CONTEXT_JSON", "{}")
+        monkeypatch.setenv("CDK_DEFAULT_ACCOUNT", _ACCOUNT)
+        calls = self._synthesizing(monkeypatch, [_WORKLOAD[1], _CONTROL[0]])
+
+        assert actions._candidate_stacks_under_base_config(ctx) == [_CONTROL[0], _WORKLOAD[1]]
+
+        ctx.stack_manager._ensure_lambda_build.assert_called_once_with()
+        (call,) = calls
+        assert call["argv"] == [sys.executable, "app.py"] and call["cwd"] == repo.root
+        env = call["env"]
+        assert env[actions.CDK_OUTDIR_ENV] == str(repo.root / "cdk.out")
+        assert "CDK_CONTEXT_JSON" not in env and "CDK_DEFAULT_ACCOUNT" not in env
+        context = json.loads(Path(env[actions.CDK_CONTEXT_FILE_ENV]).read_text())
+        assert context == actions._base_run_context(ctx)
+        # A stack an earlier synth left in cdk.out is not read as a target.
+        assert not stale.exists()
+
+    def test_a_failed_synth_stops_the_preflight(
+        self, tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ctx = _ctx(_settings(tmp_path, repo))
+        ctx.stack_manager = MagicMock(name="stack_manager")
+        self._synthesizing(monkeypatch, [], exit_code=3)
+        with pytest.raises(
+            RuntimeError, match=re.escape("under v1.0.0's cdk.json failed (exit 3)")
+        ):
+            actions._candidate_stacks_under_base_config(ctx)
 
 
 class TestPreflightChecks:
@@ -1440,9 +1546,22 @@ class TestPreflightChecks:
 
     @pytest.fixture
     def preflight(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-        calls: dict[str, Any] = {"recovered": 0}
-        monkeypatch.setattr(actions, "action_preflight", lambda ctx: {"account": _ACCOUNT})
-        monkeypatch.setattr(actions, "_verify_base_release", lambda ctx: {"ref": "v1.0.0"})
+        calls: dict[str, Any] = {"recovered": 0, "order": []}
+
+        def preflight(ctx: Any, *, list_target_stacks: Any) -> dict[str, Any]:
+            calls["order"].append("preflight")
+            calls["targets"] = list_target_stacks()
+            return {"account": _ACCOUNT}
+
+        def base(ctx: Any) -> dict[str, Any]:
+            calls["order"].append("base")
+            return {"ref": "v1.0.0"}
+
+        monkeypatch.setattr(actions, "action_preflight", preflight)
+        monkeypatch.setattr(actions, "_verify_base_release", base)
+        monkeypatch.setattr(
+            actions, "_candidate_stacks_under_base_config", lambda ctx: sorted(_TARGETS)
+        )
         monkeypatch.setattr(actions, "_verify_candidate_stack_tags", lambda ctx: {"stacks": 5})
         monkeypatch.setattr(actions, "_required_tools", lambda: {"git": "/bin/git"})
         monkeypatch.setattr(actions, "_check_workspace_disk", lambda settings: 40.0)
@@ -1471,6 +1590,9 @@ class TestPreflightChecks:
         }
         assert ctx.checkpoint.state[actions.STATE_KEY]["base"] == {"ref": "v1.0.0"}
         assert preflight["recovered"] == 0
+        # The targets come from this checkout under the base release's cdk.json.
+        assert preflight["order"] == ["base", "preflight"]
+        assert preflight["targets"] == sorted(_TARGETS)
 
     def test_a_resumed_preflight_adopts_interrupted_phases_first(
         self, tmp_path: Path, preflight: dict[str, Any]
