@@ -1648,6 +1648,12 @@ The ALB probes `/healthz` over HTTPS on every target of the health-monitor, mani
 
 The ranges are the ones Elastic Load Balancing accepts for an Application Load Balancer target group ([Health checks for Application Load Balancer target groups](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html)); a value outside them, a non-integer, or an unknown key fails `cdk synth`. Every key is optional and an omitted one keeps its default. The regional stack renders the values into the default `TargetGroupConfiguration` of `post-helm-gateway.yaml`; redeploy the regional stacks to apply a change.
 
+#### Rollouts wait for healthy targets
+
+The `gco-system` namespace carries the label `elbv2.k8s.aws/pod-readiness-gate-inject: enabled`, so the AWS Load Balancer Controller adds a [pod readiness gate](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/deploy/pod_readiness_gate/) to every health-monitor, manifest-processor and inference-proxy pod. A new pod becomes Ready only once the ALB reports its target healthy, and the three Deployments roll with `maxUnavailable: 0`, so an old pod keeps serving until its successor can take traffic. Each pod of a rollout waits about `interval_seconds` × `healthy_threshold` (30 seconds with the defaults above) longer than it would without the gate.
+
+The controller's settings in `lambda/helm-installer/charts.yaml` support this: `keepTLSSecret: true` keeps the controller's webhook certificate across chart upgrades, `targetgroupbindingMaxExponentialBackoffDelay: 60s` retries a failed target registration at least once a minute, and the pod webhook's `failurePolicy: Ignore` lets pods start without the gate while the controller is unavailable.
+
 `gateway_health_check` replaces the `alb_config` block of earlier releases. `alb_config` was required and validated, but nothing read it, and its 30-second interval was never what ran. A `cdk.json` that still has `alb_config` synthesizes with a deprecation warning and its values have no effect; delete the block and set `gateway_health_check` if you want a different probe.
 
 #### Additional Gateways

@@ -39,6 +39,7 @@ Common issues and their solutions.
   - [Can't Access Services](#cant-access-services)
   - [In-cluster TLS Errors](#in-cluster-tls-errors)
   - [API Gateway Timeout After Deployment](#api-gateway-timeout-after-deployment)
+  - [A gco-system Rollout Waits on Its Readiness Gate](#a-gco-system-rollout-waits-on-its-readiness-gate)
   - [ALB Not Routing Traffic](#alb-not-routing-traffic)
 - [Performance Issues](#performance-issues)
   - [Slow Pod Startup](#slow-pod-startup)
@@ -868,6 +869,25 @@ For emergency operator access, `submit-direct` uses the configured Kubernetes co
 gco jobs submit-direct examples/simple-job.yaml --region "$REGION" -n gco-jobs
 gco jobs submit-sqs examples/simple-job.yaml --region "$REGION"
 ```
+
+### A gco-system Rollout Waits on Its Readiness Gate
+
+**Symptom**: A health-monitor, manifest-processor or inference-proxy pod is `Running` with all containers ready, but `kubectl get pods -n gco-system -o wide` shows `READINESS GATES 0/1`, and the rollout does not move on.
+
+**Cause**: The pod waits for the AWS Load Balancer Controller to register it with the ALB and for the ALB to report it healthy ([CUSTOMIZATION.md → Rollouts wait for healthy targets](CUSTOMIZATION.md#rollouts-wait-for-healthy-targets)). The old pods keep serving meanwhile.
+
+**Solution**:
+
+```bash
+# 1. Why the gate is not ready yet (Elb.InitialHealthChecking, Target.FailedHealthChecks, ...)
+kubectl get pod POD -n gco-system -o yaml | grep -B7 'type: target-health'
+
+# 2. What the controller says about the target group binding
+kubectl get targetgroupbindings -n gco-system
+kubectl logs -n kube-system deployment/aws-load-balancer-controller --since=15m | grep -i -E 'error|targetgroupbinding'
+```
+
+A target that fails its health checks points at the pod: check `/healthz` on it and its TLS sidecar. A binding that does not reconcile points at the controller; it retries at least once a minute.
 
 ### ALB Not Routing Traffic
 

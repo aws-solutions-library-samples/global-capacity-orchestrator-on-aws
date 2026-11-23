@@ -3,6 +3,13 @@
 #   gco-system  — system services (health-monitor, manifest-processor, inference-monitor)
 #   gco-jobs    — user batch workloads
 #   gco-inference — inference endpoints managed by inference-monitor
+#
+# gco-system holds every backend of the platform ALB (health-monitor,
+# manifest-processor, inference-proxy). Its
+# elbv2.k8s.aws/pod-readiness-gate-inject label makes the AWS Load Balancer
+# Controller add a target-health readiness gate to those pods: a new pod is
+# Ready only once the ALB reports its target healthy, so a rolling update
+# (maxUnavailable: 0) keeps the old pods serving until then.
 ---
 apiVersion: v1
 kind: Namespace
@@ -13,6 +20,7 @@ metadata:
     project: gco
     purpose: system-components
     managed-by: eks-auto-mode-kubectl
+    elbv2.k8s.aws/pod-readiness-gate-inject: enabled
 ---
 apiVersion: v1
 kind: Namespace
