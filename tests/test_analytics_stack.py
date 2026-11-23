@@ -1252,6 +1252,74 @@ class TestSageMakerExecutionRole:
                 )
 
     @staticmethod
+    def _granted(statements: list[dict], action: str) -> list[str]:
+        """Rendered resources of every Allow statement that grants ``action``."""
+        resources: list[str] = []
+        for stmt in statements:
+            actions = stmt.get("Action")
+            action_set = set(actions) if isinstance(actions, list) else {actions}
+            if stmt.get("Effect") == "Allow" and action in action_set:
+                granted = stmt.get("Resource") or []
+                for res in granted if isinstance(granted, list) else [granted]:
+                    resources.append(_render_arn(res))
+        return resources
+
+    def test_role_invokes_the_regional_bridge_of_every_workload_region(self) -> None:
+        """A region-pinned ``gco`` call goes to that Region's regional bridge.
+
+        ``gco jobs submit -r``, ``jobs list -r``, ``jobs get`` and ``jobs logs``
+        send their requests to ``<project>-regional-api-<region>``, which
+        admits a caller on its identity policy alone. The grant used to name
+        the API Gateway Region only, so from a Studio terminal every one of
+        them was refused in a workload Region.
+        """
+        template = _synth_analytics()
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+
+        assert sorted(self._granted(statements, "execute-api:Invoke")) == sorted(
+            f"arn:aws:execute-api:{region}:123456789012:*/prod/*/{tree}/*"
+            for region in ("us-east-2", "us-east-1", "us-west-2")
+            for tree in ("api/v1", "inference")
+        )
+
+    def test_regional_bridge_grant_names_a_shared_region_once(self) -> None:
+        """An API Gateway Region that is also a workload Region is listed once."""
+        config = _AnalyticsMockConfig(region="us-east-1", workload_regions=("us-east-1",))
+        template = _synth_analytics(config=config)
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+
+        assert self._granted(statements, "execute-api:Invoke") == [
+            "arn:aws:execute-api:us-east-1:123456789012:*/prod/*/api/v1/*",
+            "arn:aws:execute-api:us-east-1:123456789012:*/prod/*/inference/*",
+        ]
+
+    def test_role_reads_this_projects_stacks_for_the_cli(self) -> None:
+        """The ``gco`` CLI reads the API endpoints from stack outputs.
+
+        Without ``cloudformation:DescribeStacks`` the CLI fails in a Studio
+        terminal before it sends any request (``GCOAWSClient.get_api_endpoint``
+        and ``get_regional_api_endpoint``). The grant is read-only and names
+        this project's stacks only.
+        """
+        template = _synth_analytics()
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+
+        describe = [
+            stmt
+            for stmt in statements
+            if "cloudformation:DescribeStacks"
+            in (stmt["Action"] if isinstance(stmt["Action"], list) else [stmt["Action"]])
+        ]
+        assert len(describe) == 1
+        assert describe[0]["Action"] == "cloudformation:DescribeStacks"
+        assert self._granted(statements, "cloudformation:DescribeStacks") == [
+            "arn:aws:cloudformation:*:123456789012:stack/gco-test-*/*"
+        ]
+
+    @staticmethod
     def _sqs_send_resources(statements: list[dict]) -> list[Any]:
         resources: list[Any] = []
         for stmt in statements:

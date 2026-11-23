@@ -83,6 +83,10 @@ PRESIGNED_URL_HANDLER = "handler.lambda_handler"
 PRESIGNED_URL_TIMEOUT_SECONDS = 29
 PRESIGNED_URL_MEMORY_MB = 256
 
+#: The GCO API path trees the SageMaker execution role may invoke, on the
+#: global API and on every regional bridge (``/studio/*`` is not among them).
+_GCO_API_PATH_TREES = ("api/v1", "inference")
+
 
 def _parse_removal(value: str) -> RemovalPolicy:
     """Map a cdk.json removal-policy string to ``aws_cdk.RemovalPolicy``.
@@ -440,9 +444,16 @@ class GCOAnalyticsStack(Stack):
         * RW on ``Studio_Only_Bucket`` + KMS on ``Analytics_KMS_Key``
         * ``execute-api:Invoke`` with every HTTP method on the GCO API's
           ``/prod/*/api/v1/*`` and ``/prod/*/inference/*`` routes in the API
-          Gateway Region, so notebooks can submit and delete jobs and manage
-          inference endpoints as well as read (any REST API id: this stack
-          deploys before the API Gateway stack, whose API id it cannot know)
+          Gateway Region and in every workload Region, so notebooks can
+          submit and delete jobs and manage inference endpoints as well as
+          read. The workload Regions hold the regional bridges
+          (``<project>-regional-api-<region>``) that region-pinned ``gco``
+          calls go to. Any REST API id: this stack deploys before the API
+          Gateway stack, whose API id it cannot know, and the bridges' ids
+          live in other Regions' stacks
+        * ``cloudformation:DescribeStacks`` on this project's stacks, from
+          whose outputs the ``gco`` CLI reads the API endpoints
+          (``cli/aws_client.py``), so the CLI works from a Studio terminal
         * ``sqs:SendMessage`` on each workload Region's job queue
           (``<project>-jobs-<region>``; not the dead-letter queues)
         * ``ssm:GetParameter`` on the three ``Cluster_Shared_Bucket`` metadata
@@ -518,7 +529,16 @@ class GCOAnalyticsStack(Stack):
         # /studio/login), so this stack deploys first and the API does not
         # exist yet. The grant takes any REST API id in the API Gateway
         # Region and account, under the prod stage and the two path trees.
+        #
+        # A region-pinned ``gco`` call (``jobs submit -r``, ``jobs list -r``,
+        # ``jobs get``, ``jobs logs``) does not go through that API: the CLI
+        # sends it to the named Region's IAM-authorized regional bridge
+        # (``<project>-regional-api-<region>``, see
+        # ``GCOAWSClient.make_authenticated_request``), which admits a caller
+        # on its identity policy alone. The same two path trees are granted
+        # in every workload Region for those bridges.
         api_gw_region = self.config.get_api_gateway_region()
+        api_regions = list(dict.fromkeys([api_gw_region, *self.config.get_regions()]))
         self.sagemaker_execution_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -528,14 +548,30 @@ class GCOAnalyticsStack(Stack):
                     # (GET/POST/PUT/DELETE/PATCH), any path below
                     # /api/v1/.  /studio/* is explicitly excluded; Canvas
                     # users go through their own Cognito-authorized
-                    # ``/studio/login`` route.
-                    f"arn:{self.partition}:execute-api:{api_gw_region}:{self.account}:"
-                    "*/prod/*/api/v1/*",
-                    # ``/inference/*`` proxies through to regional ALBs
-                    # for in-cluster model endpoints — notebooks need
-                    # the full method surface here too.
-                    f"arn:{self.partition}:execute-api:{api_gw_region}:{self.account}:"
-                    "*/prod/*/inference/*",
+                    # ``/studio/login`` route. ``/inference/*`` proxies
+                    # through to regional ALBs for in-cluster model
+                    # endpoints — notebooks need the full method surface
+                    # there too.
+                    f"arn:{self.partition}:execute-api:{region}:{self.account}:*/prod/*/{tree}/*"
+                    for region in api_regions
+                    for tree in _GCO_API_PATH_TREES
+                ],
+            )
+        )
+
+        # The gco CLI finds those APIs in CloudFormation: the ApiEndpoint
+        # output of <project>-api-gateway, the RegionalApiEndpoint output of
+        # each <project>-regional-api-<region>, and the regional stacks it
+        # lists for ``--all-regions`` reads. Without DescribeStacks every
+        # ``gco jobs ...`` command fails in a Studio terminal before it sends
+        # a request. Read-only, on this project's stack names in any Region.
+        self.sagemaker_execution_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["cloudformation:DescribeStacks"],
+                resources=[
+                    f"arn:{self.partition}:cloudformation:*:{self.account}:"
+                    f"stack/{self.project_name}-*/*"
                 ],
             )
         )
@@ -811,9 +847,13 @@ class GCOAnalyticsStack(Stack):
                         "wildcards grant_read_write and grant_encrypt_decrypt produce, on "
                         "the one Studio_Only_Bucket and Analytics_KMS_Key, and the bucket's "
                         "<arn>/* object keys; (2) execute-api:Invoke on any REST API id "
-                        "under prod /api/v1/* and /inference/* in the API Gateway Region, "
-                        "because the API Gateway stack depends on this stack and its API "
-                        "does not exist when this one deploys; (3) sagemaker-mlflow:* on "
+                        "under prod /api/v1/* and /inference/* in the API Gateway Region "
+                        "and in each workload Region, because the API Gateway stack depends "
+                        "on this stack and its API does not exist when this one deploys, "
+                        "and the regional bridges that region-pinned gco calls use belong "
+                        "to other Regions' stacks; cloudformation:DescribeStacks on this "
+                        "project's stack names (<project>-*) in any Region, from whose "
+                        "outputs the gco CLI reads those APIs' endpoints; (3) sagemaker-mlflow:* on "
                         "the Region's MLflow tracking servers and apps, which notebooks "
                         "create after deploy (AmazonSageMakerFullAccess does not cover the "
                         "sagemaker-mlflow prefix); (4) one Resource:* statement holding "
@@ -834,13 +874,15 @@ class GCOAnalyticsStack(Stack):
                         "Action::kms:GenerateDataKey*",
                         "Action::kms:ReEncrypt*",
                         f"Resource::<{studio_bucket_id}.Arn>/*",
-                        (
-                            f"Resource::arn:<AWS::Partition>:execute-api:{api_gw_region}:"
-                            "<AWS::AccountId>:*/prod/*/api/v1/*"
+                        *(
+                            f"Resource::arn:<AWS::Partition>:execute-api:{region}:"
+                            f"<AWS::AccountId>:*/prod/*/{tree}/*"
+                            for region in api_regions
+                            for tree in _GCO_API_PATH_TREES
                         ),
                         (
-                            f"Resource::arn:<AWS::Partition>:execute-api:{api_gw_region}:"
-                            "<AWS::AccountId>:*/prod/*/inference/*"
+                            "Resource::arn:<AWS::Partition>:cloudformation:*:<AWS::AccountId>:"
+                            f"stack/{self.project_name}-*/*"
                         ),
                         "Action::sagemaker-mlflow:*",
                         (

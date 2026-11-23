@@ -514,26 +514,43 @@ is yours to install.
 
 ### Installing the GCO CLI inside SageMaker Studio
 
-Open a JupyterLab terminal (`File` → `New` → `Terminal`) and run:
+GCO needs Python 3.14 or later, and the SageMaker Distribution images run
+an older Python (3.13 in SageMaker Distribution 5.x, see the image's
+[`cpu.env.in`](https://github.com/aws/sagemaker-distribution/blob/main/build_artifacts/v5/v5.1/v5.1.0/cpu.env.in)),
+so `pip install` of GCO fails there. Install it with
+[`uv`](https://docs.astral.sh/uv/) instead, which downloads a managed
+Python 3.14 for it. Open a JupyterLab terminal (`File` → `New` → `Terminal`)
+and run:
 
 ```bash
-git clone https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws ~/gco
-pip install -e ~/gco
+# SageMaker Distribution 5.x includes uv; on an image without it: pip install --user uv
+GCO_REF=v9.1.0   # the GCO release your deployment runs
+uv tool install --python 3.14 "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@${GCO_REF}"
+```
+
+That installs the `gco` and `gco-mcp` commands into `~/.local/bin`. The
+example manifests the sections below submit are not part of the install;
+clone the same release for them:
+
+```bash
+git clone --depth 1 --branch "${GCO_REF}" https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws ~/gco
 ```
 
 ![Cloning GCO in JupyterLab](../images/sagemaker_studio_cloning_gco_in_jupyter.png)
 
-Because `/home/sagemaker-user` (which contains `~/gco`) is mounted
-from `Studio_EFS`, the install **persists across JupyterLab restarts
-and kernel switches**. You install it once, and every subsequent
-session has `gco` on the `PATH`.
+The install and the clone live in your home directory,
+`/home/sagemaker-user`, which is on the space's own storage volume (see
+section (k)), so they survive restarts of the space. A new space starts
+without them.
 
 Point the CLI at your deployment. Add these to `~/.bashrc` so they
-survive terminal restarts (replace the region values with your own —
-see the note at the top of this guide):
+survive terminal restarts (replace the values with your own — see the
+note at the top of this guide):
 
 ```bash
 cat >> ~/.bashrc <<'BASHRC_EOF'
+export PATH="$HOME/.local/bin:$PATH"
+export GCO_PROJECT_NAME=gco
 export GCO_API_GATEWAY_REGION=us-east-2
 export GCO_DEFAULT_REGION=us-east-1
 BASHRC_EOF
@@ -545,31 +562,49 @@ The CLI discovers the API URL itself from the `ApiEndpoint` output of the
 region that stack lives in (your `deployment_regions.api_gateway`).
 `GCO_DEFAULT_REGION` should point at the regional cluster you want the CLI
 to talk to by default — typically the region closest to the Studio domain.
+`GCO_PROJECT_NAME` is your `cdk.json` `project_name`. Run `gco` from your
+home directory rather than from `~/gco`: in a directory holding a
+`cdk.json`, the CLI reads the project name and Regions from that file, and
+the clone's `cdk.json` is the shipped default, not your deployment's.
 
 Verify:
 
 ```bash
 gco --help
-gco capacity status
+gco jobs list --all-regions
 ```
 
-Because the Studio execution role has the invoke permissions the CLI
-needs (SQS send, API Gateway invoke, CloudWatch read), the CLI works
-out of the box without additional IAM configuration.
+What the Studio execution role lets the CLI do:
 
-### Optional: wiring GCO's MCP server into Amazon Q inside Studio
+- The `gco jobs` commands that go through the GCO API: `submit` (with or
+  without `-r`), `list`, `get`, `logs` and `delete`. The role may call the
+  global API and each workload Region's regional API (where a command with
+  `-r` goes), and read this project's CloudFormation stacks, whose outputs
+  name those APIs.
+- Not the fallback `gco jobs logs` uses for a job whose pods are gone: it
+  queries CloudWatch Logs Insights (`logs:StartQuery`), which the role
+  cannot. Read those logs from a workstation.
+- Not the commands that call AWS services directly instead of the API, for
+  example `gco jobs submit-direct` (kubectl), `gco jobs submit-sqs` (EC2
+  and SQS), `gco inference deploy` (DynamoDB) and `gco capacity status` or
+  `gco capacity recommend-region` (SQS, EC2 and Pricing). Run those from a
+  workstation with credentials that allow them.
 
-If you want to talk to the GCO MCP server from Amazon Q's chat
-interface inside Studio, add an entry to `~/.aws/amazonq/default.json`:
+### Optional: wiring GCO's MCP server into the Studio coding assistant
+
+The `uv tool install` above also installs the GCO MCP server as the
+`gco-mcp` command. Register it with the assistant as a stdio server with no
+arguments; the absolute path keeps it working when the assistant's
+environment does not have `~/.local/bin` on its `PATH`:
 
 ```json
 {
   "mcpServers": {
     "gco": {
-      "command": "python",
-      "args": ["-m", "mcp.run_mcp"],
-      "cwd": "/home/sagemaker-user/gco",
+      "command": "/home/sagemaker-user/.local/bin/gco-mcp",
       "env": {
+        "GCO_PROJECT_NAME": "gco",
+        "GCO_API_GATEWAY_REGION": "us-east-2",
         "GCO_DEFAULT_REGION": "us-east-1"
       }
     }
@@ -577,39 +612,37 @@ interface inside Studio, add an entry to `~/.aws/amazonq/default.json`:
 }
 ```
 
-This is **manual and user-driven, not part of the CDK deploy**. The
-CDK code knows nothing about Amazon Q. You edit the file once inside
-your Studio home directory and the MCP server is available to Amazon
-Q from then on.
+Where that block goes depends on the assistant:
 
-Restart Amazon Q from inside Studio to pick up the new server.
+- **Kiro**, the default assistant in the JupyterLab chat panel on
+  SageMaker Distribution 4.1 and later
+  ([Using a coding assistant](https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated-jl-coding-assistant.html)),
+  reads `~/.kiro/settings/mcp.json`.
+- **Amazon Q Developer** in Code Editor keeps globally configured MCP
+  servers in `~/.aws/amazonq/default.json`
+  ([MCP configuration for Q Developer in the IDE](https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/mcp-ide.html)).
+  Add the server from its MCP configuration panel (command
+  `/home/sagemaker-user/.local/bin/gco-mcp`, no arguments) rather than
+  editing that file by hand.
+
+This is **manual and user-driven, not part of the CDK deploy**; the CDK
+code knows nothing about either assistant. The server runs with the
+Studio execution role, so its tools can do what the CLI can (see the list
+above). Start a new chat session after adding it so the assistant loads
+the server.
 
 ## (f) Using the GCO CLI once installed inside JupyterLab
 
-With the CLI installed and env vars exported per section (e), every
-`gco` command works from a JupyterLab terminal or from a notebook
-cell via `!` shell-out. Replace `-r us-east-1` with your regional
-cluster region in the examples below.
+With the CLI installed and the environment variables set per section (e),
+the `gco jobs` commands that go through the GCO API work from a
+JupyterLab terminal or from a notebook cell via `!` shell-out. The
+examples read the manifests from the clone in `~/gco`; replace
+`-r us-east-1` with your regional cluster region.
 
-Submit a job directly to a cluster:
-
-```bash
-gco jobs submit-direct examples/cluster-shared-bucket-upload-job.yaml -r us-east-1
-```
-
-Get a capacity recommendation before launching a training run:
+Submit a job to a cluster:
 
 ```bash
-gco capacity recommend-region --gpu --instance-type g5.xlarge
-```
-
-Deploy an inference endpoint from a notebook:
-
-```bash
-gco inference deploy exploration-llm \
-  --image vllm/vllm-openai:v0.32.0 \
-  --replicas 1 --gpu-count 1 \
-  --region us-east-1
+gco jobs submit ~/gco/examples/cluster-shared-bucket-upload-job.yaml -r us-east-1
 ```
 
 List jobs across all regions:
@@ -621,13 +654,13 @@ gco jobs list --all-regions
 Tail logs for a specific job:
 
 ```bash
-gco jobs logs analytics-s3-upload -r us-east-1 -n gco-jobs
+gco jobs logs cluster-shared-bucket-upload -r us-east-1 -n gco-jobs
 ```
 
-All of these commands work identically from a workstation — the
-Studio instance simply happens to have AWS credentials and network
-access to the deployed stacks, so the same CLI invocations succeed
-there too.
+These commands work the same from a workstation. Capacity
+recommendations (`gco capacity recommend-region`), inference endpoints
+(`gco inference deploy`) and the other commands section (e) lists as
+needing workstation credentials are run from a workstation.
 
 ## (g) Submitting HyperPod jobs when the sub-toggle is enabled
 
@@ -892,12 +925,9 @@ End-to-end flow:
     ```
 
     If the CLI was installed per section (e), `--help` prints the
-    full command tree. If not, install it first via:
-
-    ```bash
-    git clone https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws ~/gco
-    pip install -e ~/gco
-    ```
+    full command tree. If not, install it first as section (e)
+    describes (`uv tool install`; GCO needs Python 3.14 and the image
+    runs an older one).
 
 GCO does not add Kiro-specific configuration beyond what's documented
 above. No workspace URL, SSH key, or SSM tunnel is provisioned by
@@ -922,7 +952,7 @@ End-to-end example — cluster writes, notebook reads:
 or from a JupyterLab terminal once section (e) is done):
 
 ```bash
-gco jobs submit-direct examples/analytics-s3-upload-job.yaml -r us-east-1
+gco jobs submit ~/gco/examples/analytics-s3-upload-job.yaml -r us-east-1
 ```
 
 The job reads the `gco-cluster-shared-bucket` ConfigMap via

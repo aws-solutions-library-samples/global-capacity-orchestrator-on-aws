@@ -1937,6 +1937,7 @@ def test_release_stage_one_commits_every_version_bump_output() -> None:
         "gco/_version.py",
         "cli/__init__.py",
         "gco_mcp/README.md",
+        "docs/ANALYTICS.md",
     }
     assert step.index("git add ") < step.index("git diff --exit-code") < step.index("git commit ")
 
