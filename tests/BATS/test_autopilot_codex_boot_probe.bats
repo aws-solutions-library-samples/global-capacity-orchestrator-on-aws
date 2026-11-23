@@ -105,6 +105,14 @@ probe() {
     [[ "$output" == *"✗ session did not produce these boot markers: mcp-initialize-handshake bedrock-dispatch:${FAKE_CODEX_MODEL} bedrock-runtime-endpoint credential-boundary-401"* ]]
 }
 
+@test "a session that left a planned server out of its config fails naming the server" {
+    probe FAKE_SESSION=drops-server
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"── session stdout/stderr"* ]]
+    [[ "$output" == *"✗ session did not produce these boot markers: session-config:${FAKE_SERVERS%% *}"* ]]
+    [[ "$output" != *"mcp-initialize-handshake"* ]]
+}
+
 @test "the install path is verified: pin in --version, binary on PATH, config written and matching" {
     probe FAKE_INSTALL=wrong-version
     [ "$status" -eq 1 ]
