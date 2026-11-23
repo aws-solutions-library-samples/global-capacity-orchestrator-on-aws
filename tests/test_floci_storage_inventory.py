@@ -8,9 +8,10 @@ hand-paginated) for the CDK-named access-log sinks and the Studio bucket.
 Since ADR-0005 *every* bucket is CloudFormation-named, so a wrong assumption
 about either source shows up as an inventory that lies.
 
-Here the four owning stacks (global, regional, monitoring, analytics) are real
-CloudFormation stacks in the emulator, declared with the logical-id prefixes
-``BUCKET_DESCRIPTORS`` keys on and the SSM parameters the CDK stacks publish.
+Here the five owning stacks (global, regional, the Region's persistent stack,
+monitoring, analytics) are real CloudFormation stacks in the emulator, declared
+with the logical-id prefixes ``BUCKET_DESCRIPTORS`` keys on and the SSM
+parameters the CDK stacks publish.
 The manager runs unmodified: STS for the account, SSM in each bucket's home
 Region, CloudFormation for the stack sweep including the real
 ``ValidationError: Stack ... does not exist`` shape for an undeployed stack.
@@ -88,6 +89,18 @@ def _regional_template(project: str) -> dict:
     }
 
 
+def _persistent_template(project: str) -> dict:
+    from gco.stacks.constants import regional_persistent_ssm_parameter_prefix
+
+    return {
+        **_bucket("PersistentBucket4805A6CC"),
+        **_bucket("PersistentAccessLogsBucket52DA1D78"),
+        **_identity_parameters(
+            regional_persistent_ssm_parameter_prefix(project), "PersistentBucket4805A6CC"
+        ),
+    }
+
+
 def _monitoring_template(project: str) -> dict:
     from gco.stacks.constants import cost_report_ssm_parameter_prefix
 
@@ -136,11 +149,16 @@ def _destroy(region: str, stack_name: str) -> None:
 
 @pytest.fixture(scope="module")
 def deployment(verified_floci_endpoint):
-    """One project's four stacks, each with CloudFormation-named buckets."""
+    """One project's five stacks, each with CloudFormation-named buckets."""
     project = unique_name("gcotest").replace("-", "")[:16]
     stacks = {
         "global": (GLOBAL_REGION, f"{project}-global", _global_template(project)),
         "regional": (REGIONAL_REGION, f"{project}-{REGIONAL_REGION}", _regional_template(project)),
+        "persistent": (
+            REGIONAL_REGION,
+            f"{project}-{REGIONAL_REGION}-persistent",
+            _persistent_template(project),
+        ),
         "monitoring": (GLOBAL_REGION, f"{project}-monitoring", _monitoring_template(project)),
         "analytics": (GLOBAL_REGION, f"{project}-analytics", _analytics_template()),
     }
@@ -196,6 +214,11 @@ class TestInventoryOverRealStacks:
                 "regional",
                 "RegionalSharedAccessLogsBucket",
             ),
+            f"regional-persistent:{REGIONAL_REGION}": ("persistent", "PersistentBucket"),
+            f"regional-persistent-access-logs:{REGIONAL_REGION}": (
+                "persistent",
+                "PersistentAccessLogsBucket",
+            ),
             "cost-reports": ("monitoring", "CostReportBucket"),
             "cost-reports-access-logs": ("monitoring", "CostReportAccessLogsBucket"),
             "analytics-studio": ("analytics", "StudioOnlyBucket"),
@@ -211,13 +234,14 @@ class TestInventoryOverRealStacks:
             assert record["detail"] == ""
 
         assert inventory["summary"] == {
-            "total": 10,
-            "deployed": 10,
+            "total": 12,
+            "deployed": 12,
             "not_deployed": 0,
             "pod_writable": sorted(
                 [
                     _physical(deployment, "global", "ClusterSharedBucket"),
                     _physical(deployment, "regional", "RegionalSharedBucket"),
+                    _physical(deployment, "persistent", "PersistentBucket"),
                 ]
             ),
         }
@@ -242,8 +266,22 @@ class TestInventoryOverRealStacks:
             assert record["status"] == "not-deployed", record
             assert record["bucket"] is None
             assert record["detail"] == f"{deployment['project']}-eu-west-1 is not deployed"
+        persistent = [
+            record for record in inventory["buckets"] if record["scope"] == "regional-persistent"
+        ]
+        assert [record["id"] for record in persistent] == [
+            "regional-persistent:eu-west-1",
+            "regional-persistent-access-logs:eu-west-1",
+        ]
+        for record in persistent:
+            assert record["status"] == "not-deployed", record
+            assert record["bucket"] is None
+            assert record["detail"] == (
+                f"{deployment['project']}-eu-west-1-persistent is not deployed "
+                "(opt-in: regional_persistent_bucket.enabled)"
+            )
         assert inventory["summary"]["deployed"] == 8
-        assert inventory["summary"]["not_deployed"] == 2
+        assert inventory["summary"]["not_deployed"] == 4
 
 
 class TestAliasResolutionOverRealStacks:
@@ -259,6 +297,10 @@ class TestAliasResolutionOverRealStacks:
             ),
             f"regional-shared:{REGIONAL_REGION}": (
                 _physical(deployment, "regional", "RegionalSharedBucket"),
+                REGIONAL_REGION,
+            ),
+            f"regional-persistent:{REGIONAL_REGION}": (
+                _physical(deployment, "persistent", "PersistentBucket"),
                 REGIONAL_REGION,
             ),
             "analytics-studio": (
@@ -281,6 +323,8 @@ class TestAliasResolutionOverRealStacks:
 
         with pytest.raises(StorageBucketNotFoundError, match="eu-west-1"):
             manager.resolve_bucket("regional-shared:eu-west-1")
+        with pytest.raises(StorageBucketNotFoundError, match="eu-west-1"):
+            manager.resolve_bucket("regional-persistent:eu-west-1")
 
         from cli.config import GCOConfig
         from cli.storage import StorageManager
