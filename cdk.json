@@ -324,7 +324,7 @@
       "backup_retention_days": 7,
       "deletion_protection": false
     },
-    "_comment_analytics_environment": "SageMaker Studio / EMR Serverless / Canvas analytics stack. enabled: master toggle (off by default). canvas.enabled: opt-in Canvas subfeature. hyperpod.enabled: deprecated and ignored (AmazonSageMakerFullAccess on the Studio role already allows SageMaker training jobs; HyperPod capacity is the top-level hyperpod block). cognito.domain_prefix: optional custom Cognito UI domain (null = auto). cognito.removal_policy / efs.removal_policy: 'destroy' wipes user pools and EFS on stack delete (dev default); 'retain' preserves them. studio.user_profile_name_prefix: optional Studio user-profile name prefix. See docs/ANALYTICS.md and https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated.html.",
+    "_comment_analytics_environment": "SageMaker Studio / EMR Serverless / Canvas analytics stack. enabled: master toggle (off by default). canvas.enabled: opt-in Canvas subfeature. hyperpod.enabled: deprecated and ignored (AmazonSageMakerFullAccess on the Studio role already allows SageMaker training jobs; HyperPod capacity is the top-level hyperpod block). cognito.domain_prefix: optional custom Cognito UI domain (null = auto). cognito.removal_policy / efs.removal_policy: 'destroy' wipes user pools and EFS on stack delete (dev default); 'retain' preserves them. studio.user_profile_name_prefix: accepted but not applied (each Studio user profile is named after its Cognito username). See docs/ANALYTICS.md and https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated.html.",
     "analytics_environment": {
       "enabled": false,
       "hyperpod": {

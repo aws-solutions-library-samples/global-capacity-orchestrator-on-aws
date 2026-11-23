@@ -3431,9 +3431,9 @@ class ConfigLoader:
               - removal_policy: "destroy" (default) or "retain" — controls
                 the Studio EFS file system's CloudFormation DeletionPolicy
             - studio: SageMaker Studio sub-block
-              - user_profile_name_prefix: Optional prefix for per-user
-                profile names, or None to use the Cognito username verbatim
-                (default: None)
+              - user_profile_name_prefix: accepted but not applied; the
+                presigned-URL Lambda names every profile after the Cognito
+                username (default: None)
         """
         default_config: dict[str, Any] = {
             "enabled": False,
