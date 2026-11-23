@@ -16,8 +16,5 @@
     "cdk-dia": "0.12.4",
     "markdownlint-cli2": "0.24.1",
     "swagger-ui-dist": "5.35.0"
-  },
-  "overrides": {
-    "re2js": "2.8.7"
   }
 }
