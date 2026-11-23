@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
-        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
-        <meta name="gco-flow-digest" content="b2a15bc71be1cc3d">
+        <meta name="gco-generated-at" content="2026-11-23T16:48:27Z">
+        <meta name="gco-source-commit" content="1fcc830f8bfc0e870b022382a1506c682882515c">
+        <meta name="gco-flow-digest" content="c3e8bd09ed93fc8f">
         <title>Analytics Presigned-URL Lambda (SageMaker Studio login)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,17 +208,23 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Exchange a Cognito-authorized event for a presigned Studio URL.\n\n    Returns:\n\n    * **HTTP 200** with ``{"url": "...", "expires_in": N}`` when the\n      user profile is ``InService`` and the presigned URL is ready.\n    * **HTTP 202** with ``{"status": "provisioning"}`` when the user\n      profile is still being created.  The CLI should retry after a\n      few seconds.\n    * **HTTP 409** with ``{"error": "UserProfileFailed"}`` when the user\n      profile is stuck in a failed state no retry will change.\n    * **HTTP 4xx / 5xx** with ``{"error": "<token>"}`` on failure.\n\n    The Lambda never blocks waiting for profile provisioning.  The CLI\n    is responsible for polling until it receives HTTP 200.\n    '
+        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Exchange a Cognito-authorized event for a presigned Studio URL.\n\n    Returns:\n\n    * **HTTP 200** with ``{"url": "...", "expires_in": N}`` when the\n      user profile is ``InService`` and the presigned URL is ready.\n    * **HTTP 202** with ``{"status": "provisioning"}`` when the user\n      profile is still being created.  The CLI should retry after a\n      few seconds.\n    * **HTTP 400** with ``{"error": "UnsupportedUsername"}`` when the\n      Cognito username cannot name a SageMaker user profile.\n    * **HTTP 403** with ``{"error": "UserProfileOwnedByAnotherUser"}`` when\n      the user profile of that name belongs to another Cognito user.\n    * **HTTP 409** with ``{"error": "UserProfileFailed"}`` when the user\n      profile is stuck in a failed state no retry will change.\n    * **HTTP 4xx / 5xx** with ``{"error": "<token>"}`` on failure.\n\n    The Lambda never blocks waiting for profile provisioning.  The CLI\n    is responsible for polling until it receives HTTP 200.\n    '
 op5=>operation: claims = _parse_claims(event)
 username = claims.get('cognito:username') or claims.get('username')
-if not isinstance(username, str) or not username:
-    logger.warning('Request missing Cognito username claim')
+sub = claims.get('sub')
+if not isinstance(username, str) or not username or (not isinstance(sub, str)) or (not sub):
+    logger.warning('Request missing the Cognito username or sub claim')
     return _format_error(401, _ERR_MISSING_CLAIM)
+if not _is_studio_username(username):
+    logger.warning('Username %r cannot name a SageMaker user profile', username)
+    return _format_error(400, _ERR_UNSUPPORTED_USERNAME)
 domain_id = STUDIO_DOMAIN_ID
 if not domain_id:
     logger.error('SageMaker domain not configured (STUDIO_DOMAIN_ID is empty)')
     return _format_error(404, _ERR_DOMAIN_NOT_FOUND)
-profile_status = _ensure_user_profile(domain_id, username, STUDIO_EFS_ID)
+profile_status = _ensure_user_profile(domain_id, username, sub, STUDIO_EFS_ID)
+if profile_status == 'NotOwned':
+    return _format_error(403, _ERR_PROFILE_NOT_OWNED)
 if profile_status == 'Failed':
     return _format_error(409, _ERR_PROFILE_FAILED)
 if profile_status != 'InService':
@@ -248,17 +254,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
-        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
+        <!-- Generated at (UTC): 2026-11-23T16:48:27Z -->
+        <!-- Generated from Git commit: 1fcc830f8bfc0e870b022382a1506c682882515c -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
+            Generated at (UTC): <time datetime="2026-11-23T16:48:27Z">2026-11-23T16:48:27Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
+            Source commit: <code>1fcc830f8bfc0e870b022382a1506c682882515c</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>b2a15bc71be1cc3d</code>
+            Flow content SHA-256: <code>c3e8bd09ed93fc8f</code>
           </p>
           <div id="canvas"></div>
         </div>

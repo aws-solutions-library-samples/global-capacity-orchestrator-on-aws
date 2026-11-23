@@ -61,8 +61,8 @@ from gco.stacks.lambda_assets import lambda_source_code
 from gco.stacks.nag_suppressions import apply_all_suppressions
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T18:18:19Z
-# Generated from Git commit: ae5e8fb039b08d74dd7da8ba37d00fd590f05474
+# Generated at (UTC): 2026-11-23T16:48:27Z
+# Generated from Git commit: 1fcc830f8bfc0e870b022382a1506c682882515c
 # Flowchart(s) generated from this file:
 #   * ``GCOAnalyticsStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/analytics_stack.GCOAnalyticsStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/analytics_stack.GCOAnalyticsStack___init__.png``)

@@ -24,8 +24,8 @@ import urllib.error
 from typing import Any
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T06:05:34Z
-# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
+# Generated at (UTC): 2026-11-23T16:48:27Z
+# Generated from Git commit: 1fcc830f8bfc0e870b022382a1506c682882515c
 # Flowchart(s) generated from this file:
 #   * ``srp_authenticate`` -> ``diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.html``
 #     (PNG: ``diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.png``)
