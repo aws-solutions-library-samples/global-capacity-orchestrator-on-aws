@@ -1439,10 +1439,10 @@ class GCOAnalyticsStack(Stack):
         """Create the Cognito user pool that authenticates SageMaker Studio logins.
 
         Password policy, standard threat-protection mode, and self-sign-up-
-        disabled flags are configured for SRP-backed Studio logins. The
-        attached ``UserPoolClient`` runs SRP auth
-        (used by ``gco analytics studio login``) with token revocation
-        enabled. The ``UserPoolDomain`` uses the configurable prefix from
+        disabled flags are configured for Studio logins. The attached
+        ``UserPoolClient`` allows ``ADMIN_USER_PASSWORD_AUTH`` (what
+        ``gco analytics studio login`` uses, through ``AdminInitiateAuth``)
+        and SRP, with token revocation enabled. The ``UserPoolDomain`` uses the configurable prefix from
         ``analytics_environment.cognito.domain_prefix`` or defaults to
         ``gco-studio-<account>``.
         """
@@ -1529,7 +1529,7 @@ class GCOAnalyticsStack(Stack):
             self,
             "CognitoUserPoolClientId",
             value=self.cognito_client.user_pool_client_id,
-            description="Client ID used by the GCO CLI for SRP auth",
+            description="Client ID used by gco analytics studio login",
         )
 
     # ==================================================================

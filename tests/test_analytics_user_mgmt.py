@@ -2,7 +2,7 @@
 
 The happy-path flows are already covered through the Click-level tests in
 ``tests/test_analytics_cmd.py`` — this module adds targeted tests for the
-pure helpers (SRP math, timestamp formatting, CloudFormation output lookups)
+pure helpers (password generation, the Studio username rule, CloudFormation output lookups)
 and for the error branches of the AWS-facing functions.
 """
 
@@ -107,12 +107,12 @@ class TestDiscoverFunctions:
 
 
 # ---------------------------------------------------------------------------
-# srp_authenticate with pycognito
+# srp_authenticate (AdminInitiateAuth with ADMIN_USER_PASSWORD_AUTH)
 # ---------------------------------------------------------------------------
 
 
 class TestSRPAuthenticate:
-    """Exercise srp_authenticate which delegates to pycognito."""
+    """Exercise srp_authenticate, which calls cognito-idp AdminInitiateAuth."""
 
     def test_srp_authenticate_returns_tokens_on_success(self):
         from unittest.mock import MagicMock, patch

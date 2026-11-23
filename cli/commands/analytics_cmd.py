@@ -6,9 +6,9 @@ Provides the ``gco analytics`` sub-commands:
   ``analytics_environment.enabled`` toggle in ``cdk.json``.
 * ``users add`` / ``users list`` / ``users remove`` — manage Cognito
   users against the auto-discovered pool id from ``gco-analytics``.
-* ``studio login`` — SRP-authenticate against Cognito and fetch a
-  SageMaker Studio presigned URL from ``/studio/login`` on the
-  existing ``gco-api-gateway``.
+* ``studio login`` — sign in to Cognito (``AdminInitiateAuth`` with
+  ``ADMIN_USER_PASSWORD_AUTH``) and fetch a SageMaker Studio presigned
+  URL from ``/studio/login`` on the existing ``gco-api-gateway``.
 * ``doctor`` — pre-flight checks before ``gco stacks deploy
   gco-analytics``.
 
@@ -592,7 +592,11 @@ def studio_login(
     api_url: str | None,
     open_browser: bool,
 ) -> None:
-    """Sign in to SageMaker Studio via Cognito SRP and print the presigned URL."""
+    """Sign in to SageMaker Studio through Cognito and print the presigned URL.
+
+    The sign-in is cognito-idp:AdminInitiateAuth (ADMIN_USER_PASSWORD_AUTH),
+    so it needs AWS credentials allowed to call it on the pool.
+    """
     from botocore.exceptions import ClientError
 
     from ..analytics_user_mgmt import (

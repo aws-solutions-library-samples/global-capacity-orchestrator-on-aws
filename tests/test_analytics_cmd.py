@@ -9,7 +9,7 @@ Covers:
   stack.
 * ``users add`` failing with the documented error message when the
   ``gco-analytics`` stack is absent.
-* ``studio login`` SRP-authenticating against moto Cognito and fetching
+* ``studio login`` signing in (stubbed ``srp_authenticate``) and fetching
   a Studio URL from a stubbed ``/studio/login`` HTTP endpoint.
 * ``doctor`` passing on a healthy state and failing when the required
   SSM parameters are missing.
@@ -730,7 +730,7 @@ class TestUsers:
 
 class TestStudioLogin:
     def test_studio_login_fetches_url(self, aws_creds_env, tmp_cdk_json):
-        """Stub SRP auth + HTTP call and assert the Studio URL is printed."""
+        """Stub the Cognito sign-in + HTTP call and assert the Studio URL is printed."""
         from cli.main import cli
 
         expected_url = "https://studio.example.aws/auth?token=abc"

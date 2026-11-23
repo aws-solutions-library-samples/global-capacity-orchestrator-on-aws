@@ -33,7 +33,8 @@ async def analytics_status() -> str:
 async def analytics_login_url(username: str, password: str | None = None) -> str:
     """`gco analytics studio login` — get a SageMaker Studio presigned login URL.
 
-    SRP-authenticates the user against Cognito and prints the presigned Studio
+    Signs the user in to Cognito (AdminInitiateAuth, with this server's AWS
+    credentials) and prints the presigned Studio
     URL. The password is read from ``$GCO_STUDIO_PASSWORD`` when not passed here.
     A password passed here reaches the CLI through that variable in the
     child's environment, never on its command line. With neither, the tool

@@ -206,7 +206,9 @@ deployed, the following resources appear in the API-gateway region
   for the end-to-end notebook workflow.
 
 - **Cognito user pool** with a strong password policy (12+ chars,
-  digits/symbols/uppercase required), SRP auth flow, and a hosted
+  digits/symbols/uppercase required), an app client that allows the
+  `ADMIN_USER_PASSWORD_AUTH` flow `gco analytics studio login` uses
+  (and SRP), and a hosted
   `UserPoolDomain` at prefix `gco-studio-<account>`.
 - **Analytics VPC** — private subnets for Studio, EMR Serverless and the
   endpoints, and public subnets that hold only the NAT gateway notebooks
@@ -427,10 +429,15 @@ gco analytics studio login --username alice
 
 The command prompts for the password (use `--password <p>` or set
 `$GCO_STUDIO_PASSWORD` to pass it non-interactively — for example in
-CI), performs an SRP authentication against the Cognito user pool
-using `USER_SRP_AUTH`, retrieves the Cognito `IdToken`, and exchanges
-it for a SageMaker Studio presigned URL via
+CI), signs in to the Cognito user pool with `AdminInitiateAuth`
+(`AuthFlow=ADMIN_USER_PASSWORD_AUTH`), retrieves the Cognito `IdToken`,
+and exchanges it for a SageMaker Studio presigned URL via
 `GET {API_Gateway_URL}/prod/studio/login`.
+
+`AdminInitiateAuth` is an administrator API, so the command needs AWS
+credentials as well as the Cognito password: `cognito-idp:AdminInitiateAuth`
+on the pool, and `cloudformation:DescribeStacks` on `gco-analytics` and
+`gco-api-gateway`, whose outputs name the pool, its app client and the API.
 
 The URL is printed on its own line on stdout so it's pipe-friendly.
 Add `--open` to launch the default browser automatically:
@@ -439,9 +446,9 @@ Add `--open` to launch the default browser automatically:
 gco analytics studio login --username alice --open
 ```
 
-Override the API endpoint if auto-discovery can't find it (for
-example, during local testing against a deployed API from a machine
-without CloudFormation access):
+Override the API endpoint if auto-discovery can't find it (the pool
+and its app client are still read from the `gco-analytics` stack's
+outputs):
 
 ```bash
 gco analytics studio login \
@@ -458,19 +465,21 @@ HTTP status, the Lambda's error token and the correlation ID from the
 what an administrator has to do (create a user with a supported name,
 or delete the old profile).
 
-SRP flow explained:
+Login flow:
 
-1. CLI calls `InitiateAuth` with `AuthFlow=USER_SRP_AUTH`.
-2. Cognito returns an SRP challenge; the CLI computes the password
-   verifier locally using the pure-Python SRP implementation (no
-   password is sent over the wire as a hash).
-3. CLI calls `RespondToAuthChallenge`; Cognito returns an
-   `AuthenticationResult` containing `IdToken`, `AccessToken`, and
-   `RefreshToken`.
-4. CLI sends the `IdToken` in the `Authorization` header to
+1. CLI calls `AdminInitiateAuth` with
+   `AuthFlow=ADMIN_USER_PASSWORD_AUTH`, signed with your AWS
+   credentials; the username and password travel to Cognito over TLS.
+2. Cognito returns an `AuthenticationResult` containing `IdToken`,
+   `AccessToken`, and `RefreshToken`. A user whose password is still
+   temporary gets a `NEW_PASSWORD_REQUIRED` challenge instead, which
+   the CLI does not answer: give the user a permanent password with
+   `users add --password` / `--generate-password` or
+   `users set-password`.
+3. CLI sends the `IdToken` in the `Authorization` header to
    `/studio/login`. API Gateway's Cognito authorizer validates the
    JWT against the user-pool ARN.
-5. Presigned-URL Lambda reads the Studio domain id from its
+4. Presigned-URL Lambda reads the Studio domain id from its
    environment and creates the user profile if it doesn't exist
    (replacing a `Failed` one), tagged with the caller's Cognito `sub`.
    A username SageMaker cannot use as a profile name is a `400`
@@ -480,7 +489,7 @@ SRP flow explained:
    recover is a `409` (`UserProfileFailed`). Once the profile is
    `InService` it calls `CreatePresignedDomainUrl` with a 300-second
    expiry.
-6. Lambda returns `{url, expires_in}`; API Gateway returns it to
+5. Lambda returns `{url, expires_in}`; API Gateway returns it to
    the CLI; the CLI prints `url` on its own line.
 
 The URL expires in 5 minutes — open it promptly.

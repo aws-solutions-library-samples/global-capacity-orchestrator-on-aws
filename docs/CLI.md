@@ -210,7 +210,7 @@ CloudFormation outputs, so no manual ID wiring is needed.
 | [`gco analytics users list`](#gco-analytics-users-list) | List Cognito users in the analytics user pool. |
 | [`gco analytics users remove`](#gco-analytics-users-remove) | Delete a Cognito user from the analytics user pool. |
 | [`gco analytics users set-password`](#gco-analytics-users-set-password) | Change a Cognito user's password via ``AdminSetUserPassword``. |
-| [`gco analytics studio login`](#gco-analytics-studio-login) | Sign in to SageMaker Studio via Cognito SRP and print a presigned Studio URL on its own line on stdout (pipe-friendly). |
+| [`gco analytics studio login`](#gco-analytics-studio-login) | Sign in to SageMaker Studio through Cognito (`AdminInitiateAuth`, so it needs AWS credentials too) and print a presigned Studio URL on its own line on stdout (pipe-friendly). |
 | [`gco analytics doctor`](#gco-analytics-doctor) | Run pre-flight checks before `gco stacks deploy gco-analytics`. |
 
 </details>
@@ -414,11 +414,18 @@ gco analytics users set-password --username alice \
 
 #### `gco analytics studio login`
 
-Sign in to SageMaker Studio via Cognito SRP and print a presigned
+Sign in to SageMaker Studio through Cognito and print a presigned
 Studio URL on its own line on stdout (pipe-friendly): the progress shown
 while a first login provisions the user profile (30-60 seconds) goes to
 stderr, so `URL=$(gco analytics studio login ...)` captures only the URL.
 The password, `IdToken`, and URL are never written to disk.
+
+The sign-in is `cognito-idp:AdminInitiateAuth` with
+`ADMIN_USER_PASSWORD_AUTH`, an administrator API, so the command needs
+AWS credentials allowing it on the pool (and `cloudformation:DescribeStacks`
+for discovery) as well as the user's Cognito password. A user whose
+password is still temporary cannot sign in this way; set a permanent one
+with `gco analytics users set-password`.
 
 A failed `/studio/login` call exits `2` and prints the HTTP status, the
 presigned-URL Lambda's error token and the correlation ID, for example

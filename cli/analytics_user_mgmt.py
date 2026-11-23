@@ -8,8 +8,9 @@ exercising in isolation from Click:
   / :func:`discover_api_endpoint` — single-stack CloudFormation output
   lookups used by every sub-command to avoid forcing operators to hand a
   pool id / api url on the command line.
-* :func:`srp_authenticate` — Cognito SRP authentication via the
-  ``pycognito`` library, used by ``gco analytics studio login``.
+* :func:`srp_authenticate` — Cognito sign-in with ``AdminInitiateAuth``
+  (``ADMIN_USER_PASSWORD_AUTH``; the name predates the flow), used by
+  ``gco analytics studio login``.
 * :func:`is_studio_username` / :func:`find_user_ignoring_case` — the
   checks ``gco analytics users add`` makes before it creates a user whose
   name must also work as a SageMaker Studio user profile name.
@@ -91,7 +92,7 @@ def discover_cognito_pool_id(region: str, project_name: str = "gco") -> str | No
 
 
 def discover_cognito_client_id(region: str, project_name: str = "gco") -> str | None:
-    """Return the Cognito SRP client id published by ``gco-analytics``.
+    """Return the Cognito app client id published by ``gco-analytics``.
 
     Looked up on the same stack as :func:`discover_cognito_pool_id`.
     Returns ``None`` when the stack or output is missing.

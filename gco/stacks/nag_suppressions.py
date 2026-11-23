@@ -1064,7 +1064,8 @@ def add_cognito_suppressions(stack: Stack) -> None:
                 reason=(
                     "The Studio user pool does not configure MFA. Users are created "
                     "by an administrator (self sign-up is disabled) and sign in "
-                    "with SRP from gco analytics studio login, with a password "
+                    "through gco analytics studio login (AdminInitiateAuth, which "
+                    "also needs AWS credentials for the pool), with a password "
                     "policy of at least 12 characters including digits, symbols, "
                     "upper and lower case. Turn MFA on for the pool if your policy "
                     "requires a second factor."
