@@ -1904,7 +1904,7 @@ class TestMlflowPermissions:
 
 
 class TestDomainCustomFileSystems:
-    """The Studio domain mounts the per-user EFS home folder as its only
+    """The Studio domain offers ``Studio_EFS`` to its spaces as its only
     custom file system. An earlier revision also tried to mount the
     cluster-shared bucket via ``S3FileSystemConfig`` — aws-cdk-lib
     exposes the property but SageMaker Studio rejects the resource at
@@ -1914,7 +1914,7 @@ class TestDomainCustomFileSystems:
     """
 
     def test_domain_has_efs_custom_file_system(self) -> None:
-        """The Studio domain exposes the per-user EFS mount."""
+        """The Studio domain lists ``Studio_EFS`` for its spaces to attach."""
         template = _synth_analytics()
         domains = template.find_resources("AWS::SageMaker::Domain")
         assert domains, "expected a Studio domain"
@@ -1931,7 +1931,7 @@ class TestDomainCustomFileSystems:
                     efs_seen = True
         assert efs_seen, (
             "Expected an EFSFileSystemConfig entry on CustomFileSystemConfigs "
-            "so per-user home folders on Studio_EFS work."
+            "so spaces can attach Studio_EFS."
         )
 
     def test_domain_does_not_declare_s3_file_system_config(self) -> None:

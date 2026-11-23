@@ -463,9 +463,7 @@ class GCOAnalyticsStack(Stack):
           parameters (``name``, ``arn``, ``region``) in the global region —
           lets notebooks look up the bucket at runtime without a per-user
           export step
-        * EFS mount actions on ``Studio_EFS`` (specific AP arn is added by
-          the presigned-URL Lambda at runtime; the role-level grant here is
-          scoped to the EFS ARN)
+        * EFS mount actions on ``Studio_EFS``, scoped to the file system ARN
         * AWS-managed ``AmazonSageMakerCanvasFullAccess`` when
           ``canvas.enabled=true`` (opt-in no-code ML app)
         * AWS-managed ``AmazonSageMakerFullAccess`` — always attached
@@ -1015,10 +1013,14 @@ class GCOAnalyticsStack(Stack):
         intentionally left unset so Studio falls back to the stock AWS-
         published Distribution images (a tested invariant).
 
-        ``CustomFileSystemConfigs`` mounts ``self.studio_efs`` at
-        ``/home/sagemaker-user`` — per-user ``/home/<username>`` isolation
-        is enforced by the access points that the presigned-URL Lambda
-        creates lazily on first login.
+        ``CustomFileSystemConfigs`` offers ``self.studio_efs`` to the
+        domain's spaces with ``FileSystemPath=/home/sagemaker-user``, the
+        directory on the file system that profiles without a path of their
+        own get. Profiles the presigned-URL Lambda creates set
+        ``/home/<username>`` instead. That path is the only per-user
+        separation: the access points the Lambda also creates are never
+        mounted (``EFSFileSystemConfig`` takes no access point), and no
+        ``CustomPosixUserConfig`` is set.
         """
         private_subnets = self.vpc.select_subnets(
             subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS

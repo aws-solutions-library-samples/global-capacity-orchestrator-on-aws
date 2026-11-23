@@ -349,8 +349,10 @@ gco analytics users list --as-json
 #### `gco analytics users remove`
 
 Delete a Cognito user from the analytics user pool. Does not delete
-the user's Studio user profile or EFS home folder — use
-`aws sagemaker delete-user-profile` for that.
+the user's Studio user profile or their directory on `Studio_EFS` — use
+`aws sagemaker delete-user-profile` for the profile. Until the profile
+is deleted, a new user given the same name is refused at
+`gco analytics studio login` (the profile belongs to the removed user).
 
 ```bash
 gco analytics users remove [OPTIONS]

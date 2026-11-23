@@ -16,11 +16,11 @@
 #      Sets analytics_environment.enabled = true in cdk.json.
 #   2. gco stacks deploy gco-analytics
 #      Provisions the Studio domain, Cognito user pool, KMS key,
-#      Studio_Only_Bucket, and EFS home folders. Grants the SageMaker
-#      execution role RW on the shared bucket.
-#   3. gco analytics users add <username>
-#      Creates a Cognito user and associated Studio user profile with a
-#      per-user EFS access point under /home/<username>.
+#      Studio_Only_Bucket, and the Studio EFS file system. Grants the
+#      SageMaker execution role RW on the shared bucket.
+#   3. gco analytics users add --username <username>
+#      Creates the Cognito user; its Studio user profile is created on
+#      the first `gco analytics studio login`.
 #
 # Usage:
 #   gco jobs submit-direct examples/analytics-s3-upload-job.yaml -r us-east-1

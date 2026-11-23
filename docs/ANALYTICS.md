@@ -37,7 +37,7 @@ bucket's reference.
 - [(h) Opening the environment in Kiro](#h-opening-the-environment-in-kiro)
 - [(i) Running the example cluster jobs and reading their output from a notebook](#i-running-the-example-cluster-jobs-and-reading-their-output-from-a-notebook)
 - [(j) Two-bucket access model](#j-two-bucket-access-model)
-- [(k) EFS persistent-home-folder behavior](#k-efs-persistent-home-folder-behavior)
+- [(k) Studio_EFS and the Studio home directory](#k-studio_efs-and-the-studio-home-directory)
 - [(l) The `gco-cluster-shared-bucket` ConfigMap schema](#l-the-gco-cluster-shared-bucket-configmap-schema)
 - [(m) Cross-region data-transfer caveat](#m-cross-region-data-transfer-caveat)
 
@@ -63,8 +63,9 @@ When enabled, these resources drive cost:
 - **Cognito** — The Lite tier includes 50,000 monthly active users (MAUs) for free (no automatic expiry). Advanced security features on the Essentials and Plus tiers are additional; see the [Amazon Cognito pricing page](https://aws.amazon.com/cognito/pricing/) for current rates. The new tier names (Lite / Essentials / Plus) landed in November 2024, so older blog posts may reference the legacy free-tier structure.
 - **Lambda** — The presigned-URL Lambda is invoked once per Studio
   login. Effectively free at human-scale usage.
-- **Studio_EFS** — Per-user home folders on EFS. Charged per GB-month
-  of storage plus per-GB for IA-tier transitions.
+- **Studio_EFS** — The EFS file system Studio spaces can attach, one
+  directory per user. Charged per GB-month of storage plus per-GB for
+  IA-tier transitions.
 - **VPC endpoints** — The analytics VPC creates interface endpoints
   for `SAGEMAKER_API`, `SAGEMAKER_RUNTIME`, `SAGEMAKER_STUDIO`,
   `SAGEMAKER_NOTEBOOK`, `STS`, `CLOUDWATCH_LOGS`, `ECR`, `ECR_DOCKER`,
@@ -108,10 +109,11 @@ into `/home/sagemaker-user` using `pip install --user`:
 pip install --user pandas pyarrow duckdb
 ```
 
-Because `/home/sagemaker-user` is mounted from `Studio_EFS`, packages
-installed this way **persist across JupyterLab app restarts and user
-sessions**. No container image rebuild is required, and no operator
-intervention is needed to support new libraries.
+`/home/sagemaker-user` is on the space's own storage volume, not on
+`Studio_EFS` (see section (k)), so packages installed this way **persist
+across restarts of that space**; a new space starts without them. No
+container image rebuild is required, and no operator intervention is
+needed to support new libraries.
 
 System-level tooling (for example, a binary published via `apt`) is
 out of scope for this feature — use a shell-out to `subprocess` or a
@@ -207,8 +209,9 @@ deployed, the following resources appear in the API-gateway region
   reach the internet through (pip, git); interface endpoints for the
   SageMaker, STS, CloudWatch Logs, ECR, and EFS services and a gateway
   endpoint for S3. It has no VPC flow log (the regional VPCs do).
-- **Studio_EFS** — encrypted EFS file system for per-user home
-  folders, one access point per Studio user profile.
+- **Studio_EFS** — encrypted EFS file system that Studio spaces can
+  attach; each user profile the presigned-URL Lambda creates sees
+  `/home/<username>` on it (section (k)).
 - **Studio_Only_Bucket** — KMS-encrypted S3 bucket scoped to the
   SageMaker execution role only. Not accessible from cluster pods.
   Comes with a dedicated access-logs bucket.
@@ -1096,12 +1099,36 @@ JupyterLab terminal (see section (f)) — the broader IAM surface is
 there so `boto3` / `requests_aws4auth`-style SigV4 scripting works
 the same way it does from a developer workstation.
 
-## (k) EFS persistent-home-folder behavior
+## (k) Studio_EFS and the Studio home directory
 
-Each Studio user gets a per-user home folder on `Studio_EFS`,
-accessed via a per-user EFS access point created by the presigned-
-URL Lambda on first login. The access point POSIX-isolates the user
-to `/home/<username>` on the EFS file system.
+What follows is what the stack and the presigned-URL Lambda configure,
+and what the SageMaker documentation says Studio does with it:
+
+- **The home directory is not on EFS.** A JupyterLab space runs on one
+  instance with one EBS volume, and the space's files, the home
+  directory `/home/sagemaker-user` included, live on that volume
+  ([JupyterLab user guide](https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated-jl-user-guide.html)).
+  `pip install --user` packages and the section (e) install therefore
+  belong to one space.
+- **`Studio_EFS` is a custom file system a space can attach.** The
+  domain lists it in `DefaultUserSettings.CustomFileSystemConfigs`, and
+  in a space that has it attached, SageMaker links it at
+  `/home/sagemaker-user/custom-file-systems/efs/<file-system-id>`
+  ([Adding a custom file system to a domain](https://docs.aws.amazon.com/sagemaker/latest/dg/domain-custom-file-system.html)).
+  Files written there are on `Studio_EFS`, shared by every space of that
+  user that attaches it.
+- **Per-user separation is the profile's path on the file system.** Each
+  profile the Lambda creates sets `FileSystemPath=/home/<username>`, and
+  SageMaker gives the profile's spaces that directory and nothing above
+  it. The domain's default path is `/home/sagemaker-user`, so profiles
+  created outside the Lambda (console, CLI) all share that one directory.
+- **The per-user access points are not used.** On first login the Lambda
+  also creates an EFS access point rooted at `/home/<username>`, with a
+  POSIX owner derived from the username and mode `0700`. A profile's
+  `EFSFileSystemConfig` takes only a file system ID and a path, so
+  nothing mounts through the access point and its owner and mode never
+  apply. No `CustomPosixUserConfig` is set either, so spaces use
+  SageMaker's default POSIX identity.
 
 ### Default removal policy: DESTROY
 
@@ -1109,16 +1136,17 @@ By default, `Studio_EFS` uses `RemovalPolicy.DESTROY`. This means:
 
 - `cdk destroy gco-analytics` cleanly removes the EFS file system,
   its mount targets, and every access point.
-- User home folders (installed packages, notebook history,
-  checkpoints saved under `/home/sagemaker-user`) are **lost on
-  destroy**.
+- Everything users stored on `Studio_EFS` is **lost on destroy**, and
+  so are their spaces (home directories included), which the cleanup
+  Lambda deletes so the domain can be deleted.
 - The iteration loop (section (j)) relies on this — each
   deploy/destroy cycle leaves no retained EFS behind.
 
 ### Opt-in: retain across destroys
 
 Set `analytics_environment.efs.removal_policy = "retain"` in
-`cdk.json` to preserve user home folders across `cdk destroy`:
+`cdk.json` to keep `Studio_EFS` and its files across `cdk destroy`
+(the spaces and their home directories are still deleted):
 
 ```json
 {
