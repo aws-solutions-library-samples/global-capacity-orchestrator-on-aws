@@ -221,6 +221,29 @@ def test_build_monitoring_builds_the_full_topology_without_optional_analytics(
     }
 
 
+def test_build_full_without_the_persistent_bucket_builds_no_persistent_stacks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """With ``regional_persistent_bucket`` off, the regional stacks depend on the global tier only."""
+    monkeypatch.chdir(ROOT)
+    app = cdk.App(
+        outdir=str(tmp_path / "cdk.out"),
+        context={**generate._BASE_CONTEXT, "regional_persistent_bucket": {"enabled": False}},
+    )
+    config = ConfigLoader(app)
+    project = config.get_project_name()
+    regions = config.get_deployment_regions()
+    with generate._mocked_regional_assets():
+        assert generate._build_full(app, config) is None
+    stacks = _stacks_by_id(app)
+    assert not [name for name in stacks if name.endswith("-persistent")]
+    for region in regions["regional"]:
+        assert _explicit_dependencies(stacks[f"{project}-{region}"]) == {
+            f"{project}-global",
+            f"{project}-api-gateway",
+        }
+
+
 def test_build_analytics_constructs_only_the_analytics_stack(tmp_path: Path, monkeypatch) -> None:
     """The analytics diagram holds one stack, co-located with the API Gateway region."""
     monkeypatch.chdir(ROOT)
