@@ -882,8 +882,9 @@ gco jobs submit-sqs examples/simple-job.yaml --region "$REGION"
 # 1. Why the gate is not ready yet (Elb.InitialHealthChecking, Target.FailedHealthChecks, ...)
 kubectl get pod POD -n gco-system -o yaml | grep -B7 'type: target-health'
 
-# 2. What the controller says about the target group binding
-kubectl get targetgroupbindings -n gco-system
+# 2. What the controller says about the target group binding. Name the API group:
+#    EKS Auto Mode serves a TargetGroupBinding kind of its own (eks.amazonaws.com).
+kubectl get targetgroupbindings.elbv2.k8s.aws -n gco-system
 kubectl logs -n kube-system deployment/aws-load-balancer-controller --since=15m | grep -i -E 'error|targetgroupbinding'
 ```
 
