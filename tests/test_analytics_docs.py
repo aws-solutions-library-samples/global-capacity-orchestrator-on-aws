@@ -113,10 +113,13 @@ def test_studio_install_pins_python_314_and_the_release_ref() -> None:
 
     assert re.findall(r"(?m)^GCO_REF=(v\d+\.\d+\.\d+)\b", text) == [f"v{version}"]
     installs = re.findall(r"(?m)^uv tool install .*$", text)
-    assert installs == [
-        'uv tool install --python 3.14 "git+https://github.com/aws-solutions-library-samples/'
-        'global-capacity-orchestrator-on-aws.git@${GCO_REF}"'
-    ]
+    # The repository URL is whatever the guide names (a fork rewrites it);
+    # the pin and the interpreter are what must hold.
+    assert len(installs) == 1
+    assert re.fullmatch(
+        r'uv tool install --python 3\.14 "git\+https://github\.com/[^/"]+/[^/"]+\.git@\$\{GCO_REF\}"',
+        installs[0],
+    ), installs[0]
 
 
 def test_mcp_server_examples_run_a_console_script_gco_ships() -> None:
