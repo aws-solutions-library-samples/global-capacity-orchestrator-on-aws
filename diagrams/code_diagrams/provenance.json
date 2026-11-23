@@ -42,9 +42,9 @@
       "source_commit": "db3de8225c3e025f659096135ffaa4ea72d25097"
     },
     "cli/stacks.py": {
-      "digest": "3b338086039763edf314bcf612353aa4b24d041ad6d706416c6fc694871b8b31",
-      "generated_at": "2026-11-23T02:28:23Z",
-      "source_commit": "1bf0ef9a749386c6fa50ac7edddbe6eb1b7a9fe0"
+      "digest": "d09206e5200a9cfacf692944d40510071c3c3619c5544603dec505c4af3d390a",
+      "generated_at": "2026-11-23T10:50:39Z",
+      "source_commit": "cf45a5ae125b4562c0cb686ea4e8c6e5ec2bec4d"
     },
     "cli/upgrade.py": {
       "digest": "99b3e9d70f26d76bb03fcd7490046147bc370a0ea6a132adc86c683b11be94be",
@@ -297,9 +297,9 @@
       "source_commit": "a081fbf678ca3f3fa3f7edb74687de923efe6657"
     },
     "scripts/upgrade_validation/actions.py": {
-      "digest": "2084eb0747edc70c85263fb54e29c3559c7d60476b0b45ebaaf54e8c38eee8e4",
-      "generated_at": "2026-11-23T04:28:16Z",
-      "source_commit": "8aaaad18b25d06bf2c595b761b267592b09c3cf4"
+      "digest": "bd758ac34dc8588ed557a63f970535159eefe0bd15478ec64df498758a4b4515",
+      "generated_at": "2026-11-23T10:50:39Z",
+      "source_commit": "cf45a5ae125b4562c0cb686ea4e8c6e5ec2bec4d"
     }
   }
 }
