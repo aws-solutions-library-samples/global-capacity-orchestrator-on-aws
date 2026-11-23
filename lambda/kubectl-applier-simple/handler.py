@@ -907,6 +907,9 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ("storage.k8s.io/v1", "StorageClass", None, "fsx-sc"),
     ),
     ("{{VALKEY_ENDPOINT}}", False): (("v1", "ConfigMap", "gco-jobs", "gco-valkey"),),
+    ("{{REGIONAL_PERSISTENT_BUCKET}}", False): (
+        ("v1", "ConfigMap", "gco-jobs", "gco-regional-persistent-bucket"),
+    ),
     ("{{AURORA_PGVECTOR_ENDPOINT}}", False): (
         ("v1", "ConfigMap", "gco-jobs", "gco-aurora-pgvector"),
     ),

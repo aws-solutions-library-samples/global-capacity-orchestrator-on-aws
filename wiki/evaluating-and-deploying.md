@@ -31,7 +31,7 @@ while you evaluate.
 | **Deploy** | One CDK app stands up the global control plane and every Region in `cdk.json`; CDK bootstrap is automatic. *Billable resources exist from here.* Helm charts converge asynchronously afterwards (10–30+ minutes) and never roll back the cluster. | `gco stacks deploy-all -y` |
 | **Operate** | Submit jobs by SQS, REST API, or the global queue; deploy inference endpoints; watch the fleet. | `gco jobs …`, `gco inference …`, `gco status` |
 | **Grow or shrink** | Add or remove workload Regions in `cdk.json` and redeploy — down to zero Regions, which leaves only the control plane running. | `gco stacks regions add <region>` |
-| **Upgrade** | Move the checkout, the local install, the dev image, and every deployed stack to the latest tagged release in one pass. The regional stacks are recreated, so the procedure starts with backing regional data up to the cluster-shared bucket — read [docs/UPGRADING.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/UPGRADING.md) first. | `gco upgrade` |
+| **Upgrade** | Move the checkout, the local install, the dev image, and every deployed stack to the latest tagged release in one pass. The regional stacks are recreated, so the procedure starts with staging regional data in each Region's persistent bucket or the cluster-shared bucket — read [docs/UPGRADING.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/UPGRADING.md) first. | `gco upgrade` |
 | **Tear down** | Destroy every stack in dependency order with best-effort cleanup of the resources CloudFormation leaves behind. | `gco stacks destroy-all -y` |
 
 Prefer to let an agent drive? `gco autopilot` launches Claude Code by

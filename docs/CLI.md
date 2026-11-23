@@ -5598,11 +5598,12 @@ unless every stack is gone.
 `--keep-control-plane` scales the deployment to zero workload Regions instead of
 removing it. Only the regional API bridges and the base regional stacks are
 destroyed; `<project>-global`, `<project>-api-gateway`, `<project>-monitoring`
-and, when deployed, `<project>-analytics` stay, together with everything they
-own — the DynamoDB tables, the model and cluster-shared buckets, the image
-registry, EFS recovery points in the backup vault, the cost-report bucket, and
-the analytics stack's Studio home directories, Cognito users and notebook
-outputs. Before anything is deleted the monitoring stack
+and, when deployed, `<project>-analytics` and each Region's
+`<project>-<region>-persistent` stay, together with everything they own — the
+DynamoDB tables, the model, cluster-shared and
+[persistent](REGIONAL_PERSISTENT_BUCKET.md) buckets, the image registry, EFS
+recovery points in the backup vault, the cost-report bucket, and the analytics
+stack's Studio home directories, Cognito users and notebook outputs. Before anything is deleted the monitoring stack
 is updated in place with `--context gco:control-plane-only=true` (the run-scoped
 equivalent of an empty `deployment_regions.regional`) so it stops referencing the
 regional stacks; CloudFormation would otherwise refuse to delete a stack whose
@@ -6281,13 +6282,15 @@ published by the deployed stacks; GCO does not guess or reconstruct them.
 | `cluster-shared` | Global | Cross-region cluster job artifacts and shared data | Global-region SSM parameters |
 | `model-weights` | Global | Central model weights used by inference endpoints | Global-region SSM parameter |
 | `regional-shared:REGION` | Regional | General-purpose data for workloads in one region | That region's SSM parameters |
+| `regional-persistent:REGION` | Regional | One region's staging that survives `gco upgrade` ([REGIONAL_PERSISTENT_BUCKET.md](REGIONAL_PERSISTENT_BUCKET.md)) | That region's SSM parameters |
 | `analytics-studio` | Optional analytics region | SageMaker Studio private scratch data and outputs | `PROJECT-analytics` CloudFormation resources |
 
-`regional-shared` is also accepted with `--region REGION`. When exactly one
-regional deployment is configured, the region may be omitted; multi-region
-deployments must use `--region` or the canonical region-qualified alias. The
-four dedicated access-log buckets are intentionally excluded because they are
-internal compliance sinks, not workload storage.
+`regional-shared` and `regional-persistent` are also accepted with
+`--region REGION`. When exactly one regional deployment is configured, the
+region may be omitted; multi-region deployments must use `--region` or the
+canonical region-qualified alias. The dedicated access-log buckets are
+intentionally excluded because they are internal compliance sinks, not
+workload storage.
 
 #### `gco storage list`
 
@@ -6312,19 +6315,20 @@ gco --output json storage list
 #### `gco storage s3-inventory`
 
 Describe **every** S3 bucket the deployment creates, as a JSON document. Broader
-than [`gco storage list`](#gco-storage-list), which reports only the four
+than [`gco storage list`](#gco-storage-list), which reports only the
 user-facing buckets addressable by [`gco storage sync`](#gco-storage-sync).
 
 Covers the always-on central [`Cluster_Shared_Bucket`](CLUSTER_SHARED_BUCKET.md)
-and per-region [`Regional_Shared_Bucket`](REGIONAL_SHARED_BUCKET.md), the model
-weights bucket, the cost report bucket, the optional analytics Studio bucket, and
-every server-access-log sink.
+and per-region [`Regional_Shared_Bucket`](REGIONAL_SHARED_BUCKET.md), each
+Region's [persistent bucket](REGIONAL_PERSISTENT_BUCKET.md), the model weights
+bucket, the cost report bucket, the optional analytics Studio bucket, and every
+server-access-log sink.
 
 Each entry carries the deployment-contract facts, not just the name:
 
 | Field | Meaning |
 |-------|---------|
-| `id`, `role`, `scope` | Stable identifier; `primary` vs `access-logs`; `global` / `regional` / `monitoring` / `analytics` |
+| `id`, `role`, `scope` | Stable identifier; `primary` vs `access-logs`; `global` / `regional` / `regional-persistent` / `monitoring` / `analytics` |
 | `owning_stack`, `region` | Which stack creates it, and where |
 | `bucket`, `arn`, `s3_uri` | Physical identity, resolved from SSM or CloudFormation — never reconstructed |
 | `status`, `detail` | `deployed` or `not-deployed`, with the reason |
@@ -6387,6 +6391,9 @@ gco storage sync cluster-shared ./downloads/cluster --direction download
 # Download one regional bucket (equivalent alias forms)
 gco storage sync regional-shared:us-east-1 ./downloads/us-east-1
 gco storage sync regional-shared ./downloads/us-east-1 --region us-east-1
+
+# Stage outputs in the Region's persistent bucket before gco upgrade
+gco storage sync regional-persistent:us-east-1 ./outputs --direction upload --prefix upgrade/
 
 # Download only one model prefix
 gco storage sync model-weights ./downloads/llama3 --prefix models/llama3

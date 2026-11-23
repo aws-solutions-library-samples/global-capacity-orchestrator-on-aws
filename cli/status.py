@@ -399,6 +399,7 @@ def _gather_stacks(
     optional: list[tuple[str, str]] = [
         (f"{project}-regional-api-{region}", region) for region in workload
     ]
+    optional.extend((f"{project}-{region}-persistent", region) for region in workload)
     optional.append((f"{project}-analytics", api_gateway_region))
 
     manager = get_stack_manager(config)

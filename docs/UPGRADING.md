@@ -15,7 +15,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
 - [What is destroyed, what survives](#what-is-destroyed-what-survives)
 - [The procedure](#the-procedure)
   - [1. Check](#1-check)
-  - [2. Back up regional data to the cluster-shared bucket](#2-back-up-regional-data-to-the-cluster-shared-bucket)
+  - [2. Stage regional data where it survives](#2-stage-regional-data-where-it-survives)
   - [3. Run the upgrade](#3-run-the-upgrade)
   - [4. Restore the data you staged](#4-restore-the-data-you-staged)
 - [If it stops halfway](#if-it-stops-halfway)
@@ -31,6 +31,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Stricter cdk.json validation](#stricter-cdkjson-validation)
   - [API calls need an IAM permission](#api-calls-need-an-iam-permission)
   - [The APIs answer over IPv6 too](#the-apis-answer-over-ipv6-too)
+  - [A persistent bucket in each Region](#a-persistent-bucket-in-each-region)
   - [Workload pods reach fewer AWS resources](#workload-pods-reach-fewer-aws-resources)
   - [In-VPC hosts need the cluster security group](#in-vpc-hosts-need-the-cluster-security-group)
   - [MCP server role and its access entry](#mcp-server-role-and-its-access-entry)
@@ -125,6 +126,7 @@ dominate); `--parallel` overlaps the regional work when there are several.
 | Valkey Serverless, Aurora Serverless v2 (pgvector) | regional stack | **Destroyed** (Aurora automated backups follow the cluster's retention setting; a manual snapshot survives) |
 | In-cluster PersistentVolumes — Prometheus, Grafana, Alertmanager, MLflow, the Slurm controller state and accounting database | EBS volumes the cluster's CSI driver provisioned | **Deleted** once the cluster is confirmed gone, exactly as `destroy-all` does. Pass nothing to keep them — take EBS snapshots first if you want the history. Slurm's nightly accounting dumps are in the regional-shared bucket (`slurm/accounting-backups/`), so they follow that bucket's row |
 | Regional-shared bucket (`regional-shared:<region>`) | regional stack | **Destroyed** unless `regional_shared_bucket.removal_policy` is `retain` ([REGIONAL_SHARED_BUCKET.md](REGIONAL_SHARED_BUCKET.md#removal-policy)) |
+| Regional persistent bucket (`regional-persistent:<region>`) | `<project>-<region>-persistent`, when `regional_persistent_bucket.enabled` is true | Survives — the upgrade keeps this stack with the control plane ([REGIONAL_PERSISTENT_BUCKET.md](REGIONAL_PERSISTENT_BUCKET.md)) |
 | Running jobs, inference endpoints, queued work on a cluster | regional stack | **Gone.** Drain the clusters first: let jobs finish or resubmit them afterwards; inference endpoints have to be recreated |
 | Cluster-shared bucket, model bucket, DynamoDB tables (jobs, templates, webhooks, vector store), ECR image registry | global stack | Survive — updated in place |
 | Auth secret, private TLS root CA, API Gateway, WAF, aggregator | API Gateway stack | Survive — updated in place |
@@ -153,27 +155,43 @@ document (`up_to_date`, `plan.target`, `plan.workload_stacks`, …).
 If the checkout has local modifications other than `cdk.json`, commit or stash
 them now; the upgrade refuses to move a dirty checkout.
 
-### 2. Back up regional data to the cluster-shared bucket
+### 2. Stage regional data where it survives
 
-The cluster-shared bucket lives in the global stack, is reachable from every
-Region, and is exactly the kind of storage that survives an upgrade — which makes
-it the natural staging area. Stage everything from the first six rows of the
-table above that you want to keep. Typical steps, adapt to what you actually use:
+Two kinds of storage survive the upgrade: each Region's
+[persistent bucket](REGIONAL_PERSISTENT_BUCKET.md) and the cluster-shared
+bucket. Stage everything from the first six rows of the table above that you
+want to keep in one of them:
+
+- **The persistent bucket**, `regional-persistent:<region>`, is in the same
+  Region as the data, so copies stay in-Region, and a Job in `gco-jobs` can
+  write to it directly. It exists when `regional_persistent_bucket.enabled` is
+  true. A deployment first created with v9.1.0 or earlier has no persistent
+  bucket until you turn it on after an upgrade
+  ([A persistent bucket in each Region](#a-persistent-bucket-in-each-region)).
+- **The cluster-shared bucket**, `cluster-shared`, lives in the global stack and
+  is reachable from every Region. Use it when the persistent bucket is not
+  deployed, or when another Region or SageMaker Studio must read the data.
+
+Typical steps, adapt to what you actually use:
 
 ```bash
 # Let running work finish (or record what to resubmit).
 gco jobs list --all-regions
 gco inference list
 
-# EFS / FSx contents: pull them through a helper pod, then push to the shared bucket.
+# EFS / FSx contents: pull them through a helper pod, then push them up.
+# (A Job can also copy them straight into the persistent bucket; see
+# REGIONAL_PERSISTENT_BUCKET.md → Staging data before an upgrade.)
 gco files download outputs/ ./staged/efs-outputs -r us-east-1 -t efs
 gco files download checkpoints/ ./staged/fsx-checkpoints -r us-east-1 -t fsx
-gco storage sync cluster-shared ./staged --direction upload --prefix upgrade/$(date +%F)/
+gco storage sync regional-persistent:us-east-1 ./staged --direction upload --prefix upgrade/$(date +%F)/
+# Without a persistent bucket:
+#   gco storage sync cluster-shared ./staged --direction upload --prefix upgrade/$(date +%F)/
 
-# Regional-shared bucket: copy it into the cluster-shared bucket (or flip it to
+# Regional-shared bucket: copy it into the persistent bucket (or flip it to
 # retain and redeploy before upgrading — see REGIONAL_SHARED_BUCKET.md).
 gco storage sync regional-shared:us-east-1 ./staged/regional-shared
-gco storage sync cluster-shared ./staged/regional-shared --direction upload --prefix upgrade/$(date +%F)/regional-shared/
+gco storage sync regional-persistent:us-east-1 ./staged/regional-shared --direction upload --prefix upgrade/$(date +%F)/regional-shared/
 
 # Aurora pgvector: take a manual snapshot (survives the cluster) or dump with pg_dump.
 # Valkey: export a snapshot if the data matters; it is a cache for most deployments.
@@ -205,16 +223,18 @@ should show `CREATE_COMPLETE`.
 The new regional stacks start empty. Put back what the workloads need:
 
 ```bash
-gco stacks access -r us-east-1                                           # kubectl access to the new cluster
-gco storage sync cluster-shared ./staged --prefix upgrade/$(date +%F)/   # or straight from S3 in a job
+gco stacks access -r us-east-1                                                         # kubectl access to the new cluster
+gco storage sync regional-persistent:us-east-1 ./staged --prefix upgrade/$(date +%F)/  # or straight from S3 in a job
 gco storage sync regional-shared:us-east-1 ./staged/regional-shared --direction upload
-gco models list                                                          # model weights were never touched
-gco inference deploy ...                                                 # recreate endpoints
-gco jobs submit ...                                                      # resubmit work
+gco models list                                                                        # model weights were never touched
+gco inference deploy ...                                                               # recreate endpoints
+gco jobs submit ...                                                                    # resubmit work
 ```
 
-Jobs that read their inputs from the cluster-shared or model buckets need
-nothing restored; only data that lived inside a regional stack does.
+Jobs that read their inputs from the persistent, cluster-shared or model
+buckets need nothing restored; only data that lived inside a regional stack
+does. Delete the staged objects from the persistent bucket once you no longer
+need them, or let `regional_persistent_bucket.expiration_days` expire them.
 
 ## If it stops halfway
 
@@ -513,7 +533,7 @@ chart, on the next deploy. So `"true"` (any case) still reads as on, with a
 warning, and any other string fails with a message saying how the setting has
 been running. Write `true` to keep the feature, or `false` to remove it, which
 for the storage features deletes the resource and its data: back up first
-([step 2](#2-back-up-regional-data-to-the-cluster-shared-bucket)).
+([step 2](#2-stage-regional-data-where-it-survives)).
 
 Errors (the synth fails):
 
@@ -614,6 +634,28 @@ IPv4 ones, so callers with IPv6 connectivity start connecting over IPv6.
   MCP server alternate between IPv6 and IPv4 addresses, so such a network costs
   them about two seconds per new connection. Upgrade every machine that runs
   `gco` against the deployment.
+
+### A persistent bucket in each Region
+
+This release adds an optional stack per workload Region,
+`<project>-<region>-persistent`, holding an S3 bucket that `gco upgrade` and
+`gco stacks destroy-all --keep-control-plane` leave standing
+([REGIONAL_PERSISTENT_BUCKET.md](REGIONAL_PERSISTENT_BUCKET.md)). The shipped
+`cdk.json` turns it on; a `cdk.json` without the `regional_persistent_bucket`
+block, such as yours from an earlier release, leaves it off.
+
+- **Upgrading into this release with `gco upgrade`:** keep the block out of
+  `cdk.json` until the upgrade has finished. The previous release's `gco` runs
+  that upgrade's stack cycle and cannot deploy the new stack type, so stage
+  data in the cluster-shared bucket as before.
+- **Turning it on afterwards:** add
+  `"regional_persistent_bucket": {"enabled": true, "expiration_days": null}` to
+  `cdk.json` and run `gco stacks deploy-all -y`. The persistent stacks deploy
+  with the global stacks, and the regional stacks update in place to grant the
+  job-pod role access and create the `gco-regional-persistent-bucket`
+  ConfigMap. Later upgrades can stage data there.
+- **A full `gco stacks destroy-all` deletes the persistent buckets and their
+  objects**, like every other GCO bucket.
 
 ### Workload pods reach fewer AWS resources
 

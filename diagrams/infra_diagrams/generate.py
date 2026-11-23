@@ -88,6 +88,10 @@ from gco.stacks.api_gateway_global_stack import (  # noqa: E402
 from gco.stacks.global_stack import GCOGlobalStack  # noqa: E402
 from gco.stacks.monitoring_stack import GCOMonitoringStack  # noqa: E402
 from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack  # noqa: E402
+from gco.stacks.regional_persistent_stack import (  # noqa: E402
+    GCORegionalPersistentStack,
+    regional_persistent_stack_name,
+)
 from gco.stacks.regional_stack import GCORegionalStack  # noqa: E402
 
 
@@ -181,6 +185,9 @@ _BASE_CONTEXT: dict[str, Any] = {
         "metrics_enabled": True,
         "tracing_enabled": True,
     },
+    # On in the shipped cdk.json, so the full views show each Region's
+    # persistent-bucket stack.
+    "regional_persistent_bucket": {"enabled": True},
 }
 
 
@@ -327,6 +334,7 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
     )
     api_gateway_stack.add_stack_dependency(global_stack)
 
+    persistent_bucket_enabled = config.get_regional_persistent_bucket_config()["enabled"]
     regional_stacks = []
     for region in regions["regional"]:
         regional_stack = GCORegionalStack(
@@ -340,6 +348,15 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
         regional_stack.add_stack_dependency(global_stack)
         regional_stack.add_stack_dependency(api_gateway_stack)
         regional_stacks.append(regional_stack)
+        if persistent_bucket_enabled:
+            persistent_stack = GCORegionalPersistentStack(
+                app,
+                regional_persistent_stack_name(project, region),
+                config=config,
+                region=region,
+                env=cdk.Environment(region=region),
+            )
+            regional_stack.add_stack_dependency(persistent_stack)
 
         regional_api_stack = GCORegionalApiGatewayStack(
             app,

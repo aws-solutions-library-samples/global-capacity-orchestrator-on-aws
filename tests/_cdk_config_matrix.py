@@ -685,6 +685,18 @@ CONFIGS.append(
     )
 )
 
+# Each workload Region's persistent bucket (gco/stacks/regional_persistent_stack.py).
+# The shipped cdk.json turns it on, so the baseline synthesizes the persistent
+# stacks and the regional stacks' SSM-backed grant on them. This entry is the
+# shape of a cdk.json without the block, such as one upgraded from v9.1.0: no
+# persistent stacks, and regional stacks that depend on the global tier only.
+CONFIGS.append(
+    (
+        "regional-persistent-bucket-off",
+        {"regional_persistent_bucket": {"enabled": False}},
+    )
+)
+
 # ---------------------------------------------------------------------------
 # Coverage sweep — every remaining ConfigLoader context surface.
 # ---------------------------------------------------------------------------

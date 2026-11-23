@@ -69,6 +69,7 @@ def test_full_architecture_keeps_every_stack_bridge_and_helm_topology(
         f"{project}-analytics",
         *(f"{project}-{region}" for region in regions["regional"]),
         *(f"{project}-regional-api-{region}" for region in regions["regional"]),
+        *(f"{project}-{region}-persistent" for region in regions["regional"]),
     }
     actual_stacks = {artifact.stack_name for artifact in assembly.stacks}
     assert actual_stacks >= expected_stacks
@@ -199,6 +200,7 @@ def test_build_monitoring_builds_the_full_topology_without_optional_analytics(
         f"{project}-monitoring",
         *(f"{project}-{region}" for region in regions["regional"]),
         *(f"{project}-regional-api-{region}" for region in regions["regional"]),
+        *(f"{project}-{region}-persistent" for region in regions["regional"]),
     }
     assert stacks[f"{project}-monitoring"].region == regions["monitoring"]
 
@@ -209,6 +211,7 @@ def test_build_monitoring_builds_the_full_topology_without_optional_analytics(
         assert _explicit_dependencies(stacks[f"{project}-{region}"]) >= {
             f"{project}-global",
             f"{project}-api-gateway",
+            f"{project}-{region}-persistent",
         }
         assert _explicit_dependencies(stacks[f"{project}-regional-api-{region}"]) >= {
             f"{project}-{region}"

@@ -1,0 +1,26 @@
+# Regional persistent bucket ConfigMap: the name, ARN and region of this
+# Region's persistent bucket, which gco upgrade leaves standing, for pods in
+# gco-jobs (envFrom or configMapKeyRef). The bucket and its KMS key belong to
+# the <project>-<region>-persistent stack; the regional stack grants
+# gco-service-account read/write on them and fills these placeholders.
+#
+# Present only while cdk.json regional_persistent_bucket.enabled is true. With
+# it off the placeholders stay unresolved, so the applier skips this file and
+# deletes the ConfigMap an earlier deploy created.
+#
+# Keys are persistentBucket* so a pod can envFrom this ConfigMap next to
+# gco-regional-shared-bucket and gco-cluster-shared-bucket without clashes.
+# See docs/REGIONAL_PERSISTENT_BUCKET.md.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-regional-persistent-bucket
+  namespace: gco-jobs
+  labels:
+    app: gco
+    project: gco
+data:
+  persistentBucketName: "{{REGIONAL_PERSISTENT_BUCKET}}"
+  persistentBucketArn: "{{REGIONAL_PERSISTENT_BUCKET_ARN}}"
+  persistentBucketRegion: "{{REGIONAL_PERSISTENT_BUCKET_REGION}}"

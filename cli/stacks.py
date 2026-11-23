@@ -4633,6 +4633,14 @@ class StackManager:
             configured_regions = {str(item) for item in (cdk_regions.get("regional") or [])}
             return region if region in configured_regions else None
 
+        # A Region's persistent bucket: <project>-<region>-persistent, in that
+        # Region, which must be configured like a bridge's.
+        persistent_region = _persistent_stack_region(
+            stack_name, project_name=self.config.project_name
+        )
+        if persistent_region is not None:
+            configured_regions = {str(item) for item in (cdk_regions.get("regional") or [])}
+            return persistent_region if persistent_region in configured_regions else None
         # Base regional stacks: {project}-{region}. The region is whatever
         # follows the project prefix (regions contain hyphens, so we strip
         # the known prefix rather than guess a split point).
@@ -4694,6 +4702,9 @@ class StackManager:
         # name containing ``regional-api`` remains unambiguous.
         bridge_prefix = f"{self.config.project_name}-regional-api-"
         if stack_name and stack_name.startswith(bridge_prefix):
+            return []
+        # A persistent-bucket stack holds no Helm consumer either.
+        if stack_name and _is_persistent_stack(stack_name, project_name=self.config.project_name):
             return []
 
         if stack_name and stack_name.startswith(prefix) and stack_name not in named:
@@ -4901,7 +4912,9 @@ class StackManager:
         # ordering is independent of project_name (#139):
         # 1. Pre-regional global stacks (<project>-global, then the optional
         #    <project>-analytics, whose Studio wiring the API Gateway imports,
-        #    then <project>-api-gateway)
+        #    then <project>-api-gateway, then each Region's optional
+        #    <project>-<region>-persistent, whose bucket that Region's
+        #    regional stack reads from SSM)
         # 2. Base regional stacks (<project>-<region>, parallel-safe)
         # 3. Regional API bridges (<project>-regional-api-<region>, depend on base)
         # 4. Monitoring (depends on regional stacks)
@@ -7609,15 +7622,38 @@ def _is_analytics_stack(stack: str, *, project_name: str) -> bool:
     return stack == f"{project_name}-analytics"
 
 
+def _persistent_stack_region(stack: str, *, project_name: str) -> str | None:
+    """Return the Region of a ``<project>-<region>-persistent`` stack, else None.
+
+    The Region sits between the exact project prefix and the suffix, so a
+    project whose name ends in ``-persistent`` cannot be mistaken for one.
+    """
+    prefix = f"{project_name}-"
+    suffix = "-persistent"
+    if not (stack.startswith(prefix) and stack.endswith(suffix)):
+        return None
+    region = stack[len(prefix) : -len(suffix)]
+    return region or None
+
+
+def _is_persistent_stack(stack: str, *, project_name: str) -> bool:
+    """Return whether ``stack`` is a Region's persistent-bucket stack."""
+    return _persistent_stack_region(stack, project_name=project_name) is not None
+
+
 def _is_pre_regional_stack(stack: str, *, project_name: str) -> bool:
     """Return whether ``stack`` belongs to the global tier the regional stacks depend on.
 
-    That is ``<project>-global``, ``<project>-api-gateway`` and, when enabled,
-    ``<project>-analytics``, which lives in the API Gateway Region and owns no
-    EKS cluster. It is kept by a keep-control-plane teardown like the other two.
+    That is ``<project>-global``, ``<project>-api-gateway``, when enabled
+    ``<project>-analytics``, which lives in the API Gateway Region, and each
+    Region's ``<project>-<region>-persistent``, whose bucket the regional stack
+    reads from SSM. None of them owns an EKS cluster, and a keep-control-plane
+    teardown keeps them all.
     """
-    return stack.endswith(("-global", "-api-gateway")) or _is_analytics_stack(
-        stack, project_name=project_name
+    return (
+        stack.endswith(("-global", "-api-gateway"))
+        or _is_analytics_stack(stack, project_name=project_name)
+        or _is_persistent_stack(stack, project_name=project_name)
     )
 
 
@@ -7632,9 +7668,10 @@ def _get_stack_destroy_phases(
     global phases. The public preview helper and the execution path both flatten
     this result, so custom project names and bridge dependencies cannot drift.
 
-    The pre-regional phase deletes the API Gateway stack, then the analytics
-    stack whose Studio wiring it imports, then the global stack both depend on
-    (see ``app.py``). Deleting the API Gateway stack first means the analytics
+    The pre-regional phase deletes each Region's persistent-bucket stack, then
+    the API Gateway stack, then the analytics stack whose Studio wiring it
+    imports, then the global stack both depend on (see ``app.py``). Deleting
+    the API Gateway stack before the analytics stack means the analytics
     teardown never has to redeploy it to drop those imports.
     """
     stack_names = set(stacks)
@@ -7670,6 +7707,8 @@ def _get_stack_destroy_phases(
     )
 
     def pre_regional_position(stack: str) -> int:
+        if _is_persistent_stack(stack, project_name=project_name):
+            return 0
         if stack.endswith("-api-gateway"):
             return 1
         if _is_analytics_stack(stack, project_name=project_name):
@@ -7678,7 +7717,7 @@ def _get_stack_destroy_phases(
 
     pre_regional_stacks = sorted(
         (stack for stack in stacks if _is_pre_regional_stack(stack, project_name=project_name)),
-        key=pre_regional_position,
+        key=lambda stack: (pre_regional_position(stack), stack),
     )
     return (
         monitoring_stacks,
@@ -7698,7 +7737,8 @@ def get_stack_deployment_order(
 
     Order: global stacks first, then regional stacks.
     Global stacks: <project>-global, <project>-analytics,
-    <project>-api-gateway, <project>-monitoring
+    <project>-api-gateway, each <project>-<region>-persistent,
+    <project>-monitoring
     Regional stacks: <project>-{region} (e.g., gco-us-east-1)
 
     The analytics stack depends on the global stack and the API Gateway stack
@@ -7730,6 +7770,10 @@ def get_stack_deployment_order(
 
     for stack in stacks:
         priority = _named_priority(stack)
+        if _is_persistent_stack(stack, project_name=project_name):
+            # The regional stacks read the persistent buckets from SSM, so
+            # these deploy with the global tier, after the API Gateway stack.
+            priority = 2.5
         if priority is not None:
             global_stacks.append((priority, stack))
         elif _is_regional_api_bridge_stack(
@@ -7743,7 +7787,8 @@ def get_stack_deployment_order(
 
     # Keep bridge dependencies after every base regional stack. The
     # orchestrated lifecycle further separates monitoring into its own phase.
-    global_stacks.sort(key=lambda x: x[0])
+    # Name breaks the ties between the persistent stacks of several Regions.
+    global_stacks.sort(key=lambda x: (x[0], x[1]))
     regional_stacks.sort()
     regional_api_stacks.sort()
 

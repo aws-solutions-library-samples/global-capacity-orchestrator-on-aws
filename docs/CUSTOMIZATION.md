@@ -444,7 +444,7 @@ A workload Region cannot yet be retired on its own while the others keep running
 Retire a Region through the [scale-to-zero](#scaling-to-zero-workload-regions) teardown, which rebuilds the Regions you keep:
 
 1. Delete every inference endpoint that has run in the Region you are retiring, and wait until `gco inference list` no longer shows it.
-2. Back up the data that lives in the regional stacks (EFS and FSx file systems, Valkey, Aurora, the regional-shared buckets), as described in [Scaling to zero workload Regions](#scaling-to-zero-workload-regions). The teardown removes it in every Region, not only the retired one.
+2. Back up the data that lives in the regional stacks (EFS and FSx file systems, Valkey, Aurora, the regional-shared buckets), as described in [Scaling to zero workload Regions](#scaling-to-zero-workload-regions). The teardown removes it in every Region, not only the retired one. The retired Region's [persistent bucket](REGIONAL_PERSISTENT_BUCKET.md) survives the teardown, so copy out what you need from it and delete its stack before the Region leaves `cdk.json`: `gco stacks destroy <project>-<region>-persistent -y`.
 3. Tear down the workload tier, remove the Region, and rebuild the rest:
 
 ```bash
@@ -2650,7 +2650,7 @@ been running:
   `false` to remove it. For the storage features `false` deletes the
   resource and its data (the file system, the cache, the database cluster,
   the MLflow run-metadata volume), so back up first (see
-  [UPGRADING.md](UPGRADING.md#2-back-up-regional-data-to-the-cluster-shared-bucket)).
+  [UPGRADING.md](UPGRADING.md#2-stage-regional-data-where-it-survives)).
   For a `helm` chart `false` uninstalls it, and for Kueue and Crossplane the
   uninstall first deletes their custom resources across the cluster (Kueue's
   queues and workload objects; Crossplane's composite resources and what they

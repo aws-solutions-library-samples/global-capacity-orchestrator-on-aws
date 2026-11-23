@@ -107,6 +107,13 @@ After running the generator, diagrams are saved to `diagrams/infra_diagrams/`:
 - KEDA for autoscaling
 - Network policies
 
+### Regional Persistent Stack
+
+- One per workload Region (`<project>-<region>-persistent`) while `regional_persistent_bucket.enabled` is true
+- Versioned S3 bucket encrypted with its own KMS key, and its access-logs bucket
+- SSM parameters with the bucket's name, ARN, Region and key ARN, which the regional stack reads when it deploys
+- Kept by `gco upgrade` and `gco stacks destroy-all --keep-control-plane`
+
 ### Regional API Gateway Stack
 
 - Always-deployed regional REST API with AWS-managed TLS and IAM authentication

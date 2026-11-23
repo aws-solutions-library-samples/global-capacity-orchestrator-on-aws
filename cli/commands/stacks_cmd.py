@@ -158,6 +158,7 @@ def _print_cluster_access_hint(formatter: Any, config: Any, stack_name: str) -> 
         not suffix
         or suffix in ("global", "api-gateway", "monitoring")
         or suffix.startswith("regional-api")
+        or suffix.endswith("-persistent")
     ):
         return
     formatter.print_info(
@@ -1443,7 +1444,8 @@ def regions_remove(config: Any, region: Any, config_path: Any, yes: Any) -> None
     if not yes:
         formatter.print_warning(
             f"This only edits cdk.json — a deployed {config.project_name}-{region} "
-            "stack is NOT destroyed by this change, and once the Region leaves cdk.json "
+            f"stack (or {config.project_name}-{region}-persistent, the Region's persistent "
+            "bucket) is NOT destroyed by this change, and once the Region leaves cdk.json "
             "it is no longer part of the CDK app. Retire a deployed Region first: see "
             "'Removing a Region' in docs/CUSTOMIZATION.md."
         )

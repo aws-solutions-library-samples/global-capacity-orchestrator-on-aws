@@ -282,6 +282,11 @@
     "workload_metrics": {
       "cloudwatch_namespace": "GCO/Workloads"
     },
+    "_comment_regional_persistent_bucket": "Each workload Region's persistent bucket, in its own <project>-<region>-persistent stack, which gco upgrade and destroy-all --keep-control-plane leave standing: stage outputs there before an upgrade and read them back after it. A full gco stacks destroy-all deletes it with its objects. enabled: a JSON boolean, false when the block or key is absent (a cdk.json from v9.1.0 or earlier has none; add it after upgrading). expiration_days: null keeps objects until someone deletes them; a positive number of days expires every object that long after it was written. Overwritten and deleted versions always expire after 30 days and unfinished uploads after 7. Alias: gco storage sync regional-persistent:<region>. See docs/REGIONAL_PERSISTENT_BUCKET.md.",
+    "regional_persistent_bucket": {
+      "enabled": true,
+      "expiration_days": null
+    },
     "_comment_regional_shared_bucket": "Teardown behavior for each region's always-on general-purpose bucket (and its access-logs bucket and KMS key). 'destroy' (default): a regional stack destroy deletes the bucket and every object in it — including artifacts jobs just produced. 'retain': bucket, access logs, and KMS key all survive the destroy (they become unmanaged and keep billing until deleted manually). Interim copy-out before a destroy under 'destroy': gco storage sync regional-shared:<region> ./checkpoints --prefix <prefix>. See docs/REGIONAL_SHARED_BUCKET.md (Removal policy).",
     "regional_shared_bucket": {
       "removal_policy": "destroy"
