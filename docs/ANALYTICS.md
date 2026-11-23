@@ -87,7 +87,7 @@ gco costs regions --days 7
 Disable the feature at any time with `gco analytics disable` followed
 by `gco stacks destroy gco-analytics`. The analytics resources are all
 `RemovalPolicy.DESTROY` so destroy cleanly removes them without
-orphaned retained resources (see section (k) for the opt-in retain
+orphaned retained resources (see [section (k)](#k-studio_efs-and-the-studio-home-directory) for the opt-in retain
 override on `Studio_EFS`).
 
 A cleanup Lambda (`lambda/analytics-cleanup/`) runs automatically as a
@@ -114,7 +114,7 @@ pip install --user pandas pyarrow duckdb
 ```
 
 `/home/sagemaker-user` is on the space's own storage volume, not on
-`Studio_EFS` (see section (k)), so packages installed this way **persist
+`Studio_EFS` (see [section (k)](#k-studio_efs-and-the-studio-home-directory)), so packages installed this way **persist
 across restarts of that space**; a new space starts without them. No
 container image rebuild is required, and no operator intervention is
 needed to support new libraries.
@@ -217,7 +217,7 @@ deployed, the following resources appear in the API-gateway region
   endpoint for S3. It has no VPC flow log (the regional VPCs do).
 - **Studio_EFS** — encrypted EFS file system that Studio spaces can
   attach; each user profile the presigned-URL Lambda creates sees
-  `/home/<username>` on it (section (k)).
+  `/home/<username>` on it ([section (k)](#k-studio_efs-and-the-studio-home-directory)).
 - **Studio_Only_Bucket** — KMS-encrypted S3 bucket scoped to the
   SageMaker execution role only. Not accessible from cluster pods.
   Comes with a dedicated access-logs bucket.
@@ -233,7 +233,7 @@ deployed, the following resources appear in the API-gateway region
   experiments/runs/metrics/artifacts/models, and Model Registry
   read/write). When the `canvas` sub-toggle is
   on, the role additionally gets the AWS-managed
-  `AmazonSageMakerCanvasFullAccess` policy (see section (g2)).
+  `AmazonSageMakerCanvasFullAccess` policy (see [section (g2)](#g2-launching-sagemaker-canvas-when-the-sub-toggle-is-enabled)).
 - **Presigned-URL Lambda** — the backend for the `/studio/login`
   API Gateway route. Calls
   `CreatePresignedDomainUrl` and creates per-user profiles on first
@@ -267,7 +267,7 @@ decide to apply.
 `--hyperpod` still sets `analytics_environment.hyperpod.enabled=true`,
 but it is deprecated and changes nothing: the SageMaker execution role
 can already start SageMaker training jobs, and HyperPod work goes through
-GCO. See section (g).
+GCO. See [section (g)](#g-submitting-hyperpod-jobs-and-sagemaker-training-jobs-from-studio).
 
 With SageMaker Canvas:
 
@@ -281,7 +281,7 @@ The `--canvas` flag additionally sets
 AWS-managed `AmazonSageMakerCanvasFullAccess` policy to the SageMaker
 execution role. The policy is sufficient for Canvas to surface on the
 Studio landing page — SageMaker auto-detects the entitlement when a
-user opens Studio and lights up the Canvas tile. See section (g2)
+user opens Studio and lights up the Canvas tile. See [section (g2)](#g2-launching-sagemaker-canvas-when-the-sub-toggle-is-enabled)
 for the walkthrough.
 
 Skip the confirmation prompt with `-y`:
@@ -543,7 +543,7 @@ git clone --depth 1 --branch "${GCO_REF}" https://github.com/aws-solutions-libra
 
 The install and the clone live in your home directory,
 `/home/sagemaker-user`, which is on the space's own storage volume (see
-section (k)), so they survive restarts of the space. A new space starts
+[section (k)](#k-studio_efs-and-the-studio-home-directory)), so they survive restarts of the space. A new space starts
 without them.
 
 Point the CLI at your deployment. Add these to `~/.bashrc` so they
@@ -636,7 +636,7 @@ the server.
 
 ## (f) Using the GCO CLI once installed inside JupyterLab
 
-With the CLI installed and the environment variables set per section (e),
+With the CLI installed and the environment variables set per [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server),
 the `gco jobs` commands that go through the GCO API work from a
 JupyterLab terminal or from a notebook cell via `!` shell-out. The
 examples read the manifests from the clone in `~/gco`; replace
@@ -662,7 +662,7 @@ gco jobs logs cluster-shared-bucket-upload -r us-east-1 -n gco-jobs
 
 These commands work the same from a workstation. Capacity
 recommendations (`gco capacity recommend-region`), inference endpoints
-(`gco inference deploy`) and the other commands section (e) lists as
+(`gco inference deploy`) and the other commands [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server) lists as
 needing workstation credentials are run from a workstation.
 
 ## (g) Submitting HyperPod jobs and SageMaker training jobs from Studio
@@ -694,7 +694,7 @@ metadata:
 ```
 
 Submit it from a Studio terminal through the GCO API like any other job
-(section (e) covers the install and what the Studio role allows), naming a
+([section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server) covers the install and what the Studio role allows), naming a
 Region that runs HyperPod:
 
 ```bash
@@ -763,7 +763,7 @@ Notes:
 - `Cluster_Shared_Bucket` works as both input and output because
   the SageMaker role has RW on it (always, whenever analytics is
   enabled). Replace the bucket name with your deployment's
-  (`/gco/cluster-shared-bucket/name` in SSM, see section (i)).
+  (`/gco/cluster-shared-bucket/name` in SSM, see [section (i)](#i-running-the-example-cluster-jobs-and-reading-their-output-from-a-notebook)).
 - Multi-node training is the same call with `InstanceCount > 1`. To let the
   training containers reach something inside the analytics VPC, such as
   `Studio_EFS`, run the job in that VPC with `VpcConfig` (the analytics
@@ -962,8 +962,8 @@ End-to-end flow:
     gco --help
     ```
 
-    If the CLI was installed per section (e), `--help` prints the
-    full command tree. If not, install it first as section (e)
+    If the CLI was installed per [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server), `--help` prints the
+    full command tree. If not, install it first as [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server)
     describes (`uv tool install`; GCO needs Python 3.14 and the image
     runs an older one).
 
@@ -987,7 +987,7 @@ for their full descriptions.
 End-to-end example — cluster writes, notebook reads:
 
 **Step 1 — submit the upload job from a CLI** (from your workstation
-or from a JupyterLab terminal once section (e) is done):
+or from a JupyterLab terminal once [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server) is done):
 
 ```bash
 gco jobs submit ~/gco/examples/analytics-s3-upload-job.yaml -r us-east-1
@@ -1035,7 +1035,7 @@ global region (default `us-east-2`). If your Studio domain is also
 in `us-east-2` (the default), the notebook-to-S3 calls are
 same-region — no egress charges. Cluster pods, however, may be in
 `us-east-1` or elsewhere — their uploads cross a region boundary.
-See section (m) and
+See [section (m)](#m-cross-region-data-transfer-caveat) and
 [`docs/CLUSTER_SHARED_BUCKET.md`](CLUSTER_SHARED_BUCKET.md#cross-region-egress)
 for the full discussion.
 
@@ -1113,7 +1113,7 @@ on both `/prod/*/api/v1/*` and `/prod/*/inference/*` — notebooks can
 submit jobs (`POST`), update templates (`PUT`), and tear things down
 (`DELETE`) via SigV4-signed requests in addition to read-only
 `GET`s. In practice you will usually reach for the `gco` CLI from a
-JupyterLab terminal (see section (f)) — the broader IAM surface is
+JupyterLab terminal (see [section (f)](#f-using-the-gco-cli-once-installed-inside-jupyterlab)) — the broader IAM surface is
 there so `boto3` / `requests_aws4auth`-style SigV4 scripting works
 the same way it does from a developer workstation.
 
@@ -1126,7 +1126,7 @@ and what the SageMaker documentation says Studio does with it:
   instance with one EBS volume, and the space's files, the home
   directory `/home/sagemaker-user` included, live on that volume
   ([JupyterLab user guide](https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated-jl-user-guide.html)).
-  `pip install --user` packages and the section (e) install therefore
+  `pip install --user` packages and the [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server) install therefore
   belong to one space.
 - **`Studio_EFS` is a custom file system a space can attach.** The
   domain lists it in `DefaultUserSettings.CustomFileSystemConfigs`, and
