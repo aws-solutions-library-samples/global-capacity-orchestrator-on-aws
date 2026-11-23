@@ -59,11 +59,13 @@ recreates every regional stack, and the data inside those stacks goes with them.
 ## How an upgrade works
 
 GCO has two tiers of stacks. The **control plane** — `<project>-global`,
-`<project>-api-gateway`, `<project>-monitoring` and, when the analytics
-environment is enabled, `<project>-analytics` — holds the shared state:
-DynamoDB tables, the model and cluster-shared S3 buckets, the image registry, the
-backup vault, the cost-report bucket, the auth secret, the private TLS root, and
-the SageMaker Studio domain with its home directories and Cognito users.
+`<project>-api-gateway`, `<project>-monitoring`, each Region's
+`<project>-<region>-persistent` when `regional_persistent_bucket.enabled` is
+true and, when the analytics environment is enabled, `<project>-analytics` —
+holds the shared state: DynamoDB tables, the model and cluster-shared S3
+buckets, the persistent buckets, the image registry, the backup vault, the
+cost-report bucket, the auth secret, the private TLS root, and the SageMaker
+Studio domain with its home directories and Cognito users.
 The **workload tier** — one `<project>-<region>` stack and one
 `<project>-regional-api-<region>` bridge per entry in
 `deployment_regions.regional` — holds the EKS clusters and everything that runs

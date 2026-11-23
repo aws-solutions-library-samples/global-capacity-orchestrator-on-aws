@@ -6886,7 +6886,8 @@ Runs inside a git checkout of the repository and:
 Step 3 deletes the data inside the regional stacks — EFS and FSx file systems,
 Valkey, Aurora, in-cluster volumes (Prometheus, Grafana, MLflow) and, unless its
 removal policy is `retain`, the regional-shared bucket. The control plane's
-shared state (DynamoDB tables, the model and cluster-shared buckets, the image
+shared state (DynamoDB tables, the model and cluster-shared buckets, each
+Region's [persistent bucket](REGIONAL_PERSISTENT_BUCKET.md), the image
 registry, EFS recovery points in the backup vault, the cost-report bucket) is
 untouched. Unless `-y` is given the command prints this plan, names every stack
 it will destroy, and asks you to type the project name to continue.
