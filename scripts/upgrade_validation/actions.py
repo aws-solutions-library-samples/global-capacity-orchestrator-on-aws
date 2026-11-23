@@ -73,8 +73,8 @@ from .workspace import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T06:05:34Z
-# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
+# Generated at (UTC): 2026-11-23T04:28:16Z
+# Generated from Git commit: 8aaaad18b25d06bf2c595b761b267592b09c3cf4
 # Flowchart(s) generated from this file:
 #   * ``action_upgrade`` -> ``diagrams/code_diagrams/scripts/upgrade_validation/actions.action_upgrade.html``
 #     (PNG: ``diagrams/code_diagrams/scripts/upgrade_validation/actions.action_upgrade.png``)

@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
-        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
-        <meta name="gco-flow-digest" content="0ca169851cf6fe24">
+        <meta name="gco-generated-at" content="2026-11-23T04:28:16Z">
+        <meta name="gco-source-commit" content="8aaaad18b25d06bf2c595b761b267592b09c3cf4">
+        <meta name="gco-flow-digest" content="9bfe003195aa329d">
         <title>Upgrade-validation upgrade phase (plan check, adoption window, settle, resume)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,52 +208,52 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1259=>operation: "Run the base release's gco upgrade to this commit and adopt the recreated stacks."
-op1261=>operation: settings = _settings(ctx)
-op1263=>operation: workspace = _workspace(ctx)
-op1265=>operation: phase = _phases(ctx).get('upgrade')
-cond1268=>condition: if phase is None
-op1272=>operation: prepared = _require_prepared_workspace(ctx)
-op1274=>operation: tag = tag_candidate(workspace, tag=str(prepared['synthetic_tag']), candidate_sha=settings.expected_sha)
-op1276=>operation: check = _run_step(ctx, 'upgrade check', [str(workspace.gco), '-o', 'json', 'upgrade', '--check', '--ref', tag['tag']], cwd=workspace.clone, timeout_seconds=STEP_TIMEOUT_SECONDS)
-op1278=>operation: plan = _validated_plan(ctx, check, tag['tag'])
-sub1280=>subroutine: _reconcile_stack_ownership(ctx)
-sub1282=>subroutine: _checkpoint_retained_kms_keys(ctx)
-op1284=>operation: phase = _begin_phase(ctx, 'upgrade', tag=tag, check=check.to_dict(), plan=plan, before=_stack_generations(ctx))
-op1287=>operation: result = _run_step(ctx, 'upgrade', [str(workspace.gco), '-o', 'json', 'upgrade', '--yes', '--ref', tag['tag'], '--skip-container'], cwd=workspace.clone, timeout_seconds=settings.upgrade_timeout_seconds, phase='upgrade')
+        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: "Run the base release's gco upgrade to this commit and adopt the recreated stacks."
+op4=>operation: settings = _settings(ctx)
+op6=>operation: workspace = _workspace(ctx)
+op8=>operation: phase = _phases(ctx).get('upgrade')
+cond11=>condition: if phase is None
+op15=>operation: prepared = _require_prepared_workspace(ctx)
+op17=>operation: tag = tag_candidate(workspace, tag=str(prepared['synthetic_tag']), candidate_sha=settings.expected_sha)
+op19=>operation: check = _run_step(ctx, 'upgrade check', [str(workspace.gco), '-o', 'json', 'upgrade', '--check', '--ref', tag['tag']], cwd=workspace.clone, timeout_seconds=STEP_TIMEOUT_SECONDS)
+op21=>operation: plan = _validated_plan(ctx, check, tag['tag'])
+sub23=>subroutine: _reconcile_stack_ownership(ctx)
+sub25=>subroutine: _checkpoint_retained_kms_keys(ctx)
+op27=>operation: phase = _begin_phase(ctx, 'upgrade', tag=tag, check=check.to_dict(), plan=plan, before=_stack_generations(ctx))
+op30=>operation: result = _run_step(ctx, 'upgrade', [str(workspace.gco), '-o', 'json', 'upgrade', '--yes', '--ref', tag['tag'], '--skip-container'], cwd=workspace.clone, timeout_seconds=settings.upgrade_timeout_seconds, phase='upgrade')
 phase['command'] = result.to_dict()
 phase['document'] = gco_result_document(result.stdout)
-cond1286=>condition: exception raised?
-sub1293=>subroutine: _settle_phase(ctx, 'upgrade')
-sub1300=>subroutine: _phase_outcome(phase, action='upgrade', command=f"{settings.base_ref}'s gco upgrade")
-op1302=>operation: document = phase.get('document') or {}
-cond1305=>operation: raise ActionFailure(f"gco upgrade reported {document.get('status')!r}, not 'ok'", {'phase': copy.deepcopy(phase)}) if  document.get('status') != 'ok'
-io1318=>inputoutput: output: {'phase': copy.deepcopy(phase)}
-e1316=>end: end function return
-sub1297=>subroutine: _reconcile_stack_ownership(ctx)
+cond29=>condition: exception raised?
+sub36=>subroutine: _settle_phase(ctx, 'upgrade')
+sub43=>subroutine: _phase_outcome(phase, action='upgrade', command=f"{settings.base_ref}'s gco upgrade")
+op45=>operation: document = phase.get('document') or {}
+cond48=>operation: raise ActionFailure(f"gco upgrade reported {document.get('status')!r}, not 'ok'", {'phase': copy.deepcopy(phase)}) if  document.get('status') != 'ok'
+io61=>inputoutput: output: {'phase': copy.deepcopy(phase)}
+e59=>end: end function return
+sub40=>subroutine: _reconcile_stack_ownership(ctx)
 
-op1259->op1261
-op1261->op1263
-op1263->op1265
-op1265->cond1268
-cond1268(yes)->op1272
-op1272->op1274
-op1274->op1276
-op1276->op1278
-op1278->sub1280
-sub1280->sub1282
-sub1282->op1284
-op1284->op1287
-op1287->cond1286
-cond1286(yes)->sub1293
-sub1293->sub1300
-sub1300->op1302
-op1302->cond1305
-cond1305->io1318
-io1318->e1316
-cond1286(no)->sub1293
-cond1268(no)->sub1297
-sub1297->sub1300
+op2->op4
+op4->op6
+op6->op8
+op8->cond11
+cond11(yes)->op15
+op15->op17
+op17->op19
+op19->op21
+op21->sub23
+sub23->sub25
+sub25->op27
+op27->op30
+op30->cond29
+cond29(yes)->sub36
+sub36->sub43
+sub43->op45
+op45->cond48
+cond48->io61
+io61->e59
+cond29(no)->sub36
+cond11(no)->sub40
+sub40->sub43
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -263,17 +263,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
-        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
+        <!-- Generated at (UTC): 2026-11-23T04:28:16Z -->
+        <!-- Generated from Git commit: 8aaaad18b25d06bf2c595b761b267592b09c3cf4 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
+            Generated at (UTC): <time datetime="2026-11-23T04:28:16Z">2026-11-23T04:28:16Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
+            Source commit: <code>8aaaad18b25d06bf2c595b761b267592b09c3cf4</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>0ca169851cf6fe24</code>
+            Flow content SHA-256: <code>9bfe003195aa329d</code>
           </p>
           <div id="canvas"></div>
         </div>
