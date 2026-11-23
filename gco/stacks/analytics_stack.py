@@ -132,7 +132,10 @@ class GCOAnalyticsStack(Stack):
         self.api_gateway_secret_arn = api_gateway_secret_arn
 
         cfg = config.get_analytics_config()
-        self.hyperpod_enabled: bool = bool(cfg["hyperpod"]["enabled"])
+        # ``hyperpod.enabled`` is accepted and ignored: the SageMaker
+        # training-job and cluster-node actions it used to add are already
+        # allowed by AmazonSageMakerFullAccess (see
+        # ``_create_execution_role_and_grants``).
         self.canvas_enabled: bool = bool(cfg["canvas"]["enabled"])
         self.efs_removal: RemovalPolicy = _parse_removal(cfg["efs"]["removal_policy"])
         self.cognito_removal: RemovalPolicy = _parse_removal(cfg["cognito"]["removal_policy"])
@@ -463,7 +466,6 @@ class GCOAnalyticsStack(Stack):
         * EFS mount actions on ``Studio_EFS`` (specific AP arn is added by
           the presigned-URL Lambda at runtime; the role-level grant here is
           scoped to the EFS ARN)
-        * HyperPod training-job actions when ``hyperpod.enabled=true``
         * AWS-managed ``AmazonSageMakerCanvasFullAccess`` when
           ``canvas.enabled=true`` (opt-in no-code ML app)
         * AWS-managed ``AmazonSageMakerFullAccess`` — always attached
@@ -753,26 +755,14 @@ class GCOAnalyticsStack(Stack):
             )
         )
 
-        # HyperPod sub-toggle — additional SageMaker actions for training-job
-        # submission and cluster-instance lifecycle management.
-        # ``resources=["*"]`` is the documented scope; the HyperPod actions
-        # themselves encode the per-training-job authorization model.
-        if self.hyperpod_enabled:
-            self.sagemaker_execution_role.add_to_policy(
-                iam.PolicyStatement(
-                    effect=iam.Effect.ALLOW,
-                    actions=[
-                        "sagemaker:CreateTrainingJob",
-                        "sagemaker:DescribeTrainingJob",
-                        "sagemaker:StopTrainingJob",
-                        "sagemaker:ClusterInstance",
-                        "sagemaker:ClusterInstanceGroup",
-                        "sagemaker:DescribeClusterNode",
-                        "sagemaker:ListClusterNodes",
-                    ],
-                    resources=["*"],
-                )
-            )
+        # No HyperPod statement. ``analytics_environment.hyperpod.enabled``
+        # used to add CreateTrainingJob, DescribeTrainingJob, StopTrainingJob,
+        # DescribeClusterNode and ListClusterNodes, which
+        # AmazonSageMakerFullAccess's AllowAllNonAdminSageMakerActions
+        # statement already allows, plus sagemaker:ClusterInstance and
+        # sagemaker:ClusterInstanceGroup, which are not IAM actions. HyperPod
+        # work in GCO is a Kubernetes Job on the ``gco-hyperpod`` Kueue queue,
+        # submitted through the GCO API.
 
         # Canvas sub-toggle — attach AWS-managed ``AmazonSageMakerCanvasFullAccess``
         # to the execution role so users can launch the Canvas no-code ML
@@ -861,9 +851,7 @@ class GCOAnalyticsStack(Stack):
                         "DescribeMountTargets and DescribeFileSystems calls SageMaker makes "
                         "when it provisions a user profile, the EMR Serverless actions "
                         "behind Studio's EMR panel (ListApplications takes no resource and "
-                        "CreateApplication creates new applications), and, with "
-                        "analytics_environment.hyperpod.enabled, the HyperPod training-job "
-                        "and cluster-node actions."
+                        "CreateApplication creates new applications)."
                     ),
                     "appliesTo": [
                         "Action::s3:Abort*",

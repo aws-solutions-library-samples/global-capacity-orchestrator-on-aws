@@ -93,7 +93,14 @@ def analytics_status(config: Any) -> None:
 
 
 @analytics.command("enable")
-@click.option("--hyperpod", is_flag=True, help="Also enable SageMaker HyperPod job submission.")
+@click.option(
+    "--hyperpod",
+    is_flag=True,
+    help=(
+        "Deprecated, changes nothing: sets analytics_environment.hyperpod.enabled, "
+        "which the stack ignores."
+    ),
+)
 @click.option(
     "--canvas",
     is_flag=True,
@@ -104,21 +111,28 @@ def analytics_status(config: Any) -> None:
 def analytics_enable(config: Any, hyperpod: bool, canvas: bool, yes: bool) -> None:
     """Enable the analytics environment in cdk.json.
 
-    Flips ``analytics_environment.enabled`` to ``true``; ``--hyperpod``
-    additionally flips ``analytics_environment.hyperpod.enabled``, and
-    ``--canvas`` flips ``analytics_environment.canvas.enabled`` (which
-    attaches ``AmazonSageMakerCanvasFullAccess`` to the SageMaker
-    execution role). Prints the follow-up ``gco stacks deploy
-    gco-analytics`` command — does not deploy automatically.
+    Flips ``analytics_environment.enabled`` to ``true``, and ``--canvas``
+    flips ``analytics_environment.canvas.enabled`` (which attaches
+    ``AmazonSageMakerCanvasFullAccess`` to the SageMaker execution role).
+    ``--hyperpod`` still sets ``analytics_environment.hyperpod.enabled``
+    but is deprecated: the stack ignores that key. Prints the follow-up
+    ``gco stacks deploy gco-analytics`` command — does not deploy
+    automatically.
     """
     from ..stacks import get_analytics_config, update_analytics_config
 
     formatter = get_output_formatter(config)
 
+    if hyperpod:
+        formatter.print_warning(
+            "--hyperpod is deprecated and changes nothing: the SageMaker execution "
+            "role's AmazonSageMakerFullAccess policy already allows SageMaker training "
+            "jobs, and HyperPod work goes through the gco-hyperpod queue of a Region "
+            "with the cdk.json hyperpod block on (docs/ANALYTICS.md section (g))."
+        )
+
     if not yes:
         formatter.print_info("Analytics environment will be enabled in cdk.json.")
-        if hyperpod:
-            formatter.print_info("  Hyperpod sub-toggle will also be enabled.")
         if canvas:
             formatter.print_info("  Canvas sub-toggle will also be enabled.")
         confirm("\nEnable the analytics environment?", abort=True)

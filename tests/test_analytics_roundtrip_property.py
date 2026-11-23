@@ -1,26 +1,20 @@
 """Property-based test for the analytics toggle round-trip.
 
 *For any* ``(enabled, hyperpod_enabled) ∈ {true, false}²``, synthesizing
-the full CDK app with that toggle pair and then recovering
-``(enabled', hyperpod_enabled')`` by inspecting the resulting templates
-SHALL recover the ``enabled`` bit exactly and, **when ``enabled=True``**,
-the ``hyperpod_enabled`` bit as well.
+the full CDK app with that toggle pair SHALL:
 
-  * If ``enabled=True``:  ``(enabled', hyperpod_enabled') == (True, hyperpod_enabled)``
-  * If ``enabled=False``: ``enabled' == False`` — ``hyperpod_enabled`` is
-    unobservable because the analytics stack is never instantiated, so
-    the HyperPod grant can't possibly be present. This matches the
-    semantics documented in ``gco/config/config_loader.py`` (the
-    ``hyperpod`` sub-toggle is a no-op unless the master toggle is on).
+* recover ``enabled`` exactly from the templates
+  (:func:`~tests._analytics_derivations.derive_enabled_from_templates`
+  returns True iff any template contains an ``AWS::SageMaker::Domain``), and
+* produce the same templates whatever ``hyperpod_enabled`` is.
 
-The deriver functions live in :mod:`tests._analytics_derivations`:
-
-* :func:`~tests._analytics_derivations.derive_enabled_from_templates` —
-  returns True iff any template contains an ``AWS::SageMaker::Domain``.
-* :func:`~tests._analytics_derivations.derive_hyperpod_from_templates` —
-  returns True iff the analytics stack's SageMaker execution role carries
-  any action matching ``sagemaker:CreateTrainingJob`` or
-  ``sagemaker:ClusterInstance*``.
+``analytics_environment.hyperpod.enabled`` is deprecated and ignored. It
+used to add CreateTrainingJob, DescribeTrainingJob, StopTrainingJob,
+DescribeClusterNode and ListClusterNodes to the SageMaker execution role,
+which ``AmazonSageMakerFullAccess`` already allows, plus
+``sagemaker:ClusterInstance`` and ``sagemaker:ClusterInstanceGroup``, which
+are not IAM actions. The key is still accepted so existing cdk.json files
+synth.
 
 Cardinality of the input space is 4, so ``max_examples=4`` is already
 exhaustive. Hypothesis is used for its boilerplate-free replay /
@@ -36,11 +30,7 @@ from typing import Any
 from hypothesis import HealthCheck, given, settings
 
 from tests._analytics_cdk_overlays import build_overlay, synth_all_stacks
-from tests._analytics_derivations import (
-    HYPERPOD_ACTION_PATTERNS,
-    derive_enabled_from_templates,
-    derive_hyperpod_from_templates,
-)
+from tests._analytics_derivations import derive_enabled_from_templates, sagemaker_role_actions
 from tests._analytics_strategies import roundtrip_fixtures
 
 # ---------------------------------------------------------------------------
@@ -72,6 +62,11 @@ def _unfreeze(
 ) -> dict[str, dict[str, Any]]:
     """Rebuild a ``{stack_name: template_dict}`` from the cache entry."""
     return {name: json.loads(blob) for name, blob in frozen}
+
+
+def _analytics_template(frozen: tuple[tuple[str, str], ...]) -> str | None:
+    """The serialized analytics stack template, or None when there is none."""
+    return next((blob for name, blob in frozen if name.endswith("-analytics")), None)
 
 
 # ---------------------------------------------------------------------------
@@ -106,17 +101,14 @@ class TestToggleRoundTrip:
         ],
     )
     @given(fixture=roundtrip_fixtures)
-    def test_round_trip_recovers_original_tuple(self, fixture: tuple[bool, bool]) -> None:
-        """Synthesizing with ``(enabled, hyperpod_enabled)`` and then
-        deriving the tuple back from the templates recovers the exact
-        original.
-        """
+    def test_round_trip_recovers_enabled_and_ignores_hyperpod(
+        self, fixture: tuple[bool, bool]
+    ) -> None:
+        """``enabled`` round-trips; ``hyperpod_enabled`` changes nothing."""
         enabled, hyperpod_enabled = fixture
-        templates = _unfreeze(_cached_templates_frozen(enabled, hyperpod_enabled))
+        frozen = _cached_templates_frozen(enabled, hyperpod_enabled)
 
-        enabled_derived = derive_enabled_from_templates(templates)
-        hyperpod_derived = derive_hyperpod_from_templates(templates)
-
+        enabled_derived = derive_enabled_from_templates(_unfreeze(frozen))
         assert enabled_derived == enabled, (
             f"Round-trip failed on ``enabled``: expected "
             f"{enabled!r} (input), got {enabled_derived!r} (derived). "
@@ -125,68 +117,46 @@ class TestToggleRoundTrip:
             f"whether the analytics stack was (not) instantiated as "
             f"expected in app.py / synth_all_stacks."
         )
-
-        # The ``hyperpod`` sub-toggle is only observable when the master
-        # toggle is on (the analytics stack carries the SageMaker
-        # execution role that encodes HyperPod-shaped actions). When
-        # ``enabled=False`` the analytics stack is never instantiated,
-        # so the HyperPod grant can't possibly be present — the deriver
-        # returns False regardless of the input ``hyperpod_enabled``.
-        # This matches ``ConfigLoader.get_analytics_config``'s documented
-        # semantics (the sub-toggle is moot under the master off).
-        if enabled:
-            assert hyperpod_derived == hyperpod_enabled, (
-                f"Round-trip failed on ``hyperpod_enabled`` with "
-                f"``enabled=True``: expected {hyperpod_enabled!r} "
-                f"(input), got {hyperpod_derived!r} (derived). Input "
-                f"tuple was (enabled={enabled}, "
-                f"hyperpod={hyperpod_enabled}). The deriver matches "
-                f"actions against {HYPERPOD_ACTION_PATTERNS!r}; check "
-                f"whether the HyperPod branch of "
-                f"_create_execution_role_and_grants was (not) taken "
-                f"as expected."
-            )
-        else:
-            assert hyperpod_derived is False, (
-                f"Invariant under ``enabled=False``: the "
-                f"HyperPod grant must not appear anywhere in the "
-                f"synthesized app (the analytics stack is not "
-                f"instantiated). Got hyperpod_derived={hyperpod_derived!r} "
-                f"for input hyperpod_enabled={hyperpod_enabled!r}."
-            )
+        # The analytics stack is the only one that reads the toggle. (The
+        # whole app is not compared: the regional stacks carry a per-synth
+        # add-on deployment timestamp.)
+        other = _cached_templates_frozen(enabled, not hyperpod_enabled)
+        assert _analytics_template(frozen) == _analytics_template(other), (
+            "analytics_environment.hyperpod.enabled is deprecated and must not "
+            f"change the analytics stack's template (enabled={enabled})."
+        )
 
 
 # ---------------------------------------------------------------------------
-# Smoke tests on each deriver in isolation — catches template-shape
+# Smoke tests on each input in isolation — catches template-shape
 # regressions without waiting on a full Hypothesis run.
 # ---------------------------------------------------------------------------
 
 
 class TestDerivers:
-    """Deriver-level smoke tests pinned to the four concrete input
-    tuples — fails fast if template shape drifts away from what the
-    derivers expect.
+    """Pinned to the four concrete input tuples — fails fast if template
+    shape drifts away from what the deriver expects.
     """
 
     def test_enabled_false_hyperpod_false(self) -> None:
         templates = _unfreeze(_cached_templates_frozen(False, False))
         assert derive_enabled_from_templates(templates) is False
-        assert derive_hyperpod_from_templates(templates) is False
+        assert sagemaker_role_actions(templates) == set()
 
     def test_enabled_true_hyperpod_false(self) -> None:
         templates = _unfreeze(_cached_templates_frozen(True, False))
         assert derive_enabled_from_templates(templates) is True
-        assert derive_hyperpod_from_templates(templates) is False
+        assert "sts:GetCallerIdentity" in sagemaker_role_actions(templates)
 
-    def test_enabled_true_hyperpod_true(self) -> None:
+    def test_enabled_true_hyperpod_true_grants_no_hyperpod_statement(self) -> None:
+        """The removed statement's two made-up actions stay gone."""
         templates = _unfreeze(_cached_templates_frozen(True, True))
+        actions = sagemaker_role_actions(templates)
         assert derive_enabled_from_templates(templates) is True
-        assert derive_hyperpod_from_templates(templates) is True
+        assert not {a for a in actions if a.startswith("sagemaker:ClusterInstance")}
+        assert "sagemaker:CreateTrainingJob" not in actions
 
     def test_enabled_false_hyperpod_true_has_no_analytics_effect(self) -> None:
-        # When analytics is disabled the HyperPod sub-toggle is a no-op
-        # (the analytics stack isn't instantiated, so there's no role to
-        # decorate). The deriver must read False for both.
         templates = _unfreeze(_cached_templates_frozen(False, True))
         assert derive_enabled_from_templates(templates) is False
-        assert derive_hyperpod_from_templates(templates) is False
+        assert sagemaker_role_actions(templates) == set()

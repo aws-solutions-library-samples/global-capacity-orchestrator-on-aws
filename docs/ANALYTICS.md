@@ -31,7 +31,7 @@ bucket's reference.
 - [(d) Logging into Studio](#d-logging-into-studio)
 - [(e) Optional user-driven install of GCO CLI and MCP server](#e-optional-user-driven-install-of-gco-cli-and-mcp-server)
 - [(f) Using the GCO CLI once installed inside JupyterLab](#f-using-the-gco-cli-once-installed-inside-jupyterlab)
-- [(g) Submitting HyperPod jobs when the sub-toggle is enabled](#g-submitting-hyperpod-jobs-when-the-sub-toggle-is-enabled)
+- [(g) Submitting HyperPod jobs and SageMaker training jobs from Studio](#g-submitting-hyperpod-jobs-and-sagemaker-training-jobs-from-studio)
 - [(g2) Launching SageMaker Canvas when the sub-toggle is enabled](#g2-launching-sagemaker-canvas-when-the-sub-toggle-is-enabled)
 - [(g3) Tracking experiments with managed MLflow](#g3-tracking-experiments-with-managed-mlflow)
 - [(h) Opening the environment in Kiro](#h-opening-the-environment-in-kiro)
@@ -222,10 +222,7 @@ deployed, the following resources appear in the API-gateway region
   job/inference submission, plus the SageMaker-managed MLflow +
   Model Registry API surface (tracking-server lifecycle, MLflow
   experiments/runs/metrics/artifacts/models, and Model Registry
-  read/write). When the `hyperpod` sub-toggle is on, the role
-  additionally gets
-  `sagemaker:CreateTrainingJob|DescribeTrainingJob|StopTrainingJob`
-  and `sagemaker:ClusterInstance*`. When the `canvas` sub-toggle is
+  read/write). When the `canvas` sub-toggle is
   on, the role additionally gets the AWS-managed
   `AmazonSageMakerCanvasFullAccess` policy (see section (g2)).
 - **Presigned-URL Lambda** — the backend for the `/studio/login`
@@ -258,17 +255,10 @@ in `cdk.json` and prints the follow-up deploy command — it does not
 deploy automatically. This is deliberate: you review the diff, then
 decide to apply.
 
-With HyperPod:
-
-```bash
-gco analytics enable --hyperpod
-gco stacks deploy gco-analytics
-```
-
-The `--hyperpod` flag additionally sets
-`analytics_environment.hyperpod.enabled=true`, which adds HyperPod
-training-job permissions to the SageMaker execution role. See
-section (g) for what that unlocks.
+`--hyperpod` still sets `analytics_environment.hyperpod.enabled=true`,
+but it is deprecated and changes nothing: the SageMaker execution role
+can already start SageMaker training jobs, and HyperPod work goes through
+GCO. See section (g).
 
 With SageMaker Canvas:
 
@@ -285,16 +275,11 @@ Studio landing page — SageMaker auto-detects the entitlement when a
 user opens Studio and lights up the Canvas tile. See section (g2)
 for the walkthrough.
 
-`--hyperpod` and `--canvas` are independent — pass both to enable
-both sub-toggles at once.
-
 Skip the confirmation prompt with `-y`:
 
 ```bash
 gco analytics enable -y
-gco analytics enable --hyperpod -y
 gco analytics enable --canvas -y
-gco analytics enable --hyperpod --canvas -y
 ```
 
 Run the pre-flight checks before deploying:
@@ -662,33 +647,70 @@ recommendations (`gco capacity recommend-region`), inference endpoints
 (`gco inference deploy`) and the other commands section (e) lists as
 needing workstation credentials are run from a workstation.
 
-## (g) Submitting HyperPod jobs when the sub-toggle is enabled
+## (g) Submitting HyperPod jobs and SageMaker training jobs from Studio
 
-When `analytics_environment.hyperpod.enabled=true` (flipped via
-`gco analytics enable --hyperpod`), the SageMaker execution role gets
-these additional permissions:
+`analytics_environment.hyperpod.enabled`, which
+`gco analytics enable --hyperpod` sets, is deprecated and changes nothing.
+It used to add SageMaker training-job and cluster-node actions to the
+SageMaker execution role, all of which the role's `AmazonSageMakerFullAccess`
+policy already allows (two of them were not IAM actions at all). Neither way
+of training from Studio below depends on it, and a `cdk.json` that still sets
+it synthesizes unchanged.
 
-- `sagemaker:CreateTrainingJob`
-- `sagemaker:DescribeTrainingJob`
-- `sagemaker:StopTrainingJob`
-- `sagemaker:ClusterInstance*` (cluster-instance management actions)
+### HyperPod jobs, through GCO
 
-Notebook users can then launch HyperPod training jobs directly from
-a Studio cell via `boto3` — no additional IAM setup, no cluster-side
-changes:
+In GCO, [SageMaker HyperPod](HYPERPOD.md) is capacity of a regional EKS
+cluster: a Region whose `cdk.json` `hyperpod` block is on runs a HyperPod
+cluster whose instance groups join the EKS cluster as nodes, behind the
+`gco-hyperpod` Kueue queue. Work reaches those nodes as an ordinary
+Kubernetes Job that carries the queue's label, and Kueue adds the node
+selector and toleration. [HYPERPOD.md → How work reaches HyperPod
+nodes](HYPERPOD.md#how-work-reaches-hyperpod-nodes) has a complete manifest;
+the part that routes it is:
+
+```yaml
+metadata:
+  namespace: gco-jobs
+  labels:
+    kueue.x-k8s.io/queue-name: gco-hyperpod
+```
+
+Submit it from a Studio terminal through the GCO API like any other job
+(section (e) covers the install and what the Studio role allows), naming a
+Region that runs HyperPod:
+
+```bash
+gco jobs submit train-on-hyperpod.yaml -r us-east-1
+gco jobs logs train-on-hyperpod -r us-east-1 -n gco-jobs
+```
+
+### SageMaker training jobs, from a notebook
+
+A SageMaker training job runs on instances SageMaker manages, not on a GCO
+cluster, and works whether or not any Region runs HyperPod. The execution
+role can start one with `boto3` from a notebook: `AmazonSageMakerFullAccess`
+allows `CreateTrainingJob` and passing a role whose name contains
+`AmazonSageMaker` to SageMaker, which this role's does.
 
 ```python
 import boto3
 
-sm = boto3.client("sagemaker")
+region = boto3.Session().region_name  # the Studio domain's Region
+account = boto3.client("sts").get_caller_identity()["Account"]
+sm = boto3.client("sagemaker", region_name=region)
 
 response = sm.create_training_job(
     TrainingJobName="exploration-run-001",
     AlgorithmSpecification={
-        "TrainingImage": "763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-training:2.4.0-gpu-py311-cu124-ubuntu22.04-sagemaker",
+        # A Deep Learning Containers image from the job's own Region.
+        "TrainingImage": (
+            f"763104351884.dkr.ecr.{region}.amazonaws.com/"
+            "pytorch-training:2.4.0-gpu-py311-cu124-ubuntu22.04-sagemaker"
+        ),
         "TrainingInputMode": "File",
     },
-    RoleArn="arn:aws:iam::123456789012:role/AmazonSageMaker-gco-analytics-exec-us-east-2",
+    # The execution role: AmazonSageMaker-<project_name>-analytics-exec-<region>.
+    RoleArn=f"arn:aws:iam::{account}:role/AmazonSageMaker-gco-analytics-exec-{region}",
     InputDataConfig=[
         {
             "ChannelName": "training",
@@ -716,24 +738,19 @@ print(response["TrainingJobArn"])
 
 Notes:
 
-- Replace the `RoleArn` with the actual role ARN from the
-  `gco-analytics` stack outputs (key
-  `SageMakerExecutionRoleArn`).
+- Deep Learning Containers images are published per Region; pick the
+  image URI for the job's Region from the
+  [available images list](https://github.com/aws/deep-learning-containers/blob/master/available_images.md)
+  (the `763104351884` account serves most commercial Regions, not all).
 - `Cluster_Shared_Bucket` works as both input and output because
   the SageMaker role has RW on it (always, whenever analytics is
-  enabled).
-- HyperPod-style multi-node jobs use the same API — set
-  `InstanceCount > 1` and configure a VPC peering between the
-  training job and the analytics VPC if you want EFS access from
-  the training containers.
-
-Disable HyperPod later by flipping the sub-toggle off in `cdk.json`
-and redeploying `gco-analytics`:
-
-```bash
-python3 -c "import json; d=json.load(open('cdk.json')); d['context']['analytics_environment']['hyperpod']['enabled']=False; json.dump(d, open('cdk.json','w'), indent=2)"
-gco stacks deploy gco-analytics
-```
+  enabled). Replace the bucket name with your deployment's
+  (`/gco/cluster-shared-bucket/name` in SSM, see section (i)).
+- Multi-node training is the same call with `InstanceCount > 1`. To let the
+  training containers reach something inside the analytics VPC, such as
+  `Studio_EFS`, run the job in that VPC with `VpcConfig` (the analytics
+  VPC's private subnets and a security group the resource admits); no VPC
+  peering is involved.
 
 ## (g2) Launching SageMaker Canvas when the sub-toggle is enabled
 

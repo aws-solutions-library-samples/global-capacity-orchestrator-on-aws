@@ -229,7 +229,7 @@ gco analytics enable [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--hyperpod` | | Also set `analytics_environment.hyperpod.enabled=true` (adds HyperPod training-job permissions to the SageMaker execution role). |
+| `--hyperpod` | | Deprecated, changes nothing: sets `analytics_environment.hyperpod.enabled=true`, which the analytics stack ignores (the SageMaker execution role's `AmazonSageMakerFullAccess` already allows SageMaker training jobs; see [ANALYTICS.md section (g)](ANALYTICS.md#g-submitting-hyperpod-jobs-and-sagemaker-training-jobs-from-studio)). Prints a warning saying so. |
 | `--canvas` | | Also set `analytics_environment.canvas.enabled=true` (attaches `AmazonSageMakerCanvasFullAccess` to the SageMaker execution role and enables the Canvas app on the Studio domain; artifacts land under `Cluster_Shared_Bucket/analytics-canvas/`). |
 | `--yes` | `-y` | Skip the confirmation prompt. |
 
@@ -237,9 +237,8 @@ gco analytics enable [OPTIONS]
 
 ```bash
 gco analytics enable
-gco analytics enable --hyperpod
 gco analytics enable --canvas
-gco analytics enable --hyperpod --canvas -y
+gco analytics enable --canvas -y
 
 # Follow-up to actually deploy the stack:
 gco stacks deploy gco-analytics

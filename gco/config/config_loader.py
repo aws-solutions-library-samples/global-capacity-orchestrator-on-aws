@@ -2100,6 +2100,8 @@ class ConfigLoader:
 
         - ``enabled``: must be a bool if present (defaults to False via merge).
         - ``hyperpod.enabled``: must be a bool if present (defaults to False).
+          Deprecated: still validated so existing cdk.json files synth, but
+          the analytics stack ignores it.
         - ``cognito.removal_policy`` and ``efs.removal_policy``: must be the
           literal strings ``"destroy"`` or ``"retain"`` (case sensitive — they
           are passed verbatim to CDK's ``RemovalPolicy`` lookup by the
@@ -3411,9 +3413,11 @@ class ConfigLoader:
             Analytics configuration dictionary with the following keys:
             - enabled: Whether the analytics environment stack is deployed
               (default: False — the feature is off unless explicitly opted in)
-            - hyperpod: SageMaker HyperPod integration sub-block
-              - enabled: Whether to add the HyperPod IAM grants to
-                SageMaker_Execution_Role (default: False)
+            - hyperpod: deprecated sub-block, accepted and ignored
+              - enabled: once added SageMaker training-job IAM grants
+                that ``AmazonSageMakerFullAccess`` already allows; it
+                changes nothing now (default: False). HyperPod capacity
+                is the top-level ``hyperpod`` block.
             - canvas: SageMaker Canvas integration sub-block
               - enabled: Whether to enable the SageMaker Canvas app on
                 the Studio domain and attach ``AmazonSageMakerCanvasFullAccess``

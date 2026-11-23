@@ -175,6 +175,7 @@ class TestToggles:
         assert "ENABLED" in result.output or "enabled" in result.output
 
     def test_enable_with_hyperpod_flag_sets_sub_toggle(self, tmp_cdk_json):
+        """``--hyperpod`` still writes the key, and says it changes nothing."""
         from cli.main import cli
 
         runner = CliRunner()
@@ -182,6 +183,7 @@ class TestToggles:
             result = runner.invoke(cli, ["analytics", "enable", "--hyperpod", "-y"])
 
         assert result.exit_code == 0, result.output
+        assert "--hyperpod is deprecated and changes nothing" in result.output
         data = json.loads(tmp_cdk_json.read_text())
         assert data["context"]["analytics_environment"]["enabled"] is True
         assert data["context"]["analytics_environment"]["hyperpod"]["enabled"] is True
