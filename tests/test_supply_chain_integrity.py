@@ -2717,14 +2717,11 @@ def test_npm_audit_retries_a_registry_operational_error() -> None:
 
 #: Root ``overrides`` and the reason each exists: the direct dependency that
 #: pins the vulnerable version exactly, and the fixed line the override lifts
-#: it to. markdownlint 0.42.0 (under markdownlint-cli2 0.24.0, which pins
-#: every dependency exactly) pins re2js 2.8.6 (GHSA-gg6h-894w-4m9c,
-#: quadratic-time lookbehind matching, fixed in 2.8.7). The earlier smol-toml
-#: and markdown-it overrides retired with markdownlint-cli2 0.24.0, which
-#: requests the fixed lines itself.
-_ROOT_NPM_OVERRIDES: dict[str, tuple[str, tuple[int, int, int]]] = {
-    "re2js": ("markdownlint", (2, 8, 7)),
-}
+#: it to. None is needed today. The smol-toml and markdown-it overrides retired
+#: with markdownlint-cli2 0.24.0, and the re2js one (GHSA-gg6h-894w-4m9c,
+#: fixed in 2.8.7) with markdownlint-cli2 0.24.1, whose markdownlint 0.42.1
+#: requests re2js 2.9.1 itself.
+_ROOT_NPM_OVERRIDES: dict[str, tuple[str, tuple[int, int, int]]] = {}
 
 
 def test_root_npm_overrides_are_exact_and_still_needed() -> None:

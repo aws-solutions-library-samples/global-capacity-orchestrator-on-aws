@@ -1,7 +1,7 @@
 GEM
   remote: https://rubygems.org/
   specs:
-    bashcov (4.0.2)
+    bashcov (4.0.3)
       simplecov (~> 1.1)
     bundler-audit (0.9.3)
       bundler (>= 1.2.0)
@@ -13,11 +13,11 @@ PLATFORMS
   ruby
 
 DEPENDENCIES
-  bashcov (= 4.0.2)
+  bashcov (= 4.0.3)
   bundler-audit (= 0.9.3)
 
 CHECKSUMS
-  bashcov (4.0.2) sha256=ca055e53a15268e5541102e58b5e08fda17b243327160ceabb54fcc76a2c9ade
+  bashcov (4.0.3) sha256=beea63c03617a4ca800e39bd81ca029ec1eb178e9da6d4920bd5130dff5c49b9
   bundler-audit (0.9.3) sha256=81c8766c71e47d0d28a0f98c7eed028539f21a6ea3cd8f685eb6f42333c9b4e9
   simplecov (1.3.2) sha256=2a22ec1759f1b8db60881a2e038758956fc69ef93ed669be0bde0678de6d0e85
   thor (1.5.0) sha256=e3a9e55fe857e44859ce104a84675ab6e8cd59c650a49106a05f55f136425e73

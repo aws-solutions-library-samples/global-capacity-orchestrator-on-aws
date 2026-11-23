@@ -108,6 +108,7 @@ FAKE_PYTHON
     # FAKE_INSTALL:   full | wrong-version | no-binary | no-config | other-config
     # FAKE_MCP_LIST:  complete | missing | unhealthy | exit-nonzero
     # FAKE_SESSION:   complete | delayed | partial | hang | exit-zero |
+    #                 drops-server (Codex only) |
     #                 credential-chain-bypass (OpenCode only)
     write_stub "$FAKE_BIN" gco <<'FAKE_GCO'
 #!/usr/bin/env bash
@@ -253,6 +254,11 @@ case " $* " in
     *" -- exec "*)
         # The Codex session: RUST_LOG=info tracing on stderr, then codex's own
         # bounded-retry exit.
+        # A session that dropped a planned server leaves the first one out
+        # of its configured list and reports everything else.
+        if [ "${FAKE_SESSION:-complete}" = "drops-server" ]; then
+            servers="${servers#* }"
+        fi
         # shellcheck disable=SC2086
         list="$(printf '%s, ' $servers)"
         echo "INFO codex_core: session configured mcp_server_count=4 mcp_servers=\"${list%, }\"" >&2

@@ -14,10 +14,7 @@
   "devDependencies": {
     "aws-cdk": "2.1147.0",
     "cdk-dia": "0.12.4",
-    "markdownlint-cli2": "0.24.0",
-    "swagger-ui-dist": "5.34.1"
-  },
-  "overrides": {
-    "re2js": "2.8.7"
+    "markdownlint-cli2": "0.24.1",
+    "swagger-ui-dist": "5.35.0"
   }
 }
