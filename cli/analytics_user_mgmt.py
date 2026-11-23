@@ -10,11 +10,16 @@ exercising in isolation from Click:
   pool id / api url on the command line.
 * :func:`srp_authenticate` — Cognito SRP authentication via the
   ``pycognito`` library, used by ``gco analytics studio login``.
+* :func:`is_studio_username` / :func:`find_user_ignoring_case` — the
+  checks ``gco analytics users add`` makes before it creates a user whose
+  name must also work as a SageMaker Studio user profile name.
 """
 
 from __future__ import annotations
 
 import logging
+import re
+import urllib.error
 from typing import Any
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -157,6 +162,8 @@ def srp_authenticate(
 
 
 __all__ = [
+    "STUDIO_USERNAME_MAX_LENGTH",
+    "STUDIO_USERNAME_PATTERN",
     "admin_create_user",
     "admin_delete_user",
     "admin_set_user_password",
@@ -166,11 +173,72 @@ __all__ = [
     "discover_cognito_client_id",
     "discover_cognito_pool_id",
     "fetch_studio_url",
+    "find_user_ignoring_case",
     "generate_strong_password",
+    "is_studio_username",
     "list_users",
     "scan_orphan_analytics_resources",
     "srp_authenticate",
+    "studio_login_error_token",
 ]
+
+# ---------------------------------------------------------------------------
+# Studio-compatible usernames
+# ---------------------------------------------------------------------------
+
+#: SageMaker's ``UserProfileName`` rule. The presigned-URL Lambda names each
+#: user's Studio profile after the Cognito username and answers HTTP 400
+#: ``UnsupportedUsername`` for a name outside it; this copy lets
+#: ``gco analytics users add`` refuse such a name before the user exists.
+#: ``lambda/analytics-presigned-url/handler.py`` holds the same two values.
+STUDIO_USERNAME_PATTERN = r"[a-zA-Z0-9](-*[a-zA-Z0-9]){0,62}"
+STUDIO_USERNAME_MAX_LENGTH = 63
+_STUDIO_USERNAME_RE = re.compile(STUDIO_USERNAME_PATTERN)
+
+
+def is_studio_username(username: str) -> bool:
+    """Return True when SageMaker accepts ``username`` as a user profile name.
+
+    Letters, digits and hyphens, starting and ending with a letter or digit,
+    at most :data:`STUDIO_USERNAME_MAX_LENGTH` characters.
+    """
+    return (
+        len(username) <= STUDIO_USERNAME_MAX_LENGTH
+        and _STUDIO_USERNAME_RE.fullmatch(username) is not None
+    )
+
+
+def find_user_ignoring_case(pool_id: str, region: str, username: str) -> str | None:
+    """Return the existing Cognito username equal to ``username`` ignoring case.
+
+    The user pool's usernames are case-sensitive but SageMaker's profile
+    names are not, so ``Alice`` and ``alice`` would share one Studio
+    profile. Returns ``None`` when no user matches.
+    """
+    wanted = username.lower()
+    for row in list_users(pool_id, region):
+        existing = row.get("username", "")
+        if existing.lower() == wanted:
+            return existing
+    return None
+
+
+def studio_login_error_token(exc: urllib.error.HTTPError) -> str | None:
+    """Return the ``error`` token of a ``/studio/login`` error response.
+
+    The presigned-URL Lambda answers failures with ``{"error": "<token>"}``.
+    API Gateway's own rejections (``{"message": ...}``), an empty body or a
+    body that is not JSON give ``None``.
+    """
+    import json as _json
+
+    try:
+        payload = _json.loads(exc.read())
+    except OSError, ValueError:
+        return None
+    token = payload.get("error") if isinstance(payload, dict) else None
+    return token if isinstance(token, str) else None
+
 
 # ---------------------------------------------------------------------------
 # Cognito user management helpers

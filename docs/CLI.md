@@ -293,6 +293,13 @@ stdout exactly once. Optionally sets a permanent password via
 `cognito-idp:AdminSetUserPassword` so the user can sign in without the
 `NEW_PASSWORD_REQUIRED` challenge on first login.
 
+The username also names the user's SageMaker Studio user profile, so it
+must be a name SageMaker accepts there: letters, digits and hyphens,
+starting and ending with a letter or digit, 63 characters at most. A
+name that differs only in case from an existing user's is refused too,
+because SageMaker matches profile names without regard to case. Both
+checks exit `1` before any user is created.
+
 ```bash
 gco analytics users add [OPTIONS]
 ```
@@ -301,7 +308,7 @@ gco analytics users add [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--username` | Cognito username to create (required). |
+| `--username` | Cognito username to create (required): letters, digits and hyphens, starting and ending with a letter or digit, 63 characters at most. |
 | `--email` | Email address for the new user. |
 | `--no-email` | Suppress the Cognito welcome email (`MessageAction=SUPPRESS`). |
 | `--password` | Set a permanent password on the new user (also read from `$GCO_STUDIO_PASSWORD`). Mutually exclusive with `--generate-password`. |
@@ -411,6 +418,15 @@ Studio URL on its own line on stdout (pipe-friendly): the progress shown
 while a first login provisions the user profile (30-60 seconds) goes to
 stderr, so `URL=$(gco analytics studio login ...)` captures only the URL.
 The password, `IdToken`, and URL are never written to disk.
+
+A failed `/studio/login` call exits `2` and prints the HTTP status, the
+presigned-URL Lambda's error token and the correlation ID, for example
+`login failed: HTTP 403 UserProfileOwnedByAnotherUser, correlation_id=...`.
+`UnsupportedUsername` (HTTP 400: the username cannot name a SageMaker
+user profile) and `UserProfileOwnedByAnotherUser` (HTTP 403: the profile
+of that name belongs to another Cognito user) come with a line saying
+what an administrator has to do. See
+[ANALYTICS.md section (d)](ANALYTICS.md#d-logging-into-studio).
 
 ```bash
 gco analytics studio login [OPTIONS]

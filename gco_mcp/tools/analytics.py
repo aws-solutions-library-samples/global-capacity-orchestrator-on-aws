@@ -97,7 +97,11 @@ async def analytics_user_add(username: str, email: str) -> str:
     """`gco analytics users add` — create a Cognito user in the analytics pool.
 
     Args:
-        username: Cognito username for the new user.
+        username: Cognito username for the new user. It also names the
+            user's SageMaker Studio profile, so it must be letters, digits
+            and hyphens, starting and ending with a letter or digit, 63
+            characters at most, and must not differ only in case from an
+            existing user's name.
         email: Email address for the new user.
     """
     return await asyncio.to_thread(

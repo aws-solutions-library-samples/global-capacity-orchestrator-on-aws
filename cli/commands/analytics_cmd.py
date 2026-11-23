@@ -41,6 +41,30 @@ def _stack_missing_message(project_name: str) -> str:
     )
 
 
+#: The rule ``users add`` enforces and an ``UnsupportedUsername`` login reports.
+_STUDIO_USERNAME_RULE = (
+    "SageMaker Studio names each user's profile after the username, and allows "
+    "only letters, digits and hyphens there, starting and ending with a letter "
+    "or digit, 63 characters at most"
+)
+
+#: What ``studio login`` prints for the presigned-URL Lambda's error tokens.
+_STUDIO_LOGIN_ERROR_HINTS = {
+    "UnsupportedUsername": (
+        "{username!r} cannot be used in SageMaker Studio: "
+        + _STUDIO_USERNAME_RULE
+        + ". Ask an administrator for a user created with `gco analytics users add`."
+    ),
+    "UserProfileOwnedByAnotherUser": (
+        "the Studio user profile named {username!r} belongs to another Cognito user. "
+        "SageMaker matches profile names without regard to case, so this happens when "
+        "two usernames differ only in case, or when a user was removed and a new one "
+        "created with the same name. Ask an administrator to delete the old profile "
+        "(`aws sagemaker delete-user-profile`) or to give you a different username."
+    ),
+}
+
+
 @click.group()
 @pass_config
 def analytics(config: Any) -> None:
@@ -234,7 +258,9 @@ def users_add(
     from ..analytics_user_mgmt import (
         admin_create_user,
         admin_set_user_password,
+        find_user_ignoring_case,
         generate_strong_password,
+        is_studio_username,
     )
 
     formatter = get_output_formatter(config)
@@ -243,7 +269,31 @@ def users_add(
         formatter.print_error("--password and --generate-password are mutually exclusive")
         sys.exit(1)
 
+    if not is_studio_username(username):
+        formatter.print_error(f"Cannot create user {username!r}: {_STUDIO_USERNAME_RULE}.")
+        sys.exit(1)
+
     pool_id, region = _require_cognito_pool_id(config)
+
+    # The pool's usernames are case-sensitive and SageMaker's profile names
+    # are not: a second user that differs only in case would get the first
+    # one's Studio profile name, which the presigned-URL Lambda refuses.
+    try:
+        existing = find_user_ignoring_case(pool_id, region, username)
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "Unknown")
+        formatter.print_error(f"Failed to check the existing users: {error_code}")
+        sys.exit(1)
+    if existing == username:
+        formatter.print_error(f"Cognito user {username} already exists")
+        sys.exit(1)
+    if existing is not None:
+        formatter.print_error(
+            f"Cannot create user {username!r}: Cognito user {existing!r} already exists, "
+            "and SageMaker Studio matches profile names without regard to case, so the "
+            "two would share one profile name"
+        )
+        sys.exit(1)
 
     try:
         _, temporary_password = admin_create_user(
@@ -615,10 +665,15 @@ def studio_login(
             )
             sys.exit(2)
     except urllib.error.HTTPError as exc:
+        from ..analytics_user_mgmt import studio_login_error_token
+
         correlation_id = exc.headers.get("x-amzn-RequestId") if exc.headers else "N/A"
-        formatter.print_error(
-            f"login failed: HTTP {exc.code}, correlation_id={correlation_id or 'N/A'}"
-        )
+        token = studio_login_error_token(exc)
+        status = f"HTTP {exc.code} {token}" if token else f"HTTP {exc.code}"
+        formatter.print_error(f"login failed: {status}, correlation_id={correlation_id or 'N/A'}")
+        hint = _STUDIO_LOGIN_ERROR_HINTS.get(token or "")
+        if hint:
+            formatter.print_error(hint.format(username=username))
         sys.exit(2)
     except urllib.error.URLError as exc:
         formatter.print_error(f"login failed: network error: {exc.reason!r}")

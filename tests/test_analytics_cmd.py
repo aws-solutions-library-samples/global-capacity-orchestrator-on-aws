@@ -283,6 +283,91 @@ class TestUsers:
         # human-readable note rather than inventing one.
         assert "admin-set-user-password" in result.output or "printed exactly once" in result.output
 
+    @pytest.mark.parametrize(
+        "username", ["alice.smith", "alice_smith", "alice@example.com", "-alice", "a" * 64]
+    )
+    def test_users_add_rejects_names_studio_cannot_use(self, aws_creds_env, tmp_cdk_json, username):
+        """The username names the user's SageMaker Studio profile.
+
+        Before, ``alice.smith`` was created in Cognito and every Studio login
+        then failed with a generic HTTP 500 from the presigned-URL Lambda.
+        """
+        from cli.main import cli
+
+        with mock_aws():
+            cognito = boto3.client("cognito-idp", region_name="us-east-2")
+            pool_id = cognito.create_user_pool(PoolName="gco-studio")["UserPool"]["Id"]
+            _seed_gco_analytics_stack("us-east-2", pool_id, "client-abc")
+
+            runner = CliRunner()
+            with patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json):
+                result = runner.invoke(
+                    cli, ["analytics", "users", "add", "--username", username, "--no-email"]
+                )
+            users = cognito.list_users(UserPoolId=pool_id)["Users"]
+
+        assert result.exit_code == 1
+        assert "letters, digits and hyphens" in result.output
+        assert users == []
+
+    @pytest.mark.parametrize(
+        ("existing", "message"),
+        [
+            ("Alice", "Cognito user 'Alice' already exists"),
+            ("alice", "Cognito user alice already exists"),
+        ],
+    )
+    def test_users_add_rejects_a_name_another_user_has_ignoring_case(
+        self, aws_creds_env, tmp_cdk_json, existing, message
+    ):
+        """SageMaker profile names ignore case; the pool's usernames do not.
+
+        Before, ``alice`` could be added next to ``Alice``, and ``alice``'s
+        first Studio login opened ``Alice``'s profile.
+        """
+        from cli.main import cli
+
+        with mock_aws():
+            cognito = boto3.client("cognito-idp", region_name="us-east-2")
+            pool_id = cognito.create_user_pool(PoolName="gco-studio")["UserPool"]["Id"]
+            cognito.admin_create_user(
+                UserPoolId=pool_id, Username=existing, MessageAction="SUPPRESS"
+            )
+            _seed_gco_analytics_stack("us-east-2", pool_id, "client-abc")
+
+            runner = CliRunner()
+            with patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json):
+                result = runner.invoke(
+                    cli, ["analytics", "users", "add", "--username", "alice", "--no-email"]
+                )
+            usernames = [u["Username"] for u in cognito.list_users(UserPoolId=pool_id)["Users"]]
+
+        assert result.exit_code == 1
+        assert message in result.output
+        assert usernames == [existing]
+
+    def test_users_add_stops_when_the_user_list_cannot_be_read(self, aws_creds_env, tmp_cdk_json):
+        from botocore.exceptions import ClientError
+
+        from cli.main import cli
+
+        denied = ClientError({"Error": {"Code": "AccessDeniedException"}}, "ListUsers")
+        runner = CliRunner()
+        with (
+            patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
+            patch(
+                "cli.analytics_user_mgmt.discover_cognito_pool_id",
+                return_value="us-east-2_pool",
+            ),
+            patch("cli.analytics_user_mgmt.list_users", side_effect=denied),
+            patch("cli.analytics_user_mgmt.admin_create_user") as create,
+        ):
+            result = runner.invoke(cli, ["analytics", "users", "add", "--username", "alice"])
+
+        assert result.exit_code == 1
+        assert "Failed to check the existing users: AccessDeniedException" in result.output
+        create.assert_not_called()
+
     def test_users_add_with_explicit_password_sets_permanent(self, aws_creds_env, tmp_cdk_json):
         """``--password`` calls admin_set_user_password with Permanent=True
         and doesn't leak the password into stdout."""
@@ -726,6 +811,88 @@ class TestStudioLogin:
         assert captured["username"] == "alice"
         assert captured["authorization"] == "fake.id.token"
         assert "/studio/login" in captured["login_url"]
+
+    @pytest.mark.parametrize(
+        ("status", "body", "headline", "hint"),
+        [
+            (
+                400,
+                b'{"error": "UnsupportedUsername"}',
+                "login failed: HTTP 400 UnsupportedUsername, correlation_id=req-7",
+                "letters, digits and hyphens",
+            ),
+            (
+                403,
+                b'{"error": "UserProfileOwnedByAnotherUser"}',
+                "login failed: HTTP 403 UserProfileOwnedByAnotherUser, correlation_id=req-7",
+                "belongs to another Cognito user",
+            ),
+            (
+                409,
+                b'{"error": "UserProfileFailed"}',
+                "login failed: HTTP 409 UserProfileFailed, correlation_id=req-7",
+                None,
+            ),
+            # API Gateway's own rejection carries no token.
+            (
+                403,
+                b'{"message": "Forbidden"}',
+                "login failed: HTTP 403, correlation_id=req-7",
+                None,
+            ),
+            (
+                502,
+                b"<html>Bad Gateway</html>",
+                "login failed: HTTP 502, correlation_id=req-7",
+                None,
+            ),
+        ],
+    )
+    def test_studio_login_names_the_lambda_error(
+        self, aws_creds_env, tmp_cdk_json, status, body, headline, hint
+    ):
+        """Before, every failure printed only ``HTTP <code>``."""
+        import email.message
+        import io
+        import urllib.error
+
+        from cli.main import cli
+
+        headers = email.message.Message()
+        headers["x-amzn-RequestId"] = "req-7"
+
+        def _fake_urlopen(request, timeout=None):  # duck-typed
+            raise urllib.error.HTTPError(
+                request.full_url, status, "error", headers, io.BytesIO(body)
+            )
+
+        runner = CliRunner()
+        with (
+            patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
+            patch("cli.analytics_user_mgmt.discover_cognito_pool_id", return_value="pool"),
+            patch("cli.analytics_user_mgmt.discover_cognito_client_id", return_value="client"),
+            patch(
+                "cli.analytics_user_mgmt.discover_api_endpoint",
+                return_value="https://api.example.execute-api.us-east-2.amazonaws.com/prod",
+            ),
+            patch(
+                "cli.analytics_user_mgmt.srp_authenticate",
+                return_value={"IdToken": "fake.id.token"},
+            ),
+            patch("urllib.request.urlopen", side_effect=_fake_urlopen),
+        ):
+            result = runner.invoke(
+                cli,
+                ["analytics", "studio", "login", "--username", "alice.smith", "--password", "pw"],
+            )
+
+        assert result.exit_code == 2
+        assert headline in result.output
+        if hint is None:
+            assert "SageMaker" not in result.output
+        else:
+            assert hint in result.output
+            assert "'alice.smith'" in result.output
 
 
 # ---------------------------------------------------------------------------

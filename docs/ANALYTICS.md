@@ -356,6 +356,14 @@ Create a user:
 gco analytics users add --username alice --email alice@example.com
 ```
 
+The username also names the user's SageMaker Studio user profile, so
+`users add` accepts only names SageMaker accepts there: letters, digits
+and hyphens, starting and ending with a letter or digit, 63 characters
+at most (`alice-smith`, not `alice.smith` or `alice_smith`). It also
+refuses a name that differs only in case from an existing user's:
+Cognito keeps `Alice` and `alice` apart, but SageMaker matches profile
+names without regard to case, so the two would share one profile name.
+
 The command calls `cognito-idp:AdminCreateUser`, prints the
 temporary password exactly once to stdout, and (by default) sends
 Cognito's welcome email to the address on file. Suppress the email
@@ -395,6 +403,14 @@ Removing a user in Cognito does **not** automatically delete their
 Studio user profile; the presigned-URL Lambda creates profiles on
 first login and leaves them in place. If you need to clean up the
 profile side, use `aws sagemaker delete-user-profile` directly.
+
+Each profile the Lambda creates carries a `gco:analytics:cognito-sub`
+tag holding the Cognito `sub` (the user's immutable ID) of the user it
+was created for, and the Lambda serves a profile only to that user. A
+new user given a removed user's name therefore gets an HTTP 403 at
+login until the old profile is deleted, instead of the old user's
+profile. A profile without the tag (created before the Lambda tagged
+profiles, or outside it) is tagged for the first user who logs in to it.
 
 Error path — when `gco-analytics` is not deployed:
 
@@ -442,8 +458,11 @@ gco analytics studio login \
 The password, the `IdToken`, and the Studio URL are never written to
 disk. If login fails, the CLI prints the Cognito error code (for
 example `NotAuthorizedException`, `UserNotFoundException`) or the
-HTTP status + correlation ID from the `/studio/login` call, and exits
-with status 1 or 2 respectively.
+HTTP status, the Lambda's error token and the correlation ID from the
+`/studio/login` call, and exits with status 1 or 2 respectively. For
+`UnsupportedUsername` and `UserProfileOwnedByAnotherUser` it also says
+what an administrator has to do (create a user with a supported name,
+or delete the old profile).
 
 SRP flow explained:
 
@@ -459,10 +478,14 @@ SRP flow explained:
    JWT against the user-pool ARN.
 5. Presigned-URL Lambda reads the Studio domain id from its
    environment and creates the user profile if it doesn't exist
-   (replacing a `Failed` one). While the profile provisions it answers
-   `202` and the CLI polls; a profile it cannot recover is a `409`. Once
-   the profile is `InService` it calls `CreatePresignedDomainUrl` with a
-   300-second expiry.
+   (replacing a `Failed` one), tagged with the caller's Cognito `sub`.
+   A username SageMaker cannot use as a profile name is a `400`
+   (`UnsupportedUsername`), and a profile whose tag names another user
+   is a `403` (`UserProfileOwnedByAnotherUser`). While the profile
+   provisions it answers `202` and the CLI polls; a profile it cannot
+   recover is a `409` (`UserProfileFailed`). Once the profile is
+   `InService` it calls `CreatePresignedDomainUrl` with a 300-second
+   expiry.
 6. Lambda returns `{url, expires_in}`; API Gateway returns it to
    the CLI; the CLI prints `url` on its own line.
 

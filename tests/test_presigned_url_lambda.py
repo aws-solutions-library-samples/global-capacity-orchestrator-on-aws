@@ -11,14 +11,16 @@ Test strategy:
 * Each test re-imports the handler via the fixture, gets a fresh pair
   of client mocks, and drives the handler with a synthetic API Gateway
   proxy event shaped like what Cognito would send.
-* The Hypothesis property only exercises the happy path under stubbed
-  boto3 clients, so per-example runtime is tiny.
+* The Hypothesis properties exercise the happy path and the
+  unsupported-username answer under stubbed boto3 clients, so
+  per-example runtime is tiny.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import string
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -42,6 +44,30 @@ _SAGEMAKER_EXECUTION_ROLE_ARN = (
 _URL_EXPIRES_SECONDS = "300"
 _SESSION_EXPIRES_SECONDS = "43200"
 
+# The caller's Cognito ``sub`` and another user's, plus the owner tag the
+# handler writes on the profiles it creates.
+_SUB = "11111111-2222-4333-8444-555555555555"
+_OTHER_SUB = "99999999-8888-4777-8666-555555555555"
+_OWNER_TAG_KEY = "gco:analytics:cognito-sub"
+_PROFILE_ARN = "arn:aws:sagemaker:us-east-2:123456789012:user-profile/d-abc123xyz/alice"
+
+
+def _owner_tags(sub: str = _SUB) -> dict[str, Any]:
+    """A ``ListTags`` page holding the owner tag for ``sub``."""
+    return {"Tags": [{"Key": _OWNER_TAG_KEY, "Value": sub}]}
+
+
+def _profile(status: str, **extra: Any) -> dict[str, Any]:
+    """A ``DescribeUserProfile`` answer for alice's profile in ``status``."""
+    return {
+        "UserProfileName": "alice",
+        "UserProfileArn": _PROFILE_ARN,
+        "DomainId": _STUDIO_DOMAIN_ID,
+        "Status": status,
+        **extra,
+    }
+
+
 _HANDLER_ENV = {
     "STUDIO_DOMAIN_ID": _STUDIO_DOMAIN_ID,
     "STUDIO_EFS_ID": _STUDIO_EFS_ID,
@@ -56,15 +82,18 @@ _HANDLER_ENV = {
 # ---------------------------------------------------------------------------
 
 
-def _make_event(username: str | None = "alice") -> dict[str, Any]:
+def _make_event(username: str | None = "alice", sub: str | None = _SUB) -> dict[str, Any]:
     """Build a minimal API Gateway proxy event with a Cognito authorizer.
 
     When ``username`` is ``None``, the ``claims`` dict omits both
-    ``cognito:username`` and ``username`` so the handler's 401 path fires.
+    ``cognito:username`` and ``username`` so the handler's 401 path fires;
+    ``sub=None`` omits the ``sub`` claim.
     """
     claims: dict[str, Any] = {}
     if username is not None:
         claims["cognito:username"] = username
+    if sub is not None:
+        claims["sub"] = sub
     return {
         "requestContext": {
             "authorizer": {
@@ -101,11 +130,8 @@ def handler_module(monkeypatch: pytest.MonkeyPatch):
 
     # Defaults for the "everything works" case. Individual tests override
     # these as needed.
-    sagemaker_mock.describe_user_profile.return_value = {
-        "UserProfileName": "alice",
-        "DomainId": _STUDIO_DOMAIN_ID,
-        "Status": "InService",
-    }
+    sagemaker_mock.describe_user_profile.return_value = _profile("InService")
+    sagemaker_mock.list_tags.return_value = _owner_tags()
     sagemaker_mock.create_presigned_domain_url.return_value = {
         "AuthorizedUrl": "https://d-abc123xyz.studio.us-east-2.sagemaker.aws/auth?token=xyz",
     }
@@ -156,7 +182,7 @@ class TestPresignedUrlHappyPath:
         """If the token lacks ``cognito:username``, plain ``username`` is used."""
         handler, sagemaker_mock, _ = handler_module
 
-        event = {"requestContext": {"authorizer": {"claims": {"username": "bob"}}}}
+        event = {"requestContext": {"authorizer": {"claims": {"username": "bob", "sub": _SUB}}}}
         response = handler.lambda_handler(event, None)
 
         assert response["statusCode"] == 200
@@ -195,6 +221,8 @@ class TestPresignedUrlCreatesResources:
         efs_configs = user_settings["CustomFileSystemConfigs"]
         assert efs_configs[0]["EFSFileSystemConfig"]["FileSystemId"] == _STUDIO_EFS_ID
         assert efs_configs[0]["EFSFileSystemConfig"]["FileSystemPath"] == "/home/alice"
+        # The new profile records who owns it.
+        assert call_kwargs["Tags"] == [{"Key": _OWNER_TAG_KEY, "Value": _SUB}]
         # No presigned URL minted on a 202.
         sagemaker_mock.create_presigned_domain_url.assert_not_called()
 
@@ -216,11 +244,7 @@ class TestPresignedUrlCreatesResources:
         """If the profile exists but is Pending, return 202 without creating."""
         handler, sagemaker_mock, _ = handler_module
 
-        sagemaker_mock.describe_user_profile.return_value = {
-            "UserProfileName": "alice",
-            "DomainId": _STUDIO_DOMAIN_ID,
-            "Status": "Pending",
-        }
+        sagemaker_mock.describe_user_profile.return_value = _profile("Pending")
 
         response = handler.lambda_handler(_make_event(), None)
 
@@ -233,12 +257,9 @@ class TestPresignedUrlCreatesResources:
         """If the profile is Failed, delete it, recreate, and return 202."""
         handler, sagemaker_mock, _ = handler_module
 
-        sagemaker_mock.describe_user_profile.return_value = {
-            "UserProfileName": "alice",
-            "DomainId": _STUDIO_DOMAIN_ID,
-            "Status": "Failed",
-            "FailureReason": "Permission error",
-        }
+        sagemaker_mock.describe_user_profile.return_value = _profile(
+            "Failed", FailureReason="Permission error"
+        )
 
         response = handler.lambda_handler(_make_event(), None)
 
@@ -248,6 +269,9 @@ class TestPresignedUrlCreatesResources:
             UserProfileName="alice",
         )
         sagemaker_mock.create_user_profile.assert_called_once()
+        assert sagemaker_mock.create_user_profile.call_args.kwargs["Tags"] == [
+            {"Key": _OWNER_TAG_KEY, "Value": _SUB}
+        ]
 
     def test_creates_access_point_if_missing(self, handler_module) -> None:
         handler, _, efs_mock = handler_module
@@ -294,6 +318,17 @@ class TestPresignedUrlErrorPaths:
         # No SageMaker or EFS calls for an unauthenticated request.
         sagemaker_mock.list_domains.assert_not_called()
         sagemaker_mock.create_presigned_domain_url.assert_not_called()
+        efs_mock.describe_access_points.assert_not_called()
+
+    def test_missing_sub_claim_returns_401(self, handler_module) -> None:
+        """Without ``sub`` the caller's ownership of a profile cannot be checked."""
+        handler, sagemaker_mock, efs_mock = handler_module
+
+        response = handler.lambda_handler(_make_event(sub=None), None)
+
+        assert response["statusCode"] == 401
+        assert json.loads(response["body"]) == {"error": "MissingCognitoClaim"}
+        sagemaker_mock.describe_user_profile.assert_not_called()
         efs_mock.describe_access_points.assert_not_called()
 
     def test_missing_authorizer_block_returns_401(self, handler_module) -> None:
@@ -392,16 +427,23 @@ class TestDerivePosixIds:
 # ---------------------------------------------------------------------------
 
 
-_USERNAME_ALPHABET = string.ascii_letters + string.digits + "_-"
+# Names SageMaker accepts as a UserProfileName: letters and digits with
+# hyphens only between them, 63 characters at most.
+_username_strategy = st.from_regex(r"[a-zA-Z0-9](-{0,3}[a-zA-Z0-9]){0,20}", fullmatch=True).filter(
+    lambda name: len(name) <= 63
+)
 
-_username_strategy = st.text(
-    min_size=1,
-    max_size=64,
-    alphabet=_USERNAME_ALPHABET,
+# Cognito usernames SageMaker rejects: a character outside letters, digits
+# and hyphens, a leading or trailing hyphen, or more than 63 characters.
+_unsupported_username_strategy = st.one_of(
+    st.text(alphabet=string.ascii_letters + string.digits + "-._@+ \n", min_size=1, max_size=70),
+    st.text(alphabet=string.ascii_lowercase, min_size=64, max_size=80),
+).filter(
+    lambda name: re.fullmatch(r"[a-zA-Z0-9](-*[a-zA-Z0-9]){0,62}", name) is None or len(name) > 63
 )
 
 _claim_strategy: st.SearchStrategy[dict[str, Any]] = st.fixed_dictionaries(
-    {"cognito:username": _username_strategy},
+    {"cognito:username": _username_strategy, "sub": st.uuids().map(str)},
     optional={
         "cognito:groups": st.lists(
             st.text(min_size=1, max_size=16, alphabet=string.ascii_letters),
@@ -411,7 +453,6 @@ _claim_strategy: st.SearchStrategy[dict[str, Any]] = st.fixed_dictionaries(
             st.none(),
             st.emails(),
         ),
-        "sub": st.uuids().map(str),
     },
 )
 
@@ -445,9 +486,11 @@ class TestPresignedUrlResponseShapeProperty:
         username = claims["cognito:username"]
         sagemaker_mock.describe_user_profile.return_value = {
             "UserProfileName": username,
+            "UserProfileArn": f"{_PROFILE_ARN.rsplit('/', 1)[0]}/{username}",
             "DomainId": _STUDIO_DOMAIN_ID,
             "Status": "InService",
         }
+        sagemaker_mock.list_tags.return_value = _owner_tags(claims["sub"])
         sagemaker_mock.create_presigned_domain_url.return_value = {
             "AuthorizedUrl": (
                 f"https://d-propcheck.studio.us-east-2.sagemaker.aws/auth?user={username}"
@@ -482,6 +525,35 @@ class TestPresignedUrlResponseShapeProperty:
         assert not isinstance(body["expires_in"], bool)
         assert body["expires_in"] > 0
 
+    @settings(
+        max_examples=60,
+        deadline=5000,
+        suppress_health_check=[
+            HealthCheck.function_scoped_fixture,
+            HealthCheck.too_slow,
+            HealthCheck.filter_too_much,
+        ],
+    )
+    @given(username=_unsupported_username_strategy)
+    def test_unsupported_username_is_a_400_before_any_aws_call(
+        self, handler_module, username: str
+    ) -> None:
+        """A name SageMaker would reject never reaches SageMaker or EFS.
+
+        Before, ``alice.smith`` reached ``DescribeUserProfile`` and came back
+        as a generic 500 (and as an EFS path component).
+        """
+        handler, sagemaker_mock, efs_mock = handler_module
+        sagemaker_mock.reset_mock()
+        efs_mock.reset_mock()
+
+        response = handler.lambda_handler(_make_event(username=username), None)
+
+        assert response["statusCode"] == 400
+        assert json.loads(response["body"]) == {"error": "UnsupportedUsername"}
+        assert sagemaker_mock.mock_calls == []
+        assert efs_mock.mock_calls == []
+
 
 # ---------------------------------------------------------------------------
 # Module-scope sanity check
@@ -499,6 +571,7 @@ def test_handler_module_exposes_pure_helpers(monkeypatch: pytest.MonkeyPatch) ->
         handler = load_lambda_module("analytics-presigned-url")
 
     assert callable(handler._parse_claims)
+    assert callable(handler._is_studio_username)
     assert callable(handler._derive_posix_ids)
     assert callable(handler._format_success)
     assert callable(handler._format_provisioning)
@@ -554,7 +627,7 @@ class TestEnsureUserProfileErrorCodes:
         )
 
         with pytest.raises(ClientError, match="AccessDeniedException"):
-            handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
+            handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _SUB, _STUDIO_EFS_ID)
         sagemaker_mock.create_user_profile.assert_not_called()
 
     @pytest.mark.parametrize("code", ["ResourceInUse", "AccessDeniedException"])
@@ -565,27 +638,26 @@ class TestEnsureUserProfileErrorCodes:
         ignored, so the CLI was told "provisioning" until it gave up.
         """
         handler, sagemaker_mock, _ = handler_module
-        sagemaker_mock.describe_user_profile.return_value = {
-            "Status": "Failed",
-            "FailureReason": "quota",
-        }
+        sagemaker_mock.describe_user_profile.return_value = _profile(
+            "Failed", FailureReason="quota"
+        )
         sagemaker_mock.delete_user_profile.side_effect = ClientError(
             {"Error": {"Code": code, "Message": "no"}}, "DeleteUserProfile"
         )
 
-        status = handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
+        status = handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _SUB, _STUDIO_EFS_ID)
 
         assert status == "Failed"
         sagemaker_mock.create_user_profile.assert_not_called()
 
     def test_failed_profile_already_gone_is_recreated(self, handler_module) -> None:
         handler, sagemaker_mock, _ = handler_module
-        sagemaker_mock.describe_user_profile.return_value = {"Status": "Failed"}
+        sagemaker_mock.describe_user_profile.return_value = _profile("Failed")
         sagemaker_mock.delete_user_profile.side_effect = ClientError(
             {"Error": {"Code": "ResourceNotFound", "Message": "gone"}}, "DeleteUserProfile"
         )
 
-        status = handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
+        status = handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _SUB, _STUDIO_EFS_ID)
 
         assert status == "Provisioning"
         sagemaker_mock.create_user_profile.assert_called_once()
@@ -595,12 +667,9 @@ class TestEnsureUserProfileErrorCodes:
         """Before: only ``Failed`` was handled, so these returned 202 on every
         poll and the CLI timed out after 120 s with "Try again in a minute"."""
         handler, sagemaker_mock, efs_mock = handler_module
-        sagemaker_mock.describe_user_profile.return_value = {
-            "UserProfileName": "alice",
-            "DomainId": _STUDIO_DOMAIN_ID,
-            "Status": status,
-            "FailureReason": "VPC quota",
-        }
+        sagemaker_mock.describe_user_profile.return_value = _profile(
+            status, FailureReason="VPC quota"
+        )
 
         response = handler.lambda_handler(_make_event(), None)
 
@@ -614,7 +683,7 @@ class TestEnsureUserProfileErrorCodes:
     @pytest.mark.parametrize("status", ["Pending", "Updating", "Deleting"])
     def test_converging_profile_keeps_polling(self, handler_module, status) -> None:
         handler, sagemaker_mock, _ = handler_module
-        sagemaker_mock.describe_user_profile.return_value = {"Status": status}
+        sagemaker_mock.describe_user_profile.return_value = _profile(status)
 
         response = handler.lambda_handler(_make_event(), None)
 
@@ -629,7 +698,7 @@ class TestEnsureUserProfileErrorCodes:
             {"Error": {"Code": "ResourceInUse", "Message": "exists"}}, "CreateUserProfile"
         )
 
-        handler._create_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
+        handler._create_user_profile(_STUDIO_DOMAIN_ID, "alice", _SUB, _STUDIO_EFS_ID)
 
     def test_other_creation_failures_propagate(self, handler_module) -> None:
         handler, sagemaker_mock, _ = handler_module
@@ -638,7 +707,7 @@ class TestEnsureUserProfileErrorCodes:
         )
 
         with pytest.raises(ClientError, match="ResourceLimitExceeded"):
-            handler._create_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
+            handler._create_user_profile(_STUDIO_DOMAIN_ID, "alice", _SUB, _STUDIO_EFS_ID)
 
 
 class TestEnsureAccessPointPagination:
@@ -668,3 +737,150 @@ class TestEnsureAccessPointPagination:
             "Uid": uid,
             "Gid": gid,
         }
+
+
+class TestStudioUsernames:
+    """``_is_studio_username`` is SageMaker's ``UserProfileName`` rule."""
+
+    @pytest.mark.parametrize(
+        "username",
+        ["alice", "Alice", "a", "7", "alice-smith", "a--b", "a" * 63, "a" + "-b" * 31],
+    )
+    def test_names_sagemaker_accepts(self, handler_module, username: str) -> None:
+        handler, _, _ = handler_module
+        assert handler._is_studio_username(username)
+
+    @pytest.mark.parametrize(
+        "username",
+        [
+            "alice.smith",
+            "alice_smith",
+            "alice@example.com",
+            "-alice",
+            "alice-",
+            "a b",
+            "alice\n",
+            "\u00e5lice",
+            "a" * 64,
+            # The pattern alone allows hyphen runs past 63 characters.
+            "a" + "--b" * 21,
+        ],
+    )
+    def test_names_sagemaker_rejects(self, handler_module, username: str) -> None:
+        handler, _, _ = handler_module
+        assert not handler._is_studio_username(username)
+
+
+class TestProfileOwnership:
+    """A profile answers only to the Cognito ``sub`` its owner tag names.
+
+    SageMaker matches profile names without regard to case, so before the
+    tag, ``alice`` logging in after ``Alice`` was handed ``Alice``'s
+    profile (ResourceInUse read as "already exists") and a presigned URL
+    into it.
+    """
+
+    @pytest.mark.parametrize("status", ["InService", "Pending", "Updating", "Deleting"])
+    def test_another_users_profile_is_a_403(self, handler_module, status: str) -> None:
+        handler, sagemaker_mock, efs_mock = handler_module
+        sagemaker_mock.describe_user_profile.return_value = _profile(status)
+        sagemaker_mock.list_tags.return_value = _owner_tags(_OTHER_SUB)
+
+        response = handler.lambda_handler(_make_event(), None)
+
+        assert response["statusCode"] == 403
+        assert json.loads(response["body"]) == {"error": "UserProfileOwnedByAnotherUser"}
+        sagemaker_mock.list_tags.assert_called_once_with(ResourceArn=_PROFILE_ARN)
+        sagemaker_mock.add_tags.assert_not_called()
+        sagemaker_mock.create_presigned_domain_url.assert_not_called()
+        efs_mock.describe_access_points.assert_not_called()
+        efs_mock.create_access_point.assert_not_called()
+
+    @pytest.mark.parametrize("status", ["Failed", "Update_Failed", "Delete_Failed"])
+    def test_another_users_failed_profile_is_left_alone(self, handler_module, status) -> None:
+        """Ownership comes before the delete-and-recreate of a Failed profile."""
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.describe_user_profile.return_value = _profile(status)
+        sagemaker_mock.list_tags.return_value = _owner_tags(_OTHER_SUB)
+
+        response = handler.lambda_handler(_make_event(), None)
+
+        assert response["statusCode"] == 403
+        sagemaker_mock.delete_user_profile.assert_not_called()
+        sagemaker_mock.create_user_profile.assert_not_called()
+
+    def test_untagged_profile_in_service_is_claimed_by_the_caller(self, handler_module) -> None:
+        """A profile made before the tag (or outside the Lambda) gets one."""
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.list_tags.return_value = {"Tags": [{"Key": "Project", "Value": "GCO"}]}
+
+        response = handler.lambda_handler(_make_event(), None)
+
+        assert response["statusCode"] == 200
+        sagemaker_mock.add_tags.assert_called_once_with(
+            ResourceArn=_PROFILE_ARN, Tags=[{"Key": _OWNER_TAG_KEY, "Value": _SUB}]
+        )
+
+    def test_untagged_profile_still_provisioning_is_not_claimed_yet(self, handler_module) -> None:
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.describe_user_profile.return_value = _profile("Pending")
+        sagemaker_mock.list_tags.return_value = {"Tags": []}
+
+        response = handler.lambda_handler(_make_event(), None)
+
+        assert response["statusCode"] == 202
+        sagemaker_mock.add_tags.assert_not_called()
+
+    def test_own_profile_is_not_retagged(self, handler_module) -> None:
+        handler, sagemaker_mock, _ = handler_module
+
+        response = handler.lambda_handler(_make_event(), None)
+
+        assert response["statusCode"] == 200
+        sagemaker_mock.add_tags.assert_not_called()
+
+    def test_owner_tag_on_a_later_page_is_found(self, handler_module) -> None:
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.list_tags.side_effect = [
+            {"Tags": [{"Key": "Project", "Value": "GCO"}], "NextToken": "page-2"},
+            _owner_tags(_OTHER_SUB),
+        ]
+
+        assert handler._profile_owner(_PROFILE_ARN) == _OTHER_SUB
+        assert sagemaker_mock.list_tags.call_args_list[1].kwargs == {
+            "ResourceArn": _PROFILE_ARN,
+            "NextToken": "page-2",
+        }
+
+    def test_failed_untagged_profile_is_recreated_for_the_caller(self, handler_module) -> None:
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.describe_user_profile.return_value = _profile("Failed")
+        sagemaker_mock.list_tags.return_value = {"Tags": []}
+
+        status = handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _SUB, _STUDIO_EFS_ID)
+
+        assert status == "Provisioning"
+        sagemaker_mock.delete_user_profile.assert_called_once()
+        assert sagemaker_mock.create_user_profile.call_args.kwargs["Tags"] == [
+            {"Key": _OWNER_TAG_KEY, "Value": _SUB}
+        ]
+
+    def test_concurrent_create_by_another_user_is_refused_on_the_next_poll(
+        self, handler_module
+    ) -> None:
+        """``alice``'s create loses to ``Alice``'s; the next poll answers 403."""
+        handler, sagemaker_mock, _ = handler_module
+        missing = ClientError(
+            {"Error": {"Code": "ResourceNotFound", "Message": "not found"}}, "DescribeUserProfile"
+        )
+        sagemaker_mock.describe_user_profile.side_effect = [missing, _profile("Pending")]
+        sagemaker_mock.create_user_profile.side_effect = ClientError(
+            {"Error": {"Code": "ResourceInUse", "Message": "exists"}}, "CreateUserProfile"
+        )
+        sagemaker_mock.list_tags.return_value = _owner_tags(_OTHER_SUB)
+
+        first = handler.lambda_handler(_make_event(), None)
+        second = handler.lambda_handler(_make_event(), None)
+
+        assert first["statusCode"] == 202
+        assert second["statusCode"] == 403
