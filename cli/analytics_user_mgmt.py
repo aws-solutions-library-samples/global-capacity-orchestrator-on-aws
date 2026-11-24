@@ -400,8 +400,11 @@ def admin_delete_user(pool_id: str, region: str, username: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def fetch_studio_url(api_base: str, id_token: str) -> tuple[str, int, str]:
-    """GET ``{api_base}/studio/login`` with the Cognito ID token.
+def fetch_studio_url(api_base: str, access_token: str) -> tuple[str, int, str]:
+    """GET ``{api_base}/studio/login`` with the Cognito access token.
+
+    The route's authorizer requires a scope, so it accepts an access token
+    and refuses an ID token with a 401.
 
     Returns ``(url, expires_in, correlation_id)`` on success. Raises
     :class:`urllib.error.HTTPError` / :class:`urllib.error.URLError`
@@ -445,7 +448,7 @@ def fetch_studio_url(api_base: str, id_token: str) -> tuple[str, int, str]:
     # fmt: off
     request = urllib.request.Request(  # nosec B310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         login_url,
-        headers={"Authorization": id_token, "Accept": "application/json"},
+        headers={"Authorization": access_token, "Accept": "application/json"},
         method="GET",
     )
     with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected

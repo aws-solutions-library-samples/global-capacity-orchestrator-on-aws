@@ -280,8 +280,9 @@ PATH_DESCRIPTIONS: dict[str, str] = {
         "namespaces per region."
     ),
     "/studio/login": (
-        "Authenticated with a Cognito ID token from the Studio user pool rather than "
-        "SigV4. Returns a presigned SageMaker Studio URL for the caller's user profile."
+        "Authenticated with a Cognito access token from the Studio user pool rather than "
+        "SigV4: the method requires a scope, so an ID token is refused. Returns a "
+        "presigned SageMaker Studio URL for the caller's user profile."
     ),
     "/studio/callback": (
         "Unauthenticated MOCK integration returning an empty 200 body: the Cognito "
@@ -305,7 +306,7 @@ RESPONSE_DESCRIPTIONS: dict[str, str] = {
         "Bad request: rejected by the proxy before forwarding (for example an "
         "`X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
     ),
-    "401": "Unauthorized: the Cognito ID token is missing, expired or not from the Studio pool.",
+    "401": "Unauthorized: the request carried no valid credentials.",
     "403": (
         "Forbidden: the caller's IAM identity or the API's resource policy denied "
         "`execute-api:Invoke`, or the backend rejected the request's HMAC envelope."
@@ -321,6 +322,21 @@ RESPONSE_DESCRIPTIONS: dict[str, str] = {
     ),
     "500": "Internal error in the proxy Lambda or the backend.",
     "502": "Bad gateway: the in-cluster proxy or the model server did not answer.",
+}
+#: Response descriptions that depend on how the method is authorized, keyed by
+#: API Gateway's ``AuthorizationType``; they take precedence over
+#: ``RESPONSE_DESCRIPTIONS``.
+AUTHORIZED_RESPONSE_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "COGNITO_USER_POOLS": {
+        "401": (
+            "Unauthorized: the Cognito access token is missing, expired, not from the "
+            "Studio pool, or lacks the method's scope. An ID token is refused here."
+        ),
+        "403": (
+            "Forbidden: the SageMaker Studio user profile of this name belongs to another "
+            'Cognito user (`{"error": "UserProfileOwnedByAnotherUser"}`).'
+        ),
+    },
 }
 
 #: Security schemes, keyed by API Gateway's ``AuthorizationType``.
@@ -347,8 +363,10 @@ SECURITY_SCHEMES: dict[str, tuple[str, dict[str, Any]]] = {
             "in": "header",
             "x-amazon-apigateway-authtype": "cognito_user_pools",
             "description": (
-                "ID token issued by the Studio Cognito user pool, validated by the "
-                "`<project>-studio-cognito-authorizer` authorizer."
+                "Access token issued by the Studio Cognito user pool, validated by the "
+                "`<project>-studio-cognito-authorizer` authorizer. Each operation's "
+                "security requirement lists the scopes it needs; a method with scopes "
+                "refuses an ID token."
             ),
         },
     ),
@@ -678,16 +696,23 @@ def _security(properties: dict[str, Any], schemes: dict[str, dict[str, Any]]) ->
         raise ApiGatewayDocumentError(f"unsupported AuthorizationType {authorization!r}")
     name, scheme = SECURITY_SCHEMES[authorization]
     schemes[name] = scheme
-    return [{name: []}]
+    scopes = properties.get("AuthorizationScopes") or []
+    if not isinstance(scopes, list) or not all(isinstance(scope, str) for scope in scopes):
+        raise ApiGatewayDocumentError(f"unreadable AuthorizationScopes {scopes!r}")
+    return [{name: list(scopes)}]
 
 
 def _responses(properties: dict[str, Any], mock: bool) -> dict[str, Any]:
     responses: dict[str, Any] = {}
+    authorization = str(properties.get("AuthorizationType", "NONE")).upper()
+    authorized = AUTHORIZED_RESPONSE_DESCRIPTIONS.get(authorization, {})
     for response in properties.get("MethodResponses", []):
         if not isinstance(response, dict):
             continue
         status = str(response.get("StatusCode", ""))
-        description = RESPONSE_DESCRIPTIONS.get(status, f"{status} response")
+        description = authorized.get(status) or RESPONSE_DESCRIPTIONS.get(
+            status, f"{status} response"
+        )
         if mock and status == "200":
             description = "Success; empty JSON body."
         responses[status] = {"description": description}

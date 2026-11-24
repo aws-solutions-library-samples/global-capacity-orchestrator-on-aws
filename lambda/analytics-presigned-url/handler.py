@@ -6,8 +6,9 @@ Exchanges a Cognito-authorized API Gateway event for a time-limited
 Flow (happy path):
 
 1. Extract ``claims = event["requestContext"]["authorizer"]["claims"]`` and
-   read ``cognito:username`` (falling back to ``username`` if the token
-   shape doesn't namespace Cognito claims) and ``sub``. A username
+   read ``cognito:username`` (an ID token's name for it) or ``username``
+   (an access token's, which is what the route requires since it lists a
+   scope) and ``sub``, which both tokens carry. A username
    SageMaker cannot use as a ``UserProfileName`` (``STUDIO_USERNAME_PATTERN``,
    63 characters at most) is an HTTP 400 ``UnsupportedUsername``.
 2. Read the Studio ``DomainId`` from the ``STUDIO_DOMAIN_ID`` env var,

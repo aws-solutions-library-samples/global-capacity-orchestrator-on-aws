@@ -811,7 +811,8 @@ class TestStudioLogin:
         # (no password echo, even on success).
         assert "hunter2" not in result.output
         assert captured["username"] == "alice"
-        assert captured["authorization"] == "fake.id.token"
+        # /studio/login requires a scope, so it is sent the access token.
+        assert captured["authorization"] == "fake.access.token"
         assert "/studio/login" in captured["login_url"]
 
     @pytest.mark.parametrize(
@@ -841,6 +842,14 @@ class TestStudioLogin:
                 b'{"message": "Forbidden"}',
                 "login failed: HTTP 403, correlation_id=req-7",
                 None,
+            ),
+            # API Gateway refusing the access token itself: an API deployed
+            # before /studio/login required one accepts only ID tokens.
+            (
+                401,
+                b'{"message": "Unauthorized"}',
+                "login failed: HTTP 401, correlation_id=req-7",
+                "gco stacks deploy gco-api-gateway",
             ),
             (
                 502,
@@ -879,7 +888,7 @@ class TestStudioLogin:
             ),
             patch(
                 "cli.analytics_user_mgmt.srp_authenticate",
-                return_value={"IdToken": "fake.id.token"},
+                return_value={"AccessToken": "fake.access.token"},
             ),
             patch("urllib.request.urlopen", side_effect=_fake_urlopen),
         ):
@@ -892,6 +901,10 @@ class TestStudioLogin:
         assert headline in result.output
         if hint is None:
             assert "SageMaker" not in result.output
+            assert "gco stacks deploy" not in result.output
+        elif status == 401:
+            assert hint in result.output
+            assert "access token" in result.output
         else:
             assert hint in result.output
             assert "'alice.smith'" in result.output

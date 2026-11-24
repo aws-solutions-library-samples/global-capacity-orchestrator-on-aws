@@ -177,7 +177,7 @@ def _studio_patches(fetch: Mock):
         patch("cli.analytics_user_mgmt.discover_cognito_pool_id", return_value="pool"),
         patch("cli.analytics_user_mgmt.discover_cognito_client_id", return_value="client"),
         patch("cli.analytics_user_mgmt.discover_api_endpoint", return_value="https://api.example"),
-        patch("cli.analytics_user_mgmt.srp_authenticate", return_value={"IdToken": "token"}),
+        patch("cli.analytics_user_mgmt.srp_authenticate", return_value={"AccessToken": "token"}),
         patch("cli.analytics_user_mgmt.fetch_studio_url", fetch),
         patch("time.sleep"),
     )

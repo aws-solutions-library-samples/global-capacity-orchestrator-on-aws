@@ -430,7 +430,7 @@ gco analytics studio login --username alice
 The command prompts for the password (use `--password <p>` or set
 `$GCO_STUDIO_PASSWORD` to pass it non-interactively — for example in
 CI), signs in to the Cognito user pool with `AdminInitiateAuth`
-(`AuthFlow=ADMIN_USER_PASSWORD_AUTH`), retrieves the Cognito `IdToken`,
+(`AuthFlow=ADMIN_USER_PASSWORD_AUTH`), retrieves the Cognito `AccessToken`,
 and exchanges it for a SageMaker Studio presigned URL via
 `GET {API_Gateway_URL}/prod/studio/login`.
 
@@ -456,14 +456,17 @@ gco analytics studio login \
   --api-url https://abc123.execute-api.us-east-2.amazonaws.com
 ```
 
-The password, the `IdToken`, and the Studio URL are never written to
+The password, the Cognito tokens, and the Studio URL are never written to
 disk. If login fails, the CLI prints the Cognito error code (for
 example `NotAuthorizedException`, `UserNotFoundException`) or the
 HTTP status, the Lambda's error token and the correlation ID from the
 `/studio/login` call, and exits with status 1 or 2 respectively. For
 `UnsupportedUsername` and `UserProfileOwnedByAnotherUser` it also says
 what an administrator has to do (create a user with a supported name,
-or delete the old profile).
+or delete the old profile). A `401` with no error token is API Gateway
+refusing the token before the Lambda runs; from a CLI of this release
+it usually means `<project>-api-gateway` was deployed by an earlier
+release, which accepts only an ID token, and the CLI says to redeploy it.
 
 Login flow:
 
@@ -476,9 +479,15 @@ Login flow:
    the CLI does not answer: give the user a permanent password with
    `users add --password` / `--generate-password` or
    `users set-password`.
-3. CLI sends the `IdToken` in the `Authorization` header to
+3. CLI sends the `AccessToken` in the `Authorization` header to
    `/studio/login`. API Gateway's Cognito authorizer validates the
-   JWT against the user-pool ARN.
+   JWT against the user-pool ARN and requires the
+   `aws.cognito.signin.user.admin` scope, so it accepts only an access
+   token: an ID token has no `scope` claim and gets a `401`. Cognito
+   puts exactly that one scope in the access tokens `AdminInitiateAuth`
+   issues; a custom scope would need the hosted sign-in pages or an
+   access-token trigger, which the pool's Lite feature plan does not
+   offer.
 4. Presigned-URL Lambda reads the Studio domain id from its
    environment and creates the user profile if it doesn't exist
    (replacing a `Failed` one), tagged with the caller's Cognito `sub`.

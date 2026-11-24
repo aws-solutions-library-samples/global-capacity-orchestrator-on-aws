@@ -48,6 +48,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Job status filter and request paths](#job-status-filter-and-request-paths)
   - [Access-logs buckets use SSE-S3](#access-logs-buckets-use-sse-s3)
   - [Analytics roles act on their own domain](#analytics-roles-act-on-their-own-domain)
+  - [Studio login takes an access token](#studio-login-takes-an-access-token)
   - [`Project` tag on PCS instances](#project-tag-on-pcs-instances)
   - [Add-on replay input in parts](#add-on-replay-input-in-parts)
   - [Volcano Jobs get their pods](#volcano-jobs-get-their-pods)
@@ -1055,6 +1056,33 @@ to what they use.
 - **The stack-deletion cleanup Lambda** holds exactly the API calls it makes,
   scoped to the domain, `Studio_EFS`, the Region's access points and file
   systems, and security groups in the analytics VPC.
+
+### Studio login takes an access token
+
+With `analytics_environment.enabled`, `GET /studio/login` on
+`<project>-api-gateway` requires the Cognito scope
+`aws.cognito.signin.user.admin`. A Cognito authorizer reads the token as an
+access token when the method requires a scope, and an ID token carries no
+scope, so the route accepts only access tokens. API Gateway recommends
+requiring scopes because nothing else tells the two token types apart.
+`gco analytics studio login` sends the access token from this release on.
+
+- **BREAKING (narrow): an older CLI cannot sign in to an upgraded API.** It
+  sends the ID token and gets `HTTP 401`. Upgrade the CLI with the stacks;
+  `gco upgrade` does both.
+- **This release's CLI cannot sign in to an API that was not redeployed.**
+  An API deployed by an earlier release accepts only an ID token, so it
+  refuses the access token with `HTTP 401`, and the CLI says to run
+  `gco stacks deploy <project>-api-gateway`.
+- **Your own clients** that call `/studio/login` must send the
+  `AccessToken` from `AdminInitiateAuth` or `InitiateAuth` instead of the
+  `IdToken`. The Lambda reads the username from the access token's
+  `username` claim (an ID token names it `cognito:username`) and the
+  `sub` claim, which both tokens carry.
+- **The route documents its `403`.** `UserProfileOwnedByAnotherUser` (a
+  profile of that name belongs to another Cognito user) is now one of the
+  method's declared responses, so it is in
+  `docs/openapi/api-gateway-global.json`.
 
 ### `Project` tag on PCS instances
 

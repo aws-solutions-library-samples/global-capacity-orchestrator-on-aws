@@ -48,6 +48,14 @@ _STUDIO_USERNAME_RULE = (
     "or digit, 63 characters at most"
 )
 
+#: What ``studio login`` prints when API Gateway itself refuses the request.
+_STUDIO_LOGIN_UNAUTHORIZED_HINT = (
+    "API Gateway refused the Cognito access token. This CLI sends an access token, "
+    "which /studio/login accepts from this release on; an API deployed with an "
+    "earlier release accepts only an ID token. Redeploy it with "
+    "`gco stacks deploy {project}-api-gateway`, then sign in again."
+)
+
 #: What ``studio login`` prints for the presigned-URL Lambda's error tokens.
 _STUDIO_LOGIN_ERROR_HINTS = {
     "UnsupportedUsername": (
@@ -644,9 +652,11 @@ def studio_login(
         formatter.print_error(f"Cognito authentication failed: {error_code}")
         sys.exit(1)
 
-    id_token = tokens.get("IdToken")
-    if not id_token:
-        formatter.print_error("Cognito authentication failed: no IdToken returned")
+    # /studio/login requires a scope, so it takes the access token; the ID
+    # token, which has no scope claim, is refused there with a 401.
+    access_token = tokens.get("AccessToken")
+    if not access_token:
+        formatter.print_error("Cognito authentication failed: no AccessToken returned")
         sys.exit(1)
 
     try:
@@ -663,7 +673,7 @@ def studio_login(
         while elapsed < max_wait:
             # Only the URL matters here; the presigned expiry is reported by
             # `analytics studio-url`, not by this open-in-browser path.
-            url, _expires_in, _ = fetch_studio_url(api_base, id_token)
+            url, _expires_in, _ = fetch_studio_url(api_base, access_token)
             if url:
                 break
             # 202 -- profile still provisioning. Progress goes to stderr:
@@ -692,6 +702,11 @@ def studio_login(
         hint = _STUDIO_LOGIN_ERROR_HINTS.get(token or "")
         if hint:
             formatter.print_error(hint.format(username=username))
+        elif exc.code == 401 and token is None:
+            # API Gateway's own refusal, before the Lambda ran: the token was
+            # signed in a moment ago, so the likeliest cause is an API
+            # deployed before /studio/login required an access token.
+            formatter.print_error(_STUDIO_LOGIN_UNAUTHORIZED_HINT.format(project=project_name))
         sys.exit(2)
     except urllib.error.URLError as exc:
         formatter.print_error(f"login failed: network error: {exc.reason!r}")

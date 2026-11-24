@@ -418,7 +418,9 @@ Sign in to SageMaker Studio through Cognito and print a presigned
 Studio URL on its own line on stdout (pipe-friendly): the progress shown
 while a first login provisions the user profile (30-60 seconds) goes to
 stderr, so `URL=$(gco analytics studio login ...)` captures only the URL.
-The password, `IdToken`, and URL are never written to disk.
+The password, the Cognito tokens, and the URL are never written to disk.
+The command sends Cognito's access token to `/studio/login`, which requires
+the `aws.cognito.signin.user.admin` scope and so refuses an ID token.
 
 The sign-in is `cognito-idp:AdminInitiateAuth` with
 `ADMIN_USER_PASSWORD_AUTH`, an administrator API, so the command needs
@@ -433,7 +435,10 @@ presigned-URL Lambda's error token and the correlation ID, for example
 `UnsupportedUsername` (HTTP 400: the username cannot name a SageMaker
 user profile) and `UserProfileOwnedByAnotherUser` (HTTP 403: the profile
 of that name belongs to another Cognito user) come with a line saying
-what an administrator has to do. See
+what an administrator has to do. A `401` without an error token is API
+Gateway refusing the token; the command then says to redeploy
+`<project>-api-gateway`, since an API deployed by an earlier release
+accepts only an ID token. See
 [ANALYTICS.md section (d)](ANALYTICS.md#d-logging-into-studio).
 
 ```bash

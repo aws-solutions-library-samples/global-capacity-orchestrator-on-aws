@@ -345,7 +345,7 @@ class TestStudioLoginBranches:
         assert result.exit_code == 1
         assert "NotAuthorizedException" in result.output
 
-    def test_login_fails_when_no_id_token(self, aws_creds_env, tmp_cdk_json):
+    def test_login_fails_when_no_access_token(self, aws_creds_env, tmp_cdk_json):
         from cli.main import cli
 
         with mock_aws():
@@ -377,7 +377,7 @@ class TestStudioLoginBranches:
                 )
 
         assert result.exit_code == 1
-        assert "no IdToken" in result.output
+        assert "no AccessToken" in result.output
 
     def test_login_fails_on_httperror(self, aws_creds_env, tmp_cdk_json):
         from cli.main import cli

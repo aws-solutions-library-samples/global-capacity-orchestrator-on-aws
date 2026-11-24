@@ -523,6 +523,20 @@ def cognito_domain_prefix_default(project_name: str) -> str:
     return f"{project_name}-studio"
 
 
+STUDIO_LOGIN_AUTHORIZATION_SCOPE = "aws.cognito.signin.user.admin"
+"""OAuth scope the ``/studio/login`` method requires of its Cognito token.
+
+A Cognito user pool authorizer treats the ``Authorization`` header as an ID
+token when the method lists no scopes, and as an access token when it lists
+some; ID tokens carry no ``scope`` claim, so requiring a scope means only
+access tokens are accepted. ``gco analytics studio login`` signs in with
+``AdminInitiateAuth``, and Cognito gives the access tokens of that API (and of
+``InitiateAuth``) exactly one scope, this reserved one. A custom resource-
+server scope would need either the hosted sign-in pages (an OAuth grant) or an
+access-token-customizing pre-token-generation trigger, which the pool's Lite
+feature plan does not offer.
+"""
+
 STUDIO_PRESIGNED_URL_EXPIRY_SECONDS = 300
 """Default expiry (in seconds) for SageMaker Studio presigned domain URLs.
 

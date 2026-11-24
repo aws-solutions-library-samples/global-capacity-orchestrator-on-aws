@@ -108,6 +108,14 @@ def _global_gateway() -> dict[str, Any]:
                     }
                 ),
                 "post": _operation(
+                    # Scopes render beside their scheme; a scheme listed twice
+                    # merges, and requirements that are not objects or scope
+                    # lists that are not lists add nothing.
+                    security=[
+                        {"cognito": ["write", "admin"]},
+                        {"cognito": ["admin"], "sigv4": "not-a-list"},
+                        "not-a-requirement",
+                    ],
                     **{"x-gco-backend": _lambda_backend("edge-proxy", [])},
                 ),
             },
@@ -405,7 +413,7 @@ def test_api_gateway_operations_render_security_integration_and_backend(tmp_path
             '<a id="op-post-api-v1-proxy"></a>'
         )
     ]
-    assert "- **Security:** `sigv4`" in get
+    assert "- **Security:** `sigv4`\n" in get
     assert "- **Integration:** `aws_proxy`, 29 s integration timeout" in get
     assert "**Backend**" in get
     assert (
@@ -418,6 +426,11 @@ def test_api_gateway_operations_render_security_integration_and_backend(tmp_path
     assert "    3. either — [`svc-a`](svc-a.md), [`svc-b`](svc-b.md)" in get
     assert "    4. after the fork" in get
     assert "not-a-hop" not in get
+
+    post = text[
+        text.index('<a id="op-post-api-v1-proxy"></a>') : text.index('<a id="op-get-mock"></a>')
+    ]
+    assert "- **Security:** `cognito` (scope `admin`, `write`), `sigv4`\n" in post
 
     stream = text[text.index('<a id="op-post-stream-proxy"></a>') : text.index("## Schemas")]
     assert "- **Security:**" not in stream, "a malformed security value is ignored"

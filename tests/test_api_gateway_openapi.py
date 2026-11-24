@@ -554,6 +554,12 @@ def test_security_and_responses(gen: ModuleType) -> None:
     schemes: dict[str, Any] = {}
     assert gen._security({"AuthorizationType": "AWS_IAM"}, schemes) == [{"sigv4": []}]
     assert gen._security({"AuthorizationType": "COGNITO_USER_POOLS"}, schemes) == [{"cognito": []}]
+    # A method's scopes become its security requirement's scope list.
+    scoped = {"AuthorizationType": "COGNITO_USER_POOLS", "AuthorizationScopes": ["a/read", "b"]}
+    assert gen._security(scoped, schemes) == [{"cognito": ["a/read", "b"]}]
+    for unreadable in ("a/read", [{"Ref": "Scope"}]):
+        with pytest.raises(gen.ApiGatewayDocumentError, match="unreadable AuthorizationScopes"):
+            gen._security({**scoped, "AuthorizationScopes": unreadable}, schemes)
     assert gen._security({"AuthorizationType": "NONE"}, schemes) == []
     assert gen._security({}, schemes) == []
     assert set(schemes) == {"sigv4", "cognito"}
@@ -570,6 +576,19 @@ def test_security_and_responses(gen: ModuleType) -> None:
     }
     with pytest.raises(gen.ApiGatewayDocumentError, match="declares no MethodResponses"):
         gen._responses({"MethodResponses": []}, False)
+
+    # A Cognito-authorized method's 401 and 403 describe the token and the
+    # Lambda's ownership check; an IAM method keeps the shared texts.
+    statuses = {"MethodResponses": [{"StatusCode": "401"}, {"StatusCode": "403"}]}
+    cognito = gen._responses({**statuses, "AuthorizationType": "COGNITO_USER_POOLS"}, False)
+    overrides = gen.AUTHORIZED_RESPONSE_DESCRIPTIONS["COGNITO_USER_POOLS"]
+    assert cognito == {status: {"description": overrides[status]} for status in ("401", "403")}
+    assert "access token" in cognito["401"]["description"]
+    assert "UserProfileOwnedByAnotherUser" in cognito["403"]["description"]
+    iam = gen._responses({**statuses, "AuthorizationType": "AWS_IAM"}, False)
+    assert iam == {
+        status: {"description": gen.RESPONSE_DESCRIPTIONS[status]} for status in ("401", "403")
+    }
 
 
 # ─── documents ───────────────────────────────────────────────────────────────
@@ -826,3 +845,19 @@ def test_committed_documents_match_a_fresh_synthesis(gen: ModuleType) -> None:
                     continue
                 assert (method.upper(), path) in gen.ROUTE_DOCS
                 assert operation["x-gco-backend"]["hops"] is not None
+
+
+def test_committed_studio_login_requires_the_access_token_scope(gen: ModuleType) -> None:
+    """``/studio/login`` takes an access token: its scope and its 403 are in the contract."""
+    from gco.stacks.constants import STUDIO_LOGIN_AUTHORIZATION_SCOPE
+
+    target = PROJECT_ROOT / "docs" / "openapi" / "api-gateway-global.json"
+    document = json.loads(target.read_text(encoding="utf-8"))
+    login = document["paths"]["/studio/login"]["get"]
+    assert login["security"] == [{"cognito": [STUDIO_LOGIN_AUTHORIZATION_SCOPE]}]
+    assert set(login["responses"]) == {"200", "202", "400", "401", "403", "404", "409", "500"}
+    overrides = gen.AUTHORIZED_RESPONSE_DESCRIPTIONS["COGNITO_USER_POOLS"]
+    assert login["responses"]["401"]["description"] == overrides["401"]
+    assert login["responses"]["403"]["description"] == overrides["403"]
+    scheme = document["components"]["securitySchemes"]["cognito"]["description"]
+    assert scheme.startswith("Access token issued by the Studio Cognito user pool")

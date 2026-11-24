@@ -2,7 +2,7 @@
   "components": {
     "securitySchemes": {
       "cognito": {
-        "description": "ID token issued by the Studio Cognito user pool, validated by the `<project>-studio-cognito-authorizer` authorizer.",
+        "description": "Access token issued by the Studio Cognito user pool, validated by the `<project>-studio-cognito-authorizer` authorizer. Each operation's security requirement lists the scopes it needs; a method with scopes refuses an ID token.",
         "in": "header",
         "name": "Authorization",
         "type": "apiKey",
@@ -955,7 +955,7 @@
     },
     "/studio/login": {
       "get": {
-        "description": "Authenticated with a Cognito ID token from the Studio user pool rather than SigV4. Returns a presigned SageMaker Studio URL for the caller's user profile.\n\n**Only when:** Present only when `analytics_environment.enabled` is true in cdk.json.",
+        "description": "Authenticated with a Cognito access token from the Studio user pool rather than SigV4: the method requires a scope, so an ID token is refused. Returns a presigned SageMaker Studio URL for the caller's user profile.\n\n**Only when:** Present only when `analytics_environment.enabled` is true in cdk.json.",
         "operationId": "getStudioLogin",
         "responses": {
           "200": {
@@ -968,7 +968,10 @@
             "description": "Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend."
           },
           "401": {
-            "description": "Unauthorized: the Cognito ID token is missing, expired or not from the Studio pool."
+            "description": "Unauthorized: the Cognito access token is missing, expired, not from the Studio pool, or lacks the method's scope. An ID token is refused here."
+          },
+          "403": {
+            "description": "Forbidden: the SageMaker Studio user profile of this name belongs to another Cognito user (`{\"error\": \"UserProfileOwnedByAnotherUser\"}`)."
           },
           "404": {
             "description": "Not found: the endpoint does not exist in this region or the path is outside the inference serving-path allowlist."
@@ -982,7 +985,9 @@
         },
         "security": [
           {
-            "cognito": []
+            "cognito": [
+              "aws.cognito.signin.user.admin"
+            ]
           }
         ],
         "summary": "Presigned SageMaker Studio login URL",

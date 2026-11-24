@@ -71,7 +71,7 @@ Any other call is allowed only for a principal of the deploying account whose id
 
 - **Type:** apiKey — header `Authorization` (cognito_user_pools)
 
-ID token issued by the Studio Cognito user pool, validated by the `<project>-studio-cognito-authorizer` authorizer.
+Access token issued by the Studio Cognito user pool, validated by the `<project>-studio-cognito-authorizer` authorizer. Each operation's security requirement lists the scopes it needs; a method with scopes refuses an ID token.
 
 ### `sigv4`
 
@@ -496,13 +496,13 @@ Unauthenticated MOCK integration returning an empty 200 body: the Cognito hosted
 
 ### `GET /studio/login`
 
-Authenticated with a Cognito ID token from the Studio user pool rather than SigV4. Returns a presigned SageMaker Studio URL for the caller's user profile.
+Authenticated with a Cognito access token from the Studio user pool rather than SigV4: the method requires a scope, so an ID token is refused. Returns a presigned SageMaker Studio URL for the caller's user profile.
 
 **Only when:** Present only when `analytics_environment.enabled` is true in cdk.json.
 
 - **Operation ID:** `getStudioLogin`
 - **Tags:** studio
-- **Security:** `cognito`
+- **Security:** `cognito` (scope `aws.cognito.signin.user.admin`)
 - **Integration:** `aws_proxy`, 29 s integration timeout
 
 **Backend**
@@ -517,7 +517,8 @@ Authenticated with a Cognito ID token from the Studio user pool rather than SigV
 | `200` | Success; the backend's response is returned unchanged. | — |
 | `202` | Accepted: the caller's SageMaker Studio user profile is still being created or updated (`{"status": "provisioning"}`); retry until the response is 200. | — |
 | `400` | Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend. | — |
-| `401` | Unauthorized: the Cognito ID token is missing, expired or not from the Studio pool. | — |
+| `401` | Unauthorized: the Cognito access token is missing, expired, not from the Studio pool, or lacks the method's scope. An ID token is refused here. | — |
+| `403` | Forbidden: the SageMaker Studio user profile of this name belongs to another Cognito user (`{"error": "UserProfileOwnedByAnotherUser"}`). | — |
 | `404` | Not found: the endpoint does not exist in this region or the path is outside the inference serving-path allowlist. | — |
 | `409` | Conflict: the caller's SageMaker Studio user profile is in a failed state the backend cannot recover from (`{"error": "UserProfileFailed"}`); an operator must delete it, and the next login creates it again. | — |
 | `500` | Internal error in the proxy Lambda or the backend. | — |
