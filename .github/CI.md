@@ -645,8 +645,8 @@ The console output shows each surface's drift inline. To trigger the exact workf
 #### Enabling AWS-backed dependency checks
 
 Several dependency surfaces require authoritative AWS APIs: EKS add-on and
-cluster versions, Aurora engine versions, EMR Serverless releases, Bedrock model
-profiles, the enabled-Region EC2 accelerator catalog, and the AWS PCS node
+cluster versions, Aurora engine versions, ElastiCache Valkey engine versions,
+EMR Serverless releases, Bedrock model profiles, the enabled-Region EC2 accelerator catalog, and the AWS PCS node
 lifecycle script and AMI catalogs. Without credentials,
 each online surface records an explicit skip; all public and deterministic
 offline checks continue. The accelerator validator always checks NodePool policy
@@ -697,6 +697,7 @@ To turn the check on without introducing long-lived access keys, configure a Git
          "ec2:DescribeRegions",
          "eks:DescribeAddonVersions",
          "eks:DescribeClusterVersions",
+         "elasticache:DescribeCacheEngineVersions",
          "elasticmapreduce:ListReleaseLabels",
          "rds:DescribeDBEngineVersions",
          "ssm:GetParametersByPath",
