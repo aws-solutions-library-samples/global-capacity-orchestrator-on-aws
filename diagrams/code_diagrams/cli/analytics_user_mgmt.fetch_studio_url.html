@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-23T16:48:27Z">
-        <meta name="gco-source-commit" content="1fcc830f8bfc0e870b022382a1506c682882515c">
-        <meta name="gco-flow-digest" content="90355f33eb11ea22">
+        <meta name="gco-generated-at" content="2026-11-24T14:05:08Z">
+        <meta name="gco-source-commit" content="9d3160a1b68d2fdc13355b73df0e30f2af4bc047">
+        <meta name="gco-flow-digest" content="9300591d275f2efe">
         <title>Studio presigned-URL fetch (gco analytics studio login)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,7 +208,7 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op42=>operation: "GET ``{api_base}/studio/login`` with the Cognito ID token.\n\n    Returns ``(url, expires_in, correlation_id)`` on success. Raises\n    :class:`urllib.error.HTTPError` / :class:`urllib.error.URLError`\n    on transport or HTTP failure; raises ``ValueError`` on malformed\n    response bodies (unexpected JSON shape / missing ``url`` key), or\n    on non-``https://`` ``api_base`` values (guards urllib's\n    ``file://`` / ``ftp://`` scheme support).\n    "
+        <div><textarea id="code" style="width: 100%;" rows="11">op42=>operation: "GET ``{api_base}/studio/login`` with the Cognito access token.\n\n    The route's authorizer requires a scope, so it accepts an access token\n    and refuses an ID token with a 401.\n\n    Returns ``(url, expires_in, correlation_id)`` on success. Raises\n    :class:`urllib.error.HTTPError` / :class:`urllib.error.URLError`\n    on transport or HTTP failure; raises ``ValueError`` on malformed\n    response bodies (unexpected JSON shape / missing ``url`` key), or\n    on non-``https://`` ``api_base`` values (guards urllib's\n    ``file://`` / ``ftp://`` scheme support).\n    "
 op44=>operation: import email.message
 op46=>operation: import json as _json
 op48=>operation: import urllib.error
@@ -218,7 +218,7 @@ op54=>operation: parsed = urllib.parse.urlparse(api_base)
 cond57=>operation: raise ValueError(f'api_base must use https:// scheme (got {parsed.scheme!r}). This guard rejects file:// / ftp:// schemes that urllib would otherwise follow.') if  parsed.scheme != 'https'
 cond68=>operation: raise ValueError(f'api_base is missing a hostname: {api_base!r}') if  not parsed.netloc
 op78=>operation: login_url = api_base.rstrip('/') + '/studio/login'
-op80=>operation: request = urllib.request.Request(login_url, headers={'Authorization': id_token, 'Accept': 'application/json'}, method='GET')
+op80=>operation: request = urllib.request.Request(login_url, headers={'Authorization': access_token, 'Accept': 'application/json'}, method='GET')
 op82=>operation: with urllib.request.urlopen(request, timeout=30) as response:
     status = int(response.status)
     body = response.read().decode('utf-8')
@@ -273,17 +273,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-23T16:48:27Z -->
-        <!-- Generated from Git commit: 1fcc830f8bfc0e870b022382a1506c682882515c -->
+        <!-- Generated at (UTC): 2026-11-24T14:05:08Z -->
+        <!-- Generated from Git commit: 9d3160a1b68d2fdc13355b73df0e30f2af4bc047 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-23T16:48:27Z">2026-11-23T16:48:27Z</time>
+            Generated at (UTC): <time datetime="2026-11-24T14:05:08Z">2026-11-24T14:05:08Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>1fcc830f8bfc0e870b022382a1506c682882515c</code>
+            Source commit: <code>9d3160a1b68d2fdc13355b73df0e30f2af4bc047</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>90355f33eb11ea22</code>
+            Flow content SHA-256: <code>9300591d275f2efe</code>
           </p>
           <div id="canvas"></div>
         </div>
