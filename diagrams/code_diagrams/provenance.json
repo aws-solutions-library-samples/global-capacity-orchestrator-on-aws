@@ -117,9 +117,9 @@
       "source_commit": "db3de8225c3e025f659096135ffaa4ea72d25097"
     },
     "gco/stacks/analytics_stack.py": {
-      "digest": "8e5607432dda9ca4ff0693e30eea1635f8faebee7120b33f1cd72991664d6ac5",
-      "generated_at": "2026-11-24T19:00:27Z",
-      "source_commit": "21c18ee43b7d5814a559de944c67a84889dff8d5"
+      "digest": "9a27d75fdca2d6ee2a906172848717f5ae9b745ded8b89589698781c566f10c1",
+      "generated_at": "2026-11-24T22:25:50Z",
+      "source_commit": "afbf93e626d691e7aa49495693b396b7ec7188ac"
     },
     "gco/stacks/api_gateway_global_stack.py": {
       "digest": "ec5b4ea90a3c36d957bcca90076204fa3623e4040abf031cb7b495b9346e2770",
@@ -142,9 +142,9 @@
       "source_commit": "c904dd4dd0b819014ff781aa5d888d6c579a8868"
     },
     "gco/stacks/regional_stack.py": {
-      "digest": "3b085d7da80f97fc17648b8329c51cba33c908191e2d7723f09f8c050d435fd6",
-      "generated_at": "2026-11-24T13:19:24Z",
-      "source_commit": "d15bfff96330b5e27dac1c6e91d3fd0096d37722"
+      "digest": "5fcd4cb714ce9abe66f9f309dbcfbdc84fa5382e0d98f788a27b1f7384b8434a",
+      "generated_at": "2026-11-24T22:25:50Z",
+      "source_commit": "afbf93e626d691e7aa49495693b396b7ec7188ac"
     },
     "gco_mcp/audit.py": {
       "digest": "1f59f38629f4afb688d78240715f616049e222beaae38d5644da14b196e00af5",
@@ -197,14 +197,14 @@
       "source_commit": "b6581899649d40769798e294f2ea42237f493c03"
     },
     "lambda/analytics-cleanup/handler.py": {
-      "digest": "8d8c9369bf58a544c1114318c0a24d3c0fb7ef79d9143b0e2a9bd37b21b3a1a2",
-      "generated_at": "2026-11-18T16:59:04Z",
-      "source_commit": "3d3ba1381c5c16d0c44942f3b542591f571c3f1f"
+      "digest": "c50c37b3444ed039cc29c0697f066eb74e4782fc41d151e1044756a3e690b566",
+      "generated_at": "2026-11-24T22:25:50Z",
+      "source_commit": "afbf93e626d691e7aa49495693b396b7ec7188ac"
     },
     "lambda/analytics-presigned-url/handler.py": {
-      "digest": "6ab2b59145fa3621e3edc1030788713b24e62d731c50a2f47a31c7f6ae411f32",
-      "generated_at": "2026-11-24T19:00:27Z",
-      "source_commit": "21c18ee43b7d5814a559de944c67a84889dff8d5"
+      "digest": "46289ad4d013817f48a24025803c972e460e89d58a3791a1d3dd0629743513de",
+      "generated_at": "2026-11-24T22:25:50Z",
+      "source_commit": "afbf93e626d691e7aa49495693b396b7ec7188ac"
     },
     "lambda/api-gateway-proxy/handler.py": {
       "digest": "ea050c7f0fd20212940b536648e0723316a975f063d2e327a47a28a6251a8a9a",

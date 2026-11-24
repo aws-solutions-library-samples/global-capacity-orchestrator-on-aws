@@ -83,8 +83,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-24T19:00:27Z
-# Generated from Git commit: 21c18ee43b7d5814a559de944c67a84889dff8d5
+# Generated at (UTC): 2026-11-24T22:25:50Z
+# Generated from Git commit: afbf93e626d691e7aa49495693b396b7ec7188ac
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/analytics-presigned-url/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/analytics-presigned-url/handler.lambda_handler.png``)

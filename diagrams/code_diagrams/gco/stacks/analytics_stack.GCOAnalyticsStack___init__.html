@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-24T19:00:27Z">
-        <meta name="gco-source-commit" content="21c18ee43b7d5814a559de944c67a84889dff8d5">
-        <meta name="gco-flow-digest" content="fdf3538ea0c0ce34">
+        <meta name="gco-generated-at" content="2026-11-24T22:25:50Z">
+        <meta name="gco-source-commit" content="afbf93e626d691e7aa49495693b396b7ec7188ac">
+        <meta name="gco-flow-digest" content="0f4eb164a74bb2fc">
         <title>Analytics stack constructor (KMS, VPC, EFS, Studio, EMR, Cognito)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,48 +208,52 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1084=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1086=>operation: self.config = config
-op1088=>operation: self.project_name = config.get_project_name()
-op1090=>operation: self.api_gateway_secret_arn = api_gateway_secret_arn
-op1092=>operation: cfg = config.get_analytics_config()
-op1094=>operation: self.canvas_enabled: bool = bool(cfg['canvas']['enabled'])
-op1096=>operation: self.efs_removal: RemovalPolicy = _parse_removal(cfg['efs']['removal_policy'])
-op1098=>operation: self.cognito_removal: RemovalPolicy = _parse_removal(cfg['cognito']['removal_policy'])
-op1100=>operation: self._cognito_domain_prefix_override: str | None = cfg['cognito'].get('domain_prefix')
-sub1102=>subroutine: self._create_kms_key()
-sub1104=>subroutine: self._create_vpc_and_endpoints()
-sub1106=>subroutine: self._create_access_logs_bucket()
-sub1108=>subroutine: self._create_studio_only_bucket()
-sub1110=>subroutine: self._create_studio_efs()
-sub1112=>subroutine: self._create_execution_role_and_grants()
-sub1114=>subroutine: self._grant_sagemaker_role_on_cluster_shared_bucket()
-sub1116=>subroutine: self._create_studio_domain()
-sub1118=>subroutine: self._create_emr_app()
-sub1120=>subroutine: self._create_cognito_pool()
-sub1122=>subroutine: self._create_presigned_url_lambda()
-sub1124=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub251=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op253=>operation: self.config = config
+op255=>operation: self.project_name = config.get_project_name()
+op257=>operation: self.api_gateway_secret_arn = api_gateway_secret_arn
+op259=>operation: cfg = config.get_analytics_config()
+op261=>operation: self.canvas_enabled: bool = bool(cfg['canvas']['enabled'])
+op263=>operation: self.efs_removal: RemovalPolicy = _parse_removal(cfg['efs']['removal_policy'])
+op265=>operation: self.cognito_removal: RemovalPolicy = _parse_removal(cfg['cognito']['removal_policy'])
+op267=>operation: self._cognito_domain_prefix_override: str | None = cfg['cognito'].get('domain_prefix')
+op269=>operation: raw_disable_backups = self.node.try_get_context(LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT)
+op271=>operation: self.disable_efs_automatic_backups: bool = raw_disable_backups is not None and parse_bool_flag(raw_disable_backups.strip() if isinstance(raw_disable_backups, str) else raw_disable_backups, LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT)
+sub273=>subroutine: self._create_kms_key()
+sub275=>subroutine: self._create_vpc_and_endpoints()
+sub277=>subroutine: self._create_access_logs_bucket()
+sub279=>subroutine: self._create_studio_only_bucket()
+sub281=>subroutine: self._create_studio_efs()
+sub283=>subroutine: self._create_execution_role_and_grants()
+sub285=>subroutine: self._grant_sagemaker_role_on_cluster_shared_bucket()
+sub287=>subroutine: self._create_studio_domain()
+sub289=>subroutine: self._create_emr_app()
+sub291=>subroutine: self._create_cognito_pool()
+sub293=>subroutine: self._create_presigned_url_lambda()
+sub295=>subroutine: self._apply_nag_suppressions()
 
-sub1084->op1086
-op1086->op1088
-op1088->op1090
-op1090->op1092
-op1092->op1094
-op1094->op1096
-op1096->op1098
-op1098->op1100
-op1100->sub1102
-sub1102->sub1104
-sub1104->sub1106
-sub1106->sub1108
-sub1108->sub1110
-sub1110->sub1112
-sub1112->sub1114
-sub1114->sub1116
-sub1116->sub1118
-sub1118->sub1120
-sub1120->sub1122
-sub1122->sub1124
+sub251->op253
+op253->op255
+op255->op257
+op257->op259
+op259->op261
+op261->op263
+op263->op265
+op265->op267
+op267->op269
+op269->op271
+op271->sub273
+sub273->sub275
+sub275->sub277
+sub277->sub279
+sub279->sub281
+sub281->sub283
+sub283->sub285
+sub285->sub287
+sub287->sub289
+sub289->sub291
+sub291->sub293
+sub293->sub295
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -259,17 +263,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-24T19:00:27Z -->
-        <!-- Generated from Git commit: 21c18ee43b7d5814a559de944c67a84889dff8d5 -->
+        <!-- Generated at (UTC): 2026-11-24T22:25:50Z -->
+        <!-- Generated from Git commit: afbf93e626d691e7aa49495693b396b7ec7188ac -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-24T19:00:27Z">2026-11-24T19:00:27Z</time>
+            Generated at (UTC): <time datetime="2026-11-24T22:25:50Z">2026-11-24T22:25:50Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>21c18ee43b7d5814a559de944c67a84889dff8d5</code>
+            Source commit: <code>afbf93e626d691e7aa49495693b396b7ec7188ac</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>fdf3538ea0c0ce34</code>
+            Flow content SHA-256: <code>0f4eb164a74bb2fc</code>
           </p>
           <div id="canvas"></div>
         </div>

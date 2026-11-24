@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
-        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
-        <meta name="gco-flow-digest" content="3c8a14974eb8340e">
+        <meta name="gco-generated-at" content="2026-11-24T22:25:50Z">
+        <meta name="gco-source-commit" content="afbf93e626d691e7aa49495693b396b7ec7188ac">
+        <meta name="gco-flow-digest" content="f2ccc0b09cba5874">
         <title>Analytics Cleanup Lambda (stack-delete drain)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -232,7 +232,7 @@ sub72=>subroutine: errors.extend(profile_errors)
 sub74=>subroutine: critical_errors.extend(profile_errors)
 cond77=>condition: if efs_id
 sub81=>subroutine: _delete_efs_resource_policy(region, efs_id)
-sub83=>subroutine: errors.extend(_delete_access_points(region, efs_id))
+sub83=>subroutine: errors.extend(_delete_access_points(region, efs_id, keep=os.environ.get('HOME_ACCESS_POINT_ID', '')))
 op88=>operation: sm_efs_id = _get_sagemaker_home_efs_id(region, domain_id)
 cond91=>operation: _delete_efs_resource_policy(region, sm_efs_id) if  sm_efs_id
 sub101=>subroutine: errors.extend(_delete_sagemaker_managed_efs(region, domain_id))
@@ -289,17 +289,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
-        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
+        <!-- Generated at (UTC): 2026-11-24T22:25:50Z -->
+        <!-- Generated from Git commit: afbf93e626d691e7aa49495693b396b7ec7188ac -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
+            Generated at (UTC): <time datetime="2026-11-24T22:25:50Z">2026-11-24T22:25:50Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
+            Source commit: <code>afbf93e626d691e7aa49495693b396b7ec7188ac</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>3c8a14974eb8340e</code>
+            Flow content SHA-256: <code>f2ccc0b09cba5874</code>
           </p>
           <div id="canvas"></div>
         </div>
