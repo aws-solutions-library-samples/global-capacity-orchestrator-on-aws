@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .actions import (
+    action_analytics,
     action_api_lifecycle,
     action_baseline,
     action_central_queue_lifecycle,
@@ -154,6 +155,13 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "cost-monitor span",
             ("topology",),
             action_tracing,
+        ),
+        ActionDefinition(
+            "analytics",
+            "Prove Studio sign-in, profile ownership, the EFS home and user removal in the "
+            "analytics environment",
+            ("topology",),
+            action_analytics,
         ),
         # The two cluster-facing checks run after every workload action on
         # purpose: a zero restart count and an intact policy posture mean more

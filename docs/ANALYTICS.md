@@ -1204,6 +1204,11 @@ and what the SageMaker documentation says Studio does with it:
   mounts through it), and the Lambda no longer creates them. The ones left
   from earlier releases go with the stack, or by hand as below.
 
+Every [live release validation](LIVE_RELEASE_VALIDATION.md) run proves this
+path: its `analytics` action starts a JupyterLab space with `Studio_EFS`
+attached on a profile the Lambda created and writes into the directory as
+the notebook user.
+
 ### Default removal policy: DESTROY
 
 By default, `Studio_EFS` uses `RemovalPolicy.DESTROY`. This means:

@@ -221,6 +221,9 @@ class TestActionRegistry:
                 # Drives API traffic through the deployed services and reads
                 # their spans back from Transaction Search (topology first).
                 "tracing",
+                # Signs users in to the deployed Studio domain and starts an
+                # app on Studio_EFS; nothing to prove once the stack is gone.
+                "analytics",
             }
         )
 

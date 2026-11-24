@@ -411,6 +411,7 @@ OTHER_CONTEXT_KEYS = frozenset(
         "hyperpod",
         "hyperpod_regions",
         "hyperpod_overrides",
+        "analytics_environment_overrides",
         "resource_quota",
         "feature_enabled_overrides",
         "helm_enabled_overrides",
@@ -550,8 +551,8 @@ def _deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str
     return merged
 
 
-def parse_tracing_overrides(raw: object) -> dict[str, Any]:
-    """Parse the ``tracing_overrides`` context value into a mapping.
+def _parse_json_object_context(key: str, raw: object) -> dict[str, Any]:
+    """Parse a run-scoped context value that carries a JSON object.
 
     Accepts a JSON object string (the only shape ``cdk --context`` can carry)
     or a mapping (cdk.json-style); ``None`` and blank strings mean no
@@ -569,18 +570,53 @@ def parse_tracing_overrides(raw: object) -> dict[str, Any]:
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ConfigValidationError(
-                f"{TRACING_OVERRIDES_CONTEXT_KEY} must be a JSON object: {exc}"
-            ) from exc
+            raise ConfigValidationError(f"{key} must be a JSON object: {exc}") from exc
         if not isinstance(parsed, dict):
-            raise ConfigValidationError(
-                f"{TRACING_OVERRIDES_CONTEXT_KEY} must be a JSON object, got {type(parsed).__name__}"
-            )
+            raise ConfigValidationError(f"{key} must be a JSON object, got {type(parsed).__name__}")
         return parsed
     raise ConfigValidationError(
-        f"{TRACING_OVERRIDES_CONTEXT_KEY} must be a JSON object string or an object, "
-        f"got {type(raw).__name__}"
+        f"{key} must be a JSON object string or an object, got {type(raw).__name__}"
     )
+
+
+def parse_tracing_overrides(raw: object) -> dict[str, Any]:
+    """Parse the ``tracing_overrides`` context value into a mapping.
+
+    See :func:`_parse_json_object_context` for the accepted shapes.
+    """
+    return _parse_json_object_context(TRACING_OVERRIDES_CONTEXT_KEY, raw)
+
+
+#: Run-scoped CDK context key carrying a JSON object deep-merged over the
+#: ``analytics_environment`` block for one deploy (``cdk deploy --context
+#: analytics_environment_overrides='{"enabled": true}'``), the analytics
+#: sibling of ``tracing_overrides``. The live release harness, whose preflight
+#: requires a clean worktree, deploys the analytics environment this way.
+#: Unlike the other overrides it can add a whole stack, ``<project>-analytics``,
+#: so every CDK command of the run must carry it: ``cdk list`` and a destroy
+#: without it do not see that stack.
+ANALYTICS_OVERRIDES_CONTEXT_KEY = "analytics_environment_overrides"
+
+
+def parse_analytics_environment_overrides(raw: object) -> dict[str, Any]:
+    """Parse the ``analytics_environment_overrides`` context value into a mapping.
+
+    See :func:`_parse_json_object_context` for the accepted shapes.
+    """
+    return _parse_json_object_context(ANALYTICS_OVERRIDES_CONTEXT_KEY, raw)
+
+
+def apply_analytics_environment_overrides(raw: object, overrides: object) -> object:
+    """``raw`` (the ``analytics_environment`` block, possibly ``None``) with the overrides merged in.
+
+    Only an object block, or an absent one, takes them; any other value is
+    returned as it is, and the configuration loader then treats it like an
+    absent block.
+    """
+    parsed = parse_analytics_environment_overrides(overrides)
+    if not parsed or (raw is not None and not isinstance(raw, dict)):
+        return raw
+    return _deep_merge(raw or {}, parsed)
 
 
 def resolve_tracing_config(raw: object, overrides: object = None) -> dict[str, Any]:
@@ -2113,7 +2149,7 @@ class ConfigLoader:
           are passed verbatim to CDK's ``RemovalPolicy`` lookup by the
           consumer).
         """
-        analytics_ctx = self.app.node.try_get_context("analytics_environment")
+        analytics_ctx = self._analytics_environment_context()
         if not isinstance(analytics_ctx, dict):
             # Block is absent or malformed — defaults apply, nothing to validate.
             return
@@ -3448,7 +3484,7 @@ class ConfigLoader:
             "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
             "efs": {"removal_policy": "destroy"},
         }
-        analytics_ctx = self.app.node.try_get_context("analytics_environment")
+        analytics_ctx = self._analytics_environment_context()
         analytics_config: dict[str, Any] = analytics_ctx if isinstance(analytics_ctx, dict) else {}
         merged_config: dict[str, Any] = {**default_config, **analytics_config}
 
@@ -3461,6 +3497,18 @@ class ConfigLoader:
                 merged_config[sub_block] = {**default_sub, **override}
 
         return merged_config
+
+    def _analytics_environment_context(self) -> object:
+        """The ``analytics_environment`` block with the run-scoped overrides merged in.
+
+        ``analytics_environment_overrides`` (a JSON object) is deep-merged over
+        the cdk.json block, so a validation harness can deploy the analytics
+        environment without editing cdk.json.
+        """
+        return apply_analytics_environment_overrides(
+            self.app.node.try_get_context("analytics_environment"),
+            self.app.node.try_get_context(ANALYTICS_OVERRIDES_CONTEXT_KEY),
+        )
 
     def get_analytics_enabled(self) -> bool:
         """Return whether the analytics environment stack is enabled.

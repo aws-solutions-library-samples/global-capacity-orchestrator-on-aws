@@ -30,6 +30,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from scripts.live_release_validation import constants, protected
+from scripts.live_release_validation.cleanup import analytics as cleanup_analytics
 from scripts.live_release_validation.cleanup import ecr as cleanup_ecr
 from scripts.live_release_validation.cleanup import log_groups as cleanup_log_groups
 from scripts.live_release_validation.cleanup import retained as cleanup_retained
@@ -3181,6 +3182,7 @@ class TestRetainedResourceCleanup:
             "_cleanup_new_ecr_repositories": MagicMock(return_value={"repositories": []}),
             "_schedule_retained_kms_keys": MagicMock(return_value={"keys": []}),
             "_wait_for_pcs_nodes_terminated": MagicMock(return_value={"regions": {}}),
+            "cleanup_analytics_residue": MagicMock(return_value={"errors": []}),
             "_restore_transaction_search": MagicMock(return_value={"regions": {}, "errors": []}),
         }
         fakes.update(overrides)
@@ -3199,6 +3201,7 @@ class TestRetainedResourceCleanup:
         assert result["ecr_repositories"] == {"repositories": []}
         assert result["kms"] == {"keys": []}
         assert result["pcs_nodes"] == {"regions": {}}
+        assert result["analytics"] == {"errors": []}
         assert result["transaction_search"] == {"regions": {}, "errors": []}
         assert result["started_at"] <= result["ended_at"]
         assert ctx.checkpoint.state["retained_cleanup_attempts"] == [result]
@@ -3210,12 +3213,18 @@ class TestRetainedResourceCleanup:
         ctx = _context()
         log_details = {"log_groups": [{"name": "blocked"}], "errors": [{"phase": "log-groups"}]}
         restore_details = {"regions": {"us-east-1": {"error": "denied"}}, "errors": ["denied"]}
+        analytics_details = {"deleted_lifecycle_configs": [], "errors": ["home EFS survived"]}
         fakes = self._fakes(
             _cleanup_owned_log_groups=MagicMock(
                 side_effect=constants._LogGroupCleanupError("logs failed", log_details)
             ),
             _cleanup_new_ecr_images=MagicMock(side_effect=RuntimeError("image drift")),
             _schedule_retained_kms_keys=MagicMock(side_effect=ValueError("kms drift")),
+            cleanup_analytics_residue=MagicMock(
+                side_effect=cleanup_analytics.AnalyticsResidueError(
+                    "home EFS survived", analytics_details
+                )
+            ),
             _restore_transaction_search=MagicMock(
                 side_effect=cleanup_transaction_search.TransactionSearchRestoreError(
                     "restore failed", restore_details
@@ -3231,6 +3240,8 @@ class TestRetainedResourceCleanup:
         assert attempt["cloudwatch_logs"] is not log_details
         assert "ecr_images" not in attempt
         assert attempt["ecr_repositories"] == {"repositories": []}
+        assert attempt["analytics"] == analytics_details
+        assert attempt["analytics"] is not analytics_details
         # The Transaction Search phase still runs last and keeps its partial evidence.
         assert attempt["transaction_search"] == restore_details
         assert attempt["transaction_search"] is not restore_details
@@ -3238,6 +3249,7 @@ class TestRetainedResourceCleanup:
             {"phase": "cloudwatch-logs", "error": "_LogGroupCleanupError: logs failed"},
             {"phase": "ecr-images", "error": "RuntimeError: image drift"},
             {"phase": "kms", "error": "ValueError: kms drift"},
+            {"phase": "analytics", "error": "AnalyticsResidueError: home EFS survived"},
             {
                 "phase": "transaction-search",
                 "error": "TransactionSearchRestoreError: restore failed",
@@ -3259,6 +3271,8 @@ class TestRetainedResourceCleanup:
             _wait_for_pcs_nodes_terminated=MagicMock(
                 side_effect=RuntimeError("DescribeInstances denied")
             ),
+            # A failure that is not the sweep's own keeps no analytics evidence.
+            cleanup_analytics_residue=MagicMock(side_effect=RuntimeError("SageMaker denied")),
             _restore_transaction_search=MagicMock(side_effect=RuntimeError("no baseline")),
         )
 
@@ -3271,11 +3285,13 @@ class TestRetainedResourceCleanup:
         attempt = ctx.checkpoint.state["retained_cleanup_attempts"][0]
         assert "cloudwatch_logs" not in attempt
         assert "pcs_nodes" not in attempt
+        assert "analytics" not in attempt
         assert "transaction_search" not in attempt
         assert [error["phase"] for error in attempt["errors"]] == [
             "cloudwatch-logs",
             "ecr-repositories",
             "pcs-nodes",
+            "analytics",
             "transaction-search",
         ]
         assert {"phase": "pcs-nodes", "error": "RuntimeError: DescribeInstances denied"} in attempt[

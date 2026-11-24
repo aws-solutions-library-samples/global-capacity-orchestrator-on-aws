@@ -19,6 +19,7 @@ See ``scripts/live_release_validation/README.md`` for when to add a new
 action versus extending an existing one.
 """
 
+from .analytics import action_analytics
 from .baseline import action_baseline
 from .central_queue import action_central_queue_lifecycle
 from .convergence import action_convergence
@@ -41,6 +42,7 @@ from .topology import action_topology
 from .tracing import action_tracing
 
 __all__ = [
+    "action_analytics",
     "action_api_lifecycle",
     "action_baseline",
     "action_central_queue_lifecycle",

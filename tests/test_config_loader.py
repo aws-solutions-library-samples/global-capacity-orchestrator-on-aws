@@ -2692,6 +2692,65 @@ class TestAnalyticsEnvironmentConfig:
         ):
             ConfigLoader(app)
 
+    @pytest.mark.parametrize(
+        "overrides", ['{"enabled": true}', {"enabled": True}, ' {"enabled": true} ']
+    )
+    def test_run_scoped_overrides_turn_the_environment_on(self, valid_context, overrides):
+        """``analytics_environment_overrides`` deploys the stack without editing cdk.json."""
+        valid_context["analytics_environment"] = {
+            "enabled": False,
+            "cognito": {"removal_policy": "retain"},
+        }
+        valid_context["analytics_environment_overrides"] = overrides
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_analytics_enabled() is True
+        # The block's other settings survive the deep merge.
+        assert config.get_analytics_config()["cognito"] == {
+            "domain_prefix": None,
+            "removal_policy": "retain",
+        }
+
+    def test_run_scoped_overrides_apply_without_a_block(self):
+        app = MockApp({**minimal_context(), "analytics_environment_overrides": '{"enabled": true}'})
+        assert ConfigLoader(app).get_analytics_enabled() is True
+
+    @pytest.mark.parametrize("overrides", [None, "", "   ", {}])
+    def test_empty_run_scoped_overrides_change_nothing(self, valid_context, overrides):
+        valid_context["analytics_environment"] = {"enabled": False}
+        valid_context["analytics_environment_overrides"] = overrides
+        assert ConfigLoader(MockApp(valid_context)).get_analytics_enabled() is False
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ("{enabled: true}", "analytics_environment_overrides must be a JSON object: "),
+            ("[1]", "analytics_environment_overrides must be a JSON object, got list"),
+            (
+                7,
+                "analytics_environment_overrides must be a JSON object string or an object, "
+                "got int",
+            ),
+        ],
+    )
+    def test_malformed_run_scoped_overrides_fail_at_synth(self, valid_context, overrides, message):
+        valid_context["analytics_environment_overrides"] = overrides
+        with pytest.raises(ConfigValidationError) as exc_info:
+            ConfigLoader(MockApp(valid_context))
+        assert message in str(exc_info.value)
+
+    def test_run_scoped_overrides_are_validated_with_the_block(self, valid_context):
+        valid_context["analytics_environment_overrides"] = '{"enabled": "yes"}'
+        with pytest.raises(
+            ConfigValidationError, match=re.escape("analytics_environment.enabled must be a bool")
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_a_scalar_block_takes_no_overrides(self):
+        from gco.config.config_loader import apply_analytics_environment_overrides
+
+        assert apply_analytics_environment_overrides("invalid", '{"enabled": true}') == "invalid"
+        assert apply_analytics_environment_overrides(None, None) is None
+
     def test_non_dict_analytics_environment_context_is_rejected(self):
         """A scalar where the block belongs fails instead of reading as the defaults."""
         app = MockApp({**minimal_context(), "analytics_environment": "invalid"})
