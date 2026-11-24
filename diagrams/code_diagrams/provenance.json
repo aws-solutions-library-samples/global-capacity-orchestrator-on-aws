@@ -17,9 +17,9 @@
       "source_commit": "e192bb01bb7807a52e11e262c0cb44173133f894"
     },
     "cli/analytics_user_mgmt.py": {
-      "digest": "e4ef0e368e1b7d6e9a50edd498c5c34baaea0f2c747cbaf5ea88305be70f9009",
-      "generated_at": "2026-11-24T14:05:08Z",
-      "source_commit": "9d3160a1b68d2fdc13355b73df0e30f2af4bc047"
+      "digest": "3ae7cf1de18df54311d0d49219908e2c5bba300f6ed7836d493d7c1f32ba6dba",
+      "generated_at": "2026-11-24T19:00:27Z",
+      "source_commit": "21c18ee43b7d5814a559de944c67a84889dff8d5"
     },
     "cli/commands/autopilot_cmd.py": {
       "digest": "d7d53e45018c903a9a6905592f76bd3ecbe80f0dd0103091684a03898b4f5033",
@@ -42,9 +42,9 @@
       "source_commit": "db3de8225c3e025f659096135ffaa4ea72d25097"
     },
     "cli/stacks.py": {
-      "digest": "83bd0af8098fd5a5b808d44ec126002dbbd09185c5f1b0b2357ad894c3b6b973",
-      "generated_at": "2026-11-24T15:43:05Z",
-      "source_commit": "f26802d206d23bfe5018716ec2baed16f06a1c54"
+      "digest": "9aafc12882eb37c9155712380d5c24677bd5870a749bf758a0a1e9ed6dfdb443",
+      "generated_at": "2026-11-24T19:00:27Z",
+      "source_commit": "21c18ee43b7d5814a559de944c67a84889dff8d5"
     },
     "cli/upgrade.py": {
       "digest": "99b3e9d70f26d76bb03fcd7490046147bc370a0ea6a132adc86c683b11be94be",
@@ -117,9 +117,9 @@
       "source_commit": "db3de8225c3e025f659096135ffaa4ea72d25097"
     },
     "gco/stacks/analytics_stack.py": {
-      "digest": "12cb2eb0ea689173c96bdae1579001cb733fdce30bd9b4a894735797679e8fcb",
-      "generated_at": "2026-11-23T16:48:27Z",
-      "source_commit": "1fcc830f8bfc0e870b022382a1506c682882515c"
+      "digest": "8e5607432dda9ca4ff0693e30eea1635f8faebee7120b33f1cd72991664d6ac5",
+      "generated_at": "2026-11-24T19:00:27Z",
+      "source_commit": "21c18ee43b7d5814a559de944c67a84889dff8d5"
     },
     "gco/stacks/api_gateway_global_stack.py": {
       "digest": "ec5b4ea90a3c36d957bcca90076204fa3623e4040abf031cb7b495b9346e2770",
@@ -202,9 +202,9 @@
       "source_commit": "3d3ba1381c5c16d0c44942f3b542591f571c3f1f"
     },
     "lambda/analytics-presigned-url/handler.py": {
-      "digest": "a28bbc43cb425caee0bc4b6603812c05439e493d39ebb0bb3e7dba6d62c881de",
-      "generated_at": "2026-11-24T14:05:08Z",
-      "source_commit": "9d3160a1b68d2fdc13355b73df0e30f2af4bc047"
+      "digest": "6ab2b59145fa3621e3edc1030788713b24e62d731c50a2f47a31c7f6ae411f32",
+      "generated_at": "2026-11-24T19:00:27Z",
+      "source_commit": "21c18ee43b7d5814a559de944c67a84889dff8d5"
     },
     "lambda/api-gateway-proxy/handler.py": {
       "digest": "ea050c7f0fd20212940b536648e0723316a975f063d2e327a47a28a6251a8a9a",

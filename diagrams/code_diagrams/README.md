@@ -1,9 +1,9 @@
 # GCO Code Flowcharts
 
-<!-- Generated at (UTC): 2026-11-24T15:43:05Z -->
-<!-- Generated from Git commit: f26802d206d23bfe5018716ec2baed16f06a1c54 -->
-*Generated at (UTC): `2026-11-24T15:43:05Z`.*
-*Generated from Git commit: `f26802d206d23bfe5018716ec2baed16f06a1c54`.*
+<!-- Generated at (UTC): 2026-11-24T19:00:27Z -->
+<!-- Generated from Git commit: 21c18ee43b7d5814a559de944c67a84889dff8d5 -->
+*Generated at (UTC): `2026-11-24T19:00:27Z`.*
+*Generated from Git commit: `21c18ee43b7d5814a559de944c67a84889dff8d5`.*
 
 This directory holds auto-generated control-flow diagrams for the
 Python source files listed below. Each target produces an interactive
@@ -101,7 +101,7 @@ has multiple charted entry points.
 - **`cli/`**
   - gco jobs submit — direct kubectl apply path &mdash; `cli/jobs.py::JobManager.submit_job` &mdash; [HTML](./cli/jobs.JobManager_submit_job.html) · [PNG](./cli/jobs.JobManager_submit_job.png)
   - gco jobs submit-sqs — SQS-backed submission path &mdash; `cli/jobs.py::JobManager.submit_job_sqs` &mdash; [HTML](./cli/jobs.JobManager_submit_job_sqs.html) · [PNG](./cli/jobs.JobManager_submit_job_sqs.png)
-  - Cognito SRP authentication (gco analytics studio login) &mdash; `cli/analytics_user_mgmt.py::srp_authenticate` &mdash; [HTML](./cli/analytics_user_mgmt.srp_authenticate.html) · [PNG](./cli/analytics_user_mgmt.srp_authenticate.png)
+  - Cognito password sign-in (gco analytics studio login) &mdash; `cli/analytics_user_mgmt.py::authenticate_with_password` &mdash; [HTML](./cli/analytics_user_mgmt.authenticate_with_password.html) · [PNG](./cli/analytics_user_mgmt.authenticate_with_password.png)
   - Studio presigned-URL fetch (gco analytics studio login) &mdash; `cli/analytics_user_mgmt.py::fetch_studio_url` &mdash; [HTML](./cli/analytics_user_mgmt.fetch_studio_url.html) · [PNG](./cli/analytics_user_mgmt.fetch_studio_url.png)
   - gco stacks deploy-all — orchestrated multi-stack deploy &mdash; `cli/stacks.py::StackManager.deploy_orchestrated` &mdash; [HTML](./cli/stacks.StackManager_deploy_orchestrated.html) · [PNG](./cli/stacks.StackManager_deploy_orchestrated.png)
   - gco stacks destroy-all — orchestrated multi-stack destroy &mdash; `cli/stacks.py::StackManager.destroy_orchestrated` &mdash; [HTML](./cli/stacks.StackManager_destroy_orchestrated.html) · [PNG](./cli/stacks.StackManager_destroy_orchestrated.png)

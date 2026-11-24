@@ -29,11 +29,11 @@ from collections.abc import Callable
 from typing import Any
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-24T14:05:08Z
-# Generated from Git commit: 9d3160a1b68d2fdc13355b73df0e30f2af4bc047
+# Generated at (UTC): 2026-11-24T19:00:27Z
+# Generated from Git commit: 21c18ee43b7d5814a559de944c67a84889dff8d5
 # Flowchart(s) generated from this file:
-#   * ``srp_authenticate`` -> ``diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.html``
-#     (PNG: ``diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.png``)
+#   * ``authenticate_with_password`` -> ``diagrams/code_diagrams/cli/analytics_user_mgmt.authenticate_with_password.html``
+#     (PNG: ``diagrams/code_diagrams/cli/analytics_user_mgmt.authenticate_with_password.png``)
 #   * ``fetch_studio_url`` -> ``diagrams/code_diagrams/cli/analytics_user_mgmt.fetch_studio_url.html``
 #     (PNG: ``diagrams/code_diagrams/cli/analytics_user_mgmt.fetch_studio_url.png``)
 # Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
