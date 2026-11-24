@@ -127,8 +127,8 @@ TARGETS: list[Target] = [
     ),
     Target(
         source="cli/analytics_user_mgmt.py",
-        function="srp_authenticate",
-        title="Cognito SRP authentication (gco analytics studio login)",
+        function="authenticate_with_password",
+        title="Cognito password sign-in (gco analytics studio login)",
     ),
     Target(
         source="cli/analytics_user_mgmt.py",

@@ -103,16 +103,53 @@ def test_analytics_user_creation_reports_permanent_password_failure(runner: CliR
     assert "admin-set-user-password --permanent" in result.output
 
 
-def test_analytics_user_creation_prints_temporary_password_once(runner: CliRunner) -> None:
+@pytest.mark.parametrize(
+    ("arguments", "emailed"),
+    [
+        (["--email", "alice@example.com"], True),
+        (["--email", "alice@example.com", "--no-email"], False),
+        ([], False),
+    ],
+    ids=["emailed", "suppressed", "no-address"],
+)
+def test_analytics_user_creation_prints_temporary_password_once(
+    runner: CliRunner, arguments: list[str], emailed: bool
+) -> None:
+    """Cognito never returns the temporary password it generates, so the CLI
+    printed none, and with --no-email nobody could ever sign in."""
     with (
         patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
-        patch("cli.analytics_user_mgmt.admin_create_user", return_value=("user", "Temporary!1")),
+        patch("cli.analytics_user_mgmt.generate_strong_password", return_value="Temporary!1"),
+        patch(
+            "cli.analytics_user_mgmt.admin_create_user", return_value=({}, "Temporary!1")
+        ) as create,
     ):
-        result = _invoke_analytics(runner, ["users", "add", "--username", "alice"])
-
+        result = _invoke_analytics(runner, ["users", "add", "--username", "alice", *arguments])
     assert result.exit_code == 0, result.output
     assert result.output.count("Temporary!1") == 1
     assert "Temporary password (printed exactly once)" in result.output
+    assert ("Cognito also emailed it to alice@example.com" in result.output) is emailed
+    assert "chooses a new password at the first `gco analytics studio login`" in result.output
+    assert create.call_args.kwargs["temporary_password"] == "Temporary!1"
+    assert create.call_args.kwargs["suppress_email"] is ("--no-email" in arguments)
+
+
+@pytest.mark.parametrize("flag", [["--password", "Provided!Password1"], ["--generate-password"]])
+def test_analytics_user_with_a_permanent_password_gets_no_invitation(
+    runner: CliRunner, flag: list[str]
+) -> None:
+    """The invitation would carry a temporary password that is replaced at once."""
+    with (
+        patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
+        patch("cli.analytics_user_mgmt.admin_create_user", return_value=({}, None)) as create,
+        patch("cli.analytics_user_mgmt.admin_set_user_password"),
+    ):
+        result = _invoke_analytics(
+            runner, ["users", "add", "--username", "alice", "--email", "a@example.com", *flag]
+        )
+    assert result.exit_code == 0, result.output
+    assert create.call_args.kwargs["suppress_email"] is True
+    assert create.call_args.kwargs["temporary_password"] is None
 
 
 @pytest.mark.parametrize(
@@ -177,7 +214,10 @@ def _studio_patches(fetch: Mock):
         patch("cli.analytics_user_mgmt.discover_cognito_pool_id", return_value="pool"),
         patch("cli.analytics_user_mgmt.discover_cognito_client_id", return_value="client"),
         patch("cli.analytics_user_mgmt.discover_api_endpoint", return_value="https://api.example"),
-        patch("cli.analytics_user_mgmt.srp_authenticate", return_value={"AccessToken": "token"}),
+        patch(
+            "cli.analytics_user_mgmt.authenticate_with_password",
+            return_value={"AccessToken": "token"},
+        ),
         patch("cli.analytics_user_mgmt.fetch_studio_url", fetch),
         patch("time.sleep"),
     )
@@ -565,20 +605,23 @@ def test_analytics_temporary_creation_password_survives_machine_output_once(
     secret = "Temporary!Password1"
     with (
         patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
+        patch("cli.analytics_user_mgmt.generate_strong_password", return_value=secret),
         patch("cli.analytics_user_mgmt.admin_create_user", return_value=({}, secret)),
     ):
         result = _invoke_analytics(
             runner,
-            ["users", "add", "--username", "alice"],
+            ["users", "add", "--username", "alice", "--email", "alice@example.com"],
             output_format=output_format,
         )
-
     assert result.exit_code == 0, result.output
     assert result.output.count(secret) == 1
     payload = _load_machine_document(result.output, output_format)
     assert payload["password"] == secret
     assert payload["password_state"] == "temporary"
+    assert payload["password_generated"] is True
+    assert payload["password_source"] == "generated"
     assert payload["password_permanent"] is False
+    assert payload["invitation_emailed"] is True
 
 
 @pytest.mark.parametrize("output_format", ["json", "yaml"])
@@ -640,29 +683,6 @@ def test_analytics_explicit_creation_password_machine_schema_omits_secret(
     assert "password" not in payload
     assert "Provided!Password1" not in result.output
     set_password.assert_called_once()
-
-
-@pytest.mark.parametrize("output_format", ["json", "yaml"])
-def test_analytics_missing_temporary_password_machine_schema_is_explicit(
-    runner: CliRunner,
-    output_format: str,
-) -> None:
-    with (
-        patch.object(analytics_cmd, "_require_cognito_pool_id", return_value=("pool", "us-east-1")),
-        patch("cli.analytics_user_mgmt.admin_create_user", return_value=({}, None)),
-    ):
-        result = _invoke_analytics(
-            runner,
-            ["users", "add", "--username", "alice"],
-            output_format=output_format,
-        )
-
-    assert result.exit_code == 0, result.output
-    payload = _load_machine_document(result.output, output_format)
-    assert payload["password_state"] == "not_returned"
-    assert payload["password_source"] == "unavailable"
-    assert payload["password_permanent"] is None
-    assert "password" not in payload
 
 
 def test_analytics_machine_password_prompt_and_confirmation_use_stderr_options(

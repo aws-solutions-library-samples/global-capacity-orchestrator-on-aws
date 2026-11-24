@@ -232,9 +232,11 @@ class TestUsersClientErrorBranches:
         assert result.exit_code == 1
         assert "UserNotFoundException" in result.output
 
-    def test_users_add_no_temp_password_prints_guidance(self, aws_creds_env, tmp_cdk_json):
-        """When Cognito returns no TemporaryPassword, the CLI prints the
-        admin-set-user-password hint."""
+    def test_users_add_without_email_prints_the_password_to_hand_over(
+        self, aws_creds_env, tmp_cdk_json
+    ):
+        """With --no-email nobody receives Cognito's invitation, so the printed
+        temporary password is the only way in; it used to be missing."""
         from cli.main import cli
 
         with mock_aws():
@@ -242,22 +244,17 @@ class TestUsersClientErrorBranches:
             pool = cognito.create_user_pool(PoolName="gco-studio")
             pool_id = pool["UserPool"]["Id"]
             _seed_gco_analytics_stack("us-east-2", pool_id, "client-abc")
-
-            with (
-                patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
-                patch(
-                    "cli.analytics_user_mgmt.admin_create_user",
-                    return_value=({"User": {"Username": "alice"}}, None),
-                ),
-            ):
+            with patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json):
                 runner = CliRunner()
                 result = runner.invoke(
                     cli,
                     ["analytics", "users", "add", "--username", "alice", "--no-email"],
                 )
-
-        assert result.exit_code == 0
-        assert "admin-set-user-password" in result.output
+            status = cognito.admin_get_user(UserPoolId=pool_id, Username="alice")["UserStatus"]
+        assert result.exit_code == 0, result.output
+        assert "Temporary password (printed exactly once)" in result.output
+        assert "emailed" not in result.output
+        assert status == "FORCE_CHANGE_PASSWORD"
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +318,7 @@ class TestStudioLoginBranches:
             with (
                 patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
                 patch(
-                    "cli.analytics_user_mgmt.srp_authenticate",
+                    "cli.analytics_user_mgmt.authenticate_with_password",
                     side_effect=ClientError(
                         {"Error": {"Code": "NotAuthorizedException", "Message": "x"}},
                         "RespondToAuthChallenge",
@@ -358,7 +355,7 @@ class TestStudioLoginBranches:
             with (
                 patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
                 patch(
-                    "cli.analytics_user_mgmt.srp_authenticate",
+                    "cli.analytics_user_mgmt.authenticate_with_password",
                     return_value={"IdToken": "", "AccessToken": "", "RefreshToken": ""},
                 ),
             ):
@@ -398,7 +395,7 @@ class TestStudioLoginBranches:
             with (
                 patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
                 patch(
-                    "cli.analytics_user_mgmt.srp_authenticate",
+                    "cli.analytics_user_mgmt.authenticate_with_password",
                     return_value={
                         "IdToken": "t",
                         "AccessToken": "a",
@@ -449,7 +446,7 @@ class TestStudioLoginBranches:
             with (
                 patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
                 patch(
-                    "cli.analytics_user_mgmt.srp_authenticate",
+                    "cli.analytics_user_mgmt.authenticate_with_password",
                     return_value={
                         "IdToken": "t",
                         "AccessToken": "a",
@@ -491,7 +488,7 @@ class TestStudioLoginBranches:
             with (
                 patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
                 patch(
-                    "cli.analytics_user_mgmt.srp_authenticate",
+                    "cli.analytics_user_mgmt.authenticate_with_password",
                     return_value={
                         "IdToken": "t",
                         "AccessToken": "a",
@@ -534,7 +531,7 @@ class TestStudioLoginBranches:
             with (
                 patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
                 patch(
-                    "cli.analytics_user_mgmt.srp_authenticate",
+                    "cli.analytics_user_mgmt.authenticate_with_password",
                     return_value={
                         "IdToken": "t",
                         "AccessToken": "a",
@@ -576,7 +573,7 @@ class TestStudioLoginBranches:
             with (
                 patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
                 patch(
-                    "cli.analytics_user_mgmt.srp_authenticate",
+                    "cli.analytics_user_mgmt.authenticate_with_password",
                     return_value={
                         "IdToken": "t",
                         "AccessToken": "a",

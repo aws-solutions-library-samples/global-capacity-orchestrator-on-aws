@@ -111,7 +111,6 @@ class _AnalyticsMockConfig:
                 "removal_policy": self._cognito_removal,
             },
             "efs": {"removal_policy": self._efs_removal},
-            "studio": {"user_profile_name_prefix": None},
         }
 
     def get_analytics_enabled(self) -> bool:
@@ -218,7 +217,6 @@ class TestAnalyticsStackOffByDefault:
                     "canvas": {"enabled": False},
                     "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
                     "efs": {"removal_policy": "destroy"},
-                    "studio": {"user_profile_name_prefix": None},
                 }
             }
         )
@@ -1355,6 +1353,30 @@ class TestSageMakerExecutionRole:
             for region in ("us-east-1", "us-west-2")
         ]
 
+    def test_role_runs_the_logs_insights_query_gco_jobs_logs_falls_back_to(self) -> None:
+        """A job whose pods are gone is read from Container Insights in its Region.
+
+        The role used to have no ``logs:StartQuery``, so ``gco jobs logs``
+        from a Studio terminal failed once the pods were gone.
+        """
+        template = _synth_analytics()
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+        assert self._granted(statements, "logs:StartQuery") == [
+            f"arn:aws:logs:{region}:123456789012:log-group:"
+            f"/aws/containerinsights/gco-test-{region}/application{suffix}"
+            for suffix in ("", ":*")
+            for region in ("us-east-1", "us-west-2")
+        ]
+        assert self._granted(statements, "logs:GetQueryResults") == ["*"]
+
+    def test_role_has_no_logs_insights_grant_without_workload_regions(self) -> None:
+        template = _synth_analytics(config=_AnalyticsMockConfig(workload_regions=()))
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+        assert self._granted(statements, "logs:StartQuery") == []
+        assert self._granted(statements, "logs:GetQueryResults") == []
+
     def test_role_has_no_sqs_grant_without_workload_regions(self) -> None:
         """With no workload Region there is no queue, so no statement (an
         empty Resource list would be an invalid policy)."""
@@ -1599,6 +1621,16 @@ class TestEmrServerlessApp:
     def test_exactly_one_emr_application_is_created(self) -> None:
         template = _synth_analytics()
         template.resource_count_is("AWS::EMRServerless::Application", 1)
+
+    def test_the_stack_publishes_the_ids_the_cli_and_jobs_take(self) -> None:
+        """``users remove`` reads the domain id; StartJobRun takes the application id."""
+        template = _synth_analytics()
+        outputs = template.to_json()["Outputs"]
+        (emr,) = template.find_resources("AWS::EMRServerless::Application")
+        assert outputs["StudioDomainId"]["Value"] == _DOMAIN_ID
+        assert outputs["EmrServerlessApplicationId"]["Value"] == {
+            "Fn::GetAtt": [emr, "ApplicationId"]
+        }
 
     def test_emr_app_is_spark_with_pinned_release_label(self) -> None:
         """``Type=SPARK`` and ``ReleaseLabel`` matches the pinned

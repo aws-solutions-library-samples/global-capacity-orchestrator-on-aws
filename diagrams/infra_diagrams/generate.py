@@ -433,7 +433,6 @@ _ANALYTICS_CONTEXT: dict[str, Any] = {
         "canvas": {"enabled": False},
         "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
         "efs": {"removal_policy": "destroy"},
-        "studio": {"user_profile_name_prefix": None},
     },
 }
 

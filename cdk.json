@@ -324,7 +324,7 @@
       "backup_retention_days": 7,
       "deletion_protection": false
     },
-    "_comment_analytics_environment": "SageMaker Studio / EMR Serverless / Canvas analytics stack. enabled: master toggle (off by default). canvas.enabled: opt-in Canvas subfeature. hyperpod.enabled: deprecated and ignored (AmazonSageMakerFullAccess on the Studio role already allows SageMaker training jobs; HyperPod capacity is the top-level hyperpod block). cognito.domain_prefix: optional custom Cognito UI domain (null = auto). cognito.removal_policy / efs.removal_policy: 'destroy' wipes user pools and EFS on stack delete (dev default); 'retain' preserves them. studio.user_profile_name_prefix: accepted but not applied (each Studio user profile is named after its Cognito username). See docs/ANALYTICS.md and https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated.html.",
+    "_comment_analytics_environment": "SageMaker Studio / EMR Serverless / Canvas analytics stack. enabled: master toggle (off by default). canvas.enabled: opt-in Canvas subfeature. hyperpod.enabled: deprecated and ignored (AmazonSageMakerFullAccess on the Studio role already allows SageMaker training jobs; HyperPod capacity is the top-level hyperpod block). cognito.domain_prefix: optional custom Cognito UI domain (null = auto). cognito.removal_policy / efs.removal_policy: 'destroy' wipes user pools and EFS on stack delete (dev default); 'retain' preserves them. Each Studio user profile is named after its Cognito username. See docs/ANALYTICS.md and https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated.html.",
     "analytics_environment": {
       "enabled": false,
       "hyperpod": {
@@ -339,9 +339,6 @@
       },
       "efs": {
         "removal_policy": "destroy"
-      },
-      "studio": {
-        "user_profile_name_prefix": null
       }
     },
     "_comment_cluster_observability": "Self-hosted in-cluster observability (kube-prometheus-stack: Prometheus + Alertmanager + Grafana) installed on every regional EKS cluster via the Helm installer. enabled: master toggle, ON BY DEFAULT (set false to opt out). Grafana uses native auth (no self sign-up, no anonymous) and is reachable privately via 'gco monitoring open' (kubectl port-forward to a ClusterIP service — no public endpoint; the EKS API is PRIVATE, so a VPN/SSM/bastion path is required). grafana/prometheus/alertmanager.persistence_size: EBS PVC sizes (positive Kubernetes quantities such as 10Gi). prometheus.retention: TSDB retention window. grafana.admin_password_rotation_schedule: cron for the in-cluster CronJob that rotates the chart-generated Grafana admin password (default monthly, 04:00 on the 1st). mlflow: MLflow tracking server sub-toggle, ON BY DEFAULT and effective only while observability is enabled (it shares the monitoring namespace, gp3 StorageClass, and tunnel access path); run artifacts go to the cluster-shared S3 bucket via IRSA, run metadata to an EBS PVC of mlflow.persistence_size, and access is 'gco monitoring open --service mlflow' (ClusterIP only, no ingress, no app-level auth — the authenticated tunnel is the boundary). This is complementary to the CloudWatch gco-monitoring stack; see docs/MONITORING.md.",

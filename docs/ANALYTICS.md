@@ -34,7 +34,7 @@ bucket's reference.
 - [(g) Submitting HyperPod jobs and SageMaker training jobs from Studio](#g-submitting-hyperpod-jobs-and-sagemaker-training-jobs-from-studio)
 - [(g2) Launching SageMaker Canvas when the sub-toggle is enabled](#g2-launching-sagemaker-canvas-when-the-sub-toggle-is-enabled)
 - [(g3) Tracking experiments with managed MLflow](#g3-tracking-experiments-with-managed-mlflow)
-- [(h) Opening the environment in Kiro](#h-opening-the-environment-in-kiro)
+- [(h) Using Kiro with the environment](#h-using-kiro-with-the-environment)
 - [(i) Running the example cluster jobs and reading their output from a notebook](#i-running-the-example-cluster-jobs-and-reading-their-output-from-a-notebook)
 - [(j) Two-bucket access model](#j-two-bucket-access-model)
 - [(k) Studio_EFS and the Studio home directory](#k-studio_efs-and-the-studio-home-directory)
@@ -91,10 +91,11 @@ orphaned retained resources (see [section (k)](#k-studio_efs-and-the-studio-home
 override on `Studio_EFS`).
 
 A cleanup Lambda (`lambda/analytics-cleanup/`) runs automatically as a
-CloudFormation custom resource during stack deletion. It removes all
-SageMaker user profiles and EFS access points that were created at
-runtime by the presigned-URL Lambda — resources CloudFormation doesn't
-know about because they weren't in the original template. Control flow:
+CloudFormation custom resource during stack deletion. It removes the
+SageMaker user profiles the presigned-URL Lambda created at runtime, with
+their spaces and apps, and the per-user EFS access points earlier releases
+created — resources CloudFormation doesn't know about because they
+weren't in the original template. Control flow:
 [interactive HTML](../diagrams/code_diagrams/lambda/analytics-cleanup/handler.handler.html) ·
 [PNG](../diagrams/code_diagrams/lambda/analytics-cleanup/handler.handler.png).
 
@@ -360,11 +361,13 @@ refuses a name that differs only in case from an existing user's:
 Cognito keeps `Alice` and `alice` apart, but SageMaker matches profile
 names without regard to case, so the two would share one profile name.
 
-The command calls `cognito-idp:AdminCreateUser`, prints the
-temporary password exactly once to stdout, and (by default) sends
-Cognito's welcome email to the address on file. Suppress the email
-with `--no-email` — useful when you want to hand the credentials over
-out-of-band:
+The command calls `cognito-idp:AdminCreateUser` with a temporary password
+it generates (Cognito never returns one it generates itself), prints that
+password exactly once to stdout, and (by default) has Cognito email its
+invitation, which carries the same password, to the address on file. The
+user chooses a new password at the first `gco analytics studio login` (see
+[section (d)](#d-logging-into-studio)). Suppress the email with `--no-email`
+— useful when you want to hand the credentials over out-of-band:
 
 ```bash
 gco analytics users add --username bob --email bob@example.com --no-email
@@ -374,8 +377,14 @@ Example output:
 
 ```text
 ✓ Created Cognito user: alice
-  Temporary password (printed exactly once): Tmp#V2xQ!f1yPq
+ℹ Temporary password (printed exactly once): Tmp#V2xQ!f1yPq
+ℹ Cognito also emailed it to alice@example.com in its invitation.
+ℹ The user chooses a new password at the first `gco analytics studio login`.
 ```
+
+`--password` or `--generate-password` gives the user a permanent password
+instead, so the first sign-in needs no new one; Cognito then sends no
+invitation, which would carry a temporary password that no longer works.
 
 List users:
 
@@ -395,18 +404,28 @@ gco analytics users remove --username alice --yes
 ```
 
 The first form prompts for confirmation. `--yes` skips the prompt.
-Removing a user in Cognito does **not** automatically delete their
-Studio user profile; the presigned-URL Lambda creates profiles on
-first login and leaves them in place. If you need to clean up the
-profile side, use `aws sagemaker delete-user-profile` directly.
+The command deletes the user's Studio user profile first, with the
+spaces it owns and their apps (SageMaker deletes a profile only after
+them, so this can take a few minutes), and then the Cognito user. The
+user's home directory on `Studio_EFS` stays. When the profile cannot be
+deleted, the Cognito user is kept and the command exits `1`, so it can
+be run again; `--keep-studio-profile` deletes only the Cognito user.
+The profile deletion needs `sagemaker:DescribeUserProfile`, `ListTags`,
+`ListSpaces`, `ListApps`, `DeleteApp`, `DescribeSpace`, `DeleteSpace` and
+`DeleteUserProfile` besides `cognito-idp:AdminGetUser` and `AdminDeleteUser`.
 
 Each profile the Lambda creates carries a `gco:analytics:cognito-sub`
 tag holding the Cognito `sub` (the user's immutable ID) of the user it
-was created for, and the Lambda serves a profile only to that user. A
-new user given a removed user's name therefore gets an HTTP 403 at
-login until the old profile is deleted, instead of the old user's
-profile. A profile without the tag (created before the Lambda tagged
-profiles, or outside it) is tagged for the first user who logs in to it.
+was created for, and the Lambda serves a profile only to that user.
+`users remove` likewise deletes only a profile tagged with the removed
+user's `sub` (or untagged), and names one tagged for another user. A
+profile left behind by `--keep-studio-profile`, or by `users remove` in an
+earlier release, makes a new user given the same name get an HTTP 403 at
+login until it is deleted, instead of the old user's profile; delete its
+apps and spaces and then the profile with `aws sagemaker delete-app`,
+`delete-space` and `delete-user-profile`. A profile without the tag
+(created before the Lambda tagged profiles, or outside it) is tagged for
+the first user who logs in to it.
 
 Error path — when `gco-analytics` is not deployed:
 
@@ -436,8 +455,20 @@ and exchanges it for a SageMaker Studio presigned URL via
 
 `AdminInitiateAuth` is an administrator API, so the command needs AWS
 credentials as well as the Cognito password: `cognito-idp:AdminInitiateAuth`
-on the pool, and `cloudformation:DescribeStacks` on `gco-analytics` and
-`gco-api-gateway`, whose outputs name the pool, its app client and the API.
+(and `AdminRespondToAuthChallenge` for a first sign-in) on the pool, and
+`cloudformation:DescribeStacks` on `gco-analytics` and `gco-api-gateway`,
+whose outputs name the pool, its app client and the API.
+
+The first sign-in of a user created without a permanent password uses the
+temporary password from `users add`, and Cognito then asks for a new one.
+Pass it with `--new-password` (or `$GCO_STUDIO_NEW_PASSWORD`), or let the
+command ask for it twice on a terminal; it must meet the pool's policy (12
+characters or more, with upper and lower case letters, a digit and a
+symbol) and becomes the user's password:
+
+```bash
+gco analytics studio login --username alice --new-password 'Chosen!Passw0rd'
+```
 
 The URL is printed on its own line on stdout so it's pipe-friendly.
 Add `--open` to launch the default browser automatically:
@@ -476,9 +507,8 @@ Login flow:
 2. Cognito returns an `AuthenticationResult` containing `IdToken`,
    `AccessToken`, and `RefreshToken`. A user whose password is still
    temporary gets a `NEW_PASSWORD_REQUIRED` challenge instead, which
-   the CLI does not answer: give the user a permanent password with
-   `users add --password` / `--generate-password` or
-   `users set-password`.
+   the CLI answers with `AdminRespondToAuthChallenge` and the new
+   password; Cognito then returns the `AuthenticationResult`.
 3. CLI sends the `AccessToken` in the `Authorization` header to
    `/studio/login`. API Gateway's Cognito authorizer validates the
    JWT against the user-pool ARN and requires the
@@ -593,9 +623,10 @@ What the Studio execution role lets the CLI do:
   global API and each workload Region's regional API (where a command with
   `-r` goes), and read this project's CloudFormation stacks, whose outputs
   name those APIs.
-- Not the fallback `gco jobs logs` uses for a job whose pods are gone: it
-  queries CloudWatch Logs Insights (`logs:StartQuery`), which the role
-  cannot. Read those logs from a workstation.
+- The fallback `gco jobs logs` uses for a job whose pods are gone: a
+  CloudWatch Logs Insights query of the job Region's Container Insights
+  application log group (`logs:StartQuery` on that log group and
+  `logs:GetQueryResults`).
 - Not the commands that call AWS services directly instead of the API, for
   example `gco jobs submit-direct` (kubectl), `gco jobs submit-sqs` (EC2
   and SQS), `gco inference deploy` (DynamoDB) and `gco capacity status` or
@@ -937,54 +968,42 @@ End-to-end flow from a Studio notebook:
     sm.stop_mlflow_tracking_server(TrackingServerName="gco-mlflow")
     ```
 
-## (h) Opening the environment in Kiro
+## (h) Using Kiro with the environment
 
-[Kiro](https://kiro.dev) is an AI-powered IDE that can connect to a
-remote JupyterLab instance. The combination lets you edit code in
-Kiro (with its inline agent) while running it on SageMaker compute.
+[Kiro](https://kiro.dev) works with the analytics environment in two ways,
+and neither needs anything from the CDK deploy.
 
-End-to-end flow:
+**In the JupyterLab chat panel.** On SageMaker Distribution 4.1 and later,
+Kiro is the assistant the JupyterLab chat panel is set up with
+([Using a coding assistant](https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated-jl-coding-assistant.html)):
 
-1. **Obtain the Studio login URL** from the CLI:
-
-    ```bash
-    gco analytics studio login --username alice
-    ```
-
-    Copy the URL from stdout.
-
-2. **Open Studio in a browser** by pasting the URL. This creates a
-    signed Studio session. Leave this tab open — the session token
-    is needed for the Kiro connection.
-
-3. **Connect Kiro to the JupyterLab instance** via its remote
-    workspace feature. Kiro's connection mechanics (whether via a
-    Jupyter server URL, an SSH tunnel, or an SSM port-forward) are
-    documented in the official Kiro docs — **refer there** rather
-    than copying the steps here, since they evolve independently
-    of GCO.
-
-4. **Verify the connection** by opening a terminal inside Kiro
-    (attached to the Studio instance) and running:
+1. Sign in to Studio as [section (d)](#d-logging-into-studio) shows and
+    open a JupyterLab space.
+2. Open the chat panel from the right sidebar and choose `@Kiro`. The
+    first time, sign in to Kiro from a JupyterLab terminal:
 
     ```bash
-    gco --help
+    kiro-cli login --use-device-flow
     ```
 
-    If the CLI was installed per [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server), `--help` prints the
-    full command tree. If not, install it first as [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server)
-    describes (`uv tool install`; GCO needs Python 3.14 and the image
-    runs an older one).
+    Kiro has its own sign-in (AWS Builder ID, Google or GitHub, or a Pro
+    license); the Cognito user does not sign you in to Kiro.
+3. To give Kiro the GCO tools, install the CLI and register the MCP server
+    in `~/.kiro/settings/mcp.json` as
+    [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server)
+    describes, then start a new chat. The server runs in the space with the
+    Studio execution role, so its tools can do what the CLI can there.
 
-GCO does not add Kiro-specific configuration beyond what's documented
-above. No workspace URL, SSH key, or SSM tunnel is provisioned by
-CDK. If Kiro's connection mechanism requires additional setup (for
-example, a public JupyterLab server endpoint), that setup is entirely
-on the Kiro side and is not a GCO feature.
-
-If Kiro eventually needs an in-repo configuration file to connect to
-Studio, that would be a separate, future change; this documentation
-covers the Kiro path as it works today.
+**From the Kiro IDE on your machine.** SageMaker AI can open a Studio space
+in a local IDE, Kiro included, over Session Manager
+([Connect your Remote IDE to SageMaker spaces](https://docs.aws.amazon.com/sagemaker/latest/dg/remote-access.html)).
+That needs `sagemaker:StartSession` on the space for the AWS identity on your
+machine and **Remote Access** turned on for the space
+([Set up remote access](https://docs.aws.amazon.com/sagemaker/latest/dg/remote-access-remote-setup.html)).
+The analytics stack grants and configures neither: its users sign in through
+Cognito and have no IAM identity of their own. Remote IDE access is
+therefore something an administrator sets up for IAM users or roles,
+outside GCO.
 
 ## (i) Running the example cluster jobs and reading their output from a notebook
 
@@ -1149,13 +1168,15 @@ and what the SageMaker documentation says Studio does with it:
   SageMaker gives the profile's spaces that directory and nothing above
   it. The domain's default path is `/home/sagemaker-user`, so profiles
   created outside the Lambda (console, CLI) all share that one directory.
-- **The per-user access points are not used.** On first login the Lambda
-  also creates an EFS access point rooted at `/home/<username>`, with a
-  POSIX owner derived from the username and mode `0700`. A profile's
-  `EFSFileSystemConfig` takes only a file system ID and a path, so
-  nothing mounts through the access point and its owner and mode never
-  apply. No `CustomPosixUserConfig` is set either, so spaces use
-  SageMaker's default POSIX identity.
+- **No access points are involved.** A profile's `EFSFileSystemConfig`
+  takes only a file system ID and a path. Earlier releases also created
+  an EFS access point rooted at `/home/<username>` at every login, with a
+  POSIX owner derived from the username and mode `0700`; nothing mounted
+  through it, so its owner and mode never applied (EFS creates an access
+  point's root directory only when a client mounts through it), and the
+  Lambda no longer creates them. The ones left from earlier releases go
+  with the stack, or by hand as below. No `CustomPosixUserConfig` is set
+  either, so spaces use SageMaker's default POSIX identity.
 
 ### Default removal policy: DESTROY
 

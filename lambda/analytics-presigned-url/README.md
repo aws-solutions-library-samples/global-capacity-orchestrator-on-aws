@@ -1,8 +1,8 @@
 # Analytics Presigned URL Lambda
 
 This [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) exchanges a Cognito-authorized [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) request for a short-lived
-[SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html) Studio URL and lazily provisions the caller's Studio profile and [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html)
-home-directory access point.
+[SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/whatis.html) Studio URL and lazily provisions the caller's Studio profile, whose
+home directory is `/home/<username>` on the Studio [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) file system.
 
 ## Table of Contents
 
@@ -24,8 +24,12 @@ home-directory access point.
    `Update_Failed`, `Delete_Failed`, or `Failed` with its delete refused (for
    example `AccessDeniedException` when the role lacks
    `sagemaker:DeleteUserProfile`).
-5. Ensure a deterministic per-user EFS access point.
-6. Return a time-limited `CreatePresignedDomainUrl` result.
+5. Return a time-limited `CreatePresignedDomainUrl` result.
+
+Earlier releases also created a per-user EFS access point at
+`/home/<username>` before step 5. A profile's `EFSFileSystemConfig` takes
+no access point, so nothing mounted through it, and the Lambda no longer
+makes one; it creates no EFS client at all.
 
 ## Environment
 

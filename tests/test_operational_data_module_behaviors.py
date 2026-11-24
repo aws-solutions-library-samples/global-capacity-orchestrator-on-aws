@@ -333,7 +333,7 @@ def test_describe_stack_outputs_returns_none_for_empty_stack_list() -> None:
         assert analytics_user_mgmt._describe_stack_outputs("us-east-1", "stack") is None
 
 
-def test_srp_authenticate_calls_admin_password_flow_and_normalizes_tokens() -> None:
+def test_password_sign_in_calls_admin_password_flow_and_normalizes_tokens() -> None:
     cognito = MagicMock()
     cognito.admin_initiate_auth.return_value = {
         "AuthenticationResult": {
@@ -343,7 +343,7 @@ def test_srp_authenticate_calls_admin_password_flow_and_normalizes_tokens() -> N
         }
     }
     with patch("boto3.client", return_value=cognito) as client:
-        result = analytics_user_mgmt.srp_authenticate(
+        result = analytics_user_mgmt.authenticate_with_password(
             "pool",
             "client",
             "alice",

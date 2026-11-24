@@ -164,6 +164,11 @@ DEPRECATED_BLOCK_KEYS: dict[str, str] = {
         "own execute-api:Invoke permission, whatever this says (docs/UPGRADING.md, API calls "
         "need an IAM permission). Remove it from cdk.json."
     ),
+    "analytics_environment.studio.user_profile_name_prefix": (
+        "it was never applied: the presigned-URL Lambda names each SageMaker Studio user "
+        "profile after the Cognito username. Remove it (and the then empty studio block) "
+        "from cdk.json."
+    ),
 }
 
 #: The charts of the ``helm`` block that take nothing but ``enabled``.
@@ -341,6 +346,7 @@ BLOCK_KEYS: dict[str, frozenset[str]] = {
     "analytics_environment.canvas": frozenset({"enabled"}),
     "analytics_environment.cognito": frozenset({"domain_prefix", "removal_policy"}),
     "analytics_environment.efs": frozenset({"removal_policy"}),
+    # Deprecated (DEPRECATED_BLOCK_KEYS): warned about and ignored.
     "analytics_environment.studio": frozenset({"user_profile_name_prefix"}),
     "cluster_observability": frozenset(
         {"enabled", "grafana", "prometheus", "alertmanager", "mlflow"}
@@ -3430,10 +3436,10 @@ class ConfigLoader:
             - efs: Studio_EFS sub-block
               - removal_policy: "destroy" (default) or "retain" — controls
                 the Studio EFS file system's CloudFormation DeletionPolicy
-            - studio: SageMaker Studio sub-block
-              - user_profile_name_prefix: accepted but not applied; the
-                presigned-URL Lambda names every profile after the Cognito
-                username (default: None)
+
+        A ``studio`` block (``user_profile_name_prefix``) is deprecated and
+        ignored: the presigned-URL Lambda names every profile after the Cognito
+        username. It is passed through as written.
         """
         default_config: dict[str, Any] = {
             "enabled": False,
@@ -3441,7 +3447,6 @@ class ConfigLoader:
             "canvas": {"enabled": False},
             "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
             "efs": {"removal_policy": "destroy"},
-            "studio": {"user_profile_name_prefix": None},
         }
         analytics_ctx = self.app.node.try_get_context("analytics_environment")
         analytics_config: dict[str, Any] = analytics_ctx if isinstance(analytics_ctx, dict) else {}
@@ -3449,7 +3454,7 @@ class ConfigLoader:
 
         # Deep-merge each nested sub-block so a partial override does not
         # drop the other defaults in the same sub-block.
-        for sub_block in ("hyperpod", "canvas", "cognito", "efs", "studio"):
+        for sub_block in ("hyperpod", "canvas", "cognito", "efs"):
             override = analytics_config.get(sub_block)
             if isinstance(override, dict):
                 default_sub = cast(dict[str, Any], default_config[sub_block])

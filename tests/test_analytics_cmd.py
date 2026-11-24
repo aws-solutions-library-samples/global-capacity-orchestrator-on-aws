@@ -9,7 +9,7 @@ Covers:
   stack.
 * ``users add`` failing with the documented error message when the
   ``gco-analytics`` stack is absent.
-* ``studio login`` signing in (stubbed ``srp_authenticate``) and fetching
+* ``studio login`` signing in (stubbed ``authenticate_with_password``) and fetching
   a Studio URL from a stubbed ``/studio/login`` HTTP endpoint.
 * ``doctor`` passing on a healthy state and failing when the required
   SSM parameters are missing.
@@ -507,23 +507,46 @@ class TestUsers:
             cognito = boto3.client("cognito-idp", region_name="us-east-2")
             pool = cognito.create_user_pool(PoolName="gco-studio")
             pool_id = pool["UserPool"]["Id"]
-            cognito.admin_create_user(
+            created = cognito.admin_create_user(
                 UserPoolId=pool_id, Username="alice", MessageAction="SUPPRESS"
             )
+            sub = next(
+                attribute["Value"]
+                for attribute in created["User"]["Attributes"]
+                if attribute["Name"] == "sub"
+            )
             _seed_gco_analytics_stack("us-east-2", pool_id, "client-abc")
-
             runner = CliRunner()
-            with patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json):
+            with (
+                patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
+                patch(
+                    "cli.analytics_user_mgmt.discover_studio_domain_id", return_value="d-studio"
+                ) as domain,
+                patch(
+                    "cli.analytics_user_mgmt.delete_studio_user_profile",
+                    return_value={
+                        "profile": "deleted",
+                        "spaces": ["alice-space"],
+                        "apps": ["JupyterLab/default"],
+                    },
+                ) as remove_profile,
+            ):
                 # Without --yes, click.confirm reads from stdin — "y\n" confirms.
                 result = runner.invoke(
                     cli,
                     ["analytics", "users", "remove", "--username", "alice"],
                     input="y\n",
                 )
-
             assert result.exit_code == 0, result.output
             remaining = cognito.list_users(UserPoolId=pool_id).get("Users", [])
             assert all(u.get("Username") != "alice" for u in remaining)
+        assert "Delete Cognito user 'alice' and their SageMaker Studio profile?" in result.output
+        assert "Deleted the Studio profile alice" in result.output
+        assert "spaces: alice-space" in result.output
+        assert "apps: JupyterLab/default" in result.output
+        domain.assert_called_once_with("us-east-2", "gco")
+        # The profile is matched to the user by the Cognito sub the Lambda tags it with.
+        remove_profile.assert_called_once_with("us-east-2", "d-studio", "alice", sub)
 
     def test_users_add_fails_when_stack_not_deployed(self, aws_creds_env, tmp_cdk_json):
         from cli.main import cli
@@ -737,7 +760,7 @@ class TestStudioLogin:
         # Use a captured-value container so the stub can mutate it.
         captured: dict[str, str] = {}
 
-        def _fake_srp_authenticate(**kwargs):  # duck-typed
+        def _fake_authenticate(**kwargs):  # duck-typed
             captured["username"] = kwargs["username"]
             captured["pool_id"] = kwargs["pool_id"]
             captured["client_id"] = kwargs["client_id"]
@@ -784,8 +807,8 @@ class TestStudioLogin:
             with (
                 patch("cli.stacks._find_cdk_json", return_value=tmp_cdk_json),
                 patch(
-                    "cli.analytics_user_mgmt.srp_authenticate",
-                    side_effect=_fake_srp_authenticate,
+                    "cli.analytics_user_mgmt.authenticate_with_password",
+                    side_effect=_fake_authenticate,
                 ),
                 patch(
                     "urllib.request.urlopen",
@@ -887,7 +910,7 @@ class TestStudioLogin:
                 return_value="https://api.example.execute-api.us-east-2.amazonaws.com/prod",
             ),
             patch(
-                "cli.analytics_user_mgmt.srp_authenticate",
+                "cli.analytics_user_mgmt.authenticate_with_password",
                 return_value={"AccessToken": "fake.access.token"},
             ),
             patch("urllib.request.urlopen", side_effect=_fake_urlopen),

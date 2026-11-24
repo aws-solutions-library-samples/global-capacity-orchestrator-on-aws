@@ -287,10 +287,14 @@ gco analytics status
 #### `gco analytics users add`
 
 Create a Cognito user in the analytics user pool. Calls
-`cognito-idp:AdminCreateUser` and prints the temporary password to
-stdout exactly once. Optionally sets a permanent password via
+`cognito-idp:AdminCreateUser` with a temporary password the CLI generates
+(Cognito never returns one it generates itself) and prints it to stdout
+exactly once. With `--email`, Cognito also emails it in its invitation
+unless `--no-email` is given; the user chooses a new password at the first
+`gco analytics studio login`. Optionally sets a permanent password via
 `cognito-idp:AdminSetUserPassword` so the user can sign in without the
-`NEW_PASSWORD_REQUIRED` challenge on first login.
+`NEW_PASSWORD_REQUIRED` challenge on first login; such a user gets no
+invitation, since it would carry a temporary password that no longer works.
 
 The username also names the user's SageMaker Studio user profile, so it
 must be a name SageMaker accepts there: letters, digits and hyphens,
@@ -309,7 +313,7 @@ gco analytics users add [OPTIONS]
 |--------|-------------|
 | `--username` | Cognito username to create (required): letters, digits and hyphens, starting and ending with a letter or digit, 63 characters at most. |
 | `--email` | Email address for the new user. |
-| `--no-email` | Suppress the Cognito welcome email (`MessageAction=SUPPRESS`). |
+| `--no-email` | Suppress the Cognito invitation email (`MessageAction=SUPPRESS`); hand the printed temporary password over yourself. |
 | `--password` | Set a permanent password on the new user (also read from `$GCO_STUDIO_PASSWORD`). Mutually exclusive with `--generate-password`. |
 | `--generate-password` | Generate a strong random password, set it permanent, and print it once. Mutually exclusive with `--password`. |
 
@@ -348,11 +352,29 @@ gco analytics users list --as-json
 
 #### `gco analytics users remove`
 
-Delete a Cognito user from the analytics user pool. Does not delete
-the user's Studio user profile or their directory on `Studio_EFS` — use
-`aws sagemaker delete-user-profile` for the profile. Until the profile
-is deleted, a new user given the same name is refused at
-`gco analytics studio login` (the profile belongs to the removed user).
+Delete a Cognito user from the analytics user pool, and with it the user's
+SageMaker Studio user profile, the spaces the profile owns and their apps.
+SageMaker deletes a profile only after its apps and spaces, so the command
+deletes them in that order and waits, up to 15 minutes in all. It deletes
+only a profile whose `gco:analytics:cognito-sub` tag holds the user's
+Cognito `sub` (or that has no such tag); a profile tagged for another user
+is left in place and named. The user's directory on `Studio_EFS` stays.
+
+When the profile cannot be deleted (a denied permission, a deletion that
+fails or does not finish), the command exits `1` and keeps the Cognito
+user, so it can be run again. `--keep-studio-profile` deletes only the
+Cognito user, as earlier releases did; a new user given the same name is
+then refused at `gco analytics studio login` until the profile is deleted.
+
+Besides `cognito-idp:AdminGetUser` and `AdminDeleteUser` and
+`cloudformation:DescribeStacks`, the profile deletion needs
+`sagemaker:DescribeUserProfile`, `ListTags`, `ListSpaces`, `ListApps`,
+`DeleteApp`, `DescribeSpace`, `DeleteSpace` and `DeleteUserProfile` (and
+`ListDomains` for a stack deployed before it published `StudioDomainId`).
+With `-o json` the command prints `{"username", "cognito_user_deleted",
+"studio_profile"}`, `studio_profile` holding `profile` (`deleted`, `absent`
+or `owned_by_another_user`), `spaces` and `apps`, or `null` with
+`--keep-studio-profile`.
 
 ```bash
 gco analytics users remove [OPTIONS]
@@ -363,6 +385,7 @@ gco analytics users remove [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--username` | Cognito username to remove (required). |
+| `--keep-studio-profile` | Delete only the Cognito user; leave the Studio profile, its spaces and apps. |
 | `--yes` | Skip the confirmation prompt. |
 
 **Example:**
@@ -426,8 +449,14 @@ The sign-in is `cognito-idp:AdminInitiateAuth` with
 `ADMIN_USER_PASSWORD_AUTH`, an administrator API, so the command needs
 AWS credentials allowing it on the pool (and `cloudformation:DescribeStacks`
 for discovery) as well as the user's Cognito password. A user whose
-password is still temporary cannot sign in this way; set a permanent one
-with `gco analytics users set-password`.
+password is still temporary (a new user from `gco analytics users add`)
+must choose a new one first: Cognito answers with `NEW_PASSWORD_REQUIRED`,
+and the command answers it with `--new-password` (or
+`$GCO_STUDIO_NEW_PASSWORD`), or asks for the new password twice on a
+terminal, through `cognito-idp:AdminRespondToAuthChallenge`. The new password
+becomes the user's password and must meet the pool's policy (12 characters
+or more, with upper and lower case letters, a digit and a symbol). Without a
+terminal and without `--new-password` the command exits `1` and says so.
 
 A failed `/studio/login` call exits `2` and prints the HTTP status, the
 presigned-URL Lambda's error token and the correlation ID, for example
@@ -450,7 +479,8 @@ gco analytics studio login [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--username` | Cognito username (required). |
-| `--password` | Password. Defaults to prompt (`click.prompt(..., hide_input=True)`). Also read from `$GCO_STUDIO_PASSWORD` if set. |
+| `--password` | Password. Defaults to prompt (`click.prompt(..., hide_input=True)`, on stderr). Also read from `$GCO_STUDIO_PASSWORD` if set. |
+| `--new-password` | New password for a user whose password is still temporary (also read from `$GCO_STUDIO_NEW_PASSWORD`; prompted on a terminal otherwise). |
 | `--api-url` | Override the API Gateway base URL (otherwise auto-discovered from CloudFormation). |
 | `--open` | Launch the default browser on the presigned URL after printing it. |
 
@@ -466,6 +496,9 @@ gco analytics studio login --username alice
 
 # Open browser automatically
 gco analytics studio login --username alice --open
+
+# First sign-in with the temporary password from `users add`
+gco analytics studio login --username alice --new-password 'Chosen!Passw0rd'
 
 # Custom API endpoint
 gco analytics studio login \

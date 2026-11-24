@@ -2627,9 +2627,12 @@ instead of failing halfway through a deploy.
   `images.empty_on_delete` and `images.lifecycle` (no stack creates or
   deletes the `<project_name>/*` ECR repositories: the gco CLI creates them,
   they survive a destroy, and `gco images init` applies its own lifecycle
-  policy), and `api_gateway.regional_api_enabled` (callers reach the global
+  policy), `api_gateway.regional_api_enabled` (callers reach the global
   API and every regional bridge with their own `execute-api:Invoke`
-  permission).
+  permission), and `analytics_environment.studio.user_profile_name_prefix`
+  (never applied; each Studio user profile is named after its Cognito
+  username). A deprecated key set to `null` draws no warning, since CDK drops
+  `null` context values.
 - The per-Region overlays (`fsx_lustre_regions`, `pcs_regions`,
   `hyperpod_regions`) are keyed by Region name. A name that is not an AWS
   Region fails; a real Region that is not in `deployment_regions.regional`

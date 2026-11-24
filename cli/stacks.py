@@ -8125,7 +8125,6 @@ _ANALYTICS_DEFAULTS: dict[str, Any] = {
     "canvas": {"enabled": False},
     "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
     "efs": {"removal_policy": "destroy"},
-    "studio": {"user_profile_name_prefix": None},
 }
 
 
@@ -8145,7 +8144,7 @@ def update_analytics_config(settings: dict[str, Any]) -> None:
 
     Mirrors ``update_valkey_config`` / ``update_aurora_config``. Nested
     keys under ``analytics_environment`` (``hyperpod``, ``canvas``,
-    ``cognito``, ``efs``, ``studio``) are merged one level deep rather
+    ``cognito``, ``efs``) are merged one level deep rather
     than replaced wholesale — ``enable --hyperpod`` must not clobber
     ``cognito.removal_policy``.
     """

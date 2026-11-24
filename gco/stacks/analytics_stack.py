@@ -382,10 +382,9 @@ class GCOAnalyticsStack(Stack):
     def _create_studio_efs(self) -> None:
         """Create ``Studio_EFS`` with KMS encryption + TLS in transit.
 
-        Per-user access points are created lazily by the presigned-URL
-        Lambda on first profile creation. No access points are defined
-        here, so the file system's ``/`` root is effectively inaccessible
-        until the Lambda materializes a per-user AP.
+        No access points are defined: each Studio user profile reaches its
+        own ``/home/<username>`` directory through its ``EFSFileSystemConfig``
+        (see :meth:`_create_studio_domain`).
 
         The dedicated security group only allows the VPC's private
         CIDR on TCP/2049 (NFS). SageMaker Studio mount traffic originates
@@ -459,6 +458,9 @@ class GCOAnalyticsStack(Stack):
           (``cli/aws_client.py``), so the CLI works from a Studio terminal
         * ``sqs:SendMessage`` on each workload Region's job queue
           (``<project>-jobs-<region>``; not the dead-letter queues)
+        * ``logs:StartQuery`` on each workload Region's Container Insights
+          application log group and ``logs:GetQueryResults``, for the Logs
+          Insights query ``gco jobs logs`` falls back to
         * ``ssm:GetParameter`` on the three ``Cluster_Shared_Bucket`` metadata
           parameters (``name``, ``arn``, ``region``) in the global region —
           lets notebooks look up the bucket at runtime without a per-user
@@ -592,6 +594,34 @@ class GCOAnalyticsStack(Stack):
                     effect=iam.Effect.ALLOW,
                     actions=["sqs:SendMessage"],
                     resources=job_queue_arns,
+                )
+            )
+
+        # ``gco jobs logs`` reads a job whose pods are gone from CloudWatch
+        # Logs Insights in the job's Region (cli/jobs.py): StartQuery on that
+        # Region's Container Insights application log group, and
+        # GetQueryResults on the query, an action with no resource type.
+        application_log_groups = [
+            f"arn:{self.partition}:logs:{region}:{self.account}:log-group:"
+            f"/aws/containerinsights/{project_name}-{region}/application"
+            for region in self.config.get_regions()
+        ]
+        if application_log_groups:
+            self.sagemaker_execution_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["logs:StartQuery"],
+                    resources=[
+                        *application_log_groups,
+                        *(f"{a}:*" for a in application_log_groups),
+                    ],
+                )
+            )
+            self.sagemaker_execution_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["logs:GetQueryResults"],
+                    resources=["*"],
                 )
             )
 
@@ -849,7 +879,11 @@ class GCOAnalyticsStack(Stack):
                         "DescribeMountTargets and DescribeFileSystems calls SageMaker makes "
                         "when it provisions a user profile, the EMR Serverless actions "
                         "behind Studio's EMR panel (ListApplications takes no resource and "
-                        "CreateApplication creates new applications)."
+                        "CreateApplication creates new applications), and "
+                        "logs:GetQueryResults (no resource types); (5) logs:StartQuery on "
+                        "each workload Region's Container Insights application log group "
+                        "and its <arn>:* form, for the Logs Insights query gco jobs logs "
+                        "falls back to."
                     ),
                     "appliesTo": [
                         "Action::s3:Abort*",
@@ -880,6 +914,12 @@ class GCOAnalyticsStack(Stack):
                             "<AWS::AccountId>:mlflow-app/*"
                         ),
                         "Resource::*",
+                        *(
+                            f"Resource::arn:<AWS::Partition>:logs:{region}:<AWS::AccountId>:"
+                            f"log-group:/aws/containerinsights/{self.project_name}-{region}/"
+                            "application:*"
+                            for region in self.config.get_regions()
+                        ),
                     ],
                 },
             ],
@@ -1018,8 +1058,7 @@ class GCOAnalyticsStack(Stack):
         directory on the file system that profiles without a path of their
         own get. Profiles the presigned-URL Lambda creates set
         ``/home/<username>`` instead. That path is the only per-user
-        separation: the access points the Lambda also creates are never
-        mounted (``EFSFileSystemConfig`` takes no access point), and no
+        separation: ``EFSFileSystemConfig`` takes no access point, and no
         ``CustomPosixUserConfig`` is set.
         """
         private_subnets = self.vpc.select_subnets(
@@ -1117,9 +1156,17 @@ class GCOAnalyticsStack(Stack):
             value=self.studio_domain.domain_name or "",
             description="Name of the SageMaker Studio domain",
         )
+        # `gco analytics users remove` deletes the user's profile in this domain.
+        CfnOutput(
+            self,
+            "StudioDomainId",
+            value=self.studio_domain.attr_domain_id,
+            description="ID of the SageMaker Studio domain",
+        )
 
         # Cleanup custom resource — on stack deletion, removes all user
-        # profiles from the domain and all access points from the EFS so
+        # profiles from the domain and all access points from the EFS (the
+        # per-user ones earlier releases created at login) so
         # CloudFormation can delete the domain and file system cleanly.
         from aws_cdk import CustomResource
         from aws_cdk import custom_resources as cr_provider
@@ -1158,9 +1205,9 @@ class GCOAnalyticsStack(Stack):
         # * the List calls and DescribeSecurityGroups take no resource;
         # * the app, space and profile deletes and DescribeDomain name this
         #   domain (the app, space and profile names are created at run time);
-        # * the access-point lookup names Studio_EFS; the access points are
-        #   created at run time, so DeleteAccessPoint takes this Region's
-        #   access points;
+        # * the access-point lookup names Studio_EFS; the access points earlier
+        #   releases created at run time have ids only known then, so
+        #   DeleteAccessPoint takes this Region's access points;
         # * the home file system SageMaker creates for the domain (its id is
         #   known only from DescribeDomain at run time) needs its policy,
         #   mount targets and itself deleted, so those take this Region's file
@@ -1430,6 +1477,13 @@ class GCOAnalyticsStack(Stack):
                 security_group_ids=[self.emr_security_group.security_group_id],
             ),
         )
+        # The id StartJobRun and the EMR Serverless console take.
+        CfnOutput(
+            self,
+            "EmrServerlessApplicationId",
+            value=self.emr_app.attr_application_id,
+            description="ID of the EMR Serverless Spark application",
+        )
 
     # ==================================================================
     # Cognito pool + client + domain
@@ -1543,8 +1597,8 @@ class GCOAnalyticsStack(Stack):
         ``GCOApiGatewayGlobalStack``. The function lives on
         ``GCOAnalyticsStack`` (not the API gateway stack) so its IAM role
         can reference ``SageMaker_Execution_Role.role_arn`` on ``PassRole``
-        and ``Studio_EFS.file_system_arn`` on the EFS access-point actions
-        without a cross-stack import.
+        and pass ``Studio_EFS``'s id to the profiles it creates without a
+        cross-stack import.
 
         Key configuration:
 
@@ -1570,9 +1624,6 @@ class GCOAnalyticsStack(Stack):
         * ``iam:PassRole`` on ``SageMaker_Execution_Role.role_arn`` with a
           ``StringEquals iam:PassedToService=sagemaker.amazonaws.com``
           condition so the role can only ever be handed to SageMaker.
-        * ``elasticfilesystem:DescribeAccessPoints`` +
-          ``CreateAccessPoint`` on ``Studio_EFS.file_system_arn`` for the
-          lazy per-user access-point creation path in the handler.
         * ``AWSLambdaBasicExecutionRole`` managed policy for the CloudWatch
           Logs + X-Ray write path.
         """
@@ -1588,9 +1639,8 @@ class GCOAnalyticsStack(Stack):
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
             description=(
                 "Execution role for the analytics presigned-URL Lambda. "
-                "Scoped to SageMaker domain + user-profile operations, "
-                "PassRole on SageMaker_Execution_Role, and EFS access-"
-                "point management on Studio_EFS."
+                "Scoped to SageMaker domain + user-profile operations and "
+                "PassRole on SageMaker_Execution_Role."
             ),
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name(
@@ -1637,21 +1687,6 @@ class GCOAnalyticsStack(Stack):
                         "iam:PassedToService": "sagemaker.amazonaws.com",
                     }
                 },
-            )
-        )
-
-        # EFS access-point management — scoped to the Studio_EFS file
-        # system. The Lambda creates one access point per Cognito user
-        # at first login (lazy-in-Lambda approach).
-        self.presigned_url_lambda_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "elasticfilesystem:DescribeAccessPoints",
-                    "elasticfilesystem:CreateAccessPoint",
-                    "elasticfilesystem:TagResource",
-                ],
-                resources=[self.studio_efs.file_system_arn],
             )
         )
 

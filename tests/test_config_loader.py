@@ -2527,7 +2527,7 @@ class TestAnalyticsEnvironmentConfig:
             "removal_policy": "destroy",
         }
         assert analytics_config["efs"] == {"removal_policy": "destroy"}
-        assert analytics_config["studio"] == {"user_profile_name_prefix": None}
+        assert "studio" not in analytics_config
 
     def test_get_analytics_enabled_defaults_to_false(self):
         """Missing analytics_environment block → get_analytics_enabled() is False."""
@@ -2591,7 +2591,13 @@ class TestAnalyticsEnvironmentConfig:
             "removal_policy": "retain",
         }
         assert analytics_config["efs"] == {"removal_policy": "retain"}
-        assert analytics_config["studio"] == {"user_profile_name_prefix": "dev-"}
+        # Never applied: profiles are named after the Cognito username.
+        assert (
+            "analytics_environment.studio.user_profile_name_prefix is deprecated and ignored: "
+            "it was never applied: the presigned-URL Lambda names each SageMaker Studio user "
+            "profile after the Cognito username. Remove it (and the then empty studio block) "
+            "from cdk.json."
+        ) in config.warnings
 
     def test_get_analytics_enabled_true_when_enabled_true(self, valid_context):
         """get_analytics_enabled() returns True when enabled=true."""

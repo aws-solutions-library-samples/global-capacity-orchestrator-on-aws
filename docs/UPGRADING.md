@@ -49,6 +49,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Access-logs buckets use SSE-S3](#access-logs-buckets-use-sse-s3)
   - [Analytics roles act on their own domain](#analytics-roles-act-on-their-own-domain)
   - [Studio login takes an access token](#studio-login-takes-an-access-token)
+  - [Studio users: first sign-in and removal](#studio-users-first-sign-in-and-removal)
   - [`Project` tag on PCS instances](#project-tag-on-pcs-instances)
   - [Add-on replay input in parts](#add-on-replay-input-in-parts)
   - [Volcano Jobs get their pods](#volcano-jobs-get-their-pods)
@@ -575,6 +576,7 @@ Warnings (the synth continues; the key is ignored, so remove it):
 | `fsx_lustre.node_group` (also in `fsx_lustre_regions`) | FSx workloads run on the EKS Auto Mode node pools; `gco stacks fsx enable` removes it |
 | `images.removal_policy`, `images.empty_on_delete`, `images.lifecycle` | No stack creates or deletes the `<project_name>/*` ECR repositories (the gco CLI creates them), so they survive a destroy whatever these say, and `gco images init` applies its own lifecycle policy. Delete a repository with `gco images delete-repo <name> --force -y`; change a policy with `gco images lifecycle set` |
 | `api_gateway.regional_api_enabled` | The API resource policies no longer admit the account as a whole, so callers reach the global API and the regional bridges with their own `execute-api:Invoke` permission whatever it says (see [API calls need an IAM permission](#api-calls-need-an-iam-permission)) |
+| `analytics_environment.studio.user_profile_name_prefix` (a value other than `null`) | It was never applied: each SageMaker Studio user profile is named after its Cognito username. Remove the `studio` block |
 | An `enabled` flag written as `"true"` | Write the JSON boolean `true` |
 | A top-level key in GCO's `snake_case` style that GCO does not read | Most likely a misspelt block, whose settings would not apply |
 | A `*_regions` overlay for a Region that is not in `deployment_regions.regional` | Nothing reads it until the Region is added |
@@ -1084,6 +1086,49 @@ requiring scopes because nothing else tells the two token types apart.
   method's declared responses, so it is in
   `docs/openapi/api-gateway-global.json`.
 
+### Studio users: first sign-in and removal
+
+- **A new user can sign in with the temporary password.**
+  `gco analytics users add` now generates the temporary password, prints
+  it once and, with `--email`, has Cognito email it in its invitation (the
+  invitation used to go by SMS, which these users have no number for, and
+  Cognito never returns a password it generates, so nobody received one).
+  `gco analytics studio login` answers the `NEW_PASSWORD_REQUIRED`
+  challenge with `--new-password` (or `$GCO_STUDIO_NEW_PASSWORD`, or a
+  prompt on a terminal), which needs
+  `cognito-idp:AdminRespondToAuthChallenge`; it used to fail with "no
+  AccessToken returned". With `--password` or `--generate-password`,
+  `users add` sends no invitation.
+- **`users add` JSON for a temporary password changed.** It now has
+  `password_state: "temporary"`, `password_generated: true`,
+  `password_source: "generated"`, `password_permanent: false`, the
+  `password` and `invitation_emailed`; the `not_returned` / `unavailable`
+  values are gone.
+- **BREAKING (narrow): `gco analytics users remove` also deletes the
+  Studio profile.** It deletes the user's SageMaker Studio profile, the
+  spaces it owns and their apps, then the Cognito user, and needs the
+  SageMaker permissions listed in
+  [CLI.md](CLI.md#gco-analytics-users-remove). A profile tagged for another
+  Cognito user is left in place. When the profile cannot be deleted the
+  command exits `1` and keeps the Cognito user; pass
+  `--keep-studio-profile` for the old behavior. The `<project>-analytics`
+  stack publishes the domain id as `StudioDomainId` (an older stack is
+  found by its domain name) and the EMR Serverless application id as
+  `EmrServerlessApplicationId`.
+- **`gco jobs logs` reads a finished job from Studio too.** The Studio
+  execution role may run the CloudWatch Logs Insights query the command
+  falls back to once a job's pods are gone (`logs:StartQuery` on each
+  workload Region's Container Insights application log group, and
+  `logs:GetQueryResults`).
+- **No more per-user EFS access points.** The presigned-URL Lambda no
+  longer creates an access point at `/home/<username>` at every login, and
+  its role loses `elasticfilesystem:DescribeAccessPoints`,
+  `CreateAccessPoint` and `TagResource`. Nothing mounted through them (a
+  profile's `EFSFileSystemConfig` takes no access point), so Studio behaves
+  the same. The ones already created stay until the stack is destroyed,
+  whose cleanup deletes them, or until you delete them with
+  `aws efs delete-access-point`.
+
 ### `Project` tag on PCS instances
 
 The cost reports filter Cost Explorer on the `Project` tag that `cdk.json`
@@ -1414,6 +1459,12 @@ has the details.
   where ECR's `ImageNotFoundException` used to come back as an error.
 - **`deps_scan` is tagged `low-risk`** instead of `safe`: its full scan
   pip-installs into the server's environment.
+- **The analytics user tools follow the CLI.** `analytics_user_remove`
+  (gated) deletes the user's Studio profile too, waiting up to 20 minutes,
+  unless `keep_studio_profile=True`. `analytics_login_url` takes a
+  `new_password` for a user's first sign-in, handed to the CLI as
+  `$GCO_STUDIO_NEW_PASSWORD`. `analytics_user_add` returns the temporary
+  password once under `password`.
 - **`ai_recommend` runs asynchronously, for up to 10 minutes.** Cancelling
   the call stops its CLI process; the two-minute limit used to cut the gather
   and the model off. It takes a list (or a comma-separated string) of

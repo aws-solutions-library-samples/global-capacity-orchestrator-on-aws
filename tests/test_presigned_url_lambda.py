@@ -3,7 +3,7 @@
 Test strategy:
 
 * The handler creates module-level boto3 clients at import time
-  (``sagemaker = boto3.client("sagemaker")`` and similarly for ``efs``).
+  (``sagemaker = boto3.client("sagemaker")``, the only client it makes).
   We use ``unittest.mock.patch("boto3.client")`` wrapped around the
   :func:`tests._lambda_imports.load_lambda_module` call so the clients
   are replaced with ``MagicMock`` instances before any environment
@@ -107,22 +107,18 @@ def _make_event(username: str | None = "alice", sub: str | None = _SUB) -> dict[
 def handler_module(monkeypatch: pytest.MonkeyPatch):
     """Import the Lambda handler under patched ``boto3.client`` + env vars.
 
-    Yields ``(handler, sagemaker_client, efs_client)`` tuples. The
-    sagemaker/efs client mocks are distinct ``MagicMock`` instances so
-    tests can assert call sequences on one without interference from the
-    other.
+    Yields ``(handler, sagemaker_client)``. The handler may create only a
+    SageMaker client: the per-user EFS access points earlier releases made
+    at every login are gone, so an EFS client would be a regression.
     """
     for key, value in _HANDLER_ENV.items():
         monkeypatch.setenv(key, value)
 
     sagemaker_mock = MagicMock(name="sagemaker_client")
-    efs_mock = MagicMock(name="efs_client")
 
     def _client_factory(service_name: str, *args: Any, **kwargs: Any) -> MagicMock:
         if service_name == "sagemaker":
             return sagemaker_mock
-        if service_name == "efs":
-            return efs_mock
         raise AssertionError(f"Unexpected boto3 client: {service_name!r}")
 
     with patch("boto3.client", side_effect=_client_factory):
@@ -135,19 +131,8 @@ def handler_module(monkeypatch: pytest.MonkeyPatch):
     sagemaker_mock.create_presigned_domain_url.return_value = {
         "AuthorizedUrl": "https://d-abc123xyz.studio.us-east-2.sagemaker.aws/auth?token=xyz",
     }
-    efs_mock.describe_access_points.return_value = {
-        "AccessPoints": [
-            {
-                "AccessPointArn": (
-                    "arn:aws:elasticfilesystem:us-east-2:123456789012:"
-                    "access-point/fsap-0123456789abcdef0"
-                ),
-                "RootDirectory": {"Path": "/home/alice"},
-            }
-        ]
-    }
 
-    return handler, sagemaker_mock, efs_mock
+    return handler, sagemaker_mock
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +144,7 @@ class TestPresignedUrlHappyPath:
     """Happy-path invariants for the Lambda handler."""
 
     def test_happy_path_returns_200_with_url(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
 
         response = handler.lambda_handler(_make_event(), None)
 
@@ -180,7 +165,7 @@ class TestPresignedUrlHappyPath:
 
     def test_falls_back_to_plain_username_claim(self, handler_module) -> None:
         """If the token lacks ``cognito:username``, plain ``username`` is used."""
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
 
         event = {"requestContext": {"authorizer": {"claims": {"username": "bob", "sub": _SUB}}}}
         response = handler.lambda_handler(event, None)
@@ -194,7 +179,7 @@ class TestPresignedUrlCreatesResources:
     """Lazy-provisioning branches for user profile + EFS access point."""
 
     def test_creates_user_profile_if_missing_returns_202(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
 
         # Profile doesn't exist -- triggers creation, returns 202.
         sagemaker_mock.describe_user_profile.side_effect = ClientError(
@@ -228,7 +213,7 @@ class TestPresignedUrlCreatesResources:
 
     def test_creates_user_profile_on_resource_not_found(self, handler_module) -> None:
         """``ResourceNotFound`` is also treated as 'profile missing'."""
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
 
         sagemaker_mock.describe_user_profile.side_effect = ClientError(
             error_response={"Error": {"Code": "ResourceNotFound", "Message": "not found"}},
@@ -242,7 +227,7 @@ class TestPresignedUrlCreatesResources:
 
     def test_pending_profile_returns_202(self, handler_module) -> None:
         """If the profile exists but is Pending, return 202 without creating."""
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
 
         sagemaker_mock.describe_user_profile.return_value = _profile("Pending")
 
@@ -255,7 +240,7 @@ class TestPresignedUrlCreatesResources:
 
     def test_failed_profile_deletes_and_recreates(self, handler_module) -> None:
         """If the profile is Failed, delete it, recreate, and return 202."""
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
 
         sagemaker_mock.describe_user_profile.return_value = _profile(
             "Failed", FailureReason="Permission error"
@@ -273,67 +258,35 @@ class TestPresignedUrlCreatesResources:
             {"Key": _OWNER_TAG_KEY, "Value": _SUB}
         ]
 
-    def test_creates_access_point_if_missing(self, handler_module) -> None:
-        handler, _, efs_mock = handler_module
-
-        # No access points yet for this EFS; handler should create one.
-        efs_mock.describe_access_points.return_value = {"AccessPoints": []}
-        efs_mock.create_access_point.return_value = {
-            "AccessPointArn": (
-                "arn:aws:elasticfilesystem:us-east-2:123456789012:access-point/fsap-newabc"
-            )
-        }
-
-        response = handler.lambda_handler(_make_event(), None)
-
-        assert response["statusCode"] == 200
-        efs_mock.create_access_point.assert_called_once()
-        call_kwargs = efs_mock.create_access_point.call_args.kwargs
-        assert call_kwargs["FileSystemId"] == _STUDIO_EFS_ID
-        # The derived uid/gid pair must be equal and >= 100000.
-        uid = call_kwargs["PosixUser"]["Uid"]
-        gid = call_kwargs["PosixUser"]["Gid"]
-        assert uid == gid
-        assert uid >= 100000
-        # Match what _derive_posix_ids returns for the same username.
-        assert (uid, gid) == handler._derive_posix_ids("alice")
-        # Root-dir creation info matches the POSIX owner.
-        root_dir = call_kwargs["RootDirectory"]
-        assert root_dir["Path"] == "/home/alice"
-        assert root_dir["CreationInfo"]["OwnerUid"] == uid
-        assert root_dir["CreationInfo"]["Permissions"] == "0700"
-
 
 class TestPresignedUrlErrorPaths:
     """Error-path assertions — auth failures, missing domain, boto3 errors."""
 
     def test_missing_cognito_claim_returns_401(self, handler_module) -> None:
-        handler, sagemaker_mock, efs_mock = handler_module
+        handler, sagemaker_mock = handler_module
 
         response = handler.lambda_handler(_make_event(username=None), None)
 
         assert response["statusCode"] == 401
         body = json.loads(response["body"])
         assert body == {"error": "MissingCognitoClaim"}
-        # No SageMaker or EFS calls for an unauthenticated request.
+        # No SageMaker calls for an unauthenticated request.
         sagemaker_mock.list_domains.assert_not_called()
         sagemaker_mock.create_presigned_domain_url.assert_not_called()
-        efs_mock.describe_access_points.assert_not_called()
 
     def test_missing_sub_claim_returns_401(self, handler_module) -> None:
         """Without ``sub`` the caller's ownership of a profile cannot be checked."""
-        handler, sagemaker_mock, efs_mock = handler_module
+        handler, sagemaker_mock = handler_module
 
         response = handler.lambda_handler(_make_event(sub=None), None)
 
         assert response["statusCode"] == 401
         assert json.loads(response["body"]) == {"error": "MissingCognitoClaim"}
         sagemaker_mock.describe_user_profile.assert_not_called()
-        efs_mock.describe_access_points.assert_not_called()
 
     def test_missing_authorizer_block_returns_401(self, handler_module) -> None:
         """A bare event with no requestContext still fails cleanly."""
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
 
         response = handler.lambda_handler({}, None)
 
@@ -348,7 +301,7 @@ class TestPresignedUrlErrorPaths:
         The old ListDomains fallback looked for a domain named "", so it
         could never find one; the stack always sets the ID.
         """
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
 
         handler.STUDIO_DOMAIN_ID = ""
 
@@ -363,7 +316,7 @@ class TestPresignedUrlErrorPaths:
 
     def test_create_presigned_url_raise_returns_500_with_opaque_token(self, handler_module) -> None:
         """500 body contains only the opaque token, never the message."""
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
 
         secret_message = "internal-detail-do-not-leak-123-accountid-credentials-leak"
         sagemaker_mock.create_presigned_domain_url.side_effect = ClientError(
@@ -385,41 +338,6 @@ class TestPresignedUrlErrorPaths:
         # response payload — not the body, not the headers.
         assert secret_message not in response["body"]
         assert secret_message not in json.dumps(response["headers"])
-
-
-# ---------------------------------------------------------------------------
-# Pure-helper coverage
-# ---------------------------------------------------------------------------
-
-
-class TestDerivePosixIds:
-    """Unit tests for the pure POSIX-id derivation helper."""
-
-    def test_derive_posix_ids_returns_in_valid_range(self, handler_module) -> None:
-        handler, _, _ = handler_module
-
-        uid, gid = handler._derive_posix_ids("alice")
-
-        assert uid == gid
-        assert uid >= 100000
-        # 32-bit signed positive int ceiling.
-        assert uid < 2**31
-
-    def test_derive_posix_ids_is_deterministic(self, handler_module) -> None:
-        """Same username always produces the same (uid, gid)."""
-        handler, _, _ = handler_module
-
-        for _ in range(3):
-            assert handler._derive_posix_ids("alice") == handler._derive_posix_ids("alice")
-
-    def test_derive_posix_ids_differs_across_usernames(self, handler_module) -> None:
-        """Different usernames produce different uids (not a contract, but a
-        reasonable collision-resistance smoke test)."""
-        handler, _, _ = handler_module
-
-        uid_alice, _ = handler._derive_posix_ids("alice")
-        uid_bob, _ = handler._derive_posix_ids("bob")
-        assert uid_alice != uid_bob
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +395,7 @@ class TestPresignedUrlResponseShapeProperty:
     def test_response_body_is_valid_json_with_url_and_positive_expires(
         self, handler_module, claims: dict[str, Any]
     ) -> None:
-        handler, sagemaker_mock, efs_mock = handler_module
+        handler, sagemaker_mock = handler_module
 
         # Stub the domain + profile + access-point flow so every example
         # takes the happy path. The per-username access-point path
@@ -495,17 +413,6 @@ class TestPresignedUrlResponseShapeProperty:
             "AuthorizedUrl": (
                 f"https://d-propcheck.studio.us-east-2.sagemaker.aws/auth?user={username}"
             ),
-        }
-        efs_mock.describe_access_points.return_value = {
-            "AccessPoints": [
-                {
-                    "AccessPointArn": (
-                        "arn:aws:elasticfilesystem:us-east-2:123456789012:"
-                        "access-point/fsap-propcheck"
-                    ),
-                    "RootDirectory": {"Path": f"/home/{username}"},
-                }
-            ]
         }
 
         event = {"requestContext": {"authorizer": {"claims": claims}}}
@@ -543,16 +450,14 @@ class TestPresignedUrlResponseShapeProperty:
         Before, ``alice.smith`` reached ``DescribeUserProfile`` and came back
         as a generic 500 (and as an EFS path component).
         """
-        handler, sagemaker_mock, efs_mock = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.reset_mock()
-        efs_mock.reset_mock()
 
         response = handler.lambda_handler(_make_event(username=username), None)
 
         assert response["statusCode"] == 400
         assert json.loads(response["body"]) == {"error": "UnsupportedUsername"}
         assert sagemaker_mock.mock_calls == []
-        assert efs_mock.mock_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -561,8 +466,8 @@ class TestPresignedUrlResponseShapeProperty:
 
 
 def test_handler_module_exposes_pure_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_parse_claims``, ``_derive_posix_ids``, ``_format_success``, and
-    ``_format_error`` are factored out as pure helpers.
+    """``_parse_claims``, ``_format_success``, and ``_format_error`` are
+    factored out as pure helpers.
     """
     for key, value in _HANDLER_ENV.items():
         monkeypatch.setenv(key, value)
@@ -572,7 +477,6 @@ def test_handler_module_exposes_pure_helpers(monkeypatch: pytest.MonkeyPatch) ->
 
     assert callable(handler._parse_claims)
     assert callable(handler._is_studio_username)
-    assert callable(handler._derive_posix_ids)
     assert callable(handler._format_success)
     assert callable(handler._format_provisioning)
     assert callable(handler._format_error)
@@ -615,13 +519,13 @@ class TestParseClaimsShapes:
         ids=["non-dict-event", "non-dict-authorizer", "non-dict-claims"],
     )
     def test_every_malformed_layer_yields_no_claims(self, handler_module, event) -> None:
-        handler, _, _ = handler_module
+        handler, _ = handler_module
         assert handler._parse_claims(event) == {}
 
 
 class TestEnsureUserProfileErrorCodes:
     def test_unexpected_describe_error_propagates(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.describe_user_profile.side_effect = ClientError(
             {"Error": {"Code": "AccessDeniedException", "Message": "no"}}, "DescribeUserProfile"
         )
@@ -637,7 +541,7 @@ class TestEnsureUserProfileErrorCodes:
         Before, the refused delete was logged and the create's ResourceInUse
         ignored, so the CLI was told "provisioning" until it gave up.
         """
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.describe_user_profile.return_value = _profile(
             "Failed", FailureReason="quota"
         )
@@ -651,7 +555,7 @@ class TestEnsureUserProfileErrorCodes:
         sagemaker_mock.create_user_profile.assert_not_called()
 
     def test_failed_profile_already_gone_is_recreated(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.describe_user_profile.return_value = _profile("Failed")
         sagemaker_mock.delete_user_profile.side_effect = ClientError(
             {"Error": {"Code": "ResourceNotFound", "Message": "gone"}}, "DeleteUserProfile"
@@ -666,7 +570,7 @@ class TestEnsureUserProfileErrorCodes:
     def test_unrecoverable_profile_is_a_409_not_a_202(self, handler_module, status) -> None:
         """Before: only ``Failed`` was handled, so these returned 202 on every
         poll and the CLI timed out after 120 s with "Try again in a minute"."""
-        handler, sagemaker_mock, efs_mock = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.describe_user_profile.return_value = _profile(
             status, FailureReason="VPC quota"
         )
@@ -678,11 +582,10 @@ class TestEnsureUserProfileErrorCodes:
         sagemaker_mock.delete_user_profile.assert_not_called()
         sagemaker_mock.create_user_profile.assert_not_called()
         sagemaker_mock.create_presigned_domain_url.assert_not_called()
-        efs_mock.describe_access_points.assert_not_called()
 
     @pytest.mark.parametrize("status", ["Pending", "Updating", "Deleting"])
     def test_converging_profile_keeps_polling(self, handler_module, status) -> None:
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.describe_user_profile.return_value = _profile(status)
 
         response = handler.lambda_handler(_make_event(), None)
@@ -693,7 +596,7 @@ class TestEnsureUserProfileErrorCodes:
         sagemaker_mock.create_user_profile.assert_not_called()
 
     def test_concurrent_creation_is_tolerated(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.create_user_profile.side_effect = ClientError(
             {"Error": {"Code": "ResourceInUse", "Message": "exists"}}, "CreateUserProfile"
         )
@@ -701,42 +604,13 @@ class TestEnsureUserProfileErrorCodes:
         handler._create_user_profile(_STUDIO_DOMAIN_ID, "alice", _SUB, _STUDIO_EFS_ID)
 
     def test_other_creation_failures_propagate(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.create_user_profile.side_effect = ClientError(
             {"Error": {"Code": "ResourceLimitExceeded", "Message": "quota"}}, "CreateUserProfile"
         )
 
         with pytest.raises(ClientError, match="ResourceLimitExceeded"):
             handler._create_user_profile(_STUDIO_DOMAIN_ID, "alice", _SUB, _STUDIO_EFS_ID)
-
-
-class TestEnsureAccessPointPagination:
-    def test_existing_access_point_on_a_later_page_is_reused(self, handler_module) -> None:
-        handler, _, efs_mock = handler_module
-        arn = "arn:aws:elasticfilesystem:us-east-2:123456789012:access-point/fsap-alice"
-        efs_mock.describe_access_points.side_effect = [
-            {"AccessPoints": [{"RootDirectory": {"Path": "/home/bob"}}], "NextToken": "p2"},
-            {"AccessPoints": [{"AccessPointArn": arn, "RootDirectory": {"Path": "/home/alice"}}]},
-        ]
-
-        assert handler._ensure_access_point("alice", _STUDIO_EFS_ID) == arn
-        assert efs_mock.describe_access_points.call_args_list[1].kwargs["NextToken"] == "p2"
-        efs_mock.create_access_point.assert_not_called()
-
-    def test_exhausted_pages_lead_to_creation(self, handler_module) -> None:
-        handler, _, efs_mock = handler_module
-        efs_mock.describe_access_points.side_effect = [
-            {"AccessPoints": [{"RootDirectory": {"Path": "/home/bob"}}], "NextToken": "p2"},
-            {"AccessPoints": []},
-        ]
-        efs_mock.create_access_point.return_value = {"AccessPointArn": "arn:new"}
-
-        assert handler._ensure_access_point("alice", _STUDIO_EFS_ID) == "arn:new"
-        uid, gid = handler._derive_posix_ids("alice")
-        assert efs_mock.create_access_point.call_args.kwargs["PosixUser"] == {
-            "Uid": uid,
-            "Gid": gid,
-        }
 
 
 class TestStudioUsernames:
@@ -747,7 +621,7 @@ class TestStudioUsernames:
         ["alice", "Alice", "a", "7", "alice-smith", "a--b", "a" * 63, "a" + "-b" * 31],
     )
     def test_names_sagemaker_accepts(self, handler_module, username: str) -> None:
-        handler, _, _ = handler_module
+        handler, _ = handler_module
         assert handler._is_studio_username(username)
 
     @pytest.mark.parametrize(
@@ -767,7 +641,7 @@ class TestStudioUsernames:
         ],
     )
     def test_names_sagemaker_rejects(self, handler_module, username: str) -> None:
-        handler, _, _ = handler_module
+        handler, _ = handler_module
         assert not handler._is_studio_username(username)
 
 
@@ -782,7 +656,7 @@ class TestProfileOwnership:
 
     @pytest.mark.parametrize("status", ["InService", "Pending", "Updating", "Deleting"])
     def test_another_users_profile_is_a_403(self, handler_module, status: str) -> None:
-        handler, sagemaker_mock, efs_mock = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.describe_user_profile.return_value = _profile(status)
         sagemaker_mock.list_tags.return_value = _owner_tags(_OTHER_SUB)
 
@@ -793,13 +667,11 @@ class TestProfileOwnership:
         sagemaker_mock.list_tags.assert_called_once_with(ResourceArn=_PROFILE_ARN)
         sagemaker_mock.add_tags.assert_not_called()
         sagemaker_mock.create_presigned_domain_url.assert_not_called()
-        efs_mock.describe_access_points.assert_not_called()
-        efs_mock.create_access_point.assert_not_called()
 
     @pytest.mark.parametrize("status", ["Failed", "Update_Failed", "Delete_Failed"])
     def test_another_users_failed_profile_is_left_alone(self, handler_module, status) -> None:
         """Ownership comes before the delete-and-recreate of a Failed profile."""
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.describe_user_profile.return_value = _profile(status)
         sagemaker_mock.list_tags.return_value = _owner_tags(_OTHER_SUB)
 
@@ -811,7 +683,7 @@ class TestProfileOwnership:
 
     def test_untagged_profile_in_service_is_claimed_by_the_caller(self, handler_module) -> None:
         """A profile made before the tag (or outside the Lambda) gets one."""
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.list_tags.return_value = {"Tags": [{"Key": "Project", "Value": "GCO"}]}
 
         response = handler.lambda_handler(_make_event(), None)
@@ -822,7 +694,7 @@ class TestProfileOwnership:
         )
 
     def test_untagged_profile_still_provisioning_is_not_claimed_yet(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.describe_user_profile.return_value = _profile("Pending")
         sagemaker_mock.list_tags.return_value = {"Tags": []}
 
@@ -832,7 +704,7 @@ class TestProfileOwnership:
         sagemaker_mock.add_tags.assert_not_called()
 
     def test_own_profile_is_not_retagged(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
 
         response = handler.lambda_handler(_make_event(), None)
 
@@ -840,7 +712,7 @@ class TestProfileOwnership:
         sagemaker_mock.add_tags.assert_not_called()
 
     def test_owner_tag_on_a_later_page_is_found(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.list_tags.side_effect = [
             {"Tags": [{"Key": "Project", "Value": "GCO"}], "NextToken": "page-2"},
             _owner_tags(_OTHER_SUB),
@@ -853,7 +725,7 @@ class TestProfileOwnership:
         }
 
     def test_failed_untagged_profile_is_recreated_for_the_caller(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         sagemaker_mock.describe_user_profile.return_value = _profile("Failed")
         sagemaker_mock.list_tags.return_value = {"Tags": []}
 
@@ -869,7 +741,7 @@ class TestProfileOwnership:
         self, handler_module
     ) -> None:
         """``alice``'s create loses to ``Alice``'s; the next poll answers 403."""
-        handler, sagemaker_mock, _ = handler_module
+        handler, sagemaker_mock = handler_module
         missing = ClientError(
             {"Error": {"Code": "ResourceNotFound", "Message": "not found"}}, "DescribeUserProfile"
         )

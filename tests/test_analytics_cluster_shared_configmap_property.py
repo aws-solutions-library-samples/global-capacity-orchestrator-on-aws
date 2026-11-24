@@ -100,7 +100,6 @@ def _synth_regional(analytics_enabled: bool, region: str, logical_name: str) -> 
             "hyperpod": {"enabled": False},
             "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
             "efs": {"removal_policy": "destroy"},
-            "studio": {"user_profile_name_prefix": None},
         },
     }
     app = cdk.App(context=context)

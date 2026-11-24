@@ -63,7 +63,6 @@ def build_overlay(
             "canvas": {"enabled": canvas_enabled},
             "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
             "efs": {"removal_policy": "destroy"},
-            "studio": {"user_profile_name_prefix": None},
         },
         "deployment_regions": {
             "global": "us-east-2",

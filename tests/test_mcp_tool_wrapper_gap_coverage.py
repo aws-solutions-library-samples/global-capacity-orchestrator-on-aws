@@ -1610,7 +1610,16 @@ def test_analytics_wrapper_matrix(
 
 @pytest.mark.parametrize(
     ("kwargs", "expected_env"),
-    [({}, None), ({"password": "secret"}, {"GCO_STUDIO_PASSWORD": "secret"})],
+    [
+        ({}, None),
+        ({"password": "secret"}, {"GCO_STUDIO_PASSWORD": "secret"}),
+        # The first sign-in of an account with a temporary password.
+        ({"new_password": "chosen"}, {"GCO_STUDIO_NEW_PASSWORD": "chosen"}),
+        (
+            {"password": "secret", "new_password": "chosen"},
+            {"GCO_STUDIO_PASSWORD": "secret", "GCO_STUDIO_NEW_PASSWORD": "chosen"},
+        ),
+    ],
 )
 def test_analytics_login_url_passes_the_password_in_the_environment(
     kwargs: dict[str, Any], expected_env: dict[str, str] | None, monkeypatch: pytest.MonkeyPatch
@@ -1621,6 +1630,27 @@ def test_analytics_login_url_passes_the_password_in_the_environment(
         assert _invoke(loaded.module.analytics_login_url, "alice", **kwargs) == CLI_RESULT
         loaded.run_cli.assert_called_once_with(
             "analytics", "studio", "login", "--username", "alice", env=expected_env
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "flags"), [({}, ()), ({"keep_studio_profile": True}, ("--keep-studio-profile",))]
+)
+def test_analytics_user_remove_deletes_the_studio_profile_unless_kept(
+    kwargs: dict[str, Any], flags: tuple[str, ...]
+) -> None:
+    """The SageMaker deletions wait for the apps and spaces, so the call gets 20 minutes."""
+    with _isolated_tool_module("analytics", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
+        assert _invoke(loaded.module.analytics_user_remove, "alice", **kwargs) == CLI_RESULT
+        loaded.run_cli.assert_called_once_with(
+            "analytics",
+            "users",
+            "remove",
+            "--username",
+            "alice",
+            "--yes",
+            *flags,
+            timeout_seconds=1200,
         )
 
 

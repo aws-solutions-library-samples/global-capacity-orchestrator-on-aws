@@ -28,12 +28,15 @@ Flow (happy path):
    ``Delete_Failed``, or a ``Failed`` one whose delete is refused) is an
    HTTP 409 ``UserProfileFailed`` instead of a 202 the CLI would poll
    until it gives up.
-4. Once the profile is ``InService``, ensure the per-user EFS access
-   point exists (lazy creation). Studio does not mount through it: a
-   profile's ``EFSFileSystemConfig`` takes only a file system ID and a
-   path, so the profile reaches ``/home/<username>`` on the file system
-   with Studio's own POSIX identity.
-5. ``sagemaker:CreatePresignedDomainUrl`` and return the URL (HTTP 200).
+4. ``sagemaker:CreatePresignedDomainUrl`` and return the URL (HTTP 200).
+
+The profile reaches ``/home/<username>`` on the Studio EFS through its
+``EFSFileSystemConfig``, which takes only a file system ID and a path, with
+Studio's own POSIX identity. Earlier releases also created a per-user EFS
+access point at that path on every login; nothing mounted through it, so
+it never applied (EFS creates an access point's root directory only when a
+client mounts through the access point), and it is no longer created. The
+stack's cleanup still deletes the ones earlier releases left.
 
 The Lambda never blocks waiting for profile provisioning.  Instead it
 returns HTTP 202 ``{"status": "provisioning"}`` and the CLI retries
@@ -48,18 +51,17 @@ Environment variables (set by ``GCOAnalyticsStack._create_presigned_url_lambda``
 
 - ``STUDIO_DOMAIN_ID`` -- the Studio domain ID (e.g. ``d-abc123xyz``).
 - ``SAGEMAKER_EXECUTION_ROLE_ARN`` -- passed on ``CreateUserProfile``.
-- ``STUDIO_EFS_ID`` -- used by ``_ensure_access_point``.
+- ``STUDIO_EFS_ID`` -- the file system each profile's home directory is on.
 - ``URL_EXPIRES_SECONDS`` -- default ``300`` (5 minutes).
 - ``SESSION_EXPIRES_SECONDS`` -- default ``43200`` (12 hours).
 
-The module-level boto3 clients (``sagemaker`` and ``efs``) are created
-once at cold start so repeat invocations inside a warm container reuse
-the same HTTP connection pools.
+The module-level ``sagemaker`` boto3 client is created once at cold start
+so repeat invocations inside a warm container reuse its HTTP connection
+pool.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -89,7 +91,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 sagemaker = boto3.client("sagemaker")
-efs = boto3.client("efs")
 
 # ---------------------------------------------------------------------------
 # Environment variables (read at module import, i.e. cold start)
@@ -137,12 +138,6 @@ _UNRECOVERABLE_PROFILE_STATUSES = frozenset({"Update_Failed", "Delete_Failed"})
 #: DescribeUserProfile / DeleteUserProfile error codes for a missing profile.
 _PROFILE_MISSING_CODES = frozenset({"ValidationException", "ResourceNotFound"})
 
-# POSIX id derivation constants. 2**31 - 19 keeps the result comfortably
-# within the 32-bit signed-int range EFS accepts; the 100000 offset pushes
-# the uid/gid out of the system-user range reserved for the base image.
-_POSIX_ID_MODULUS = 2147483629
-_POSIX_ID_OFFSET = 100000
-
 # ==========================================================================
 # Pure helpers (unit-testable without mocking)
 # ==========================================================================
@@ -184,25 +179,6 @@ def _is_studio_username(username: str) -> bool:
         len(username) <= STUDIO_USERNAME_MAX_LENGTH
         and _STUDIO_USERNAME_RE.fullmatch(username) is not None
     )
-
-
-def _derive_posix_ids(username: str) -> tuple[int, int]:
-    """Derive a deterministic POSIX ``(uid, gid)`` pair from a username.
-
-    Uses SHA-256 over the UTF-8 encoded username; the first four bytes
-    are interpreted as a big-endian unsigned int, reduced modulo
-    ``_POSIX_ID_MODULUS``, and shifted by ``_POSIX_ID_OFFSET`` so the
-    result is always ``>= 100000`` and fits within the 32-bit signed
-    range EFS expects.
-
-    The gid is always equal to the uid -- per-user home directories own
-    a single-user group, matching the ``0700`` permissions on
-    ``/home/<username>`` access points.
-    """
-    digest = hashlib.sha256(username.encode("utf-8")).digest()
-    raw = int.from_bytes(digest[:4], byteorder="big", signed=False)
-    uid = (raw % _POSIX_ID_MODULUS) + _POSIX_ID_OFFSET
-    return uid, uid
 
 
 def _format_success(url: str, expires: int) -> dict[str, Any]:
@@ -385,58 +361,6 @@ def _create_user_profile(domain_id: str, username: str, sub: str, efs_id: str) -
         logger.info("User profile %s already exists (ResourceInUse)", username)
 
 
-def _ensure_access_point(username: str, efs_id: str) -> str:
-    """Ensure a per-user EFS access point at ``/home/<username>`` exists.
-
-    Searches existing access points on ``efs_id`` for one whose
-    ``RootDirectory.Path`` equals ``/home/<username>``; creates one if
-    absent with a POSIX ``(uid, gid)`` derived from
-    :func:`_derive_posix_ids` and ``0700`` permissions.
-
-    Returns the ``AccessPointArn``. Nothing associates it with the user
-    profile: ``EFSFileSystemConfig`` has no access-point field, so Studio
-    never mounts through it and its POSIX identity and ``0700`` mode do not
-    apply to the profile's spaces.
-    """
-    uid, gid = _derive_posix_ids(username)
-    target_path = f"/home/{username}"
-
-    # Paginate describe_access_points. EFS returns at most 100 APs per
-    # page by default; we explicitly cap at 1000 to stay inside a single
-    # request for typical deployments.
-    next_token: str | None = None
-    while True:
-        kwargs: dict[str, Any] = {"FileSystemId": efs_id, "MaxResults": 1000}
-        if next_token is not None:
-            kwargs["NextToken"] = next_token
-        response = efs.describe_access_points(**kwargs)
-        for ap in response.get("AccessPoints", []):
-            root_dir = ap.get("RootDirectory", {})
-            if root_dir.get("Path") == target_path:
-                return str(ap.get("AccessPointArn", ""))
-        next_token = response.get("NextToken")
-        if not next_token:
-            break
-
-    created = efs.create_access_point(
-        FileSystemId=efs_id,
-        PosixUser={"Uid": uid, "Gid": gid},
-        RootDirectory={
-            "Path": target_path,
-            "CreationInfo": {
-                "OwnerUid": uid,
-                "OwnerGid": gid,
-                "Permissions": "0700",
-            },
-        },
-        Tags=[
-            {"Key": "gco:analytics:user", "Value": username},
-            {"Key": "gco:analytics:managed", "Value": "true"},
-        ],
-    )
-    return str(created.get("AccessPointArn", ""))
-
-
 # ==========================================================================
 # Entry point
 # ==========================================================================
@@ -490,10 +414,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         if profile_status != "InService":
             return _format_provisioning()
 
-        # Step 4: lazy per-user EFS access point.
-        _ensure_access_point(username, STUDIO_EFS_ID)
-
-        # Step 5: mint the presigned URL.
+        # Step 4: mint the presigned URL.
         response = sagemaker.create_presigned_domain_url(
             DomainId=domain_id,
             UserProfileName=username,
