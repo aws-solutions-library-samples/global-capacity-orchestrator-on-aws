@@ -111,6 +111,18 @@ _CONFIG_LOCK_STATE = local()
 # cannot synthesize or deploy. ``StackManager._ensure_cdk_toolchain`` checks
 # for these before invoking ``cdk`` so a missing toolchain is actionable.
 _CDK_TOOLCHAIN_MODULES = ("aws_cdk", "cdk_nag")
+# The CDK subcommands that evaluate app.py.
+_CDK_APP_COMMANDS = frozenset({"deploy", "destroy", "diff", "list", "synth"})
+# Part of what the CDK CLI prints when the cloud assembly app.py wrote is
+# newer than the CLI can read: "This CDK CLI is not compatible with the CDK
+# library used by your application. Please upgrade the CLI to the latest
+# version. (Cloud assembly schema version mismatch: Maximum schema version
+# supported is 54.x.x, but found 55.0.0. You need at least CLI version
+# 2.1147.0 to read this manifest.)"
+_CDK_SCHEMA_MISMATCH_MARKER = "Cloud assembly schema version mismatch"
+# Serializes the lookup in _cdk_library_minimum_cli_version: parallel deploys
+# can fail together, and every jsii call goes through one kernel process.
+_CDK_LIBRARY_LOOKUP_LOCK = Lock()
 _INFERENCE_STREAMING_PACKAGE_FILES = ("index.mjs", "package.json", "package-lock.json")
 _KUBECTL_PACKAGE_INPUTS = ("handler.py", "requirements.txt", "manifests")
 _LAMBDA_BUILD_MANIFEST = ".gco-build-manifest.json"
@@ -1281,6 +1293,31 @@ def _config_mutation_lock(path: Path) -> Iterator[None]:
 def _known_cloudformation_regions() -> frozenset[str]:
     """Return every AWS SDK-known Region that exposes CloudFormation."""
     return known_cloudformation_regions()
+
+
+def _cdk_version_key(version: str) -> tuple[int, int, int] | None:
+    """``"2.1147.0"`` as ``(2, 1147, 0)``; ``None`` for anything else."""
+    parts = version.split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        return None
+    return int(parts[0]), int(parts[1]), int(parts[2])
+
+
+def _cdk_library_minimum_cli_version() -> str | None:
+    """The oldest CDK CLI that can read the cloud assembly the CDK library writes.
+
+    Read from ``aws_cdk.cloud_assembly_schema`` in this environment, which is
+    the one app.py synthesizes with (see ``StackManager._ensure_cdk_toolchain``).
+    ``None`` when the library does not say or cannot be loaded.
+    """
+    with _CDK_LIBRARY_LOOKUP_LOCK:
+        try:
+            from aws_cdk.cloud_assembly_schema import Manifest
+
+            version = Manifest.cli_version()
+        except Exception:  # best-effort: only a hint depends on it
+            return None
+    return str(version) if version else None
 
 
 class CdkToolchainError(RuntimeError):
@@ -2469,7 +2506,7 @@ class StackManager:
         # These commands all evaluate app.py, including list and destroy. The
         # stack graph references ignored generated Lambda assets, so prepare
         # them centrally rather than relying on individual command wrappers.
-        if command and command[0] in {"deploy", "destroy", "diff", "list", "synth"}:
+        if command and command[0] in _CDK_APP_COMMANDS:
             if prepare_assets:
                 self._ensure_lambda_build()
             # Apply registered context overrides uniformly to every
@@ -2542,11 +2579,82 @@ class StackManager:
             finally:
                 with self._active_cdk_lock:
                     self._active_cdk_processes.pop(process.pid, None)
-        return subprocess.CompletedProcess(
+        result = subprocess.CompletedProcess(
             cdk_cmd,
             process.returncode,
             stdout=stdout or "",
             stderr=stderr or "",
+        )
+        if result.returncode != 0 and command and command[0] in _CDK_APP_COMMANDS:
+            hint = self._cdk_cli_mismatch_hint(
+                cdk_path,
+                full_env,
+                f"{result.stdout}\n{result.stderr}" if capture_output else None,
+            )
+            if hint is not None and capture_output:
+                result.stderr = f"{result.stderr.rstrip()}\n\nLikely cause: {hint}\n"
+            elif hint is not None:
+                print(f"\n  Likely cause: {hint}")
+        return result
+
+    @staticmethod
+    def _cdk_cli_version(cdk_path: str, env: Mapping[str, str]) -> str | None:
+        """The version ``cdk --version`` prints, or ``None`` when it cannot be read."""
+        try:
+            result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - static CDK argv, no shell
+                [cdk_path, "--version"],
+                capture_output=True,
+                text=True,
+                env=dict(env),
+                timeout=60,
+                check=False,
+            )
+        except Exception:  # best-effort: only a hint depends on it
+            return None
+        words = str(result.stdout or "").split()
+        if result.returncode != 0 or not words or _cdk_version_key(words[0]) is None:
+            return None
+        return words[0]
+
+    def _cdk_cli_mismatch_hint(
+        self, cdk_path: str, env: Mapping[str, str], output: str | None
+    ) -> str | None:
+        """Explain a failed CDK command whose CLI is older than the CDK library.
+
+        ``output`` is the command's captured stdout and stderr, or ``None``
+        when it went to the terminal. Captured output must carry the CDK CLI's
+        schema-mismatch message. Output on the terminal cannot be read, so the
+        CLI's version is compared with the oldest the library accepts instead:
+        an older CLI fails every command that synthesizes the app. ``None``
+        when neither shows the mismatch.
+        """
+        if output is not None and _CDK_SCHEMA_MISMATCH_MARKER not in output:
+            return None
+        cli_version = self._cdk_cli_version(cdk_path, env)
+        if output is None and cli_version is None:
+            return None
+        minimum = _cdk_library_minimum_cli_version()
+        if output is None:
+            cli_key = _cdk_version_key(cli_version or "")
+            minimum_key = _cdk_version_key(minimum or "")
+            if cli_key is None or minimum_key is None or cli_key >= minimum_key:
+                return None
+        local_cli = Path(self.project_root) / "node_modules" / ".bin" / "cdk"
+        ran = f"{cdk_path} ({cli_version})" if cli_version else cdk_path
+        needs = f", and the CDK library needs CLI {minimum} or later" if minimum else ""
+        hint = (
+            f"the CDK CLI is older than the CDK library app.py synthesizes with: gco ran "
+            f"{ran}{needs}. Run 'npm ci --ignore-scripts --no-audit --no-fund' at the "
+            "project root to install the CLI package-lock.json pins"
+        )
+        if Path(cdk_path) != local_cli:
+            hint += (
+                f". gco runs {local_cli} when it exists and the cdk on PATH otherwise; "
+                f"'npm install --global aws-cdk@{minimum or 'latest'}' upgrades the one on PATH"
+            )
+        return (
+            f"{hint}. In the dev container, run ./scripts/setup-dev-alias.sh on the host "
+            "to rebuild the image."
         )
 
     def list_stacks(self) -> list[str]:
