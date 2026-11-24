@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 _TELEMETRY_MISSING_SIGNAL_PENALTY = 1000.0
 _SCORED_TELEMETRY_SIGNALS = frozenset({"queue", "gpu", "jobs"})
+#: Sorts a CloudWatch datapoint without a timestamp before every real one.
+_OLDEST_TIMESTAMP = datetime.min.replace(tzinfo=UTC)
 #: The health monitor publishes the Region's active Job count (Jobs in the job
 #: namespaces with a pending or running pod) every 30 seconds.
 _ACTIVE_JOBS_NAMESPACE = "GCO/HealthMonitor"
@@ -113,6 +115,16 @@ class MultiRegionCapacityChecker:
         # Errors from the most recent get_all_regions_capacity() sweep, so an
         # empty result can be distinguished as "checks failed" vs "no regions".
         self._last_region_errors: list[str] = []
+
+    @property
+    def region_errors(self) -> list[str]:
+        """The failures of the latest :meth:`get_all_regions_capacity` sweep.
+
+        One ``"<region>: <error>"`` (or ``"region discovery: <error>"``) per
+        failure, so a caller can tell "no deployed Regions" from "every check
+        failed".
+        """
+        return list(self._last_region_errors)
 
     def get_region_capacity(self, region: str, *, backend: str = BACKEND_EKS) -> RegionCapacity:
         """Get capacity information while retaining telemetry uncertainty.
@@ -198,7 +210,13 @@ class MultiRegionCapacityChecker:
                     )
                     datapoints = response.get("Datapoints", [])
                     if datapoints:
-                        setattr(capacity, attribute, datapoints[0]["Average"])
+                        # CloudWatch returns datapoints unordered; read the
+                        # newest, as the running-job reading below does.
+                        newest = max(
+                            datapoints,
+                            key=lambda point: point.get("Timestamp") or _OLDEST_TIMESTAMP,
+                        )
+                        setattr(capacity, attribute, newest["Average"])
                         available[signal] = True
                     else:
                         capacity.telemetry_errors.append(

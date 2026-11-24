@@ -51,6 +51,41 @@ def _confirm_charges(question: str, *, yes: bool, dry_run: bool) -> None:
     _confirm_request(question, yes=yes, dry_run=dry_run, request="this request incurs charges")
 
 
+def _canonical_instance_types(_ctx: click.Context, _param: click.Parameter, value: Any) -> Any:
+    """Expand friendly instance-type aliases (``p5`` -> ``p5.48xlarge``) as ``-i`` is parsed.
+
+    find-blocks, find-reservations, instance-info, create-reservation,
+    recommend-region and the training-plan commands normalize on their own.
+    This gives the commands that hand ``-i`` straight to EC2, the Price List
+    API or the history table the same reading, so ``gco capacity check -i p5``
+    no longer reports that "p5" is not offered.
+    """
+    from ..capacity.blocks import normalize_instance_type
+
+    if value is None:
+        return None
+    if isinstance(value, tuple):
+        return tuple(normalize_instance_type(item)[0] for item in value)
+    return normalize_instance_type(value)[0]
+
+
+def _print_no_result(config: Any, formatter: Any, message: str, document: Any) -> None:
+    """Say there is nothing to report, keeping JSON/YAML stdout one document.
+
+    The warning goes to stderr. Printing only that left machine-readable
+    stdout empty, which the MCP server reports as a generic "empty stdout"
+    error that hides the reason.
+    """
+    formatter.print_warning(message)
+    if config.output_format != "table":
+        formatter.print(document)
+
+
+def _history_disabled_document() -> dict[str, Any]:
+    """The JSON/YAML answer of a history command when the history table is not deployed."""
+    return {"historical_enabled": False, "message": _history_disabled_hint()}
+
+
 @click.group()
 @pass_config
 def capacity(config: Any) -> None:
@@ -58,7 +93,13 @@ def capacity(config: Any) -> None:
 
 
 @capacity.command("check")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option(
     "--type",
@@ -116,7 +157,13 @@ def check_capacity(
 
 
 @capacity.command("recommend")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option(
     "--fault-tolerance",
@@ -153,7 +200,13 @@ def recommend_capacity(config: Any, instance_type: Any, region: Any, fault_toler
 
 
 @capacity.command("spot-prices")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option("--days", "-d", default=7, help="Days of history")
 @pass_config
@@ -311,14 +364,22 @@ def instance_info(config: Any, instance_type: Any, region: Any) -> None:
 
 @capacity.command("status")
 @click.option("--region", "-r", help="Specific region to check")
-@click.option("--all-regions", "-a", is_flag=True, default=True, help="Check all regions (default)")
+@click.option(
+    "--all-regions",
+    "-a",
+    is_flag=True,
+    default=True,
+    help="Check every deployed region (the default; accepted for compatibility)",
+)
 @pass_config
 def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
     """Show comprehensive resource utilization across regions.
 
     Displays the SQS job-queue depth, the running (active) Job count the
     health monitor publishes, and GPU/CPU utilization for one or all GCO
-    clusters.
+    clusters. A signal that could not be read shows as "-" and the region's
+    TELEMETRY column says so. A region whose check failed is named on stderr;
+    when region discovery or every region failed, the command exits 1.
 
     Examples:
         gco capacity status
@@ -337,21 +398,34 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
             formatter.print(capacity)
         else:
             capacities = checker.get_all_regions_capacity()
+            failures = checker.region_errors
 
             if not capacities:
+                if failures:
+                    # Discovery or every region failed: not "no stacks", and
+                    # exiting 0 here hid the failure from scripts and the MCP.
+                    formatter.print_error("Could not read capacity status: " + "; ".join(failures))
+                    sys.exit(1)
                 formatter.print_warning("No GCO stacks found")
                 if config.output_format != "table":
                     formatter.print(capacities)
                 return
 
+            for failure in failures:
+                formatter.print_warning(f"Capacity status check failed for {failure}")
+
             if config.output_format == "table":
-                print("\n  REGION          QUEUE  RUNNING  GPU%   CPU%   SCORE")
-                print("  " + "-" * 55)
+                print("\n  REGION          QUEUE  RUNNING  GPU%   CPU%   SCORE  TELEMETRY")
+                print("  " + "-" * 66)
                 for c in sorted(capacities, key=lambda x: x.recommendation_score):
+                    missing = set(c.unavailable_signals)
+                    queue = "-" if "queue" in missing else str(c.queue_depth)
+                    running = "-" if "jobs" in missing else str(c.running_jobs)
+                    gpu = "-" if "gpu" in missing else f"{c.gpu_utilization:.0f}%"
+                    cpu = "-" if "cpu" in missing else f"{c.cpu_utilization:.0f}%"
                     print(
-                        f"  {c.region:<15} {c.queue_depth:>5}  {c.running_jobs:>7}  "
-                        f"{c.gpu_utilization:>4.0f}%  {c.cpu_utilization:>4.0f}%  "
-                        f"{c.recommendation_score:>5.0f}"
+                        f"  {c.region:<15} {queue:>5}  {running:>7}  {gpu:>4}  {cpu:>5}  "
+                        f"{c.recommendation_score:>5.0f}  {c.telemetry_status}"
                     )
 
                 print()
@@ -389,7 +463,14 @@ def _ranked_region_line(backend: str, entry: dict[str, Any]) -> str:
 
 
 @capacity.command("recommend-region")
-@click.option("--gpu", is_flag=True, help="Job requires GPUs")
+@click.option(
+    "--gpu",
+    is_flag=True,
+    help=(
+        "Job requires GPUs (informational; name the GPUs with --gpu-count and "
+        "the type with --instance-type, which the ranking uses)"
+    ),
+)
 @click.option("--min-gpus", default=0, help="Minimum GPUs required")
 @click.option(
     "--instance-type", "-i", default=None, help="Specific instance type for workload-aware scoring"
@@ -513,7 +594,8 @@ def _recommendation_to_dict(recommendation: Any, raw: bool) -> dict[str, Any]:
     "--instance-type",
     "-i",
     multiple=True,
-    help="Instance types to consider (can specify multiple)",
+    callback=_canonical_instance_types,
+    help="Instance types or aliases to consider (can specify multiple)",
 )
 @click.option("--region", "-r", multiple=True, help="Regions to consider (can specify multiple)")
 @click.option("--gpu", is_flag=True, help="Workload requires GPUs")
@@ -702,7 +784,9 @@ def _print_reservation_errors(errors: list[dict[str, Any]]) -> None:
 
 
 @capacity.command("reservations")
-@click.option("--instance-type", "-i", help="Filter by instance type")
+@click.option(
+    "--instance-type", "-i", callback=_canonical_instance_types, help="Filter by instance type"
+)
 @click.option("--region", "-r", help="Specific region (default: all deployed regions)")
 @pass_config
 def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
@@ -771,7 +855,13 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
 
 
 @capacity.command("reservation-check")
-@click.option("--instance-type", "-i", required=True, help="Instance type to check")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="Instance type or alias to check (e.g. p5)",
+)
 @click.option(
     "--region",
     "-r",
@@ -904,6 +994,15 @@ def reservation_check(
                     )
             else:
                 print("  No Capacity Block offerings available")
+            block_errors = block_section.get("errors") or []
+            if block_errors:
+                print()
+                print(
+                    f"  ⚠  The Capacity Block search failed in {len(block_errors)} Region(s); "
+                    "their offerings are missing:"
+                )
+                for error in block_errors:
+                    print(f"     {error['region']}: {error['error_code']}: {error['error']}")
 
         # Recommendation
         print()
@@ -1998,7 +2097,13 @@ def history() -> None:
 
 
 @history.command("show")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option("--hours", "-H", default=168, help="Hours of history (default 168 = 7 days)")
 @pass_config
@@ -2010,8 +2115,11 @@ def history_show(config: Any, instance_type: Any, region: Any, hours: Any) -> No
     try:
         trend = get_capacity_history_store().get_trend(instance_type, region, hours)
         if not trend:
-            formatter.print_warning(
-                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes)."
+            _print_no_result(
+                config,
+                formatter,
+                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes).",
+                [],
             )
             return
         # Columns derive from the store's exported metric registry so a new
@@ -2020,14 +2128,22 @@ def history_show(config: Any, instance_type: Any, region: Any, hours: Any) -> No
         formatter.print(trend, columns=["timestamp", *METRIC_FIELDS])
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_history_disabled_hint())
+            _print_no_result(
+                config, formatter, _history_disabled_hint(), _history_disabled_document()
+            )
             return
         formatter.print_error(f"Failed to load capacity history: {e}")
         sys.exit(1)
 
 
 @history.command("stats")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option("--hours", "-H", default=168, help="Hours of history (default 168 = 7 days)")
 @pass_config
@@ -2039,8 +2155,11 @@ def history_stats(config: Any, instance_type: Any, region: Any, hours: Any) -> N
     try:
         stats = get_capacity_history_store().get_statistics(instance_type, region, hours)
         if stats["sample_count"] == 0:
-            formatter.print_warning(
-                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes)."
+            _print_no_result(
+                config,
+                formatter,
+                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes).",
+                stats,
             )
             return
         if config.output_format == "table":
@@ -2065,14 +2184,22 @@ def history_stats(config: Any, instance_type: Any, region: Any, hours: Any) -> N
             formatter.print(stats)
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_history_disabled_hint())
+            _print_no_result(
+                config, formatter, _history_disabled_hint(), _history_disabled_document()
+            )
             return
         formatter.print_error(f"Failed to compute capacity statistics: {e}")
         sys.exit(1)
 
 
 @history.command("patterns")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option("--hours", "-H", default=168, help="Hours of history (default 168 = 7 days)")
 @click.option(
@@ -2097,8 +2224,11 @@ def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any, m
             instance_type, region, hours, metric=metric
         )
         if not patterns["patterns"]:
-            formatter.print_warning(
-                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes)."
+            _print_no_result(
+                config,
+                formatter,
+                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes).",
+                patterns,
             )
             return
         if config.output_format == "table":
@@ -2107,7 +2237,9 @@ def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any, m
             formatter.print(patterns)
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_history_disabled_hint())
+            _print_no_result(
+                config, formatter, _history_disabled_hint(), _history_disabled_document()
+            )
             return
         formatter.print_error(f"Failed to compute capacity patterns: {e}")
         sys.exit(1)
@@ -2161,7 +2293,13 @@ def _print_prediction(prediction: Any, raw: bool) -> None:
 
 
 @capacity.command("predict")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", help="AWS region (omit when using --all-regions)")
 @click.option(
     "--all-regions",
@@ -2219,11 +2357,20 @@ def predict_capacity(
         else:
             predictions = [advisor.predict_capacity_window(instance_type, region, hours_back=hours)]
     except ValueError as e:
-        formatter.print_warning(str(e))
+        _print_no_result(
+            config,
+            formatter,
+            str(e),
+            []
+            if all_regions
+            else {"instance_type": instance_type, "region": region, "message": str(e)},
+        )
         return
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_history_disabled_hint())
+            _print_no_result(
+                config, formatter, _history_disabled_hint(), _history_disabled_document()
+            )
             return
         if is_bedrock_ftu_form_error(e):
             formatter.print_error(BEDROCK_FTU_REMEDIATION)
@@ -2232,8 +2379,11 @@ def predict_capacity(
         sys.exit(1)
 
     if not predictions:
-        formatter.print_warning(
-            f"No usable historical samples for {instance_type} in any region yet."
+        _print_no_result(
+            config,
+            formatter,
+            f"No usable historical samples for {instance_type} in any region yet.",
+            [],
         )
         return
 
@@ -2382,3 +2532,5 @@ def traffic_dial_clear(config: Any, region: Any) -> None:
         formatter.print_success(f"Cleared the {region} traffic-dial override.")
     else:
         formatter.print_info(f"No traffic-dial override was set for {region}.")
+    if config.output_format != "table":
+        formatter.print({"region": region, "override_cleared": existed})

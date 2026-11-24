@@ -1,5 +1,7 @@
 """Capacity checking and recommendation MCP tools."""
 
+from typing import Literal
+
 import cli_runner
 from audit import audit_logged
 from feature_flags import (
@@ -13,14 +15,24 @@ from server import mcp
 
 @mcp.tool(tags={"safe", "capacity"})
 @audit_logged
-def check_capacity(instance_type: str, region: str) -> str:
+def check_capacity(
+    instance_type: str,
+    region: str,
+    capacity_type: Literal["spot", "on-demand", "both"] = "both",
+) -> str:
     """Check spot and on-demand capacity for a specific instance type.
 
     Args:
-        instance_type: EC2 instance type (e.g. g4dn.xlarge, g5.2xlarge, p4d.24xlarge).
+        instance_type: EC2 instance type or alias (e.g. g4dn.xlarge, g5.2xlarge,
+            p4d.24xlarge, p5).
         region: AWS region to check.
+        capacity_type: Which estimates to return: ``spot``, ``on-demand`` or
+            ``both`` (default).
     """
-    return cli_runner._run_cli("capacity", "check", "-i", instance_type, "-r", region)
+    args = ["capacity", "check", "-i", instance_type, "-r", region]
+    if capacity_type != "both":
+        args += ["-t", capacity_type]
+    return cli_runner._run_cli(*args)
 
 
 @mcp.tool(tags={"safe", "capacity"})
@@ -134,14 +146,18 @@ def recommend_region(
 
 @mcp.tool(tags={"safe", "capacity"})
 @audit_logged
-def spot_prices(instance_type: str, region: str) -> str:
-    """Get current spot prices for an instance type.
+def spot_prices(instance_type: str, region: str, days: int = 7) -> str:
+    """Get current spot prices and their history for an instance type, per zone.
 
     Args:
-        instance_type: EC2 instance type.
+        instance_type: EC2 instance type or alias.
         region: AWS region.
+        days: Days of price history to summarize (default 7).
     """
-    return cli_runner._run_cli("capacity", "spot-prices", "-i", instance_type, "-r", region)
+    args = ["capacity", "spot-prices", "-i", instance_type, "-r", region]
+    if days != 7:
+        args += ["-d", str(days)]
+    return cli_runner._run_cli(*args)
 
 
 @mcp.tool(tags={"safe", "capacity"})
@@ -256,9 +272,11 @@ def reservation_check(
         latest_start: Latest block start date (YYYY-MM-DD or ISO datetime); a
             date means the whole of that day.
 
-    A Capacity Block request EC2 refuses (an instance count it does not sell,
-    a start window it cannot serve) is returned as an error with EC2's
-    reason rather than as "no offerings".
+    A Region whose Capacity Block search EC2 refused or that failed (a
+    denied permission, throttling) is listed under ``capacity_blocks.errors``
+    with EC2's reason, and the other Regions' results stand; when the search
+    ran nowhere (an instance count EC2 does not sell, say) the tool returns
+    an error with EC2's reasons rather than "no offerings".
     """
     args = ["capacity", "reservation-check", "-i", instance_type, "-c", str(count)]
     for r in regions or []:
@@ -320,8 +338,9 @@ def find_capacity_blocks(
         find_longest: Sweep the duration ladder and surface the longest block.
 
     A probe EC2 refuses (an instance count it does not sell, a start window
-    it cannot serve) is listed in the report's ``rejected_probes`` and named
-    in ``recommendation``; when EC2 refuses every probe the tool returns an
+    it cannot serve) or that fails (a denied permission, throttling past the
+    retry budget) is listed in the report's ``rejected_probes`` and named in
+    ``recommendation``; when no probe searched anything the tool returns an
     error with EC2's reason instead of an empty report.
     """
     args = ["capacity", "find-blocks", "-i", instance_type]

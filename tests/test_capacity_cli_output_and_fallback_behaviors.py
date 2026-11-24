@@ -785,3 +785,192 @@ def test_spot_prices_empty_result_in_table_mode_prints_only_the_warning() -> Non
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
     assert "No spot price data" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Instance-type aliases reach AWS expanded
+# ---------------------------------------------------------------------------
+
+
+def test_instance_type_alias_callback_expands_single_repeated_and_absent_values() -> None:
+    from cli.commands.capacity_cmd import _canonical_instance_types
+
+    assert _canonical_instance_types(None, None, "p5") == "p5.48xlarge"  # type: ignore[arg-type]
+    assert _canonical_instance_types(None, None, "g5.xlarge") == "g5.xlarge"  # type: ignore[arg-type]
+    assert _canonical_instance_types(None, None, ("b200", "g5.xlarge")) == (  # type: ignore[arg-type]
+        "p6-b200.48xlarge",
+        "g5.xlarge",
+    )
+    assert _canonical_instance_types(None, None, None) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "method", "expected"),
+    [
+        (["check", "-i", "p5", "-r", "us-east-1"], "estimate_capacity", ("p5.48xlarge",)),
+        (
+            ["spot-prices", "-i", "p5", "-r", "us-east-1"],
+            "get_spot_price_history",
+            ("p5.48xlarge",),
+        ),
+        (["recommend", "-i", "p5", "-r", "us-east-1"], "recommend_capacity_type", ("p5.48xlarge",)),
+    ],
+)
+def test_commands_that_call_ec2_directly_expand_the_alias(
+    arguments: list[str], method: str, expected: tuple[str, ...]
+) -> None:
+    """``gco capacity check -i p5`` used to report that "p5" is not offered."""
+    checker = MagicMock()
+    checker.estimate_capacity.return_value = []
+    checker.get_spot_price_history.return_value = []
+    checker.recommend_capacity_type.return_value = ("spot", "ok")
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(capacity, arguments, obj=_config("json"))
+    assert result.exit_code == 0, result.output
+    assert getattr(checker, method).call_args.args[: len(expected)] == expected
+
+
+# ---------------------------------------------------------------------------
+# JSON/YAML stay one document when there is nothing to report
+# ---------------------------------------------------------------------------
+
+
+def _resource_not_found() -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "ResourceNotFoundException", "Message": "no table"}}, "Query"
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "store_method", "empty", "document"),
+    [
+        ("show", "get_trend", [], []),
+        (
+            "stats",
+            "get_statistics",
+            {"sample_count": 0, "metrics": {}},
+            {"sample_count": 0, "metrics": {}},
+        ),
+        (
+            "patterns",
+            "get_temporal_patterns",
+            {"patterns": {}, "best_windows": []},
+            {"patterns": {}, "best_windows": []},
+        ),
+    ],
+)
+def test_history_without_samples_prints_an_empty_document(
+    command: str, store_method: str, empty: object, document: object
+) -> None:
+    from cli.main import cli
+
+    store = MagicMock()
+    getattr(store, store_method).return_value = empty
+    with patch("cli.capacity.history.get_capacity_history_store", return_value=store):
+        result = CliRunner().invoke(
+            cli, ["-o", "json", "capacity", "history", command, "-i", "p5", "-r", "us-east-1"]
+        )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == document
+    assert "No historical samples for p5.48xlarge in us-east-1" in result.stderr
+
+
+@pytest.mark.parametrize("command", ["show", "stats", "patterns"])
+def test_history_not_deployed_says_so_in_machine_output(command: str) -> None:
+    from cli.main import cli
+
+    store = MagicMock()
+    for method in ("get_trend", "get_statistics", "get_temporal_patterns"):
+        getattr(store, method).side_effect = _resource_not_found()
+    with patch("cli.capacity.history.get_capacity_history_store", return_value=store):
+        result = CliRunner().invoke(
+            cli,
+            ["-o", "json", "capacity", "history", command, "-i", "g5.xlarge", "-r", "us-east-1"],
+        )
+    assert result.exit_code == 0, result.output
+    document = json.loads(result.stdout)
+    assert document["historical_enabled"] is False
+    assert "historical.enabled" in document["message"]
+    assert "historical.enabled" in result.stderr
+
+
+def test_predict_without_samples_prints_a_document_naming_the_reason() -> None:
+    from cli.main import cli
+
+    advisor = MagicMock()
+    advisor.predict_capacity_window.side_effect = ValueError("No historical capacity samples yet.")
+    advisor.predict_capacity_windows_all_regions.side_effect = ValueError("none anywhere")
+    with patch("cli.capacity.get_bedrock_capacity_advisor", return_value=advisor):
+        single = CliRunner().invoke(
+            cli, ["-o", "json", "capacity", "predict", "-i", "g5.xlarge", "-r", "us-east-1"]
+        )
+        every = CliRunner().invoke(
+            cli, ["-o", "json", "capacity", "predict", "-i", "g5.xlarge", "--all-regions"]
+        )
+    assert single.exit_code == 0, single.output
+    assert json.loads(single.stdout) == {
+        "instance_type": "g5.xlarge",
+        "region": "us-east-1",
+        "message": "No historical capacity samples yet.",
+    }
+    assert every.exit_code == 0, every.output
+    assert json.loads(every.stdout) == []
+    assert "none anywhere" in every.stderr
+
+
+def test_predict_with_no_usable_region_and_without_history_prints_documents() -> None:
+    from cli.main import cli
+
+    advisor = MagicMock()
+    advisor.predict_capacity_windows_all_regions.return_value = []
+    advisor.predict_capacity_window.side_effect = _resource_not_found()
+    with patch("cli.capacity.get_bedrock_capacity_advisor", return_value=advisor):
+        empty = CliRunner().invoke(
+            cli, ["-o", "json", "capacity", "predict", "-i", "g5.xlarge", "--all-regions"]
+        )
+        disabled = CliRunner().invoke(
+            cli, ["-o", "json", "capacity", "predict", "-i", "g5.xlarge", "-r", "us-east-1"]
+        )
+    assert empty.exit_code == 0, empty.output
+    assert json.loads(empty.stdout) == []
+    assert "No usable historical samples for g5.xlarge" in empty.stderr
+    assert disabled.exit_code == 0, disabled.output
+    assert json.loads(disabled.stdout)["historical_enabled"] is False
+
+
+@pytest.mark.parametrize("existed", [True, False])
+def test_traffic_dial_clear_prints_a_machine_document(existed: bool) -> None:
+    manager = MagicMock()
+    manager.clear_override.return_value = existed
+    with patch("cli.capacity.traffic_dial.get_traffic_dial_manager", return_value=manager):
+        result = CliRunner().invoke(
+            capacity, ["traffic-dial", "clear", "us-west-2"], obj=_config("json")
+        )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"region": "us-west-2", "override_cleared": existed}
+
+
+def test_reservation_check_table_names_regions_whose_block_search_failed() -> None:
+    checker = MagicMock()
+    checker.check_reservation_availability.return_value = {
+        "odcr": {"reservations": [], "total_available_instances": 0, "total_reserved_instances": 0},
+        "capacity_blocks": {
+            "duration_hours": 24,
+            "offerings": [],
+            "errors": [
+                {
+                    "region": "eu-west-1",
+                    "duration_hours": 24,
+                    "error_code": "UnauthorizedOperation",
+                    "error": "not authorized",
+                }
+            ],
+        },
+        "recommendation": "No reserved capacity or block offerings found.",
+    }
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(capacity, ["reservation-check", "-i", "p5"], obj=_config())
+    assert result.exit_code == 0, result.output
+    assert "The Capacity Block search failed in 1 Region(s)" in result.output
+    assert "eu-west-1: UnauthorizedOperation: not authorized" in result.output
+    assert checker.check_reservation_availability.call_args.kwargs["instance_type"] == "p5.48xlarge"

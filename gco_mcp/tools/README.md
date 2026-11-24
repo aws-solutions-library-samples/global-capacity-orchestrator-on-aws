@@ -90,7 +90,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `reservation_check` | Check ODCR and Capacity Block availability (multi-region, date-window, duration in hours or days). |
 | `reserve_capacity` | Purchase a Capacity Block offering by its ID. |
 | `runai_capacity` | Read GPU capacity from the NVIDIA Run:ai control plane configured on the MCP host (read-only, outside the AWS Region ranking; gated by `GCO_ENABLE_RUNAI_CAPACITY`, no URL or credential argument). |
-| `spot_prices` | Get current spot prices for an instance type. |
+| `spot_prices` | Get current spot prices and their history for an instance type, per zone. |
 
 ### `cluster.py`
 

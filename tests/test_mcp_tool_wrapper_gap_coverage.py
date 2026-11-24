@@ -2033,3 +2033,30 @@ def test_slurm_context_warning_paths() -> None:
         # A context whose warning fails is swallowed.
         context.warning = AsyncMock(side_effect=RuntimeError("closed"))
         assert asyncio.run(loaded.module._ctx_warning("careful")) is None
+
+
+@pytest.mark.parametrize(
+    ("function_name", "kwargs", "expected_argv"),
+    [
+        (
+            "check_capacity",
+            {"instance_type": "p5", "region": "us-east-1", "capacity_type": "spot"},
+            ("capacity", "check", "-i", "p5", "-r", "us-east-1", "-t", "spot"),
+        ),
+        (
+            "spot_prices",
+            {"instance_type": "g5.xlarge", "region": "us-west-2", "days": 30},
+            ("capacity", "spot-prices", "-i", "g5.xlarge", "-r", "us-west-2", "-d", "30"),
+        ),
+        (
+            "spot_prices",
+            {"instance_type": "g5.xlarge", "region": "us-west-2"},
+            ("capacity", "spot-prices", "-i", "g5.xlarge", "-r", "us-west-2"),
+        ),
+    ],
+)
+def test_capacity_lookup_tools_forward_the_cli_options_they_expose(
+    function_name: str, kwargs: dict[str, Any], expected_argv: tuple[str, ...]
+) -> None:
+    with _isolated_tool_module("capacity") as loaded:
+        _assert_cli_call(loaded, function_name, (), kwargs, expected_argv)

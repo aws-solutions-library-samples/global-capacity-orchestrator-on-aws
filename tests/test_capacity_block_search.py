@@ -844,22 +844,62 @@ class TestListCapacityBlockOfferingsEnhanced:
         assert cfg.retries["mode"] == "adaptive"
         assert cfg.retries["max_attempts"] == 10
 
-    def test_botocore_error_returns_empty(self):
+    def test_botocore_error_is_a_failed_lookup_not_no_offerings(self):
+        # A failed connection searched nothing; it used to read as "no offerings".
+        from cli.capacity import CapacityBlockLookupError
+
         checker = _make_checker()
         mock_ec2 = MagicMock()
         mock_ec2.describe_capacity_block_offerings.side_effect = BotoCoreError()
         checker._session.client = MagicMock(return_value=mock_ec2)
-        assert checker.list_capacity_block_offerings("cn-north-1", "p5.48xlarge") == []
+        with pytest.raises(CapacityBlockLookupError) as excinfo:
+            checker.list_capacity_block_offerings("cn-north-1", "p5.48xlarge")
+        assert excinfo.value.as_probe() == {
+            "region": "cn-north-1",
+            "duration_hours": 24,
+            "error_code": "BotoCoreError",
+            "error": str(BotoCoreError()),
+        }
 
-    def test_unexpected_clienterror_logged_returns_empty(self):
+    @pytest.mark.parametrize(
+        ("code", "message"),
+        [
+            ("InternalError", "boom"),
+            ("UnauthorizedOperation", "You are not authorized to perform this operation."),
+            ("RequestLimitExceeded", "Request limit exceeded."),
+        ],
+    )
+    def test_other_clienterror_is_a_failed_lookup_naming_ec2s_reason(self, code, message):
+        from cli.capacity import CapacityBlockLookupError, CapacityBlockSearchError
+
         checker = _make_checker()
         mock_ec2 = MagicMock()
         mock_ec2.describe_capacity_block_offerings.side_effect = ClientError(
-            {"Error": {"Code": "InternalError", "Message": "boom"}},
+            {"Error": {"Code": code, "Message": message}},
             "DescribeCapacityBlockOfferings",
         )
         checker._session.client = MagicMock(return_value=mock_ec2)
-        assert checker.list_capacity_block_offerings("us-east-1", "p5.48xlarge") == []
+        with pytest.raises(CapacityBlockLookupError) as excinfo:
+            checker.list_capacity_block_offerings("us-east-1", "p5.48xlarge", duration_hours=48)
+        assert isinstance(excinfo.value, CapacityBlockSearchError)
+        assert str(excinfo.value) == (
+            f"The Capacity Block search in us-east-1 failed ({code}): {message}"
+        )
+        assert excinfo.value.as_probe()["duration_hours"] == 48
+
+    def test_clienterror_without_a_code_or_message_keeps_the_error_text(self):
+        from cli.capacity import CapacityBlockLookupError
+
+        checker = _make_checker()
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_capacity_block_offerings.side_effect = ClientError(
+            {"Error": {}}, "DescribeCapacityBlockOfferings"
+        )
+        checker._session.client = MagicMock(return_value=mock_ec2)
+        with pytest.raises(CapacityBlockLookupError) as excinfo:
+            checker.list_capacity_block_offerings("us-east-1", "p5.48xlarge")
+        assert excinfo.value.error_code == "ClientError"
+        assert "DescribeCapacityBlockOfferings" in excinfo.value.message
 
 
 # =============================================================================
@@ -1171,18 +1211,46 @@ class TestFindCapacityBlocks:
         # Six probes, one distinct reason: the first four are named, the rest counted.
         assert text.endswith("[eu-west-1 1d, eu-west-1 2d, us-east-1 1d, us-east-1 2d, +2 more]")
 
-    def test_other_probe_exception_still_warns_and_continues(self):
-        # A transient failure (not EC2 refusing the parameters) keeps its
-        # warning-and-continue handling; it is not a rejected probe.
+    def test_a_failed_probe_is_reported_not_read_as_no_offerings(self, caplog):
+        # A failed lookup (a denied permission, throttling past the retry
+        # budget, any unexpected error) searched nothing: it is listed with
+        # the other refused probes instead of vanishing into "no offerings".
+        from cli.capacity import CapacityBlockLookupError, CapacityCheckError
+
         checker = _make_checker()
 
         def fake_list(region, instance_type, *, instance_count, duration_hours, **kwargs):
-            raise RuntimeError("transient")
+            if region == "us-east-1":
+                raise RuntimeError("transient")
+            raise CapacityBlockLookupError(
+                region, duration_hours, "UnauthorizedOperation", "not authorized"
+            )
 
-        with patch.object(checker, "list_capacity_block_offerings", side_effect=fake_list):
-            report = checker.find_capacity_blocks("p5.48xlarge", regions=["us-east-1"])
-        assert report["offerings_found"] == 0
-        assert report["rejected_probes"] == []
+        with (
+            patch.object(checker, "list_capacity_block_offerings", side_effect=fake_list),
+            pytest.raises(CapacityCheckError, match="EC2 rejected every Capacity Block"),
+        ):
+            checker.find_capacity_blocks("p5.48xlarge", regions=["us-east-1", "us-west-2"])
+        assert "Capacity block probe failed" in caplog.text
+
+        def west_fails(region, instance_type, *, instance_count, duration_hours, **kwargs):
+            if region == "us-west-2":
+                raise CapacityBlockLookupError(
+                    region, duration_hours, "UnauthorizedOperation", "not authorized"
+                )
+            return []
+
+        with patch.object(checker, "list_capacity_block_offerings", side_effect=west_fails):
+            report = checker.find_capacity_blocks("p5.48xlarge", regions=["us-east-1", "us-west-2"])
+        assert report["rejected_probes"] == [
+            {
+                "region": "us-west-2",
+                "duration_hours": 24,
+                "error_code": "UnauthorizedOperation",
+                "error": "not authorized",
+            }
+        ]
+        assert "EC2 rejected 1 probe(s): UnauthorizedOperation" in report["recommendation"]
 
     def test_default_regions_discovered_when_omitted(self):
         checker = _make_checker()

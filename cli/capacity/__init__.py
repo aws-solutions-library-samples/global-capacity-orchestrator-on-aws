@@ -33,7 +33,9 @@ from .backends import (
     PcsCapacity,
 )
 from .checker import (
+    CapacityBlockLookupError,
     CapacityBlockRequestError,
+    CapacityBlockSearchError,
     CapacityChecker,
     SpotPlacementConfigLimitError,
     get_capacity_checker,
@@ -72,7 +74,9 @@ __all__ = [
     "BACKEND_PCS",
     "BedrockCapacityAdvisor",
     "BedrockCapacityRecommendation",
+    "CapacityBlockLookupError",
     "CapacityBlockRequestError",
+    "CapacityBlockSearchError",
     "CapacityCheckError",
     "CapacityChecker",
     "CapacityEstimate",

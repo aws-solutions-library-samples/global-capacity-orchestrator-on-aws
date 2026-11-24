@@ -615,3 +615,51 @@ def test_traffic_dial_factory_returns_a_manager() -> None:
     config = SimpleNamespace(project_name="gco", global_region="us-east-1")
     with patch("cli.capacity.traffic_dial.boto3.Session", return_value=MagicMock()):
         assert isinstance(get_traffic_dial_manager(config), TrafficDialManager)  # type: ignore[arg-type]
+
+
+def test_region_capacity_reads_the_newest_utilization_datapoint() -> None:
+    """CloudWatch returns datapoints unordered; the first one was read as current."""
+    from datetime import UTC, datetime
+
+    checker = _multi_region_checker()
+    stack = SimpleNamespace(stack_name="gco-us-east-1", cluster_name="gco-us-east-1")
+    cloudformation = MagicMock()
+    cloudformation.describe_stacks.return_value = {"Stacks": [{"Outputs": []}]}
+    cloudwatch = MagicMock()
+
+    def statistics(MetricName: str, **_kwargs):
+        if MetricName == "node_gpu_utilization":
+            return {
+                "Datapoints": [
+                    {"Timestamp": datetime(2026, 11, 24, 10, 0, tzinfo=UTC), "Average": 10.0},
+                    {"Timestamp": datetime(2026, 11, 24, 10, 5, tzinfo=UTC), "Average": 90.0},
+                ]
+            }
+        if MetricName == "node_cpu_utilization":
+            return {"Datapoints": [{"Average": 40.0}]}  # no timestamp: still read
+        return {"Datapoints": []}
+
+    cloudwatch.get_metric_statistics.side_effect = statistics
+
+    def client(service, **_kwargs):
+        return {"cloudformation": cloudformation, "cloudwatch": cloudwatch}[service]
+
+    checker._session.client.side_effect = client
+    aws_client = MagicMock()
+    aws_client.get_regional_stack.return_value = stack
+    with patch("cli.aws_client.get_aws_client", return_value=aws_client):
+        capacity = checker.get_region_capacity("us-east-1")
+    assert capacity.gpu_utilization == 90.0
+    assert capacity.cpu_utilization == 40.0
+
+
+def test_region_errors_names_the_failures_of_the_latest_sweep() -> None:
+    checker = _multi_region_checker()
+    aws_client = MagicMock()
+    aws_client.discover_regional_stacks.side_effect = RuntimeError("ExpiredToken")
+    with patch("cli.aws_client.get_aws_client", return_value=aws_client):
+        assert checker.get_all_regions_capacity() == []
+    errors = checker.region_errors
+    assert errors == ["region discovery: ExpiredToken"]
+    errors.append("mutated")  # a copy: the checker's record is unchanged
+    assert checker.region_errors == ["region discovery: ExpiredToken"]

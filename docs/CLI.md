@@ -587,7 +587,12 @@ If the selected `claude`, `codex`, or `opencode` binary is missing, Autopilot of
 
 ### Capacity Commands
 
-Check and manage cluster capacity.
+Check and manage cluster capacity. Every `-i/--instance-type` accepts the
+friendly aliases (`p5` → `p5.48xlarge`, `b200` → `p6-b200.48xlarge`); they
+are expanded before any AWS call. With `-o json` or `-o yaml`, a command with
+nothing to report still prints one document (an empty list, a summary with
+`sample_count: 0`, or `{"historical_enabled": false, "message": ...}` when the
+history table is not deployed) and puts the reason on stderr.
 
 <details>
 <summary>All <code>gco capacity</code> commands (24) — click to expand</summary>
@@ -666,6 +671,12 @@ metric has no recent datapoint the count is reported as unavailable (`jobs` in
 running jobs nor score it as idle. The same values feed
 [`recommend-region`](#gco-capacity-recommend-region), `gco status` and the capacity advisor.
 
+In the table, a signal that could not be read shows as `-` rather than `0`, and the
+`TELEMETRY` column says whether a Region's readings are `complete`, `partial` or
+`unavailable`. A Region whose check failed is named on stderr; when Region discovery
+fails, or every Region does, the command exits 1 instead of reporting that no stacks
+were found.
+
 ```bash
 gco capacity status [OPTIONS]
 ```
@@ -675,7 +686,7 @@ gco capacity status [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Check a single region |
-| `--all-regions` | `-a` | Check every configured region (the default) |
+| `--all-regions` | `-a` | Check every deployed region (the default; accepted for compatibility) |
 
 #### `gco capacity recommend`
 
@@ -705,7 +716,7 @@ gco capacity recommend-region [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--gpu` | | Recommend for GPU workloads |
+| `--gpu` | | Informational: the ranking reads the GPU need from `--gpu-count` and `--instance-type` |
 | `--instance-type` | `-i` | Specific instance type (enables weighted scoring; with `--backend hyperpod`, the instance group type a Region must have) |
 | `--gpu-count` | | Number of GPUs required |
 | `--min-gpus` | | Minimum GPUs required |
@@ -866,6 +877,8 @@ Check reservation availability and Capacity Block offerings for ML workloads. Ch
 
 ODCR availability is judged per Region: `--count` is met only when one Region has that many free reserved instances, since a workload cannot use reservations in another Region. The table lists each Region's free and reserved instances when more than one Region is checked; the JSON report carries them under `odcr.by_region` (`region`, `reserved_instances`, `available_instances`, `has_availability`), next to the overall `total_available_instances`.
 
+A Region whose Capacity Block search EC2 refused or that failed (a denied permission, throttling past the retry budget) is listed under `capacity_blocks.errors` with EC2's reason, named in the table and the recommendation, and the other Regions' results stand. When the search ran in no Region, the command exits 1 with EC2's reasons.
+
 ```bash
 gco capacity reservation-check [OPTIONS]
 ```
@@ -921,7 +934,7 @@ gco capacity find-blocks [OPTIONS]
 
 **Instance-type notes.** Friendly names are normalized (`p6-b200` → `p6-b200.48xlarge`, `p6-b300` → `p6-b300.48xlarge`). Both B200 and B300 (Blackwell Ultra) are standalone EC2 instance types and resolve normally. The Grace-Blackwell **GB200/GB300** NVL72 *superchips* ship only as **P6e-GB200 / P6e-GB300 UltraServers** (never as a standalone `InstanceType`), so those names are flagged with guidance toward the UltraServer flow rather than silently returning nothing. Unknown/typo'd types are reported as invalid (distinct from a valid type that simply has zero offerings).
 
-**Rejected probes.** Each (region, duration) pair is one `DescribeCapacityBlockOfferings` call. When EC2 refuses a call's parameters (an instance count it does not sell, a start window later than it currently serves) rather than answering with zero offerings, the refusal is reported as such: the table lists the rejected probes with EC2's reason, the JSON report carries them under `rejected_probes`, and when EC2 refuses every probe the command exits non-zero with that reason instead of suggesting a wider window. A Region or instance type that simply has no Capacity Blocks is still an ordinary empty result.
+**Rejected probes.** Each (region, duration) pair is one `DescribeCapacityBlockOfferings` call. When EC2 refuses a call's parameters (an instance count it does not sell, a start window later than it currently serves), or the call fails (a denied permission, throttling past the retry budget, a failed connection), rather than answering with zero offerings, the probe is reported as such: the table lists the rejected probes with EC2's reason, the JSON report carries them under `rejected_probes`, and when no probe searched anything the command exits non-zero with that reason instead of suggesting a wider window. A Region or instance type that simply has no Capacity Blocks is still an ordinary empty result.
 
 ```bash
 # Bound the motivating scenario in a single call:
@@ -1363,6 +1376,8 @@ controller re-converges it from the region's health signal on its next cycle.
 ```bash
 gco capacity traffic-dial clear REGION
 ```
+
+With `-o json` or `-o yaml` it prints `{"region": ..., "override_cleared": true|false}`.
 
 **Example:**
 
