@@ -155,7 +155,7 @@ If you have [`uv`](https://docs.astral.sh/uv/) installed, you can run the GCO MC
 
 ```bash
 # Current reviewed release; v3.2.0 was the first release that shipped gco-mcp.
-GCO_REF=v9.1.0
+GCO_REF=v9.2.0
 
 # Run it ad hoc — uvx builds a cached, throwaway environment:
 uvx --python 3.14 --from "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@${GCO_REF}" gco-mcp
@@ -177,7 +177,7 @@ Then point any stdio MCP client at that same command. For Kiro (`~/.kiro/setting
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ],
       "env": {
@@ -188,7 +188,7 @@ Then point any stdio MCP client at that same command. For Kiro (`~/.kiro/setting
 }
 ```
 
-> The `@v9.1.0` value is an exact reproducibility pin, not a version range. Update it deliberately when adopting a newer reviewed release. (Shell snippets can interpolate `${GCO_REF}`; JSON cannot, so the tag is written inline.)
+> The `@v9.2.0` value is an exact reproducibility pin, not a version range. Update it deliberately when adopting a newer reviewed release. (Shell snippets can interpolate `${GCO_REF}`; JSON cannot, so the tag is written inline.)
 >
 > **Heads-up on `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` (shown above):** a bare `uvx` install runs the AWS-facing cluster tools, but the infra/stack tools this flag gates also need the CDK toolchain and a checkout. On a base install they register and then fail fast with an actionable error — to actually deploy, use the [Deploy-capable setup](#deploy-capable-setup-infrastructure-tools).
 
@@ -218,7 +218,7 @@ The `deploy_*`, `destroy_*`, `bootstrap_cdk`, and `stack_synth`/`diff`/`list` to
         "--python",
         "3.14",
         "--from",
-        "gco-cli[cdk] @ git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "gco-cli[cdk] @ git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ],
       "cwd": "/path/to/global-capacity-orchestrator-on-aws",
@@ -232,7 +232,7 @@ The `deploy_*`, `destroy_*`, `bootstrap_cdk`, and `stack_synth`/`diff`/`list` to
 
 All three also need the non-Python tooling the CDK drives: **Node.js + the AWS CDK CLI** (`cdk`), **`kubectl`**, a **container runtime** (Docker/Finch/Podman, plus Buildx for image builds and CDK [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) bundling), and the **AWS CLI** with credentials configured. The dev container ships all of these; on a host, install them yourself.
 
-> **Optional metric-file formats.** Reading Parquet or TensorBoard `tfevents` metric files (via `metrics_from_shared_storage_file` / `metrics_from_local_file`) needs extra libraries, added the same way: `.[metrics-parquet]` (pandas + pyarrow), `.[metrics-tfevents]` (tbparse + tensorboard), or `.[metrics]` for both — e.g. `pip install -e ".[cdk,metrics,mcp]"`, or `gco-cli[cdk,metrics] @ git+…@v9.1.0` for the `uvx` form. Every other metric source ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html), job logs, and JSON/CSV/JSONL/YAML/HF-Trainer-state files) works without them.
+> **Optional metric-file formats.** Reading Parquet or TensorBoard `tfevents` metric files (via `metrics_from_shared_storage_file` / `metrics_from_local_file`) needs extra libraries, added the same way: `.[metrics-parquet]` (pandas + pyarrow), `.[metrics-tfevents]` (tbparse + tensorboard), or `.[metrics]` for both — e.g. `pip install -e ".[cdk,metrics,mcp]"`, or `gco-cli[cdk,metrics] @ git+…@v9.2.0` for the `uvx` form. Every other metric source ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html), job logs, and JSON/CSV/JSONL/YAML/HF-Trainer-state files) works without them.
 
 ### Kiro
 
@@ -247,7 +247,7 @@ Add to your MCP config at `~/.kiro/settings/mcp.json`. The recommended `uvx` for
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ]
     }
@@ -266,7 +266,7 @@ To enable a feature flag, add an `env` block alongside `args`:
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ],
       "env": {
@@ -277,7 +277,7 @@ To enable a feature flag, add an `env` block alongside `args`:
 }
 ```
 
-The `@v9.1.0` value is an exact release pin; update it deliberately when adopting a newer reviewed release.
+The `@v9.2.0` value is an exact release pin; update it deliberately when adopting a newer reviewed release.
 
 **From a local clone (development).** When you need the clone-only resources or CDK/stack operations, point Kiro at `run_mcp.py` instead. Kiro additionally honors a `cwd` field, so you can use the absolute-path form or the `cwd` shorthand:
 
@@ -308,7 +308,7 @@ Add to your MCP config at `~/Library/Application Support/Claude/claude_desktop_c
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ],
       "env": {
@@ -319,7 +319,7 @@ Add to your MCP config at `~/Library/Application Support/Claude/claude_desktop_c
 }
 ```
 
-Drop the `env` block if you do not need a [feature flag](#feature-flags). The `@v9.1.0` value is an exact release pin; update it deliberately when adopting a newer reviewed release.
+Drop the `env` block if you do not need a [feature flag](#feature-flags). The `@v9.2.0` value is an exact release pin; update it deliberately when adopting a newer reviewed release.
 
 **From a local clone (development).** For the clone-only resources or CDK/stack operations, point Claude Desktop at the absolute path to `run_mcp.py` instead:
 
@@ -343,13 +343,13 @@ Replace `/path/to/global-capacity-orchestrator-on-aws` with the absolute path to
 [Claude Code](https://code.claude.com/docs/en/mcp) registers stdio servers with the `claude mcp add` CLI. The recommended `uvx` form needs no clone — everything after `--` is the launch command:
 
 ```bash
-claude mcp add gco -- uvx --python 3.14 --from "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0" gco-mcp
+claude mcp add gco -- uvx --python 3.14 --from "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0" gco-mcp
 ```
 
 Add a feature flag with `--env`:
 
 ```bash
-claude mcp add --env GCO_ENABLE_INFRASTRUCTURE_DEPLOY=true gco -- uvx --python 3.14 --from "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0" gco-mcp
+claude mcp add --env GCO_ENABLE_INFRASTRUCTURE_DEPLOY=true gco -- uvx --python 3.14 --from "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0" gco-mcp
 ```
 
 Pass `--scope project` to write a shareable `.mcp.json` at the project root (checked into version control) instead of your personal config. That file uses the same `mcpServers` schema as the other clients:
@@ -363,7 +363,7 @@ Pass `--scope project` to write a shareable `.mcp.json` at the project root (che
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ],
       "env": {
@@ -374,7 +374,7 @@ Pass `--scope project` to write a shareable `.mcp.json` at the project root (che
 }
 ```
 
-The `@v9.1.0` value is an exact release pin; update it deliberately when adopting a newer reviewed release. For a local clone (development), swap the launch command for `python3 /absolute/path/to/global-capacity-orchestrator-on-aws/gco_mcp/run_mcp.py`.
+The `@v9.2.0` value is an exact release pin; update it deliberately when adopting a newer reviewed release. For a local clone (development), swap the launch command for `python3 /absolute/path/to/global-capacity-orchestrator-on-aws/gco_mcp/run_mcp.py`.
 
 ### OpenAI Codex
 
@@ -389,7 +389,7 @@ args = [
   "--python",
   "3.14",
   "--from",
-  "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+  "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
   "gco-mcp",
 ]
 enabled = true
@@ -415,7 +415,7 @@ To add only the GCO server to an existing [OpenCode](https://opencode.ai/docs/mc
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ],
       "enabled": true,
@@ -440,7 +440,7 @@ Add to your MCP config at `~/.cursor/mcp.json`. The recommended `uvx` form:
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ],
       "env": {
@@ -451,7 +451,7 @@ Add to your MCP config at `~/.cursor/mcp.json`. The recommended `uvx` form:
 }
 ```
 
-Drop the `env` block if you do not need a [feature flag](#feature-flags). The `@v9.1.0` value is an exact release pin; update it deliberately when adopting a newer reviewed release.
+Drop the `env` block if you do not need a [feature flag](#feature-flags). The `@v9.2.0` value is an exact release pin; update it deliberately when adopting a newer reviewed release.
 
 **From a local clone (development).** For the clone-only resources or CDK/stack operations, point Cursor at the absolute path to `run_mcp.py` instead:
 
@@ -473,7 +473,7 @@ Replace `/path/to/global-capacity-orchestrator-on-aws` with the absolute path to
 The server uses stdio transport (the MCP default). Any MCP client that supports stdio can launch the `gco-mcp` console script — the recommended `uvx` form needs no clone:
 
 ```bash
-GCO_REF=v9.1.0 # Current reviewed release; update deliberately.
+GCO_REF=v9.2.0 # Current reviewed release; update deliberately.
 uvx --python 3.14 --from "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@${GCO_REF}" gco-mcp
 ```
 
@@ -523,7 +523,7 @@ Set the flag in the MCP client `env` block. The same `env` block works whether y
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ],
       "env": {
@@ -545,7 +545,7 @@ Set the flag in the MCP client `env` block. The same `env` block works whether y
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ],
       "env": {
@@ -567,7 +567,7 @@ Set the flag in the MCP client `env` block. The same `env` block works whether y
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ],
       "env": {
@@ -578,7 +578,7 @@ Set the flag in the MCP client `env` block. The same `env` block works whether y
 }
 ```
 
-Each `@v9.1.0` above is an exact release pin; update all of them together when adopting a newer reviewed release. For a clone-based client, swap `command` / `args` for the `python3 gco_mcp/run_mcp.py` form (plus `cwd` on Kiro) shown in [Setup](#setup); the `env` block is identical.
+Each `@v9.2.0` above is an exact release pin; update all of them together when adopting a newer reviewed release. For a clone-based client, swap `command` / `args` for the `python3 gco_mcp/run_mcp.py` form (plus `cwd` on Kiro) shown in [Setup](#setup); the `env` block is identical.
 
 To enable everything for a development client, set the umbrella flag instead of every individual flag:
 
@@ -692,7 +692,7 @@ If your client relied on uploads, set the model-upload gate and an absolute conf
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ],
       "env": {
@@ -705,7 +705,7 @@ If your client relied on uploads, set the model-upload gate and an absolute conf
 }
 ```
 
-The `@v9.1.0` value is an exact release pin; update it deliberately when adopting a newer reviewed release.
+The `@v9.2.0` value is an exact release pin; update it deliberately when adopting a newer reviewed release.
 
 Setting the umbrella `GCO_ENABLE_ALL_TOOLS=true` enables every gated tool, but local-data tools still require their confinement-root variables.
 
@@ -1520,7 +1520,7 @@ Here's a `~/.kiro/settings/mcp.json` that wires up the GCO MCP server alongside 
         "--python",
         "3.14",
         "--from",
-        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.1.0",
+        "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@v9.2.0",
         "gco-mcp"
       ]
     },
