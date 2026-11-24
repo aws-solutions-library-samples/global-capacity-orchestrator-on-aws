@@ -55,6 +55,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Volcano Jobs get their pods](#volcano-jobs-get-their-pods)
   - [Kueue's controller is not preempted](#kueues-controller-is-not-preempted)
   - [The keep-warm GPU pool](#the-keep-warm-gpu-pool)
+  - [Log groups earlier upgrades left behind](#log-groups-earlier-upgrades-left-behind)
   - [CLI exit codes, output and prompts](#cli-exit-codes-output-and-prompts)
   - [MCP server tools](#mcp-server-tools)
   - [Pre-commit hook for contributors](#pre-commit-hook-for-contributors)
@@ -1222,6 +1223,37 @@ window so that short GPU Jobs run back to back reuse it
 - **Admission judges manifests that select the pool.** A manifest that
   selects `gco.aws/keep-warm` but could never run on the pool is refused on
   every submission path. Manifests that don't select it are judged as before.
+
+### Log groups earlier upgrades left behind
+
+Each `gco upgrade` and `gco stacks destroy-all --keep-control-plane` run with
+v9.2.0 or earlier left one CloudWatch log group in the monitoring Region when a
+workload Region was not the monitoring Region:
+`/aws/lambda/<project>-monitoring-CustomCrossRegionExportReaderCustom-<suffix>`.
+The monitoring stack reads the regional stacks' values through that Lambda
+function. The update that stops it referencing them deletes the function, but
+CloudFormation never owned the log group Lambda created for it, and the group
+never expires.
+
+- **This release's teardown deletes the group.** It lists the monitoring
+  stack's functions before the update and deletes the log groups of the ones
+  the update removed ([CLI.md → Keeping the control plane](CLI.md#keeping-the-control-plane---keep-control-plane)).
+  `gco upgrade` runs the teardown of the release it upgrades from, so an
+  upgrade from v9.2.0 or earlier still leaves one.
+- **Delete the groups already there.** Each run left a group with its own
+  suffix. List the monitoring stack's functions and the groups, then delete
+  every group that is not `/aws/lambda/<function>` for a function in the first
+  list (all of them, once the monitoring stack is deleted):
+
+  ```bash
+  aws cloudformation describe-stack-resources --region <monitoring-region> \
+    --stack-name <project>-monitoring \
+    --query "StackResources[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId"
+  aws logs describe-log-groups --region <monitoring-region> \
+    --log-group-name-prefix /aws/lambda/<project>-monitoring-CustomCrossRegionExportReaderCustom- \
+    --query 'logGroups[].logGroupName'
+  aws logs delete-log-group --region <monitoring-region> --log-group-name <group>
+  ```
 
 ### CLI exit codes, output and prompts
 

@@ -5545,11 +5545,27 @@ class StackManager:
             pre_regional_stacks,
         ) = _get_stack_destroy_phases(stacks, project_name=project_name)
 
+        removed_function_log_groups: dict[str, dict[str, Any]] = {}
         if keep_control_plane:
             # The monitoring stack stays, so its cross-region references to the
             # regional stacks must be dropped before those can be deleted.
+            # Dropping the last one also removes the stack's cross-region
+            # export reader: CloudFormation deletes the reader's Lambda
+            # function, but not the log group Lambda created for it. The
+            # stack's functions are listed before the update, so the log-group
+            # sweep at the end of the teardown can delete the groups of the
+            # functions the update removed. Strict teardowns list nothing, as
+            # for the other log-group sweeps.
+            monitoring_stack = f"{project_name}-monitoring"
+            monitoring_functions = (
+                None if strict_identity else self._collect_stack_functions(monitoring_stack)
+            )
             if not self.detach_monitoring_from_regions():
-                return False, [], [f"{project_name}-monitoring"]
+                return False, [], [monitoring_stack]
+            if monitoring_functions is not None:
+                removed_function_log_groups = self._removed_function_log_groups(
+                    monitoring_stack, monitoring_functions
+                )
             workload_tier = set(regional_api_stacks) | set(regional_stacks)
             post_regional_stacks = []
             pre_regional_stacks = []
@@ -5654,7 +5670,12 @@ class StackManager:
             stack_identities = self._collect_stack_identities(stacks)
 
         def sweep_log_groups(deleted_stacks: Collection[str]) -> None:
-            """Delete the log groups collected for ``deleted_stacks``."""
+            """Delete the log groups collected for ``deleted_stacks``.
+
+            The groups of the monitoring functions a keep-control-plane update
+            removed are deleted whichever stacks went: those functions are
+            already gone.
+            """
             if implicit_log_groups:
                 record_cleanup(
                     "implicit-log-groups",
@@ -5664,6 +5685,13 @@ class StackManager:
                 record_cleanup(
                     "regenerated-log-groups",
                     self._cleanup_regenerated_log_groups(stack_identities, deleted_stacks),
+                )
+            if removed_function_log_groups:
+                record_cleanup(
+                    "removed-function-log-groups",
+                    self._cleanup_implicit_log_groups(
+                        removed_function_log_groups, removed_function_log_groups
+                    ),
                 )
 
         finishing = False
@@ -6499,10 +6527,12 @@ class StackManager:
     #
     # The cleanup below deletes ONLY exact names derived from the project's
     # own stack resources, captured while the stacks still exist, and only
-    # for stacks whose deletion actually succeeded. It never runs in strict
-    # (live-validation) teardowns: the harness checkpoints, tags, and
-    # fences its own log-group generations and must remain the single
-    # owner of that deletion authority.
+    # for stacks whose deletion actually succeeded, or for functions an
+    # in-place update removed (``_removed_function_log_groups``: the
+    # monitoring stack's export reader in a keep-control-plane teardown).
+    # It never runs in strict (live-validation) teardowns: the harness
+    # checkpoints, tags, and fences its own log-group generations and must
+    # remain the single owner of that deletion authority.
 
     # The service-side patterns implicit log groups follow. An explicit
     # ``AWS::Logs::LogGroup`` resource is deliberately absent here —
@@ -6723,6 +6753,69 @@ class StackManager:
         for failure in outcome["errors"]:
             logger.warning("Regenerated log-group cleanup failed for %s", failure)
         return outcome
+
+    @staticmethod
+    def _stack_function_names(cloudformation: Any, stack_id: str) -> set[str]:
+        """The names (physical IDs) of a stack's ``AWS::Lambda::Function`` resources."""
+        paginator = cloudformation.get_paginator("list_stack_resources")
+        return {
+            str(item["PhysicalResourceId"])
+            for page in paginator.paginate(StackName=stack_id)
+            for item in page.get("StackResourceSummaries", [])
+            if item.get("ResourceType") == "AWS::Lambda::Function"
+            and item.get("PhysicalResourceId")
+        }
+
+    def _collect_stack_functions(self, stack_name: str) -> dict[str, Any] | None:
+        """A live stack's Region, stack ID and Lambda function names.
+
+        ``None`` when the stack is absent or cannot be read, with a warning for
+        the latter: like the log-group collection, this never blocks the
+        teardown.
+        """
+        try:
+            target = self._describe_stack_target(stack_name)
+            if target is None:
+                return None
+            region, cloudformation, stack = target
+            stack_id = str(stack["StackId"])
+            functions = self._stack_function_names(cloudformation, stack_id)
+        except Exception as exc:  # best-effort collection
+            logger.warning("Could not list the Lambda functions of %s: %s", stack_name, exc)
+            return None
+        return {"region": region, "stack_id": stack_id, "functions": sorted(functions)}
+
+    def _removed_function_log_groups(
+        self, stack_name: str, before: Mapping[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        """The log groups of the functions an in-place update removed from a stack.
+
+        ``before`` is what ``_collect_stack_functions`` read ahead of the
+        update. CloudFormation deletes a function its template no longer has,
+        but not the ``/aws/lambda/<function>`` group Lambda created for it; a
+        ``gco upgrade`` left the monitoring stack's cross-region export reader's
+        group behind this way. The result has the shape
+        ``_cleanup_implicit_log_groups`` takes. It is empty when the update
+        removed no function or the stack cannot be read again.
+        """
+        import boto3
+
+        region = str(before["region"])
+        try:
+            cloudformation = boto3.client("cloudformation", region_name=region)
+            after = self._stack_function_names(cloudformation, str(before["stack_id"]))
+        except Exception as exc:  # best-effort collection
+            logger.warning("Could not list the Lambda functions of %s: %s", stack_name, exc)
+            return {}
+        removed = sorted(set(before["functions"]) - after)
+        if not removed:
+            return {}
+        return {
+            stack_name: {
+                "region": region,
+                "log_groups": [f"/aws/lambda/{name}" for name in removed],
+            }
+        }
 
     def _cleanup_traffic_dial_parameters(self) -> dict[str, Any]:
         """Best-effort purge of the runtime traffic-dial SSM parameter tree.

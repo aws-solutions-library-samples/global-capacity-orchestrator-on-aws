@@ -5755,6 +5755,18 @@ bastions, roles held in instance profiles, implicit and recreated log groups,
 dynamically provisioned EBS volumes, the Region's add-on SSM parameters) still
 run for the stacks that went away.
 
+The monitoring update also removes the stack's cross-region export reader, the
+Lambda function that read the regional stacks' values, once the stack
+references no stack in another Region. CloudFormation deletes the function but
+not the `/aws/lambda/<function>` log group Lambda created for it. The teardown
+therefore lists the monitoring stack's functions before the update and, at its
+end, deletes the log groups of the functions the update removed, also when a
+regional stack failed to delete. `gco upgrade` runs the teardown of the release
+it upgrades from, so an upgrade from v9.2.0 or earlier leaves that group
+behind;
+[UPGRADING.md → Log groups earlier upgrades left behind](UPGRADING.md#log-groups-earlier-upgrades-left-behind)
+shows how to delete it.
+
 Data inside the regional stacks (EFS and FSx file systems, Valkey, Aurora,
 in-cluster volumes) is deleted with them — back it up to the cluster-shared bucket
 first. The next `gco stacks deploy-all` recreates the regional stacks from
@@ -5830,8 +5842,9 @@ that Region writes them again.
 
 This cleanup is not an account-wide emptiness proof. ECR repositories or other
 resources configured for retention, and unexpected resources outside the known
-inventory, may remain. Only exact names taken from the destroyed stacks' own
-resources are considered, and only for stacks whose deletion succeeded. Sweep
+inventory, may remain. Only exact names taken from the stacks' own resources
+are considered, and only for stacks whose deletion succeeded or, in a
+`--keep-control-plane` teardown, for functions the monitoring update removed. Sweep
 failures are reported best-effort and do not fail the destroy command; log
 groups belonging to stacks that failed to delete are left untouched. When an
 error interrupts the teardown, the log-group sweep still runs, for every stack
