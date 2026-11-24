@@ -456,6 +456,21 @@ against ``rds describe-db-engine-versions`` — the authoritative source — so
 a newer minor is reported the day RDS ships it, independent of the CDK
 library's enum catalog.
 """
+
+# ---------------------------------------------------------------------------
+# ElastiCache Serverless Valkey Engine Version
+# ---------------------------------------------------------------------------
+
+VALKEY_MAJOR_ENGINE_VERSION = "9"
+"""Valkey major engine version of the optional ElastiCache Serverless cache.
+
+``AWS::ElastiCache::ServerlessCache`` takes a major version as an integer
+string ("8", "9"); ElastiCache Serverless applies minor and patch releases
+itself. Raising it upgrades an existing cache in place, without downtime and
+with the same endpoint (CloudFormation: "No interruption"); a cache cannot go
+back to an older major. The monthly dependency scan compares this pin with
+the newest Valkey major ``elasticache describe-cache-engine-versions`` lists.
+"""
 # ---------------------------------------------------------------------------
 # Analytics Environment Constants
 # ---------------------------------------------------------------------------

@@ -39,6 +39,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [ECR replication rules of your own are kept](#ecr-replication-rules-of-your-own-are-kept)
   - [Default-deny ingress in `gco-inference`](#default-deny-ingress-in-gco-inference)
   - [Valkey and Aurora ConfigMaps only in `gco-jobs`](#valkey-and-aurora-configmaps-only-in-gco-jobs)
+  - [Valkey 9 for the optional cache](#valkey-9-for-the-optional-cache)
   - [Narrower platform service-account RBAC](#narrower-platform-service-account-rbac)
   - [Endpoint and project labels on the monitor's objects](#endpoint-and-project-labels-on-the-monitors-objects)
   - [Training job admission](#training-job-admission)
@@ -842,6 +843,23 @@ ConfigMaps in `gco-system`, `gco-jobs` and `gco-inference`, but only
   `optional: true` no longer starts. Run such a workload in `gco-jobs`, or give
   it a NetworkPolicy that admits egress to the endpoint's port and a
   ConfigMap of your own.
+
+### Valkey 9 for the optional cache
+
+With `valkey.enabled`, the regional stacks now create their ElastiCache
+Serverless caches with Valkey 9 instead of Valkey 8.
+
+- **A running cache is upgraded in place on the next deploy.** ElastiCache
+  Serverless upgrades the major version without downtime, and the endpoint,
+  the `gco-valkey` ConfigMap and the cached data stay. A cache cannot go back
+  to Valkey 8 afterwards.
+- **Check your own clients first.** AWS lists the behavior that changes from
+  Valkey 8 in
+  [Major version behavior and compatibility differences for Valkey](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/VersionManagementConsiderations-valkey.html):
+  unauthenticated clients get an authentication error before an unknown-command
+  error, a few error messages are worded differently, and in 9.1
+  `CLUSTER SHARDS` and `CLUSTER SLOTS` answer with an availability-zone field
+  that strict parsers, such as older go-redis releases, may reject.
 
 ### Narrower platform service-account RBAC
 

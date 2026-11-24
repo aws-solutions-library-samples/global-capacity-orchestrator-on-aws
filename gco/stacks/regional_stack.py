@@ -191,6 +191,7 @@ from gco.stacks.constants import (
     EKS_UNSUPPORTED_AZ_IDS,
     LAMBDA_PYTHON_RUNTIME,
     MOONCAKE_MASTER_DEFAULT_IMAGE,
+    VALKEY_MAJOR_ENGINE_VERSION,
     api_gateway_auth_secret_name,
     backend_tls_certificate_arn_parameter_name,
     cluster_shared_ssm_parameter_prefix,
@@ -7379,7 +7380,7 @@ class GCORegionalStack(Stack):
             engine="valkey",
             serverless_cache_name=f"{self.config.get_project_name()}-{self.deployment_region}",
             description=f"GCO K/V cache for {self.deployment_region}",
-            major_engine_version="8",
+            major_engine_version=VALKEY_MAJOR_ENGINE_VERSION,
             security_group_ids=[valkey_sg.security_group_id],
             subnet_ids=private_subnet_ids,
             cache_usage_limits=elasticache.CfnServerlessCache.CacheUsageLimitsProperty(

@@ -1916,6 +1916,8 @@ See `examples/fsx-lustre-job.yaml` for a complete example.
 
 GCO can deploy an ElastiCache Serverless Valkey cache in each regional stack for low-latency key-value storage. Use cases include prompt caching for inference, session state, feature stores, and shared state across pods.
 
+The cache runs Valkey 9, the major version `VALKEY_MAJOR_ENGINE_VERSION` in `gco/stacks/constants.py` pins; ElastiCache Serverless applies minor and patch releases itself.
+
 Enable via CLI:
 
 ```bash
@@ -2285,7 +2287,7 @@ search` wraps the whole path.
 
 ## Infrastructure Version Constants
 
-All pinned infrastructure versions — EKS add-on versions, Lambda runtime, Aurora PostgreSQL engine version — are centralised in `gco/stacks/constants.py`. This is the single source of truth for version-pinned components.
+All pinned infrastructure versions — EKS add-on versions, Lambda runtime, Aurora PostgreSQL engine version, ElastiCache Valkey major engine version — are centralised in `gco/stacks/constants.py`. This is the single source of truth for version-pinned components.
 
 When updating a version:
 
