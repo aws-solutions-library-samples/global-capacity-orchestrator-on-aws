@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-24T19:00:27Z">
-        <meta name="gco-source-commit" content="21c18ee43b7d5814a559de944c67a84889dff8d5">
-        <meta name="gco-flow-digest" content="ca31583da9346ca6">
+        <meta name="gco-generated-at" content="2026-11-24T19:33:23Z">
+        <meta name="gco-source-commit" content="facc8a50cd596a034586c1981dea6492f1252a16">
+        <meta name="gco-flow-digest" content="e8e7a011f884457d">
         <title>gco stacks deploy — pre-deploy image mirror gate (regional-only, #139)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,32 +208,32 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1285=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
-op1287=>operation: from . import _image_mirror as image_mirror
-op1289=>operation: cfg = image_mirror.read_mirror_config()
-cond1292=>condition: if not cfg['enabled']
-e1297=>end: end function return
-op1303=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
-cond1306=>condition: for region in regions
-sub1310=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
-sub1315=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True, repository_tags=repository_tags, on_repository_created=on_repository_created)
-cond1312=>condition: exception raised?
-cond1317=>condition: except Exception as exc
-sub1321=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
+        <div><textarea id="code" style="width: 100%;" rows="11">op973=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
+op975=>operation: from . import _image_mirror as image_mirror
+op977=>operation: cfg = image_mirror.read_mirror_config()
+cond980=>condition: if not cfg['enabled']
+e985=>end: end function return
+op991=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
+cond994=>condition: for region in regions
+sub998=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
+sub1003=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True, repository_tags=repository_tags, on_repository_created=on_repository_created)
+cond1000=>condition: exception raised?
+cond1005=>condition: except Exception as exc
+sub1009=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
 
-op1285->op1287
-op1287->op1289
-op1289->cond1292
-cond1292(yes)->e1297
-cond1292(no)->op1303
-op1303->cond1306
-cond1306(yes)->sub1310
-sub1310->sub1315
-sub1315->cond1312
-cond1312(yes)->cond1317
-cond1317(yes)->sub1321
-cond1317(no)->cond1306
-cond1312(no)->cond1306
+op973->op975
+op975->op977
+op977->cond980
+cond980(yes)->e985
+cond980(no)->op991
+op991->cond994
+cond994(yes)->sub998
+sub998->sub1003
+sub1003->cond1000
+cond1000(yes)->cond1005
+cond1005(yes)->sub1009
+cond1005(no)->cond994
+cond1000(no)->cond994
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -243,17 +243,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-24T19:00:27Z -->
-        <!-- Generated from Git commit: 21c18ee43b7d5814a559de944c67a84889dff8d5 -->
+        <!-- Generated at (UTC): 2026-11-24T19:33:23Z -->
+        <!-- Generated from Git commit: facc8a50cd596a034586c1981dea6492f1252a16 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-24T19:00:27Z">2026-11-24T19:00:27Z</time>
+            Generated at (UTC): <time datetime="2026-11-24T19:33:23Z">2026-11-24T19:33:23Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>21c18ee43b7d5814a559de944c67a84889dff8d5</code>
+            Source commit: <code>facc8a50cd596a034586c1981dea6492f1252a16</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>ca31583da9346ca6</code>
+            Flow content SHA-256: <code>e8e7a011f884457d</code>
           </p>
           <div id="canvas"></div>
         </div>
