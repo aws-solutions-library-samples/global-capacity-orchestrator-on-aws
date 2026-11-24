@@ -14,6 +14,7 @@
 #   - EKS add-on versions from gco/stacks/constants.py (AWS creds)
 #   - EKS Kubernetes minor from cdk.json (AWS creds)
 #   - Aurora PostgreSQL engine versions (AWS creds)
+#   - ElastiCache Valkey major engine version (AWS creds)
 #   - EMR Serverless release labels (AWS creds)
 #   - Bedrock default model ids from cdk.json
 #     context.bedrock.mission_default_model_id (Mission sampling),
@@ -984,6 +985,51 @@ fi
 
 AURORA_COUNT="$(wc -l < "$AURORA_RESULTS" 2>/dev/null | tr -d ' ')"
 [ -z "$AURORA_COUNT" ] && AURORA_COUNT=0
+
+# ---------------------------------------------------------------------------
+# ElastiCache Valkey engine version (best-effort — requires AWS credentials)
+#
+# The optional workload cache (``valkey`` in cdk.json) is an ElastiCache
+# Serverless cache pinned to a Valkey major version,
+# VALKEY_MAJOR_ENGINE_VERSION in gco/stacks/constants.py. A serverless cache
+# applies minor releases on its own, so only a newer major counts as drift:
+# the check lists the Valkey engine versions ElastiCache offers and reports
+# when the newest one belongs to a later major than the pin.
+#
+# IAM action: ``elasticache:DescribeCacheEngineVersions``. Same credential
+# preflight as the EKS add-on / Aurora checks above.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking ElastiCache Valkey engine version ==="
+
+VALKEY_RESULTS="$(mktemp)"
+VALKEY_SKIP_REASON=""
+
+if ! aws sts get-caller-identity >/dev/null 2>&1; then
+  VALKEY_SKIP_REASON="No AWS credentials available (scan needs elasticache:DescribeCacheEngineVersions). Configure OIDC to enable."
+  echo "  $VALKEY_SKIP_REASON"
+else
+  VALKEY_CURRENT="$(extract_valkey_major_version "gco/stacks/constants.py")"
+  if [ -z "$VALKEY_CURRENT" ]; then
+    VALKEY_SKIP_REASON="Could not read VALKEY_MAJOR_ENGINE_VERSION from gco/stacks/constants.py."
+    echo "  $VALKEY_SKIP_REASON"
+  else
+    VALKEY_LATEST="$(aws elasticache describe-cache-engine-versions \
+      --engine valkey \
+      --query 'CacheEngineVersions[].EngineVersion' \
+      --output text 2>/dev/null | newest_valkey_major)" || VALKEY_LATEST=""
+    if [ -z "$VALKEY_LATEST" ]; then
+      VALKEY_SKIP_REASON="ElastiCache Valkey engine lookup failed or returned no valid version."
+      echo "  $VALKEY_SKIP_REASON"
+    elif [ "$VALKEY_LATEST" -gt "$VALKEY_CURRENT" ]; then
+      echo "  - valkey: ${VALKEY_CURRENT} -> ${VALKEY_LATEST}"
+      echo "valkey|${VALKEY_CURRENT}|${VALKEY_LATEST}" >> "$VALKEY_RESULTS"
+    fi
+  fi
+fi
+
+VALKEY_COUNT="$(wc -l < "$VALKEY_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$VALKEY_COUNT" ] && VALKEY_COUNT=0
 
 # ---------------------------------------------------------------------------
 # EMR Serverless release labels (best-effort — requires AWS credentials)
@@ -2850,6 +2896,11 @@ if [ -n "$AURORA_SKIP_REASON" ]; then
 else
   echo "Aurora PostgreSQL:        $AURORA_COUNT"
 fi
+if [ -n "$VALKEY_SKIP_REASON" ]; then
+  echo "ElastiCache Valkey:       (skipped)"
+else
+  echo "ElastiCache Valkey:       $VALKEY_COUNT"
+fi
 if [ -n "$EMR_SKIP_REASON" ]; then
   echo "EMR Serverless release:   (skipped)"
 else
@@ -2931,6 +2982,7 @@ if ! dependency_scan_is_complete \
   "$ADDON_SKIP_REASON" \
   "$EKS_K8S_SKIP_REASON" \
   "$AURORA_SKIP_REASON" \
+  "$VALKEY_SKIP_REASON" \
   "$EMR_SKIP_REASON" \
   "$BEDROCK_MODEL_SKIP_REASON" \
   "$ACCELERATOR_SKIP_REASON" \
@@ -2961,6 +3013,7 @@ findings_surface "Helm Charts"              "routine" "$HELM_COUNT"           ""
 findings_surface "EKS Add-ons"              "routine" "$ADDON_COUNT"          "$ADDON_SKIP_REASON"         "addon|current|latest" "$ADDON_RESULTS"
 findings_surface "EKS Kubernetes Version"   "act soon" "$EKS_K8S_COUNT"       "$EKS_K8S_SKIP_REASON"       "pin|current|latest|standard_support_ends" "$EKS_K8S_RESULTS"
 findings_surface "Aurora PostgreSQL Engine" "routine" "$AURORA_COUNT"         "$AURORA_SKIP_REASON"        "engine|current|latest" "$AURORA_RESULTS"
+findings_surface "ElastiCache Valkey Engine" "routine" "$VALKEY_COUNT"        "$VALKEY_SKIP_REASON"        "engine|current|latest" "$VALKEY_RESULTS"
 findings_surface "EMR Serverless"           "routine" "$EMR_COUNT"            "$EMR_SKIP_REASON"           "release|current|latest" "$EMR_RESULTS"
 findings_surface "Bedrock Default Model"    "routine" "$BEDROCK_MODEL_COUNT"  "$BEDROCK_MODEL_SKIP_REASON" "key|current|latest" "$BEDROCK_MODEL_RESULTS"
 findings_surface "PCS Slurm Versions"       "act soon" "$PCS_SLURM_COUNT"     "$PCS_SLURM_SKIP_REASON"     "pin|current|upstream|action" "$PCS_SLURM_RESULTS"
@@ -2987,7 +3040,8 @@ findings_surface "Lockfile Freshness"       "routine" "$LOCKFILE_COUNT"       ""
 if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
    && [ "$HELM_COUNT" -eq 0 ] && [ "$ADDON_COUNT" -eq 0 ] \
    && [ "$EKS_K8S_COUNT" -eq 0 ] \
-   && [ "$AURORA_COUNT" -eq 0 ] && [ "$EMR_COUNT" -eq 0 ] \
+   && [ "$AURORA_COUNT" -eq 0 ] && [ "$VALKEY_COUNT" -eq 0 ] \
+   && [ "$EMR_COUNT" -eq 0 ] \
    && [ "$DOCKERFILE_COUNT" -eq 0 ] \
    && [ "$AUTOPILOT_COUNT" -eq 0 ] \
    && [ "$PRECOMMIT_COUNT" -eq 0 ] \
@@ -3019,6 +3073,10 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
   if [ -n "$AURORA_SKIP_REASON" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Aurora engine skipped: $AURORA_SKIP_REASON"
+  fi
+  if [ -n "$VALKEY_SKIP_REASON" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}Valkey engine skipped: $VALKEY_SKIP_REASON"
   fi
   if [ -n "$EMR_SKIP_REASON" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
@@ -3084,7 +3142,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
   echo "$STATUS_MESSAGE"
   write_findings_document "$FINDINGS_FILE" "$SCAN_COMPLETE" false "$INCOMPLETE_REASONS_FILE"
   rm -f "$FINDINGS_SURFACES"
-  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$RUNAI_API_RESULTS" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$HMA_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$VALKEY_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$RUNAI_API_RESULTS" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$HMA_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "# Dependency Update Report"
@@ -3169,6 +3227,7 @@ rm -f "$FINDINGS_SURFACES"
   summary_row "EKS Add-ons"              "$ADDON_COUNT"          "$ADDON_SKIP_REASON"        "routine"
   summary_row "EKS Kubernetes Version"   "$EKS_K8S_COUNT"        "$EKS_K8S_SKIP_REASON"      "act soon"
   summary_row "Aurora PostgreSQL Engine" "$AURORA_COUNT"         "$AURORA_SKIP_REASON"       "routine"
+  summary_row "ElastiCache Valkey Engine" "$VALKEY_COUNT"        "$VALKEY_SKIP_REASON"       "routine"
   summary_row "EMR Serverless"           "$EMR_COUNT"            "$EMR_SKIP_REASON"          "routine"
   summary_row "Bedrock Default Model"    "$BEDROCK_MODEL_COUNT"  "$BEDROCK_MODEL_SKIP_REASON" "routine"
   summary_row "PCS Slurm Versions"       "$PCS_SLURM_COUNT"      "$PCS_SLURM_SKIP_REASON"    "act soon"
@@ -3280,6 +3339,19 @@ rm -f "$FINDINGS_SURFACES"
     echo "## Aurora PostgreSQL Engine"
     echo ""
     emit_md_table "Engine|Current|Latest" "$AURORA_RESULTS"
+    echo ""
+  fi
+
+  if [ "$VALKEY_COUNT" -gt 0 ]; then
+    echo "## ElastiCache Valkey Engine"
+    echo ""
+    echo "ElastiCache offers a newer Valkey major than \`VALKEY_MAJOR_ENGINE_VERSION\`"
+    echo "(\`gco/stacks/constants.py\`), the major the optional serverless cache runs."
+    echo "Raising the pin upgrades each deployed cache in place, and a cache cannot go"
+    echo "back to an older major, so check the new major's behavior changes first and"
+    echo "describe them in \`docs/UPGRADING.md\`."
+    echo ""
+    emit_md_table "Engine|Current|Latest" "$VALKEY_RESULTS"
     echo ""
   fi
 
@@ -3603,7 +3675,7 @@ rm -f "$FINDINGS_SURFACES"
   fi
 
   # ----- Skipped checks (collapsed) -----
-  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${PCS_SLURM_SKIP_REASON}${PCS_ASSETS_SKIP_REASON}${HMA_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}${UBUNTU_LTS_SKIP_REASON}${RUNNER_IMAGE_SKIP_REASON}${RUNAI_API_SKIP_REASON}" ] \
+  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${VALKEY_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${PCS_SLURM_SKIP_REASON}${PCS_ASSETS_SKIP_REASON}${HMA_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}${UBUNTU_LTS_SKIP_REASON}${RUNNER_IMAGE_SKIP_REASON}${RUNAI_API_SKIP_REASON}" ] \
      || [ -s "$INCOMPLETE_REASONS_FILE" ]; then
     echo "<details>"
     echo "<summary>Skipped checks</summary>"
@@ -3611,6 +3683,7 @@ rm -f "$FINDINGS_SURFACES"
     [ -n "$ADDON_SKIP_REASON" ]         && echo "- **EKS Add-ons:** $ADDON_SKIP_REASON"
     [ -n "$EKS_K8S_SKIP_REASON" ]       && echo "- **EKS Kubernetes Version:** $EKS_K8S_SKIP_REASON"
     [ -n "$AURORA_SKIP_REASON" ]        && echo "- **Aurora PostgreSQL Engine:** $AURORA_SKIP_REASON"
+    [ -n "$VALKEY_SKIP_REASON" ]        && echo "- **ElastiCache Valkey Engine:** $VALKEY_SKIP_REASON"
     [ -n "$EMR_SKIP_REASON" ]           && echo "- **EMR Serverless:** $EMR_SKIP_REASON"
     [ -n "$BEDROCK_MODEL_SKIP_REASON" ] && echo "- **Bedrock Default Model:** $BEDROCK_MODEL_SKIP_REASON"
     [ -n "$PCS_SLURM_SKIP_REASON" ]     && echo "- **PCS Slurm Versions:** $PCS_SLURM_SKIP_REASON"
@@ -3656,7 +3729,7 @@ rm -f "$FINDINGS_SURFACES"
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$RUNAI_API_RESULTS" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$HMA_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$VALKEY_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$RUNAI_API_RESULTS" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$HMA_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {

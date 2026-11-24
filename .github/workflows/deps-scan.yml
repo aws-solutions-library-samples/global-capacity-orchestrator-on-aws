@@ -15,6 +15,7 @@
 #   - EKS add-on versions from gco/stacks/regional_stack.py (requires AWS creds
 #     via OIDC; falls back gracefully when no creds are configured)
 #   - Aurora PostgreSQL engine versions (AWS creds via OIDC)
+#   - ElastiCache Valkey major engine version (AWS creds via OIDC)
 #   - EMR Serverless release labels (AWS creds via OIDC)
 #   - Bedrock default model ids from cdk.json context.bedrock
 #     (mission_default_model_id, capacity_advisor_default_model_id,

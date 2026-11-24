@@ -762,7 +762,7 @@ exceptions require an [Architecture Decision Record](docs/adr/README.md).
 │   ├── models/                          # Data models for k8s clusters, health monitor, inference monitor and manifest processor
 │   ├── services/                        # K8s services (health/inference monitors, inference proxy, manifest/queue processors)
 │   └── stacks/                          # CDK stacks (global, API gateway, regional with its PCS and HyperPod constructs, regional API gateway, monitoring, analytics)
-│       └── constants.py                 # Pinned versions: EKS addons, Lambda runtime, Aurora engine
+│       └── constants.py                 # Pinned versions: EKS addons, Lambda runtime, Aurora and Valkey engines
 │
 ├── lambda/                              # Lambda functions
 │   ├── analytics-cleanup/               # Custom resource that deletes Studio user profiles + EFS access points on stack destroy

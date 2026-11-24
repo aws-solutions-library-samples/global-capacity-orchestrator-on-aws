@@ -473,6 +473,37 @@ if value and re.fullmatch(r'\d+\.\d+(?:\.\d+)?', value):
 " "$file" 2>/dev/null | sort -V
 }
 
+# extract_valkey_major_version [constants_path]
+#
+# Prints VALKEY_MAJOR_ENGINE_VERSION from the constants module: the Valkey
+# major version the optional ElastiCache Serverless cache is pinned to
+# (``9``). The value is read without importing the module, and printed only
+# when it is a whole number, because a serverless cache takes a major version
+# (``MajorEngineVersion``) and applies minor releases itself; a ``9.1`` or an
+# enum-style name never reaches the ElastiCache query.
+extract_valkey_major_version() {
+  local file="${1:-gco/stacks/constants.py}" value
+  value="$(extract_python_string_constant VALKEY_MAJOR_ENGINE_VERSION "$file")"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "$value"
+  fi
+}
+
+# newest_valkey_major
+#
+# Reads ElastiCache Valkey engine versions on stdin and prints the major
+# version of the newest one (``7.2 8.1 9.0 9.1`` -> ``9``). The versions may
+# be separated by tabs, spaces or newlines, since ``aws elasticache
+# describe-cache-engine-versions --output text`` prints the list on one
+# tab-separated line. Anything that is not an ``X.Y[.Z]`` version is ignored,
+# so an empty or reshaped response prints nothing and reads as a failed
+# lookup, never as drift. Ordering is by version: ``10.0`` outranks ``9.1``.
+newest_valkey_major() {
+  tr -s '[:space:]' '\n' \
+    | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+    | sort -V | tail -1 | cut -d. -f1
+}
+
 # extract_eks_addons <file> [k8s_version]
 #
 # Extracts EKS addon name|version pairs from the constants module.
