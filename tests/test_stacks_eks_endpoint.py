@@ -219,6 +219,7 @@ class TestClusterAccessHint:
             "gco-api-gateway",
             "gco-monitoring",
             "gco-regional-api-us-east-1",
+            "gco-us-east-1-persistent",
             "unrelated-stack",
             "gco-",
         ):

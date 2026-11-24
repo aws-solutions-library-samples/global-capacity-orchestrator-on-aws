@@ -66,6 +66,7 @@ from aws_cdk import aws_wafv2 as wafv2
 from aws_cdk import custom_resources as cr
 from constructs import Construct
 
+from gco.stacks.api_ip_address_type import DEFAULT_IP_ADDRESS_TYPE, api_ip_address_type
 from gco.stacks.constants import (
     AGGREGATOR_REGIONAL_API_ROUTES,
     DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -83,8 +84,8 @@ from gco.stacks.control_plane_alarms import add_api_alarms, create_alert_topic
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T06:05:34Z
-# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
+# Generated at (UTC): 2026-11-22T20:50:27Z
+# Generated from Git commit: c904dd4dd0b819014ff781aa5d888d6c579a8868
 # Flowchart(s) generated from this file:
 #   * ``GCOApiGatewayGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.png``)
@@ -205,6 +206,7 @@ class GCOApiGatewayGlobalStack(Stack):
             "log_level": "INFO",
             "metrics_enabled": True,
             "tracing_enabled": True,
+            "ip_address_type": DEFAULT_IP_ADDRESS_TYPE,
         }
         if api_gateway_config is not None:
             configured_api_gateway = api_gateway_config
@@ -1116,12 +1118,18 @@ class GCOApiGatewayGlobalStack(Stack):
             if self.ga_dns is not None
             else apigateway.EndpointType.REGIONAL
         )
+        ip_address_type = str(
+            self.api_gateway_config.get("ip_address_type", DEFAULT_IP_ADDRESS_TYPE)
+        )
         api = apigateway.RestApi(
             self,
             "GCOGlobalApi",
             rest_api_name=f"{self.project_name}-global-api",
             description="Authenticated global aggregation API for GCO",
-            endpoint_types=[endpoint_type],
+            endpoint_configuration=apigateway.EndpointConfiguration(
+                types=[endpoint_type],
+                ip_address_type=api_ip_address_type(ip_address_type),
+            ),
             deploy=True,
             deploy_options=apigateway.StageOptions(
                 stage_name="prod",

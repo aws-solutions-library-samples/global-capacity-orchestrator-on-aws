@@ -24,6 +24,14 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _no_user_differing_only_in_case():
+    """``users add`` first looks for a user whose name differs only in case;
+    the pools these tests stub have none."""
+    with patch("cli.analytics_user_mgmt.find_user_ignoring_case", return_value=None):
+        yield
+
+
 def _config(*, output_format: str = "table") -> GCOConfig:
     return GCOConfig(
         project_name="test-gco",

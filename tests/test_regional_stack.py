@@ -31,6 +31,10 @@ class MockConfigLoader:
     def __init__(self, app=None, fsx_enabled=False):
         self._fsx_enabled = fsx_enabled
 
+    def get_regional_persistent_bucket_config(self):
+        """Off, as for a cdk.json without the block, so templates match the stack's own tests."""
+        return {"enabled": False, "expiration_days": None}
+
     def get_project_name(self):
         return "gco-test"
 

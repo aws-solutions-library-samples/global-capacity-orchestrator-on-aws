@@ -6,9 +6,9 @@ Provides the ``gco analytics`` sub-commands:
   ``analytics_environment.enabled`` toggle in ``cdk.json``.
 * ``users add`` / ``users list`` / ``users remove`` — manage Cognito
   users against the auto-discovered pool id from ``gco-analytics``.
-* ``studio login`` — SRP-authenticate against Cognito and fetch a
-  SageMaker Studio presigned URL from ``/studio/login`` on the
-  existing ``gco-api-gateway``.
+* ``studio login`` — sign in to Cognito (``AdminInitiateAuth`` with
+  ``ADMIN_USER_PASSWORD_AUTH``) and fetch a SageMaker Studio presigned
+  URL from ``/studio/login`` on the existing ``gco-api-gateway``.
 * ``doctor`` — pre-flight checks before ``gco stacks deploy
   gco-analytics``.
 
@@ -41,6 +41,30 @@ def _stack_missing_message(project_name: str) -> str:
     )
 
 
+#: The rule ``users add`` enforces and an ``UnsupportedUsername`` login reports.
+_STUDIO_USERNAME_RULE = (
+    "SageMaker Studio names each user's profile after the username, and allows "
+    "only letters, digits and hyphens there, starting and ending with a letter "
+    "or digit, 63 characters at most"
+)
+
+#: What ``studio login`` prints for the presigned-URL Lambda's error tokens.
+_STUDIO_LOGIN_ERROR_HINTS = {
+    "UnsupportedUsername": (
+        "{username!r} cannot be used in SageMaker Studio: "
+        + _STUDIO_USERNAME_RULE
+        + ". Ask an administrator for a user created with `gco analytics users add`."
+    ),
+    "UserProfileOwnedByAnotherUser": (
+        "the Studio user profile named {username!r} belongs to another Cognito user. "
+        "SageMaker matches profile names without regard to case, so this happens when "
+        "two usernames differ only in case, or when a user was removed and a new one "
+        "created with the same name. Ask an administrator to delete the old profile "
+        "(`aws sagemaker delete-user-profile`) or to give you a different username."
+    ),
+}
+
+
 @click.group()
 @pass_config
 def analytics(config: Any) -> None:
@@ -69,7 +93,14 @@ def analytics_status(config: Any) -> None:
 
 
 @analytics.command("enable")
-@click.option("--hyperpod", is_flag=True, help="Also enable SageMaker HyperPod job submission.")
+@click.option(
+    "--hyperpod",
+    is_flag=True,
+    help=(
+        "Deprecated, changes nothing: sets analytics_environment.hyperpod.enabled, "
+        "which the stack ignores."
+    ),
+)
 @click.option(
     "--canvas",
     is_flag=True,
@@ -80,21 +111,28 @@ def analytics_status(config: Any) -> None:
 def analytics_enable(config: Any, hyperpod: bool, canvas: bool, yes: bool) -> None:
     """Enable the analytics environment in cdk.json.
 
-    Flips ``analytics_environment.enabled`` to ``true``; ``--hyperpod``
-    additionally flips ``analytics_environment.hyperpod.enabled``, and
-    ``--canvas`` flips ``analytics_environment.canvas.enabled`` (which
-    attaches ``AmazonSageMakerCanvasFullAccess`` to the SageMaker
-    execution role). Prints the follow-up ``gco stacks deploy
-    gco-analytics`` command — does not deploy automatically.
+    Flips ``analytics_environment.enabled`` to ``true``, and ``--canvas``
+    flips ``analytics_environment.canvas.enabled`` (which attaches
+    ``AmazonSageMakerCanvasFullAccess`` to the SageMaker execution role).
+    ``--hyperpod`` still sets ``analytics_environment.hyperpod.enabled``
+    but is deprecated: the stack ignores that key. Prints the follow-up
+    ``gco stacks deploy gco-analytics`` command — does not deploy
+    automatically.
     """
     from ..stacks import get_analytics_config, update_analytics_config
 
     formatter = get_output_formatter(config)
 
+    if hyperpod:
+        formatter.print_warning(
+            "--hyperpod is deprecated and changes nothing: the SageMaker execution "
+            "role's AmazonSageMakerFullAccess policy already allows SageMaker training "
+            "jobs, and HyperPod work goes through the gco-hyperpod queue of a Region "
+            "with the cdk.json hyperpod block on (docs/ANALYTICS.md section (g))."
+        )
+
     if not yes:
         formatter.print_info("Analytics environment will be enabled in cdk.json.")
-        if hyperpod:
-            formatter.print_info("  Hyperpod sub-toggle will also be enabled.")
         if canvas:
             formatter.print_info("  Canvas sub-toggle will also be enabled.")
         confirm("\nEnable the analytics environment?", abort=True)
@@ -234,7 +272,9 @@ def users_add(
     from ..analytics_user_mgmt import (
         admin_create_user,
         admin_set_user_password,
+        find_user_ignoring_case,
         generate_strong_password,
+        is_studio_username,
     )
 
     formatter = get_output_formatter(config)
@@ -243,7 +283,31 @@ def users_add(
         formatter.print_error("--password and --generate-password are mutually exclusive")
         sys.exit(1)
 
+    if not is_studio_username(username):
+        formatter.print_error(f"Cannot create user {username!r}: {_STUDIO_USERNAME_RULE}.")
+        sys.exit(1)
+
     pool_id, region = _require_cognito_pool_id(config)
+
+    # The pool's usernames are case-sensitive and SageMaker's profile names
+    # are not: a second user that differs only in case would get the first
+    # one's Studio profile name, which the presigned-URL Lambda refuses.
+    try:
+        existing = find_user_ignoring_case(pool_id, region, username)
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "Unknown")
+        formatter.print_error(f"Failed to check the existing users: {error_code}")
+        sys.exit(1)
+    if existing == username:
+        formatter.print_error(f"Cognito user {username} already exists")
+        sys.exit(1)
+    if existing is not None:
+        formatter.print_error(
+            f"Cannot create user {username!r}: Cognito user {existing!r} already exists, "
+            "and SageMaker Studio matches profile names without regard to case, so the "
+            "two would share one profile name"
+        )
+        sys.exit(1)
 
     try:
         _, temporary_password = admin_create_user(
@@ -528,7 +592,11 @@ def studio_login(
     api_url: str | None,
     open_browser: bool,
 ) -> None:
-    """Sign in to SageMaker Studio via Cognito SRP and print the presigned URL."""
+    """Sign in to SageMaker Studio through Cognito and print the presigned URL.
+
+    The sign-in is cognito-idp:AdminInitiateAuth (ADMIN_USER_PASSWORD_AUTH),
+    so it needs AWS credentials allowed to call it on the pool.
+    """
     from botocore.exceptions import ClientError
 
     from ..analytics_user_mgmt import (
@@ -615,10 +683,15 @@ def studio_login(
             )
             sys.exit(2)
     except urllib.error.HTTPError as exc:
+        from ..analytics_user_mgmt import studio_login_error_token
+
         correlation_id = exc.headers.get("x-amzn-RequestId") if exc.headers else "N/A"
-        formatter.print_error(
-            f"login failed: HTTP {exc.code}, correlation_id={correlation_id or 'N/A'}"
-        )
+        token = studio_login_error_token(exc)
+        status = f"HTTP {exc.code} {token}" if token else f"HTTP {exc.code}"
+        formatter.print_error(f"login failed: {status}, correlation_id={correlation_id or 'N/A'}")
+        hint = _STUDIO_LOGIN_ERROR_HINTS.get(token or "")
+        if hint:
+            formatter.print_error(hint.format(username=username))
         sys.exit(2)
     except urllib.error.URLError as exc:
         formatter.print_error(f"login failed: network error: {exc.reason!r}")
@@ -698,7 +771,7 @@ def analytics_doctor(config: Any) -> None:
     ):
         ok, remediation = check_stack_complete(region, stack_name)
         _emit(
-            f"{stack_name} is CREATE_COMPLETE",
+            f"{stack_name} is deployed",
             ok,
             remediation or f"deploy with `gco stacks deploy {stack_name}`",
         )
@@ -709,7 +782,7 @@ def analytics_doctor(config: Any) -> None:
         stack_name = f"{config.project_name}-{region}"
         ok, remediation = check_stack_complete(region, stack_name)
         _emit(
-            f"{stack_name} is CREATE_COMPLETE",
+            f"{stack_name} is deployed",
             ok,
             remediation or f"deploy with `gco stacks deploy {stack_name}`",
         )

@@ -262,7 +262,7 @@ volumes:
 | Distributed training | FSx for Lustre |
 | Cost-sensitive workloads | EFS |
 
-Beyond the two file systems, every deployment also has two always-on S3 buckets — the per-region [Regional Shared Bucket](REGIONAL_SHARED_BUCKET.md) and the cross-region [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) — and three optional data services: a [Valkey](CUSTOMIZATION.md#configure-valkey-cache) cache, an [Aurora Serverless v2 pgvector](CUSTOMIZATION.md#configure-aurora-pgvector) database, and the globally replicated [vector store](CUSTOMIZATION.md#configure-the-vector-store) (`gco vector`). The [Customization Guide](CUSTOMIZATION.md) covers enabling and sizing each.
+Beyond the two file systems, every deployment also has two always-on S3 buckets — the per-region [Regional Shared Bucket](REGIONAL_SHARED_BUCKET.md) and the cross-region [Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md) — a per-region [persistent bucket](REGIONAL_PERSISTENT_BUCKET.md) that `gco upgrade` leaves in place (on in the shipped `cdk.json`), and three optional data services: a [Valkey](CUSTOMIZATION.md#configure-valkey-cache) cache, an [Aurora Serverless v2 pgvector](CUSTOMIZATION.md#configure-aurora-pgvector) database, and the globally replicated [vector store](CUSTOMIZATION.md#configure-the-vector-store) (`gco vector`). The [Customization Guide](CUSTOMIZATION.md) covers enabling and sizing each.
 
 ## Security Model
 

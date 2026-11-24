@@ -53,6 +53,7 @@ process, so this harness, and only this harness, owns them by **run-tag
 adoption**:
 
 - the base checkout's cdk.json carries `context.tags.GcoLiveValidationRun` set to the run ID, which the app applies to every stack; the harness proves the synthesized stacks carry it before deploying anything;
+- the checkout's target stacks are its app synthesized with the base checkout's cdk.json, which is what `gco upgrade` deploys, since it keeps that file byte for byte: a stack that only the checkout's own cdk.json turns on, such as a persistent-bucket stack, is not part of the upgrade and not a target, and the teardown lists the same stacks;
 - a stack is adopted when its name is one of the checkout's target stacks, it carries this run's exact tag, and CloudFormation reports it created after the phase that created it began, measured against the AWS clock recorded before the phase's command started;
 - a stack the upgrade recreates is accepted as a new generation only if `gco upgrade --check` named it part of the workload tier and the previous generation is deleted; that previous generation stays on record, so the EKS key and log groups it retained are cleaned up with the run's own;
 - a log group the new generation derives under a name the old one used (the EKS cluster's, a named Lambda function's) moves to the new generation: its record is rebound when the group outlived the old stack, and checkpointed afresh when the upgrade's teardown deleted it, which only stable absence or a stable different generation can prove;

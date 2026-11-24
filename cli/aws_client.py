@@ -24,6 +24,7 @@ from botocore.exceptions import ClientError
 from botocore.regions import EndpointResolver
 from botocore.session import get_session as get_botocore_session
 
+from ._dual_stack_http import request as _http_request
 from .config import GCOConfig, get_config
 
 logger = logging.getLogger(__name__)
@@ -834,7 +835,7 @@ class GCOAWSClient:
         )
         attempt = 0
         while True:
-            response = requests.request(
+            response = _http_request(
                 method=method,
                 url=url,
                 headers=dict(aws_request.headers),

@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
-        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
-        <meta name="gco-flow-digest" content="3933e809e952583a">
+        <meta name="gco-generated-at" content="2026-11-23T02:28:23Z">
+        <meta name="gco-source-commit" content="1bf0ef9a749386c6fa50ac7edddbe6eb1b7a9fe0">
+        <meta name="gco-flow-digest" content="f979e94c31a20085">
         <title>CDK app entry point (app.py::main)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,7 +208,7 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: '\n    Main application entry point.\n\n    Creates and configures all CDK stacks with proper dependencies:\n    1. Global stack (shared state plus optional Global Accelerator) - must be created first\n    2. API Gateway stack - uses Global Accelerator DNS only when available\n    3. Regional stacks - depend on both global stacks\n    4. Regional API bridges - depend on their matching regional stack\n       (direct caller access is optional in `aws` and required elsewhere)\n    5. Monitoring stack - depends on all regional stacks\n    6. Optional analytics stack - feeds Studio routes into the API Gateway stack\n    '
+        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: '\n    Main application entry point.\n\n    Creates and configures all CDK stacks with proper dependencies:\n    1. Global stack (shared state plus optional Global Accelerator) - must be created first\n    2. API Gateway stack - uses Global Accelerator DNS only when available\n    3. Regional stacks - depend on both global stacks\n    4. Regional API bridges - depend on their matching regional stack\n       (direct caller access is optional in `aws` and required elsewhere)\n    5. Monitoring stack - depends on all regional stacks\n    6. Optional analytics stack - feeds Studio routes into the API Gateway stack\n    7. Optional per-Region persistent buckets - control-plane stacks the\n       regional stacks depend on, which gco upgrade leaves standing\n    '
 op4=>operation: app = cdk.App()
 sub6=>subroutine: cdk.Aspects.of(app).add(LambdaTracingAspect())
 sub8=>subroutine: cdk.Validations.of(app).add_plugins(*nag_validation_plugins(app, verbose=True))
@@ -227,24 +227,28 @@ op40=>operation: account = os.environ.get('CDK_DEFAULT_ACCOUNT')
 op42=>operation: global_stack = GCOGlobalStack(app, f'{project_name}-global', config=config, env=cdk.Environment(account=account, region=global_region), description=f'{SOLUTION_DESCRIPTION_PREFIX} - Shared global resources for GCO (Global Capacity Orchestrator on AWS)')
 op44=>operation: api_gateway_stack = GCOApiGatewayGlobalStack(app, f'{project_name}-api-gateway', global_accelerator_dns=global_stack.get_accelerator_dns_name(), project_name=project_name, api_gateway_config=api_gateway_config, registry_region=global_region, certificate_regions=regional_regions, backend_tls_config=config.get_backend_tls_config(), max_request_body_bytes=manifest_processor_config.get('max_request_body_bytes', 1048576), monitoring_region=monitoring_region, env=cdk.Environment(account=account, region=api_gateway_region), description='Global API Gateway with IAM authentication')
 sub46=>subroutine: api_gateway_stack.add_stack_dependency(global_stack)
-op48=>operation: regional_stacks = []
-cond51=>condition: for region in regional_regions
-op55=>operation: regional_stack = GCORegionalStack(app, f'{project_name}-{region}', config=config, region=region, auth_secret_arn=api_gateway_stack.secret.secret_arn, env=cdk.Environment(account=account, region=region), description=f'Regional resources for {region} - EKS cluster, ALB, and services')
-sub57=>subroutine: regional_stack.add_stack_dependency(global_stack)
-sub59=>subroutine: regional_stack.add_stack_dependency(api_gateway_stack)
-sub61=>subroutine: regional_stacks.append(regional_stack)
-op63=>operation: regional_api_stack = GCORegionalApiGatewayStack(app, f'{project_name}-regional-api-{region}', config=config, region=region, vpc=regional_stack.vpc, auth_secret_arn=api_gateway_stack.secret.secret_arn, aggregator_role_arn=api_gateway_stack.aggregator_role.role_arn, env=cdk.Environment(account=account, region=region), description=f'Regional aggregation and workload bridge for {region}')
-sub65=>subroutine: regional_api_stack.add_stack_dependency(regional_stack)
-op69=>operation: monitoring_stack = GCOMonitoringStack(app, f'{project_name}-monitoring', config=config, global_stack=global_stack, regional_stacks=regional_stacks, api_gateway_stack=api_gateway_stack, env=cdk.Environment(account=account, region=monitoring_region), description='Cross-region monitoring and observability for GCO (Global Capacity Orchestrator on AWS)')
-cond72=>operation: monitoring_stack.add_stack_dependency(regional_stack) while  regional_stack in regional_stacks
-cond82=>condition: if config.get_analytics_enabled()
-op86=>operation: analytics_stack = GCOAnalyticsStack(app, f'{project_name}-analytics', config=config, env=cdk.Environment(account=account, region=api_gateway_region), description='Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)')
-sub88=>subroutine: analytics_stack.add_stack_dependency(global_stack)
-op90=>operation: analytics_api_config = AnalyticsApiConfig(user_pool_arn=analytics_stack.cognito_pool.user_pool_arn, presigned_url_lambda=analytics_stack.presigned_url_lambda)
-sub92=>subroutine: api_gateway_stack.set_analytics_config(analytics_api_config)
-sub94=>subroutine: api_gateway_stack.add_stack_dependency(analytics_stack)
-op99=>operation: assembly = app.synth()
-sub101=>subroutine: normalize_staged_asset_modes(assembly.directory)
+op48=>operation: persistent_bucket_enabled = config.get_regional_persistent_bucket_config()['enabled']
+op50=>operation: regional_stacks = []
+cond53=>condition: for region in regional_regions
+op57=>operation: regional_stack = GCORegionalStack(app, f'{project_name}-{region}', config=config, region=region, auth_secret_arn=api_gateway_stack.secret.secret_arn, env=cdk.Environment(account=account, region=region), description=f'Regional resources for {region} - EKS cluster, ALB, and services')
+sub59=>subroutine: regional_stack.add_stack_dependency(global_stack)
+sub61=>subroutine: regional_stack.add_stack_dependency(api_gateway_stack)
+sub63=>subroutine: regional_stacks.append(regional_stack)
+cond66=>condition: if persistent_bucket_enabled
+op70=>operation: persistent_stack = GCORegionalPersistentStack(app, regional_persistent_stack_name(project_name, region), config=config, region=region, env=cdk.Environment(account=account, region=region), description=f'Persistent bucket for {region} that survives gco upgrade')
+sub72=>subroutine: regional_stack.add_stack_dependency(persistent_stack)
+op77=>operation: regional_api_stack = GCORegionalApiGatewayStack(app, f'{project_name}-regional-api-{region}', config=config, region=region, vpc=regional_stack.vpc, auth_secret_arn=api_gateway_stack.secret.secret_arn, aggregator_role_arn=api_gateway_stack.aggregator_role.role_arn, env=cdk.Environment(account=account, region=region), description=f'Regional aggregation and workload bridge for {region}')
+sub79=>subroutine: regional_api_stack.add_stack_dependency(regional_stack)
+op83=>operation: monitoring_stack = GCOMonitoringStack(app, f'{project_name}-monitoring', config=config, global_stack=global_stack, regional_stacks=regional_stacks, api_gateway_stack=api_gateway_stack, env=cdk.Environment(account=account, region=monitoring_region), description='Cross-region monitoring and observability for GCO (Global Capacity Orchestrator on AWS)')
+cond86=>operation: monitoring_stack.add_stack_dependency(regional_stack) while  regional_stack in regional_stacks
+cond96=>condition: if config.get_analytics_enabled()
+op100=>operation: analytics_stack = GCOAnalyticsStack(app, f'{project_name}-analytics', config=config, env=cdk.Environment(account=account, region=api_gateway_region), description='Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)')
+sub102=>subroutine: analytics_stack.add_stack_dependency(global_stack)
+op104=>operation: analytics_api_config = AnalyticsApiConfig(user_pool_arn=analytics_stack.cognito_pool.user_pool_arn, presigned_url_lambda=analytics_stack.presigned_url_lambda)
+sub106=>subroutine: api_gateway_stack.set_analytics_config(analytics_api_config)
+sub108=>subroutine: api_gateway_stack.add_stack_dependency(analytics_stack)
+op113=>operation: assembly = app.synth()
+sub115=>subroutine: normalize_staged_asset_modes(assembly.directory)
 
 op2->op4
 op4->sub6
@@ -265,25 +269,30 @@ op40->op42
 op42->op44
 op44->sub46
 sub46->op48
-op48->cond51
-cond51(yes)->op55
-op55->sub57
-sub57->sub59
+op48->op50
+op50->cond53
+cond53(yes)->op57
+op57->sub59
 sub59->sub61
-sub61->op63
-op63->sub65
-sub65(left)->cond51
-cond51(no)->op69
-op69->cond72
-cond72->cond82
-cond82(yes)->op86
-op86->sub88
-sub88->op90
-op90->sub92
-sub92->sub94
-sub94->op99
-op99->sub101
-cond82(no)->op99
+sub61->sub63
+sub63->cond66
+cond66(yes)->op70
+op70->sub72
+sub72->op77
+op77->sub79
+sub79(left)->cond53
+cond66(no)->op77
+cond53(no)->op83
+op83->cond86
+cond86->cond96
+cond96(yes)->op100
+op100->sub102
+sub102->op104
+op104->sub106
+sub106->sub108
+sub108->op113
+op113->sub115
+cond96(no)->op113
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -293,17 +302,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
-        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
+        <!-- Generated at (UTC): 2026-11-23T02:28:23Z -->
+        <!-- Generated from Git commit: 1bf0ef9a749386c6fa50ac7edddbe6eb1b7a9fe0 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
+            Generated at (UTC): <time datetime="2026-11-23T02:28:23Z">2026-11-23T02:28:23Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
+            Source commit: <code>1bf0ef9a749386c6fa50ac7edddbe6eb1b7a9fe0</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>3933e809e952583a</code>
+            Flow content SHA-256: <code>f979e94c31a20085</code>
           </p>
           <div id="canvas"></div>
         </div>

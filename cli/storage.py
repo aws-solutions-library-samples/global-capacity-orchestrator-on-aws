@@ -381,6 +381,7 @@ class StorageManager:
         "cluster-shared": "Cross-region cluster job artifacts and shared data",
         "model-weights": "Central model weights used by inference endpoints",
         "regional-shared": "General-purpose data for workloads in one region",
+        "regional-persistent": "One region's staging that survives gco upgrade",
         "analytics-studio": "SageMaker Studio private scratch data and outputs",
     }
 
@@ -409,6 +410,8 @@ class StorageManager:
         for regional_region in regional_regions:
             with suppress(StorageBucketNotFoundError):
                 buckets.append(self.resolve_bucket("regional-shared", region=regional_region))
+            with suppress(StorageBucketNotFoundError):
+                buckets.append(self.resolve_bucket("regional-persistent", region=regional_region))
 
         with suppress(StorageBucketNotFoundError):
             buckets.append(self.resolve_bucket("analytics-studio"))
@@ -419,7 +422,7 @@ class StorageManager:
         """Describe every S3 bucket this deployment creates, deployed or not.
 
         Complements :meth:`list_buckets`, which deliberately reports only the
-        four user-facing buckets addressable by ``storage sync``. This reports
+        user-facing buckets addressable by ``storage sync``. This reports
         the full set — including the server-access-log sinks and the cost-report
         bucket — with the deployment-contract facts a caller actually needs:
         which stack owns each bucket, what it is for, whether job pods can reach
@@ -457,6 +460,10 @@ class StorageManager:
             (f"regional:{item}", f"{self.config.regional_stack_prefix}-{item}", item)
             for item in regional_regions
         )
+        stacks_to_sweep.extend(
+            (f"regional-persistent:{item}", f"{project}-{item}-persistent", item)
+            for item in regional_regions
+        )
         for scope_key, stack_name, stack_region in stacks_to_sweep:
             for logical_id, physical in self._stack_bucket_resources(
                 stack_name, stack_region
@@ -465,16 +472,21 @@ class StorageManager:
 
         records: list[dict[str, Any]] = []
         for descriptor in BUCKET_DESCRIPTORS:
-            if descriptor.scope == "regional":
+            if descriptor.scope in ("regional", "regional-persistent"):
                 for regional_region in regional_regions:
+                    stack_name = (
+                        f"{project}-{regional_region}-persistent"
+                        if descriptor.scope == "regional-persistent"
+                        else f"{self.config.regional_stack_prefix}-{regional_region}"
+                    )
                     records.append(
                         self._s3_inventory_record(
                             descriptor,
                             region=regional_region,
-                            stack_name=f"{self.config.regional_stack_prefix}-{regional_region}",
+                            stack_name=stack_name,
                             account=account,
                             log_buckets=log_buckets,
-                            scope_key=f"regional:{regional_region}",
+                            scope_key=f"{descriptor.scope}:{regional_region}",
                         )
                     )
                 continue
@@ -551,7 +563,11 @@ class StorageManager:
             )
 
         return {
-            "id": descriptor.id if descriptor.scope != "regional" else f"{descriptor.id}:{region}",
+            "id": (
+                f"{descriptor.id}:{region}"
+                if descriptor.scope in ("regional", "regional-persistent")
+                else descriptor.id
+            ),
             "role": descriptor.role,
             "scope": descriptor.scope,
             "region": region,
@@ -568,7 +584,7 @@ class StorageManager:
             "reserved_prefixes": list(descriptor.reserved_prefixes),
             "sync_alias": (
                 f"{descriptor.sync_alias}:{region}"
-                if descriptor.sync_alias and descriptor.scope == "regional"
+                if descriptor.sync_alias and descriptor.scope in ("regional", "regional-persistent")
                 else descriptor.sync_alias
             ),
             "opt_in": descriptor.opt_in,
@@ -590,6 +606,7 @@ class StorageManager:
         from gco.stacks.constants import (
             cluster_shared_ssm_parameter_prefix,
             cost_report_ssm_parameter_prefix,
+            regional_persistent_ssm_parameter_prefix,
             regional_shared_ssm_parameter_prefix,
         )
 
@@ -603,6 +620,12 @@ class StorageManager:
             )
         if descriptor.id == "regional-shared":
             prefix = regional_shared_ssm_parameter_prefix(project)
+            return (
+                get_ssm_parameter_optional(f"{prefix}/name", region=region),
+                get_ssm_parameter_optional(f"{prefix}/arn", region=region),
+            )
+        if descriptor.id == "regional-persistent":
+            prefix = regional_persistent_ssm_parameter_prefix(project)
             return (
                 get_ssm_parameter_optional(f"{prefix}/name", region=region),
                 get_ssm_parameter_optional(f"{prefix}/arn", region=region),
@@ -694,14 +717,15 @@ class StorageManager:
         """Resolve a stable alias to a physical bucket and home region.
 
         Supported aliases are ``cluster-shared``, ``model-weights``,
-        ``analytics-studio``, and either ``regional-shared:<region>`` or
-        ``regional-shared`` with ``region`` supplied. The unqualified regional
-        alias is inferred only when exactly one deployment region is configured.
+        ``analytics-studio``, and for each of ``regional-shared`` and
+        ``regional-persistent`` either ``<alias>:<region>`` or the bare alias
+        with ``region`` supplied. An unqualified regional alias is inferred only
+        when exactly one deployment region is configured.
         """
         normalized = alias.strip().lower()
         embedded_region: str | None = None
 
-        if normalized.startswith("regional-shared:"):
+        if normalized.startswith(("regional-shared:", "regional-persistent:")):
             normalized, embedded_region = normalized.split(":", 1)
             embedded_region = embedded_region.strip()
             if not embedded_region:
@@ -713,11 +737,18 @@ class StorageManager:
             region = embedded_region
 
         if normalized == "regional-shared":
-            target_region = region or self._infer_single_regional_region()
+            target_region = region or self._infer_single_regional_region(normalized)
             return self._resolve_regional_shared(target_region)
 
+        if normalized == "regional-persistent":
+            target_region = region or self._infer_single_regional_region(normalized)
+            return self._resolve_regional_persistent(target_region)
+
         if region:
-            raise ValueError("--region is only valid with the 'regional-shared' alias")
+            raise ValueError(
+                "--region is only valid with the 'regional-shared' and "
+                "'regional-persistent' aliases"
+            )
 
         if normalized == "cluster-shared":
             return self._resolve_cluster_shared()
@@ -728,7 +759,8 @@ class StorageManager:
 
         raise ValueError(
             f"Unknown bucket alias '{alias}'. Use one of: cluster-shared, "
-            "model-weights, regional-shared:<region>, analytics-studio"
+            "model-weights, regional-shared:<region>, regional-persistent:<region>, "
+            "analytics-studio"
         )
 
     def sync(
@@ -1124,6 +1156,26 @@ class StorageManager:
             scope="regional",
         )
 
+    def _resolve_regional_persistent(self, region: str) -> dict[str, str]:
+        from gco.services.aws_ssm import get_ssm_parameter_optional
+        from gco.stacks.constants import regional_persistent_ssm_parameter_prefix
+
+        prefix = regional_persistent_ssm_parameter_prefix(self.config.project_name)
+        name = get_ssm_parameter_optional(f"{prefix}/name", region=region)
+        if not name:
+            raise StorageBucketNotFoundError(
+                f"Persistent bucket not found in region '{region}'. Set "
+                "regional_persistent_bucket.enabled to true in cdk.json and run "
+                "'gco stacks deploy-all -y' (docs/REGIONAL_PERSISTENT_BUCKET.md)."
+            )
+        bucket_region = get_ssm_parameter_optional(f"{prefix}/region", region=region)
+        return self._bucket_record(
+            alias=f"regional-persistent:{region}",
+            name=name,
+            region=bucket_region or region,
+            scope="regional",
+        )
+
     def _resolve_analytics_studio(self) -> dict[str, str]:
         region = self.config.api_gateway_region
         stack_name = f"{self.config.project_name}-analytics"
@@ -1180,18 +1232,18 @@ class StorageManager:
                 seen.add(value)
         return regions or [self.config.default_region]
 
-    def _infer_single_regional_region(self) -> str:
+    def _infer_single_regional_region(self, alias: str = "regional-shared") -> str:
         regions = self._configured_regional_regions()
         if len(regions) == 1:
             return regions[0]
-        choices = ", ".join(f"regional-shared:{item}" for item in regions)
+        choices = ", ".join(f"{alias}:{item}" for item in regions)
         raise ValueError(
-            "The 'regional-shared' alias is ambiguous across configured regions. "
+            f"The '{alias}' alias is ambiguous across configured regions. "
             f"Use --region or one of: {choices}"
         )
 
     def _bucket_record(self, *, alias: str, name: str, region: str, scope: str) -> dict[str, str]:
-        purpose_key = "regional-shared" if alias.startswith("regional-shared:") else alias
+        purpose_key = alias.split(":", 1)[0]
         return {
             "alias": alias,
             "bucket": name,
@@ -1870,6 +1922,35 @@ BUCKET_DESCRIPTORS: tuple[BucketDescriptor, ...] = (
         discovery="CloudFormation resource of the regional stack (CDK-generated name)",
         removal_policy="destroy",
         logical_id_prefix="RegionalSharedAccessLogsBucket",
+    ),
+    BucketDescriptor(
+        id="regional-persistent",
+        role="primary",
+        scope="regional-persistent",
+        purpose=(
+            "In-region staging that gco upgrade and destroy-all --keep-control-plane leave "
+            "standing; a full destroy-all deletes it"
+        ),
+        pod_access="read-write",
+        discovery=(
+            "gco-regional-persistent-bucket ConfigMap (persistentBucketName) in gco-jobs; "
+            "SSM /<project>/regional-persistent-bucket/{name,arn,region,kms-key-arn}"
+        ),
+        removal_policy="destroy",
+        logical_id_prefix="PersistentBucket",
+        sync_alias="regional-persistent",
+        opt_in="regional_persistent_bucket.enabled",
+    ),
+    BucketDescriptor(
+        id="regional-persistent-access-logs",
+        role="access-logs",
+        scope="regional-persistent",
+        purpose="Server access logs for that region's persistent bucket",
+        pod_access="none",
+        discovery="CloudFormation resource of the persistent stack (CDK-generated name)",
+        removal_policy="destroy",
+        logical_id_prefix="PersistentAccessLogsBucket",
+        opt_in="regional_persistent_bucket.enabled",
     ),
     BucketDescriptor(
         id="cost-reports",

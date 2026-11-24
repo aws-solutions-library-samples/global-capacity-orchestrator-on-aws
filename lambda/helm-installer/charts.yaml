@@ -64,6 +64,28 @@ charts:
       disableIngressClassAnnotation: true
       webhookConfig:
         disableIngressValidation: true
+      # Reuse the webhook's TLS Secret on chart upgrades. With the chart's
+      # default (false) every helm upgrade generates a new CA and serving
+      # certificate. The API server trusts the new CA at once, while the
+      # controller serves the old certificate until the kubelet refreshes
+      # the mounted Secret, so for that window every call to the
+      # controller's webhooks fails with "tls: bad certificate". The
+      # TargetGroupBinding updates the controller makes through them fail
+      # too, and their retries back off: after one upgrade the health
+      # monitor's new pods waited about 12 minutes to be registered.
+      keepTLSSecret: true
+      # Retry a failed TargetGroupBinding reconcile at least once a minute
+      # (the controller's default backoff grows to 16m40s), so a transient
+      # failure delays target registration by a minute at most.
+      targetgroupbindingMaxExponentialBackoffDelay: 60s
+      # gco-system carries elbv2.k8s.aws/pod-readiness-gate-inject
+      # (00-namespaces.yaml): the pod mutator adds a target-health readiness
+      # gate to each pod behind the ALB, so a rollout replaces a pod only
+      # once its successor is healthy in the target group. Ignore (the
+      # chart's default, pinned here) creates pods without the gate while
+      # the controller is unavailable instead of refusing to create them.
+      podMutatorWebhookConfig:
+        failurePolicy: Ignore
       enableServiceMutatorWebhook: false
       defaultTargetType: ip
       defaultLoadBalancerScheme: internal

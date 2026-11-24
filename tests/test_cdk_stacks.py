@@ -96,6 +96,10 @@ class MockConfigLoader:
     def __init__(self, app=None):
         pass
 
+    def get_regional_persistent_bucket_config(self):
+        """Off, as for a cdk.json without the block, so templates match the stack's own tests."""
+        return {"enabled": False, "expiration_days": None}
+
     def get_project_name(self):
         return "gco-test"
 
@@ -574,6 +578,38 @@ class TestTrafficDialControllerSynth:
 
 class TestApiGatewayStackSynth:
     """Tests for API Gateway Stack synthesis."""
+
+    @staticmethod
+    def _global_api(ip_address_type: str | None) -> dict:
+        from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
+
+        config = {} if ip_address_type is None else {"ip_address_type": ip_address_type}
+        stack = GCOApiGatewayGlobalStack(
+            cdk.App(),
+            "test-api-ip-address-type",
+            global_accelerator_dns="test-accelerator.awsglobalaccelerator.com",
+            api_gateway_config=config,
+        )
+        return assertions.Template.from_stack(stack).to_json()["Resources"]
+
+    @pytest.mark.parametrize(
+        ("configured", "rendered"),
+        [(None, "dualstack"), ("ipv4", "ipv4"), ("dualstack", "dualstack")],
+    )
+    def test_global_api_endpoint_carries_the_configured_ip_address_type(self, configured, rendered):
+        (api,) = [
+            r
+            for r in self._global_api(configured).values()
+            if r["Type"] == "AWS::ApiGateway::RestApi"
+        ]
+        assert api["Properties"]["EndpointConfiguration"] == {
+            "Types": ["EDGE"],
+            "IpAddressType": rendered,
+        }
+
+    def test_an_unknown_ip_address_type_fails_synthesis(self):
+        with pytest.raises(ValueError, match=r"api_gateway\.ip_address_type must be one of"):
+            self._global_api("ipv6")
 
     def test_api_gateway_stack_synthesizes(self):
         """Test that ApiGatewayStack synthesizes without errors."""

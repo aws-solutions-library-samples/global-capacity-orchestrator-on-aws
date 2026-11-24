@@ -299,6 +299,11 @@ def test_each_rejection_condition_carries_its_own_distinct_reason(
     assert reason not in (all_reasons - {expected_reason})
 
 
+# Arbitrary tool names other than the loop-management tools the resolver
+# always refuses in an explicit list.
+_NON_CONTROL_TOOL_NAME = _TOOL_NAME.filter(lambda name: name not in validation.SWARM_EXCLUDED_TOOLS)
+
+
 @st.composite
 def _explicit_list_inputs(draw):  # type: ignore[no-untyped-def]
     """Draw a registry, a non-empty explicit list, and a flag-lookup mapping.
@@ -317,13 +322,18 @@ def _explicit_list_inputs(draw):  # type: ignore[no-untyped-def]
     * The flag-lookup is ``None``, an empty mapping, or a mapping that favours
       the not-registered names so the rejection's ``flag`` annotation is
       populated on at least some examples.
+    * No name is a control tool. The resolver refuses those before it
+      validates (``reject_control_tools``), whatever the registry holds, and
+      ``test_explicit_list_naming_a_control_tool_is_rejected`` pins that.
+      Hypothesis draws string constants from the code under test, so
+      ``swarm_status`` and its kin turn up without this filter.
     """
-    registered_names = draw(st.lists(_TOOL_NAME, max_size=10, unique=True))
+    registered_names = draw(st.lists(_NON_CONTROL_TOOL_NAME, max_size=10, unique=True))
     registered = {name: {draw(st.sampled_from(_TAGS))} for name in registered_names}
 
     # Invented names deliberately kept out of the registry so the explicit list
     # can drive the not-registered rejection. Drop any accidental overlap.
-    raw_outsiders = draw(st.lists(_TOOL_NAME, max_size=6, unique=True))
+    raw_outsiders = draw(st.lists(_NON_CONTROL_TOOL_NAME, max_size=6, unique=True))
     outsiders = [name for name in raw_outsiders if name not in registered]
 
     pool = registered_names + outsiders
@@ -332,7 +342,7 @@ def _explicit_list_inputs(draw):  # type: ignore[no-untyped-def]
         # duplicate-name rejection as well as the registered/not-registered mix.
         explicit = draw(st.lists(st.sampled_from(pool), min_size=1, max_size=10))
     else:
-        explicit = draw(st.lists(_TOOL_NAME, min_size=1, max_size=10))
+        explicit = draw(st.lists(_NON_CONTROL_TOOL_NAME, min_size=1, max_size=10))
 
     # flag_lookup is dict[str, str] | None. Bias the keys toward names that may
     # be missing from the registry so the validator's flag annotation fires.

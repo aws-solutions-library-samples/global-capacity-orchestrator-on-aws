@@ -75,8 +75,9 @@ def offline_image_assets() -> Iterator[MagicMock]:
 def build_all_stacks(app: cdk.App, account: str | None = None) -> None:
     """Add every stack ``app.py::main`` builds to ``app``, with the same arguments.
 
-    Global, API Gateway, one regional stack and one regional API bridge per
-    configured Region, monitoring, and the analytics stack when
+    Global, API Gateway, one regional stack, one regional API bridge and, when
+    ``regional_persistent_bucket.enabled`` is true, one persistent-bucket stack
+    per configured Region, monitoring, and the analytics stack when
     ``analytics_environment.enabled`` is true, wired with app.py's dependencies.
     Only ``description`` may differ from app.py: it is template prose, and all
     but the analytics stack leave it out.
@@ -97,6 +98,10 @@ def build_all_stacks(app: cdk.App, account: str | None = None) -> None:
     from gco.stacks.global_stack import GCOGlobalStack
     from gco.stacks.monitoring_stack import GCOMonitoringStack
     from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
+    from gco.stacks.regional_persistent_stack import (
+        GCORegionalPersistentStack,
+        regional_persistent_stack_name,
+    )
     from gco.stacks.regional_stack import GCORegionalStack
 
     config = ConfigLoader(app)
@@ -131,6 +136,7 @@ def build_all_stacks(app: cdk.App, account: str | None = None) -> None:
     )
     api_gateway_stack.add_stack_dependency(global_stack)
 
+    persistent_bucket_enabled = config.get_regional_persistent_bucket_config()["enabled"]
     regional_stacks = []
     for region in regional_regions:
         regional_stack = GCORegionalStack(
@@ -144,6 +150,15 @@ def build_all_stacks(app: cdk.App, account: str | None = None) -> None:
         regional_stack.add_stack_dependency(global_stack)
         regional_stack.add_stack_dependency(api_gateway_stack)
         regional_stacks.append(regional_stack)
+        if persistent_bucket_enabled:
+            persistent_stack = GCORegionalPersistentStack(
+                app,
+                regional_persistent_stack_name(project_name, region),
+                config=config,
+                region=region,
+                env=cdk.Environment(account=account, region=region),
+            )
+            regional_stack.add_stack_dependency(persistent_stack)
 
         regional_api_stack = GCORegionalApiGatewayStack(
             app,

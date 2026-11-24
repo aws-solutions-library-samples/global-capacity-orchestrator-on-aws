@@ -114,15 +114,16 @@
     "gpu_keep_warm": {
       "window": "10m"
     },
-    "_comment_api_gateway": "Authenticated API behavior. In the commercial 'aws' partition the global REST API is edge-optimized and its control/inference proxies use Global Accelerator; in other partitions it is regional and aggregate-only, the Global Accelerator proxy routes are omitted, and the always-deployed regional API bridges are the workload ingress. Every IAM-authorized route, on the global API or a regional bridge, needs the caller's own execute-api:Invoke permission: the global API's resource policy admits only GET /studio/* (the analytics sign-in pages, which carry no IAM identity) and each bridge's only the cross-region aggregator role. throttle/logging/metrics/tracing settings apply in every partition. The former regional_api_enabled key has no effect; the synth warns about it and ignores it (see docs/UPGRADING.md).",
+    "_comment_api_gateway": "Authenticated API behavior. In the commercial 'aws' partition the global REST API is edge-optimized and its control/inference proxies use Global Accelerator; in other partitions it is regional and aggregate-only, the Global Accelerator proxy routes are omitted, and the always-deployed regional API bridges are the workload ingress. Every IAM-authorized route, on the global API or a regional bridge, needs the caller's own execute-api:Invoke permission: the global API's resource policy admits only GET /studio/* (the analytics sign-in pages, which carry no IAM identity) and each bridge's only the cross-region aggregator role. throttle/logging/metrics/tracing settings apply in every partition. The former regional_api_enabled key has no effect; the synth warns about it and ignores it (see docs/UPGRADING.md). ip_address_type is dualstack (the default) or ipv4, for the global API and every regional API bridge: dualstack answers their execute-api host names with IPv6 (AAAA) records as well as IPv4 (A) records and keeps the endpoint URLs; ipv4 answers with A records only. A caller whose policies limit aws:SourceIp to IPv4 ranges needs its IPv6 ranges added, or ipv4 here. GCO's VPCs, clusters and internal load balancers stay IPv4 either way. See docs/CUSTOMIZATION.md (API Gateway IP Address Type).",
     "api_gateway": {
       "throttle_rate_limit": 1000,
       "throttle_burst_limit": 2000,
       "log_level": "INFO",
       "metrics_enabled": true,
-      "tracing_enabled": true
+      "tracing_enabled": true,
+      "ip_address_type": "dualstack"
     },
-    "_comment_waf": "WAFv2 web ACL in front of API Gateway. per_ip_rate_limit is the WAF rate-based rule's request budget per source IP over a 5-minute window. See https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-rate-based.html.",
+    "_comment_waf": "WAFv2 web ACL in front of API Gateway. per_ip_rate_limit is the WAF rate-based rule's request budget per source IP over a 5-minute window. With api_gateway.ip_address_type dualstack (the default), each IPv6 address a client sends from has its own budget. See https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-rate-based.html.",
     "waf": {
       "per_ip_rate_limit": 100
     },
@@ -281,6 +282,11 @@
     "workload_metrics": {
       "cloudwatch_namespace": "GCO/Workloads"
     },
+    "_comment_regional_persistent_bucket": "Each workload Region's persistent bucket, in its own <project>-<region>-persistent stack, which gco upgrade and destroy-all --keep-control-plane leave standing: stage outputs there before an upgrade and read them back after it. A full gco stacks destroy-all deletes it with its objects. enabled: a JSON boolean, false when the block or key is absent (a cdk.json from v9.1.0 or earlier has none; add it after upgrading). expiration_days: null keeps objects until someone deletes them; a positive number of days expires every object that long after it was written. Overwritten and deleted versions always expire after 30 days and unfinished uploads after 7. Alias: gco storage sync regional-persistent:<region>. See docs/REGIONAL_PERSISTENT_BUCKET.md.",
+    "regional_persistent_bucket": {
+      "enabled": true,
+      "expiration_days": null
+    },
     "_comment_regional_shared_bucket": "Teardown behavior for each region's always-on general-purpose bucket (and its access-logs bucket and KMS key). 'destroy' (default): a regional stack destroy deletes the bucket and every object in it — including artifacts jobs just produced. 'retain': bucket, access logs, and KMS key all survive the destroy (they become unmanaged and keep billing until deleted manually). Interim copy-out before a destroy under 'destroy': gco storage sync regional-shared:<region> ./checkpoints --prefix <prefix>. See docs/REGIONAL_SHARED_BUCKET.md (Removal policy).",
     "regional_shared_bucket": {
       "removal_policy": "destroy"
@@ -318,7 +324,7 @@
       "backup_retention_days": 7,
       "deletion_protection": false
     },
-    "_comment_analytics_environment": "SageMaker Studio / HyperPod / Canvas analytics stack. enabled: master toggle (off by default). hyperpod.enabled / canvas.enabled: opt-in subfeatures. cognito.domain_prefix: optional custom Cognito UI domain (null = auto). cognito.removal_policy / efs.removal_policy: 'destroy' wipes user pools and EFS on stack delete (dev default); 'retain' preserves them. studio.user_profile_name_prefix: optional Studio user-profile name prefix. See docs/ANALYTICS.md and https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated.html.",
+    "_comment_analytics_environment": "SageMaker Studio / EMR Serverless / Canvas analytics stack. enabled: master toggle (off by default). canvas.enabled: opt-in Canvas subfeature. hyperpod.enabled: deprecated and ignored (AmazonSageMakerFullAccess on the Studio role already allows SageMaker training jobs; HyperPod capacity is the top-level hyperpod block). cognito.domain_prefix: optional custom Cognito UI domain (null = auto). cognito.removal_policy / efs.removal_policy: 'destroy' wipes user pools and EFS on stack delete (dev default); 'retain' preserves them. studio.user_profile_name_prefix: accepted but not applied (each Studio user profile is named after its Cognito username). See docs/ANALYTICS.md and https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated.html.",
     "analytics_environment": {
       "enabled": false,
       "hyperpod": {

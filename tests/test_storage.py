@@ -240,6 +240,9 @@ class TestBucketDiscovery:
                 ("/demo/model-bucket-name", "us-east-2"): "models-bucket",
                 ("/demo/regional-shared-bucket/name", "ap-south-1"): "regional-bucket",
                 ("/demo/regional-shared-bucket/region", "ap-south-1"): "ap-south-1",
+                ("/demo/regional-persistent-bucket/name", "ap-south-1"): "persistent-bucket",
+                ("/demo/regional-persistent-bucket/region", "ap-south-1"): "ap-south-1",
+                ("/demo/regional-persistent-bucket/name", "eu-west-1"): "older-bucket",
             }
             return values.get((name, region))
 
@@ -247,6 +250,10 @@ class TestBucketDiscovery:
             cluster = manager.resolve_bucket("  CLUSTER-SHARED ")
             models = manager.resolve_bucket("model-weights")
             regional = manager.resolve_bucket("regional-shared:ap-south-1")
+            persistent = manager.resolve_bucket("Regional-Persistent:ap-south-1")
+            # A stack that published no region parameter is in the Region it
+            # was read from.
+            older = manager.resolve_bucket("regional-persistent", region="eu-west-1")
 
         assert cluster == {
             "alias": "cluster-shared",
@@ -260,6 +267,16 @@ class TestBucketDiscovery:
         assert models["region"] == "us-east-2"
         assert regional["alias"] == "regional-shared:ap-south-1"
         assert regional["scope"] == "regional"
+        assert persistent == {
+            "alias": "regional-persistent:ap-south-1",
+            "bucket": "persistent-bucket",
+            "region": "ap-south-1",
+            "scope": "regional",
+            "purpose": "One region's staging that survives gco upgrade",
+            "s3_uri": "s3://persistent-bucket/",
+        }
+        assert older["alias"] == "regional-persistent:eu-west-1"
+        assert older["region"] == "eu-west-1"
 
     @pytest.mark.parametrize(
         ("alias", "message"),
@@ -267,6 +284,7 @@ class TestBucketDiscovery:
             ("cluster-shared", "Deploy the global stack"),
             ("model-weights", "Deploy the global stack"),
             ("regional-shared:us-east-1", "Deploy that region's stack"),
+            ("regional-persistent:us-east-1", "regional_persistent_bucket.enabled"),
         ],
     )
     def test_missing_ssm_bucket_is_reported(
@@ -302,6 +320,28 @@ class TestBucketDiscovery:
         manager._configured_regional_regions.return_value = ["us-east-1", "us-west-2"]
         with pytest.raises(ValueError, match="ambiguous"):
             manager.resolve_bucket("regional-shared")
+
+    def test_persistent_alias_validation_and_inference(self, config: GCOConfig) -> None:
+        manager = StorageManager(config)
+        manager._resolve_regional_persistent = MagicMock(return_value={"bucket": "kept"})  # type: ignore[method-assign]
+        manager._configured_regional_regions = MagicMock(return_value=["eu-north-1"])  # type: ignore[method-assign]
+
+        assert manager.resolve_bucket("regional-persistent") == {"bucket": "kept"}
+        manager._resolve_regional_persistent.assert_called_once_with("eu-north-1")
+        manager.resolve_bucket("regional-persistent", region="us-west-2")
+        manager._resolve_regional_persistent.assert_called_with("us-west-2")
+        with pytest.raises(ValueError, match="must include a region"):
+            manager.resolve_bucket("regional-persistent: ")
+        with pytest.raises(ValueError, match="conflicts"):
+            manager.resolve_bucket("regional-persistent:us-east-1", region="us-west-2")
+        with pytest.raises(ValueError, match="'regional-shared' and 'regional-persistent'"):
+            manager.resolve_bucket("model-weights", region="us-east-1")
+        manager._configured_regional_regions.return_value = ["us-east-1", "us-west-2"]
+        with pytest.raises(
+            ValueError,
+            match=r"'regional-persistent' alias is ambiguous.*regional-persistent:us-west-2",
+        ):
+            manager.resolve_bucket("regional-persistent")
 
     def test_configured_regions_deduplicate_and_fallback(self, config: GCOConfig) -> None:
         manager = StorageManager(config)
@@ -390,11 +430,13 @@ class TestBucketDiscovery:
         assert manager.list_buckets() == [
             {"alias": "cluster-shared"},
             {"alias": "regional-shared:us-east-1"},
+            {"alias": "regional-persistent:us-east-1"},
             {"alias": "analytics-studio"},
         ]
         manager.resolve_bucket.reset_mock()
         manager.list_buckets(region="eu-west-1")
         manager.resolve_bucket.assert_any_call("regional-shared", region="eu-west-1")
+        manager.resolve_bucket.assert_any_call("regional-persistent", region="eu-west-1")
 
 
 class TestDownloadSync:

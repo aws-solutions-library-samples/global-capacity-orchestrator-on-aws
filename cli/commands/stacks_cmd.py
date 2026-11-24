@@ -158,6 +158,7 @@ def _print_cluster_access_hint(formatter: Any, config: Any, stack_name: str) -> 
         not suffix
         or suffix in ("global", "api-gateway", "monitoring")
         or suffix.startswith("regional-api")
+        or suffix.endswith("-persistent")
     ):
         return
     formatter.print_info(
@@ -534,13 +535,14 @@ def destroy_all_orchestrated(
     --keep-control-plane scales the deployment to zero workload Regions
     instead of removing it: only phases 2 and 3 run, after the monitoring
     stack is updated in place so it stops referencing the regional stacks.
-    The global, API Gateway and monitoring stacks, the analytics stack when
-    deployed, and the shared state they own (DynamoDB tables, the model and
-    cluster-shared buckets, the image registry, EFS recovery points, cost
+    The global, API Gateway and monitoring stacks, each Region's
+    persistent-bucket stack, the analytics stack when deployed, and the
+    shared state they own (DynamoDB tables, the model, cluster-shared and
+    persistent buckets, the image registry, EFS recovery points, cost
     reports, Studio home directories and Cognito users) stay. Data inside the
     regional stacks (EFS and FSx file systems, Valkey, Aurora, in-cluster
-    volumes) is still deleted, so back it up to the cluster-shared bucket
-    first. Remove the Regions from cdk.json afterwards ('gco stacks regions
+    volumes) is still deleted, so stage it in the Region's persistent bucket
+    or the cluster-shared bucket first. Remove the Regions from cdk.json afterwards ('gco stacks regions
     remove') if the scale-down is meant to last; 'gco upgrade' uses this
     same teardown before recreating the regional stacks.
 
@@ -1443,7 +1445,8 @@ def regions_remove(config: Any, region: Any, config_path: Any, yes: Any) -> None
     if not yes:
         formatter.print_warning(
             f"This only edits cdk.json — a deployed {config.project_name}-{region} "
-            "stack is NOT destroyed by this change, and once the Region leaves cdk.json "
+            f"stack (or {config.project_name}-{region}-persistent, the Region's persistent "
+            "bucket) is NOT destroyed by this change, and once the Region leaves cdk.json "
             "it is no longer part of the CDK app. Retire a deployed Region first: see "
             "'Removing a Region' in docs/CUSTOMIZATION.md."
         )

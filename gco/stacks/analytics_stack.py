@@ -61,8 +61,8 @@ from gco.stacks.lambda_assets import lambda_source_code
 from gco.stacks.nag_suppressions import apply_all_suppressions
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T18:18:19Z
-# Generated from Git commit: ae5e8fb039b08d74dd7da8ba37d00fd590f05474
+# Generated at (UTC): 2026-11-23T16:48:27Z
+# Generated from Git commit: 1fcc830f8bfc0e870b022382a1506c682882515c
 # Flowchart(s) generated from this file:
 #   * ``GCOAnalyticsStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/analytics_stack.GCOAnalyticsStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/analytics_stack.GCOAnalyticsStack___init__.png``)
@@ -82,6 +82,10 @@ PRESIGNED_URL_HANDLER = "handler.lambda_handler"
 #: API Gateway's maximum integration timeout, so the function times out first.
 PRESIGNED_URL_TIMEOUT_SECONDS = 29
 PRESIGNED_URL_MEMORY_MB = 256
+
+#: The GCO API path trees the SageMaker execution role may invoke, on the
+#: global API and on every regional bridge (``/studio/*`` is not among them).
+_GCO_API_PATH_TREES = ("api/v1", "inference")
 
 
 def _parse_removal(value: str) -> RemovalPolicy:
@@ -128,7 +132,10 @@ class GCOAnalyticsStack(Stack):
         self.api_gateway_secret_arn = api_gateway_secret_arn
 
         cfg = config.get_analytics_config()
-        self.hyperpod_enabled: bool = bool(cfg["hyperpod"]["enabled"])
+        # ``hyperpod.enabled`` is accepted and ignored: the SageMaker
+        # training-job and cluster-node actions it used to add are already
+        # allowed by AmazonSageMakerFullAccess (see
+        # ``_create_execution_role_and_grants``).
         self.canvas_enabled: bool = bool(cfg["canvas"]["enabled"])
         self.efs_removal: RemovalPolicy = _parse_removal(cfg["efs"]["removal_policy"])
         self.cognito_removal: RemovalPolicy = _parse_removal(cfg["cognito"]["removal_policy"])
@@ -440,19 +447,23 @@ class GCOAnalyticsStack(Stack):
         * RW on ``Studio_Only_Bucket`` + KMS on ``Analytics_KMS_Key``
         * ``execute-api:Invoke`` with every HTTP method on the GCO API's
           ``/prod/*/api/v1/*`` and ``/prod/*/inference/*`` routes in the API
-          Gateway Region, so notebooks can submit and delete jobs and manage
-          inference endpoints as well as read (any REST API id: this stack
-          deploys before the API Gateway stack, whose API id it cannot know)
+          Gateway Region and in every workload Region, so notebooks can
+          submit and delete jobs and manage inference endpoints as well as
+          read. The workload Regions hold the regional bridges
+          (``<project>-regional-api-<region>``) that region-pinned ``gco``
+          calls go to. Any REST API id: this stack deploys before the API
+          Gateway stack, whose API id it cannot know, and the bridges' ids
+          live in other Regions' stacks
+        * ``cloudformation:DescribeStacks`` on this project's stacks, from
+          whose outputs the ``gco`` CLI reads the API endpoints
+          (``cli/aws_client.py``), so the CLI works from a Studio terminal
         * ``sqs:SendMessage`` on each workload Region's job queue
           (``<project>-jobs-<region>``; not the dead-letter queues)
         * ``ssm:GetParameter`` on the three ``Cluster_Shared_Bucket`` metadata
           parameters (``name``, ``arn``, ``region``) in the global region —
           lets notebooks look up the bucket at runtime without a per-user
           export step
-        * EFS mount actions on ``Studio_EFS`` (specific AP arn is added by
-          the presigned-URL Lambda at runtime; the role-level grant here is
-          scoped to the EFS ARN)
-        * HyperPod training-job actions when ``hyperpod.enabled=true``
+        * EFS mount actions on ``Studio_EFS``, scoped to the file system ARN
         * AWS-managed ``AmazonSageMakerCanvasFullAccess`` when
           ``canvas.enabled=true`` (opt-in no-code ML app)
         * AWS-managed ``AmazonSageMakerFullAccess`` — always attached
@@ -518,7 +529,16 @@ class GCOAnalyticsStack(Stack):
         # /studio/login), so this stack deploys first and the API does not
         # exist yet. The grant takes any REST API id in the API Gateway
         # Region and account, under the prod stage and the two path trees.
+        #
+        # A region-pinned ``gco`` call (``jobs submit -r``, ``jobs list -r``,
+        # ``jobs get``, ``jobs logs``) does not go through that API: the CLI
+        # sends it to the named Region's IAM-authorized regional bridge
+        # (``<project>-regional-api-<region>``, see
+        # ``GCOAWSClient.make_authenticated_request``), which admits a caller
+        # on its identity policy alone. The same two path trees are granted
+        # in every workload Region for those bridges.
         api_gw_region = self.config.get_api_gateway_region()
+        api_regions = list(dict.fromkeys([api_gw_region, *self.config.get_regions()]))
         self.sagemaker_execution_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -528,14 +548,30 @@ class GCOAnalyticsStack(Stack):
                     # (GET/POST/PUT/DELETE/PATCH), any path below
                     # /api/v1/.  /studio/* is explicitly excluded; Canvas
                     # users go through their own Cognito-authorized
-                    # ``/studio/login`` route.
-                    f"arn:{self.partition}:execute-api:{api_gw_region}:{self.account}:"
-                    "*/prod/*/api/v1/*",
-                    # ``/inference/*`` proxies through to regional ALBs
-                    # for in-cluster model endpoints — notebooks need
-                    # the full method surface here too.
-                    f"arn:{self.partition}:execute-api:{api_gw_region}:{self.account}:"
-                    "*/prod/*/inference/*",
+                    # ``/studio/login`` route. ``/inference/*`` proxies
+                    # through to regional ALBs for in-cluster model
+                    # endpoints — notebooks need the full method surface
+                    # there too.
+                    f"arn:{self.partition}:execute-api:{region}:{self.account}:*/prod/*/{tree}/*"
+                    for region in api_regions
+                    for tree in _GCO_API_PATH_TREES
+                ],
+            )
+        )
+
+        # The gco CLI finds those APIs in CloudFormation: the ApiEndpoint
+        # output of <project>-api-gateway, the RegionalApiEndpoint output of
+        # each <project>-regional-api-<region>, and the regional stacks it
+        # lists for ``--all-regions`` reads. Without DescribeStacks every
+        # ``gco jobs ...`` command fails in a Studio terminal before it sends
+        # a request. Read-only, on this project's stack names in any Region.
+        self.sagemaker_execution_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["cloudformation:DescribeStacks"],
+                resources=[
+                    f"arn:{self.partition}:cloudformation:*:{self.account}:"
+                    f"stack/{self.project_name}-*/*"
                 ],
             )
         )
@@ -717,26 +753,14 @@ class GCOAnalyticsStack(Stack):
             )
         )
 
-        # HyperPod sub-toggle — additional SageMaker actions for training-job
-        # submission and cluster-instance lifecycle management.
-        # ``resources=["*"]`` is the documented scope; the HyperPod actions
-        # themselves encode the per-training-job authorization model.
-        if self.hyperpod_enabled:
-            self.sagemaker_execution_role.add_to_policy(
-                iam.PolicyStatement(
-                    effect=iam.Effect.ALLOW,
-                    actions=[
-                        "sagemaker:CreateTrainingJob",
-                        "sagemaker:DescribeTrainingJob",
-                        "sagemaker:StopTrainingJob",
-                        "sagemaker:ClusterInstance",
-                        "sagemaker:ClusterInstanceGroup",
-                        "sagemaker:DescribeClusterNode",
-                        "sagemaker:ListClusterNodes",
-                    ],
-                    resources=["*"],
-                )
-            )
+        # No HyperPod statement. ``analytics_environment.hyperpod.enabled``
+        # used to add CreateTrainingJob, DescribeTrainingJob, StopTrainingJob,
+        # DescribeClusterNode and ListClusterNodes, which
+        # AmazonSageMakerFullAccess's AllowAllNonAdminSageMakerActions
+        # statement already allows, plus sagemaker:ClusterInstance and
+        # sagemaker:ClusterInstanceGroup, which are not IAM actions. HyperPod
+        # work in GCO is a Kubernetes Job on the ``gco-hyperpod`` Kueue queue,
+        # submitted through the GCO API.
 
         # Canvas sub-toggle — attach AWS-managed ``AmazonSageMakerCanvasFullAccess``
         # to the execution role so users can launch the Canvas no-code ML
@@ -750,9 +774,9 @@ class GCOAnalyticsStack(Stack):
         # change. The trade-off (broader-than-least-privilege inside the
         # role) is acknowledged with a dedicated nag suppression below.
         #
-        # The matching ``CanvasAppSettings`` override on the Studio domain
-        # lives in ``_create_studio_domain`` so the Canvas tile shows up
-        # on the Studio landing page when the toggle is on.
+        # The managed policy alone surfaces the Canvas tile on the Studio
+        # landing page; the domain carries no ``CanvasAppSettings`` (see
+        # ``_create_studio_domain``).
         if self.canvas_enabled:
             self.sagemaker_execution_role.add_managed_policy(
                 iam.ManagedPolicy.from_aws_managed_policy_name("AmazonSageMakerCanvasFullAccess")
@@ -811,9 +835,13 @@ class GCOAnalyticsStack(Stack):
                         "wildcards grant_read_write and grant_encrypt_decrypt produce, on "
                         "the one Studio_Only_Bucket and Analytics_KMS_Key, and the bucket's "
                         "<arn>/* object keys; (2) execute-api:Invoke on any REST API id "
-                        "under prod /api/v1/* and /inference/* in the API Gateway Region, "
-                        "because the API Gateway stack depends on this stack and its API "
-                        "does not exist when this one deploys; (3) sagemaker-mlflow:* on "
+                        "under prod /api/v1/* and /inference/* in the API Gateway Region "
+                        "and in each workload Region, because the API Gateway stack depends "
+                        "on this stack and its API does not exist when this one deploys, "
+                        "and the regional bridges that region-pinned gco calls use belong "
+                        "to other Regions' stacks; cloudformation:DescribeStacks on this "
+                        "project's stack names (<project>-*) in any Region, from whose "
+                        "outputs the gco CLI reads those APIs' endpoints; (3) sagemaker-mlflow:* on "
                         "the Region's MLflow tracking servers and apps, which notebooks "
                         "create after deploy (AmazonSageMakerFullAccess does not cover the "
                         "sagemaker-mlflow prefix); (4) one Resource:* statement holding "
@@ -821,9 +849,7 @@ class GCOAnalyticsStack(Stack):
                         "DescribeMountTargets and DescribeFileSystems calls SageMaker makes "
                         "when it provisions a user profile, the EMR Serverless actions "
                         "behind Studio's EMR panel (ListApplications takes no resource and "
-                        "CreateApplication creates new applications), and, with "
-                        "analytics_environment.hyperpod.enabled, the HyperPod training-job "
-                        "and cluster-node actions."
+                        "CreateApplication creates new applications)."
                     ),
                     "appliesTo": [
                         "Action::s3:Abort*",
@@ -834,13 +860,15 @@ class GCOAnalyticsStack(Stack):
                         "Action::kms:GenerateDataKey*",
                         "Action::kms:ReEncrypt*",
                         f"Resource::<{studio_bucket_id}.Arn>/*",
-                        (
-                            f"Resource::arn:<AWS::Partition>:execute-api:{api_gw_region}:"
-                            "<AWS::AccountId>:*/prod/*/api/v1/*"
+                        *(
+                            f"Resource::arn:<AWS::Partition>:execute-api:{region}:"
+                            f"<AWS::AccountId>:*/prod/*/{tree}/*"
+                            for region in api_regions
+                            for tree in _GCO_API_PATH_TREES
                         ),
                         (
-                            f"Resource::arn:<AWS::Partition>:execute-api:{api_gw_region}:"
-                            "<AWS::AccountId>:*/prod/*/inference/*"
+                            "Resource::arn:<AWS::Partition>:cloudformation:*:<AWS::AccountId>:"
+                            f"stack/{self.project_name}-*/*"
                         ),
                         "Action::sagemaker-mlflow:*",
                         (
@@ -985,10 +1013,14 @@ class GCOAnalyticsStack(Stack):
         intentionally left unset so Studio falls back to the stock AWS-
         published Distribution images (a tested invariant).
 
-        ``CustomFileSystemConfigs`` mounts ``self.studio_efs`` at
-        ``/home/sagemaker-user`` — per-user ``/home/<username>`` isolation
-        is enforced by the access points that the presigned-URL Lambda
-        creates lazily on first login.
+        ``CustomFileSystemConfigs`` offers ``self.studio_efs`` to the
+        domain's spaces with ``FileSystemPath=/home/sagemaker-user``, the
+        directory on the file system that profiles without a path of their
+        own get. Profiles the presigned-URL Lambda creates set
+        ``/home/<username>`` instead. That path is the only per-user
+        separation: the access points the Lambda also creates are never
+        mounted (``EFSFileSystemConfig`` takes no access point), and no
+        ``CustomPosixUserConfig`` is set.
         """
         private_subnets = self.vpc.select_subnets(
             subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
@@ -1065,13 +1097,14 @@ class GCOAnalyticsStack(Stack):
         #
         # We intentionally do *not* inject a
         # ``DefaultUserSettings.CanvasAppSettings`` block on the domain.
-        # The CloudFormation ``AWS::SageMaker::Domain`` resource does
-        # not accept that property (only ``AWS::SageMaker::UserProfile``
-        # does), so a property override fails early validation with
+        # ``CanvasAppSettings`` exists only in the SageMaker API's user
+        # settings (CreateDomain, CreateUserProfile, UpdateUserProfile):
+        # neither ``AWS::SageMaker::Domain`` nor ``AWS::SageMaker::UserProfile``
+        # takes it, so a property override fails early validation with
         # ``Unsupported property [CanvasAppSettings]``. Canvas uses its
         # own default workspace artifact locations; operators who want
-        # to pin per-user Canvas defaults can apply
-        # ``CanvasAppSettings`` at the ``UserProfile`` level directly.
+        # to pin Canvas defaults apply ``CanvasAppSettings`` through the
+        # API (``aws sagemaker update-user-profile`` / ``update-domain``).
 
         # The domain validates that the EFS file system has mount targets in
         # every subnet before stabilizing. CDK doesn't infer this dependency
@@ -1406,10 +1439,10 @@ class GCOAnalyticsStack(Stack):
         """Create the Cognito user pool that authenticates SageMaker Studio logins.
 
         Password policy, standard threat-protection mode, and self-sign-up-
-        disabled flags are configured for SRP-backed Studio logins. The
-        attached ``UserPoolClient`` runs SRP auth
-        (used by ``gco analytics studio login``) with token revocation
-        enabled. The ``UserPoolDomain`` uses the configurable prefix from
+        disabled flags are configured for Studio logins. The attached
+        ``UserPoolClient`` allows ``ADMIN_USER_PASSWORD_AUTH`` (what
+        ``gco analytics studio login`` uses, through ``AdminInitiateAuth``)
+        and SRP, with token revocation enabled. The ``UserPoolDomain`` uses the configurable prefix from
         ``analytics_environment.cognito.domain_prefix`` or defaults to
         ``gco-studio-<account>``.
         """
@@ -1496,7 +1529,7 @@ class GCOAnalyticsStack(Stack):
             self,
             "CognitoUserPoolClientId",
             value=self.cognito_client.user_pool_client_id,
-            description="Client ID used by the GCO CLI for SRP auth",
+            description="Client ID used by gco analytics studio login",
         )
 
     # ==================================================================

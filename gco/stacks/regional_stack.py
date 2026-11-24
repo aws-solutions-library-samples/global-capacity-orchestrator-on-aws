@@ -196,6 +196,7 @@ from gco.stacks.constants import (
     cluster_shared_ssm_parameter_prefix,
     cost_report_ssm_parameter_prefix,
     parse_k8s_quantity,
+    regional_persistent_ssm_parameter_prefix,
     regional_shared_ssm_parameter_prefix,
     s3_bucket_kms_conditions,
 )
@@ -204,8 +205,8 @@ from gco.stacks.lambda_assets import lambda_source_code
 from gco.stacks.pcs_cluster import PcsCluster
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-21T20:42:53Z
-# Generated from Git commit: 1d908f3fa649c16f69e32c2af36f5992f62d94d7
+# Generated at (UTC): 2026-11-23T02:28:23Z
+# Generated from Git commit: 1bf0ef9a749386c6fa50ac7edddbe6eb1b7a9fe0
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -280,6 +281,40 @@ def _compute_kubectl_regional_shared_replacements(
         "{{REGIONAL_SHARED_BUCKET}}": name,
         "{{REGIONAL_SHARED_BUCKET_ARN}}": arn,
         "{{REGIONAL_SHARED_BUCKET_REGION}}": region,
+    }
+
+
+@dataclass(frozen=True)
+class PersistentBucketIdentity:
+    """This Region's persistent bucket, read back from the SSM parameters its stack publishes.
+
+    ``GCORegionalPersistentStack`` (``<project>-<region>-persistent``) owns the
+    bucket and its key; this stack only references them. Each value is a CDK
+    token CloudFormation resolves from SSM when the regional stack deploys.
+    """
+
+    name: str
+    arn: str
+    region: str
+    kms_key_arn: str
+
+
+def _compute_kubectl_regional_persistent_replacements(
+    persistent: PersistentBucketIdentity | None,
+) -> dict[str, str]:
+    """Build the ``{{REGIONAL_PERSISTENT_BUCKET*}}`` kubectl-applier replacements.
+
+    Empty when ``regional_persistent_bucket.enabled`` is false: the
+    placeholders then stay unresolved, so the applier skips
+    ``27-storage-regional-persistent-bucket.yaml`` and prunes a ConfigMap an
+    earlier deploy created.
+    """
+    if persistent is None:
+        return {}
+    return {
+        "{{REGIONAL_PERSISTENT_BUCKET}}": persistent.name,
+        "{{REGIONAL_PERSISTENT_BUCKET_ARN}}": persistent.arn,
+        "{{REGIONAL_PERSISTENT_BUCKET_REGION}}": persistent.region,
     }
 
 
@@ -1221,6 +1256,12 @@ class GCORegionalStack(Stack):
         # there is no cdk.json toggle and no feature flag gating its existence —
         # in addition to the central buckets owned by GCOGlobalStack.
         self._create_regional_shared_bucket()
+
+        # This Region's persistent bucket lives in its own control-plane stack,
+        # which upgrades leave standing; grant the job-pod role access to it.
+        self.persistent_bucket_identity = self._resolve_persistent_bucket_from_ssm()
+        if self.persistent_bucket_identity is not None:
+            self._grant_persistent_bucket_to_job_role(self.persistent_bucket_identity)
 
         # Create EFS for shared storage
         self._create_efs()
@@ -4170,6 +4211,92 @@ class GCORegionalStack(Stack):
             ],
         )
 
+    def _resolve_persistent_bucket_from_ssm(self) -> PersistentBucketIdentity | None:
+        """Read this Region's persistent bucket identity from SSM, or None when it is off.
+
+        The persistent stack publishes four parameters under
+        ``regional_persistent_ssm_parameter_prefix(project_name)`` in this
+        Region. Each is read as an ``AWS::SSM::Parameter::Value<String>``
+        template parameter, which CloudFormation resolves on every deploy, so
+        this stack needs the persistent stack deployed first: ``app.py`` makes
+        it a dependency, and ``gco stacks deploy-all`` deploys it with the
+        global stacks.
+        """
+        if not self.config.get_regional_persistent_bucket_config()["enabled"]:
+            return None
+        prefix = regional_persistent_ssm_parameter_prefix(self.config.get_project_name())
+
+        def read(suffix: str) -> str:
+            value: str = ssm.StringParameter.value_for_string_parameter(self, f"{prefix}/{suffix}")
+            return value
+
+        return PersistentBucketIdentity(
+            name=read("name"),
+            arn=read("arn"),
+            region=read("region"),
+            kms_key_arn=read("kms-key-arn"),
+        )
+
+    def _grant_persistent_bucket_to_job_role(self, persistent: PersistentBucketIdentity) -> None:
+        """Attach RW on the persistent bucket and use of its key to the job-pod role.
+
+        The same actions as the regional-shared grant, on the exact bucket ARN
+        and key ARN the persistent stack published, so ``gco-service-account``
+        can stage outputs there and read them back after an upgrade.
+        """
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        self.service_account_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                ],
+                resources=[persistent.arn, f"{persistent.arn}/*"],
+            )
+        )
+        self.service_account_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "kms:Decrypt",
+                    "kms:Encrypt",
+                    "kms:GenerateDataKey",
+                    "kms:DescribeKey",
+                ],
+                resources=[persistent.kms_key_arn],
+            )
+        )
+        acknowledge_nag_findings(
+            self.service_account_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The persistent bucket RW grant uses an <arn>/* object-key wildcard on "
+                        "the one bucket ARN this Region's persistent stack published in SSM; the "
+                        "wildcard covers the object keys of that single bucket."
+                    ),
+                    "appliesTo": [f"Resource::<{self._template_parameter_id(persistent.arn)}>/*"],
+                },
+            ],
+        )
+
+    def _template_parameter_id(self, token: str) -> str:
+        """The logical ID of the template parameter a ``value_for_string_parameter`` token names.
+
+        cdk-nag renders a ``{"Ref": <id>}`` resource as ``<id>``, so an
+        acknowledgment of a grant on that resource names the same ID.
+        """
+        resolved = self.resolve(token)
+        if not (isinstance(resolved, dict) and isinstance(resolved.get("Ref"), str)):
+            raise ValueError(f"expected a template parameter reference, got {resolved!r}")
+        return str(resolved["Ref"])
+
     def _cost_report_bucket_parameter_name(self) -> str:
         """SSM parameter (in the monitoring region) publishing the cost bucket name."""
         return f"{cost_report_ssm_parameter_prefix(self.config.get_project_name())}/name"
@@ -4582,6 +4709,9 @@ class GCORegionalStack(Stack):
                 arn=self.regional_shared_bucket.bucket_arn,
                 region=self.deployment_region,
             )
+        )
+        image_replacements.update(
+            _compute_kubectl_regional_persistent_replacements(self.persistent_bucket_identity)
         )
 
         # OpenTelemetry tracing of the API services (on by default). Both

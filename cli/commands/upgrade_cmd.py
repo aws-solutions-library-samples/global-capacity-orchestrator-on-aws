@@ -191,17 +191,17 @@ def upgrade(
          monitoring stack is updated in place so it stops referencing the
          regional stacks, then every regional API bridge and regional stack
          is DESTROYED;
-      4. updates the global, API Gateway, monitoring and (when enabled)
-         analytics stacks in place and recreates the regional stacks from
-         cdk.json on the new release.
+      4. updates the global, API Gateway, monitoring, each Region's
+         persistent-bucket and (when enabled) analytics stacks in place and
+         recreates the regional stacks from cdk.json on the new release.
 
     Step 3 deletes the data inside the regional stacks (EFS and FSx file
     systems, Valkey, Aurora, in-cluster volumes, the regional-shared bucket
-    unless retained). Back it up to the cluster-shared bucket first and
-    restore it afterwards: docs/UPGRADING.md walks through the procedure.
-    The shared state in the control plane — DynamoDB tables, the model and
-    cluster-shared buckets, the image registry, EFS recovery points, cost
-    reports — is untouched.
+    unless retained). Stage it in the Region's persistent bucket or the
+    cluster-shared bucket first and restore it afterwards: docs/UPGRADING.md
+    walks through the procedure. The shared state in the control plane —
+    DynamoDB tables, the model, cluster-shared and persistent buckets, the
+    image registry, EFS recovery points, cost reports — is untouched.
 
     --check prints the plan without changing anything. --skip-checkout reruns
     only the stack cycle (to finish an interrupted upgrade, or on a fork that

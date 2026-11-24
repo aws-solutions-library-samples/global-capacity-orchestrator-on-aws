@@ -14,16 +14,58 @@ load 'helpers.sh'
 SCRIPT="$REPO_ROOT/scripts/setup-dev-alias.sh"
 
 # Make a fake runtime executable on PATH. It answers `<rt> info` with the exit
-# code requested via $3 (so detection can be steered) and `<rt> build` with the
-# optional exit code in $4 (default 0, so a build failure can be simulated),
-# exits 0 otherwise, and logs every invocation's args to $GCO_SHIM_LOG when set.
+# code requested via $3 (so detection can be steered), `<rt> build` with the
+# optional exit code in $4 (default 0, so a build failure can be simulated) and
+# `<rt> run` with the optional exit code in $5 (default 0; a non-zero code fails
+# every container start, socket probes included), exits 0 otherwise, and logs
+# every invocation's args to $GCO_SHIM_LOG when set.
+#
+# A `<rt> run ... --mount type=bind,source=PATH,target=/var/run/docker.sock
+# IMAGE sh -c PROBE` is the setup script's socket probe; the shim answers it
+# the way the dev image would, steered through environment variables:
+#   GCO_SHIM_SOCKETS        space-separated PATH=SERVER pairs: only these paths
+#                           answer, each with that /_ping Server header (empty
+#                           for none). Unset: every path answers, as Docker
+#                           Engine for docker, Libpod for podman, and with no
+#                           Server header (finch-daemon) for finch.
+#   GCO_SHIM_LABEL_REQUIRED a probe answers only with --security-opt label=disable
+#   GCO_SHIM_PROBE_SILENT   the container exits 0 without running the probe
+#   GCO_SHIM_INSPECT        exit code of `<rt> image inspect` (default 0)
+#   GCO_SHIM_CONTEXT_HOST   what `docker context inspect --format ...` prints
+#   GCO_SHIM_PODMAN_REMOTE  what `podman info --format ...` prints
 make_shim() {
-    local dir="$1" name="$2" code="$3" build_code="${4:-0}"
+    local dir="$1" name="$2" code="$3" build_code="${4:-0}" run_code="${5:-0}"
     cat > "$dir/$name" <<SHIM
 #!/usr/bin/env bash
 if [ -n "\${GCO_SHIM_LOG:-}" ]; then printf '%s\n' "\$*" >> "\$GCO_SHIM_LOG"; fi
+if [ "\$1" = "info" ] && [ "\${2:-}" = "--format" ]; then printf '%s\n' "\${GCO_SHIM_PODMAN_REMOTE:-}"; exit $code; fi
 if [ "\$1" = "info" ]; then exit $code; fi
 if [ "\$1" = "build" ]; then exit $build_code; fi
+if [ "\$1" = "image" ] && [ "\${2:-}" = "inspect" ]; then exit "\${GCO_SHIM_INSPECT:-0}"; fi
+if [ "\$1" = "context" ] && [ "\${2:-}" = "inspect" ]; then printf '%s\n' "\${GCO_SHIM_CONTEXT_HOST:-}"; exit 0; fi
+if [ "\$1" = "run" ]; then
+    [ "$run_code" -eq 0 ] || exit $run_code
+    case "\$*" in
+        *"target=/var/run/docker.sock"*" sh -c "*) ;;
+        *) exit 0 ;;
+    esac
+    [ -z "\${GCO_SHIM_PROBE_SILENT:-}" ] || exit 0
+    if [ -n "\${GCO_SHIM_LABEL_REQUIRED:-}" ]; then
+        case "\$*" in *"label=disable"*) ;; *) exit 3 ;; esac
+    fi
+    source_path="\$(printf '%s\n' "\$*" | sed -n 's/.*type=bind,source=\(.*\),target=\/var\/run\/docker.sock.*/\1/p' | head -1)"
+    case "$name" in docker) server="Docker/28.0.0" ;; podman) server="Libpod/5.6.0" ;; *) server="" ;; esac
+    if [ -n "\${GCO_SHIM_SOCKETS+set}" ]; then
+        found=0
+        for pair in \${GCO_SHIM_SOCKETS}; do
+            if [ "\${pair%%=*}" = "\$source_path" ]; then server="\${pair#*=}"; found=1; fi
+        done
+        [ "\$found" -eq 1 ] || exit 3
+    fi
+    [ -z "\$server" ] || printf 'server=%s\n' "\$server"
+    echo gco-socket-ok
+    exit 0
+fi
 exit 0
 SHIM
     chmod +x "$dir/$name"
@@ -32,6 +74,12 @@ SHIM
 setup() {
     SHIMDIR="$(mktemp -d)"
     RCFILE="$(mktemp -u)"
+    # Every runtime the script may call is a shim unless a test replaces it,
+    # so no test depends on (or starts containers with) a real runtime.
+    make_shim "$SHIMDIR" docker 0
+    make_shim "$SHIMDIR" finch 0
+    make_shim "$SHIMDIR" podman 0
+    export PATH="$SHIMDIR:$PATH"
 }
 
 teardown() {
@@ -71,11 +119,57 @@ teardown() {
     [[ "$output" == *'gco "$@"'* ]]
 }
 
-@test "--print --runtime finch omits the docker socket mount" {
-    run bash "$SCRIPT" --print --runtime finch
+@test "--print --runtime finch omits the socket when the Finch VM serves none" {
+    make_shim "$SHIMDIR" finch 0 0 1
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --print --runtime finch
     [ "$status" -eq 0 ]
     [[ "$output" == *"finch run"* ]]
     [[ "$output" != *"/var/run/docker.sock"* ]]
+    [[ "$output" != *"DOCKER_BUILDKIT"* ]]
+}
+
+@test "--print --runtime finch mounts finch-daemon's socket and the classic builder" {
+    make_shim "$SHIMDIR" finch 0
+    run bash "$SCRIPT" --print --runtime finch
+    [ "$status" -eq 0 ]
+    tty_line="$(printf '%s\n' "$output" | grep -- 'run --rm -it')"
+    notty_line="$(printf '%s\n' "$output" | grep -- 'run --rm -i ')"
+    for line in "$tty_line" "$notty_line"; do
+        [[ "$line" == *"finch run"* ]]
+        [[ "$line" == *"-v '/run/finch.sock:/var/run/docker.sock' -e DOCKER_BUILDKIT=0 "* ]]
+        [[ "$line" != *"label=disable"* ]]
+    done
+}
+
+@test "the socket probe uses --mount, so a missing socket is never created" {
+    make_shim "$SHIMDIR" finch 0 0 1
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    run bash "$SCRIPT" --print --runtime finch --image my-dev
+    [ "$status" -eq 0 ]
+    grep -q '^run --rm --mount type=bind,source=/run/finch.sock,target=/var/run/docker.sock my-dev sh -c docker version' "$GCO_SHIM_LOG"
+    grep -q '^run --rm --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock my-dev sh -c docker version' "$GCO_SHIM_LOG"
+    ! grep -q -- '-v /var/run/docker.sock' "$GCO_SHIM_LOG"
+    # finch (nerdctl) has no SELinux labels, so it is never retried without them.
+    ! grep -q 'label=disable' "$GCO_SHIM_LOG"
+}
+
+@test "Docker Engine keeps BuildKit; Podman and finch-daemon get the classic builder" {
+    run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"DOCKER_BUILDKIT"* ]]
+    local rt
+    for rt in podman finch; do
+        run bash "$SCRIPT" --print --runtime "$rt"
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"-e DOCKER_BUILDKIT=0 "* ]]
+    done
+}
+
+@test "a docker CLI whose daemon is Podman gets the classic builder too" {
+    GCO_SHIM_SOCKETS="/var/run/docker.sock=Libpod/5.6.0" run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"-v '/var/run/docker.sock:/var/run/docker.sock' -e DOCKER_BUILDKIT=0 "* ]]
 }
 
 @test "--print --runtime podman maps the podman socket onto docker.sock" {
@@ -666,11 +760,10 @@ SHIM
 }
 
 @test "install summary describes the podman socket mount" {
-    make_shim "$SHIMDIR" podman 0
-    PATH="$SHIMDIR:$PATH" XDG_RUNTIME_DIR=/run/user/4242 \
-        run bash "$SCRIPT" --runtime podman --no-build --rc "$RCFILE"
+    XDG_RUNTIME_DIR=/run/user/4242 run bash "$SCRIPT" --runtime podman --no-build --rc "$RCFILE"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Socket mount      : Podman socket (/run/user/4242/podman/podman.sock) -> /var/run/docker.sock"* ]]
+    [[ "$output" == *"Socket mount      : /run/user/4242/podman/podman.sock -> /var/run/docker.sock (classic builder: DOCKER_BUILDKIT=0)"* ]]
+    [[ "$output" == *"This daemon has no BuildKit API, so the function also sets DOCKER_BUILDKIT=0:"* ]]
 }
 
 # -- fish shell ----------------------------------------------------------------
@@ -711,12 +804,190 @@ SHIM
     [[ "$output" == *"only readable in the container when it lives under ~/.aws"* ]]
 }
 
-@test "install on a VM-backed runtime explains the missing socket and the host-side builder" {
-    make_shim "$SHIMDIR" finch 0
+@test "install on Finch without finch-daemon explains the missing socket and the host-side builder" {
+    make_shim "$SHIMDIR" finch 0 0 1
     PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime finch --no-build --rc "$RCFILE"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Socket mount      : none (finch has no host socket to share)"* ]]
-    [[ "$output" == *"Note: finch runs containers inside a VM and exposes no host daemon socket"* ]]
+    [[ "$output" == *"Socket mount      : none (this Finch VM serves no Docker-compatible socket)"* ]]
+    [[ "$output" == *"Note: this Finch VM serves no Docker-compatible socket the container can reach"* ]]
+    [[ "$output" == *"From v1.8.0, Finch runs finch-daemon in its VM; after upgrading Finch, re-run"* ]]
     [[ "$output" == *"CDK_DOCKER=finch gco stacks deploy-all -y"* ]]
     [[ "$output" == *"so the pinned aws-cdk-lib / cdk-nag are used."* ]]
+    ! grep -q '/var/run/docker.sock' "$RCFILE"
+}
+
+@test "install with a runtime the script has no socket for omits the mount and names the host-side builder" {
+    make_shim "$SHIMDIR" nerdctl 0
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime nerdctl --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : none (nerdctl has no host socket to share)"* ]]
+    [[ "$output" == *"Note: this script knows no socket of nerdctl to share with the container, so"* ]]
+    [[ "$output" == *"run them on the host with nerdctl as the builder:"* ]]
+    [[ "$output" == *"CDK_DOCKER=nerdctl gco stacks deploy-all -y"* ]]
+    [[ "$output" != *"finch-daemon"* ]]
+    [[ "$output" != *"VM serves no"* ]]
+    ! grep -q '/var/run/docker.sock' "$RCFILE"
+}
+
+@test "install on Finch with finch-daemon mounts its socket and says builds run in the container" {
+    make_shim "$SHIMDIR" finch 0
+    run bash "$SCRIPT" --runtime finch --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : /run/finch.sock -> /var/run/docker.sock (classic builder: DOCKER_BUILDKIT=0)"* ]]
+    [[ "$output" == *"so build-heavy commands such as 'gco stacks deploy-all' and"* ]]
+    [[ "$output" == *"so the function also sets DOCKER_BUILDKIT=0"* ]]
+    [[ "$output" != *"CDK_DOCKER=finch gco stacks deploy-all -y"* ]]
+    grep -q -- "-v '/run/finch.sock:/var/run/docker.sock' -e DOCKER_BUILDKIT=0 " "$RCFILE"
+}
+
+@test "Finch's VM link to finch-daemon is the fallback when /run/finch.sock does not answer" {
+    GCO_SHIM_SOCKETS="/var/run/docker.sock=" run bash "$SCRIPT" --runtime finch --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : /var/run/docker.sock -> /var/run/docker.sock (classic builder: DOCKER_BUILDKIT=0)"* ]]
+}
+
+@test "on Finch the socket is checked after the image build, against the built image" {
+    make_shim "$SHIMDIR" finch 0
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime finch --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    build_line="$(grep -n '^build ' "$GCO_SHIM_LOG" | head -1 | cut -d: -f1)"
+    probe_line="$(grep -n '^run --rm --mount ' "$GCO_SHIM_LOG" | head -1 | cut -d: -f1)"
+    [ -n "$build_line" ]
+    [ -n "$probe_line" ]
+    [ "$build_line" -lt "$probe_line" ]
+}
+
+# -- Socket discovery ---------------------------------------------------------
+@test "docker: /var/run/docker.sock wins when it answers" {
+    GCO_SHIM_CONTEXT_HOST=unix:///run/user/1000/docker.sock run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : /var/run/docker.sock -> /var/run/docker.sock (BuildKit)"* ]]
+    grep -q -- "-v '/var/run/docker.sock:/var/run/docker.sock' -w /workspace" "$RCFILE"
+}
+
+@test "docker: rootless Docker's context socket is the fallback" {
+    GCO_SHIM_SOCKETS="/run/user/1000/docker.sock=Docker/28.0.0" GCO_SHIM_CONTEXT_HOST=unix:///run/user/1000/docker.sock \
+        run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : /run/user/1000/docker.sock -> /var/run/docker.sock (BuildKit)"* ]]
+    grep -q -- "-v '/run/user/1000/docker.sock:/var/run/docker.sock' " "$RCFILE"
+}
+
+@test "docker: a unix DOCKER_HOST is tried before the context, and tcp endpoints never" {
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    GCO_SHIM_SOCKETS="/srv/docker/api.sock=Docker/28.0.0" DOCKER_HOST=unix:///srv/docker/api.sock GCO_SHIM_CONTEXT_HOST=tcp://10.0.0.5:2376 \
+        run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : /srv/docker/api.sock -> /var/run/docker.sock (BuildKit)"* ]]
+    ! grep -q 'source=tcp' "$GCO_SHIM_LOG"
+}
+
+@test "podman: the socket podman info reports is tried first" {
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    GCO_SHIM_PODMAN_REMOTE=unix:///run/user/501/podman/podman.sock XDG_RUNTIME_DIR=/run/user/4242 \
+        run bash "$SCRIPT" --runtime podman --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : /run/user/501/podman/podman.sock -> /var/run/docker.sock (classic builder: DOCKER_BUILDKIT=0)"* ]]
+    [ "$(grep -c 'source=/run/user/501/podman/podman.sock' "$GCO_SHIM_LOG")" -eq 1 ]
+    ! grep -q 'source=/run/user/4242' "$GCO_SHIM_LOG"
+}
+
+@test "podman: a reported path without a scheme is used as is, and duplicates are probed once" {
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    GCO_SHIM_SOCKETS="/run/podman/podman.sock=Libpod/5.6.0" GCO_SHIM_PODMAN_REMOTE=/run/user/4242/podman/podman.sock XDG_RUNTIME_DIR=/run/user/4242 \
+        run bash "$SCRIPT" --runtime podman --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : /run/podman/podman.sock -> /var/run/docker.sock"* ]]
+    [ "$(grep -c 'source=/run/user/4242/podman/podman.sock,target=/var/run/docker.sock localhost/gco-dev' "$GCO_SHIM_LOG")" -eq 2 ]
+}
+
+@test "podman: a socket SELinux keeps the container off is retried without label separation" {
+    GCO_SHIM_LABEL_REQUIRED=1 run bash "$SCRIPT" --runtime podman --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"(classic builder: DOCKER_BUILDKIT=0), SELinux label separation off"* ]]
+    [[ "$output" == *"also passes '--security-opt label=disable'"* ]]
+    grep -q -- "podman.sock:/var/run/docker.sock' --security-opt label=disable -e DOCKER_BUILDKIT=0 " "$RCFILE"
+}
+
+@test "podman: no answering API names the service to start and keeps the host builder" {
+    GCO_SHIM_SOCKETS="" XDG_RUNTIME_DIR=/run/user/4242 run bash "$SCRIPT" --runtime podman --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : none (no Docker-compatible API answered at /run/user/4242/podman/podman.sock, /run/podman/podman.sock)"* ]]
+    [[ "$output" == *"systemctl --user enable --now podman.socket"* ]]
+    [[ "$output" == *"CDK_DOCKER=podman gco stacks deploy-all -y"* ]]
+    ! grep -q '/var/run/docker.sock' "$RCFILE"
+}
+
+@test "docker: no answering API says to start the daemon or pass --socket" {
+    GCO_SHIM_SOCKETS="" run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : none (no Docker-compatible API answered at /var/run/docker.sock)"* ]]
+    [[ "$output" == *"Start the daemon, or pass --socket PATH with the path its containers see"* ]]
+    [[ "$output" != *"podman.socket"* ]]
+}
+
+@test "a container that exits 0 without answering the probe is not a socket" {
+    GCO_SHIM_PROBE_SILENT=1 run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : none (no Docker-compatible API answered at /var/run/docker.sock)"* ]]
+}
+
+@test "--socket PATH is the only path probed" {
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE" --socket /opt/rd/docker.sock
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : /opt/rd/docker.sock -> /var/run/docker.sock (BuildKit)"* ]]
+    [ "$(grep -c 'target=/var/run/docker.sock' "$GCO_SHIM_LOG")" -eq 1 ]
+    run bash "$SCRIPT" --print --runtime docker --socket=/opt/rd/docker.sock
+    [[ "$output" == *"-v '/opt/rd/docker.sock:/var/run/docker.sock' "* ]]
+}
+
+@test "--socket needs a value, a single line, and no --no-socket" {
+    run bash "$SCRIPT" --runtime docker --socket
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--socket needs a value"* ]]
+    run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE" --socket $'/a\n/b'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--socket must not contain line breaks"* ]]
+    run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE" --socket /a --no-socket
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--socket and --no-socket cannot be combined"* ]]
+    [ ! -e "$RCFILE" ]
+}
+
+@test "--no-socket probes nothing, mounts nothing and names the host-side builder" {
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    run bash "$SCRIPT" --runtime podman --no-build --rc "$RCFILE" --no-socket
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : none (--no-socket)"* ]]
+    [[ "$output" == *"Note: the function shares no runtime socket with the container, so it cannot"* ]]
+    [[ "$output" == *"CDK_DOCKER=podman gco stacks deploy-all -y"* ]]
+    ! grep -q 'target=/var/run/docker.sock' "$GCO_SHIM_LOG"
+    ! grep -q '/var/run/docker.sock' "$RCFILE"
+}
+
+@test "--print before the image is built shares no socket and says why" {
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    GCO_SHIM_INSPECT=1 run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"'gco-dev' is not built yet, so no runtime socket could be checked"* ]]
+    [[ "$output" != *"/var/run/docker.sock"* ]]
+    ! grep -q 'target=/var/run/docker.sock' "$GCO_SHIM_LOG"
+}
+
+@test "--print with --no-socket skips the image check" {
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    GCO_SHIM_INSPECT=1 run bash "$SCRIPT" --print --runtime docker --no-socket
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"is not built yet"* ]]
+    ! grep -q '^image inspect' "$GCO_SHIM_LOG"
 }

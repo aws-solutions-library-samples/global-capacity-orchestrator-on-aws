@@ -248,6 +248,7 @@ BLOCK_KEYS: dict[str, frozenset[str]] = {
             "log_level",
             "metrics_enabled",
             "tracing_enabled",
+            "ip_address_type",
             "regional_api_enabled",  # deprecated (DEPRECATED_BLOCK_KEYS)
         }
     ),
@@ -319,6 +320,7 @@ BLOCK_KEYS: dict[str, frozenset[str]] = {
     "s3_access_logs": frozenset({"retention_days"}),
     "workload_metrics": frozenset({"cloudwatch_namespace"}),
     "regional_shared_bucket": frozenset({"removal_policy"}),
+    "regional_persistent_bucket": frozenset({"enabled", "expiration_days"}),
     "mission_memory": frozenset(
         {"enabled", "retention_days", "dimensions", "distance_function", "top_k"}
     ),
@@ -749,6 +751,18 @@ def parse_block_flag(
     )
 
 
+#: The IP address types API Gateway accepts for the global API and the regional
+#: API bridges (``api_gateway.ip_address_type``). ``dualstack``, the default,
+#: adds IPv6 (AAAA) answers to the default execute-api host names; ``ipv4``
+#: leaves them IPv4-only. GCO's VPCs, clusters and internal load balancers
+#: stay IPv4 either way.
+API_GATEWAY_IP_ADDRESS_TYPES = ("ipv4", "dualstack")
+
+#: ``api_gateway.ip_address_type`` when ``cdk.json`` does not set it; the
+#: stacks read the same default from ``gco.stacks.api_ip_address_type``.
+DEFAULT_API_GATEWAY_IP_ADDRESS_TYPE = "dualstack"
+
+
 def _is_ipv4_cidr(value: object) -> bool:
     """Whether ``value`` is an IPv4 CIDR string with an explicit prefix (``a.b.c.d/n``)."""
     if not isinstance(value, str) or "/" not in value:
@@ -1112,6 +1126,8 @@ class ConfigLoader:
         self._validate_mission_memory_config()
         # Validate the vector-store configuration (global workload RAG corpus)
         self._validate_vector_store_config()
+        # Validate each Region's persistent bucket (staging that survives gco upgrade)
+        self.get_regional_persistent_bucket_config()
 
     #: Allowed ``project_name`` format (#139). ``project_name`` is the
     #: deployment's unique prefix and flows into S3 bucket names, the Cognito
@@ -1646,6 +1662,13 @@ class ConfigLoader:
             if flag in api_gw_config and not isinstance(api_gw_config[flag], bool):
                 raise ConfigValidationError(f"api_gateway.{flag} must be a boolean")
 
+        ip_address_type = api_gw_config.get("ip_address_type", DEFAULT_API_GATEWAY_IP_ADDRESS_TYPE)
+        if ip_address_type not in API_GATEWAY_IP_ADDRESS_TYPES:
+            raise ConfigValidationError(
+                "api_gateway.ip_address_type must be one of "
+                f"{list(API_GATEWAY_IP_ADDRESS_TYPES)}, got {ip_address_type!r}"
+            )
+
     def _validate_eks_cluster_config(self) -> None:
         """Validate EKS cluster configuration"""
         eks_config = self.app.node.try_get_context("eks_cluster") or {}
@@ -2077,6 +2100,8 @@ class ConfigLoader:
 
         - ``enabled``: must be a bool if present (defaults to False via merge).
         - ``hyperpod.enabled``: must be a bool if present (defaults to False).
+          Deprecated: still validated so existing cdk.json files synth, but
+          the analytics stack ignores it.
         - ``cognito.removal_policy`` and ``efs.removal_policy``: must be the
           literal strings ``"destroy"`` or ``"retain"`` (case sensitive — they
           are passed verbatim to CDK's ``RemovalPolicy`` lookup by the
@@ -2837,6 +2862,55 @@ class ConfigLoader:
         except GatewayHealthCheckConfigError as exc:
             raise ConfigValidationError(str(exc)) from exc
 
+    def get_regional_persistent_bucket_config(self) -> dict[str, Any]:
+        """Return the validated ``regional_persistent_bucket`` block.
+
+        Returns ``{"enabled": bool, "expiration_days": int | None}``:
+
+        - ``enabled`` creates ``<project>-<region>-persistent`` in every
+          workload Region: a bucket that ``gco upgrade`` and
+          ``gco stacks destroy-all --keep-control-plane`` leave in place, so
+          outputs staged there survive the rebuild of the regional stacks. It
+          is a JSON boolean and is false when the block or the key is absent:
+          a cdk.json from v9.1.0 or earlier has no block, and the previous
+          release's ``gco upgrade`` drives the stack cycle of the upgrade into
+          this one with stack orchestration that cannot deploy a stack type it
+          does not know. The shipped cdk.json sets it to true.
+        - ``expiration_days`` is ``null`` (the default: objects stay until
+          someone deletes them) or a positive whole number of days after which
+          S3 expires every object.
+
+        Raises:
+            ConfigValidationError: when the block is not an object, ``enabled``
+                is not a JSON boolean, or ``expiration_days`` is neither null nor
+                a positive integer.
+        """
+        block = self.app.node.try_get_context("regional_persistent_bucket")
+        if block is None:
+            block = {}
+        if not isinstance(block, dict):
+            raise ConfigValidationError(
+                "regional_persistent_bucket must be a JSON object, got "
+                f"{type(block).__name__}: {block!r}"
+            )
+        enabled = block.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ConfigValidationError(
+                "regional_persistent_bucket.enabled must be true or false (a JSON boolean), "
+                f"got {enabled!r}"
+            )
+        expiration_days = block.get("expiration_days")
+        if expiration_days is not None and (
+            not isinstance(expiration_days, int)
+            or isinstance(expiration_days, bool)
+            or expiration_days < 1
+        ):
+            raise ConfigValidationError(
+                "regional_persistent_bucket.expiration_days must be null (keep objects until "
+                f"they are deleted) or a positive whole number of days, got {expiration_days!r}"
+            )
+        return {"enabled": enabled, "expiration_days": expiration_days}
+
     def get_gpu_keep_warm_config(self) -> dict[str, Any]:
         """Return the keep-warm GPU pool's window (:mod:`gco.keep_warm`).
 
@@ -2950,6 +3024,9 @@ class ConfigLoader:
             - log_level: CloudWatch logging level (OFF, ERROR, INFO)
             - metrics_enabled: Enable CloudWatch metrics
             - tracing_enabled: Enable X-Ray tracing
+            - ip_address_type: "dualstack" (default) or "ipv4", the IP
+              address types that can invoke the global API and the regional
+              API bridges
 
             A deprecated ``regional_api_enabled`` key is passed through
             unread (:data:`DEPRECATED_BLOCK_KEYS`): callers reach the
@@ -2962,6 +3039,7 @@ class ConfigLoader:
             "log_level": "INFO",
             "metrics_enabled": True,
             "tracing_enabled": True,
+            "ip_address_type": DEFAULT_API_GATEWAY_IP_ADDRESS_TYPE,
         }
         return {**default_config, **(self.app.node.try_get_context("api_gateway") or {})}
 
@@ -3335,9 +3413,11 @@ class ConfigLoader:
             Analytics configuration dictionary with the following keys:
             - enabled: Whether the analytics environment stack is deployed
               (default: False — the feature is off unless explicitly opted in)
-            - hyperpod: SageMaker HyperPod integration sub-block
-              - enabled: Whether to add the HyperPod IAM grants to
-                SageMaker_Execution_Role (default: False)
+            - hyperpod: deprecated sub-block, accepted and ignored
+              - enabled: once added SageMaker training-job IAM grants
+                that ``AmazonSageMakerFullAccess`` already allows; it
+                changes nothing now (default: False). HyperPod capacity
+                is the top-level ``hyperpod`` block.
             - canvas: SageMaker Canvas integration sub-block
               - enabled: Whether to enable the SageMaker Canvas app on
                 the Studio domain and attach ``AmazonSageMakerCanvasFullAccess``
@@ -3351,9 +3431,9 @@ class ConfigLoader:
               - removal_policy: "destroy" (default) or "retain" — controls
                 the Studio EFS file system's CloudFormation DeletionPolicy
             - studio: SageMaker Studio sub-block
-              - user_profile_name_prefix: Optional prefix for per-user
-                profile names, or None to use the Cognito username verbatim
-                (default: None)
+              - user_profile_name_prefix: accepted but not applied; the
+                presigned-URL Lambda names every profile after the Cognito
+                username (default: None)
         """
         default_config: dict[str, Any] = {
             "enabled": False,

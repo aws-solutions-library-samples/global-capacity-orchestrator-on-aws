@@ -364,8 +364,8 @@ class TestAnalyticsVpc:
 
     def test_vpc_has_two_subnets_across_two_azs(self) -> None:
         """At least two subnets across at least two availability
-        zones. ``max_azs=2`` + a single private-isolated subnet
-        configuration yields exactly two subnets.
+        zones. ``max_azs=2`` with a private (egress) and a public subnet
+        tier yields four subnets.
         """
         template = _synth_analytics()
         subnets = template.find_resources("AWS::EC2::Subnet")
@@ -1252,6 +1252,74 @@ class TestSageMakerExecutionRole:
                 )
 
     @staticmethod
+    def _granted(statements: list[dict], action: str) -> list[str]:
+        """Rendered resources of every Allow statement that grants ``action``."""
+        resources: list[str] = []
+        for stmt in statements:
+            actions = stmt.get("Action")
+            action_set = set(actions) if isinstance(actions, list) else {actions}
+            if stmt.get("Effect") == "Allow" and action in action_set:
+                granted = stmt.get("Resource") or []
+                for res in granted if isinstance(granted, list) else [granted]:
+                    resources.append(_render_arn(res))
+        return resources
+
+    def test_role_invokes_the_regional_bridge_of_every_workload_region(self) -> None:
+        """A region-pinned ``gco`` call goes to that Region's regional bridge.
+
+        ``gco jobs submit -r``, ``jobs list -r``, ``jobs get`` and ``jobs logs``
+        send their requests to ``<project>-regional-api-<region>``, which
+        admits a caller on its identity policy alone. The grant used to name
+        the API Gateway Region only, so from a Studio terminal every one of
+        them was refused in a workload Region.
+        """
+        template = _synth_analytics()
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+
+        assert sorted(self._granted(statements, "execute-api:Invoke")) == sorted(
+            f"arn:aws:execute-api:{region}:123456789012:*/prod/*/{tree}/*"
+            for region in ("us-east-2", "us-east-1", "us-west-2")
+            for tree in ("api/v1", "inference")
+        )
+
+    def test_regional_bridge_grant_names_a_shared_region_once(self) -> None:
+        """An API Gateway Region that is also a workload Region is listed once."""
+        config = _AnalyticsMockConfig(region="us-east-1", workload_regions=("us-east-1",))
+        template = _synth_analytics(config=config)
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+
+        assert self._granted(statements, "execute-api:Invoke") == [
+            "arn:aws:execute-api:us-east-1:123456789012:*/prod/*/api/v1/*",
+            "arn:aws:execute-api:us-east-1:123456789012:*/prod/*/inference/*",
+        ]
+
+    def test_role_reads_this_projects_stacks_for_the_cli(self) -> None:
+        """The ``gco`` CLI reads the API endpoints from stack outputs.
+
+        Without ``cloudformation:DescribeStacks`` the CLI fails in a Studio
+        terminal before it sends any request (``GCOAWSClient.get_api_endpoint``
+        and ``get_regional_api_endpoint``). The grant is read-only and names
+        this project's stacks only.
+        """
+        template = _synth_analytics()
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+
+        describe = [
+            stmt
+            for stmt in statements
+            if "cloudformation:DescribeStacks"
+            in (stmt["Action"] if isinstance(stmt["Action"], list) else [stmt["Action"]])
+        ]
+        assert len(describe) == 1
+        assert describe[0]["Action"] == "cloudformation:DescribeStacks"
+        assert self._granted(statements, "cloudformation:DescribeStacks") == [
+            "arn:aws:cloudformation:*:123456789012:stack/gco-test-*/*"
+        ]
+
+    @staticmethod
     def _sqs_send_resources(statements: list[dict]) -> list[Any]:
         resources: list[Any] = []
         for stmt in statements:
@@ -1647,11 +1715,10 @@ class TestCanvasEnabled:
     The Canvas managed policy must be attached to ``SageMaker_Execution_Role``.
     We do **not** inject ``DefaultUserSettings.CanvasAppSettings`` on the
     domain because CloudFormation's ``AWS::SageMaker::Domain`` resource
-    rejects that property (it only belongs on
-    ``AWS::SageMaker::UserProfile``); per-user Canvas configuration, when
-    we need it, will be applied by the presigned-URL Lambda at user-profile
-    creation time. Canvas is still discoverable from Studio purely via IAM
-    — the managed policy attachment is sufficient to surface the tile.
+    rejects that property (so does ``AWS::SageMaker::UserProfile``; only
+    the SageMaker API's user settings carry it). Canvas is still
+    discoverable from Studio purely via IAM — the managed policy
+    attachment is sufficient to surface the tile.
     """
 
     @staticmethod
@@ -1702,7 +1769,7 @@ class TestCanvasEnabled:
             default_user_settings = domain["Properties"].get("DefaultUserSettings", {})
             assert "CanvasAppSettings" not in default_user_settings, (
                 "CanvasAppSettings is not a valid property on "
-                "AWS::SageMaker::Domain — it belongs on UserProfile only. "
+                "AWS::SageMaker::Domain (only the SageMaker API takes it). "
                 f"Got {default_user_settings!r}"
             )
 
@@ -1836,7 +1903,7 @@ class TestMlflowPermissions:
 
 
 class TestDomainCustomFileSystems:
-    """The Studio domain mounts the per-user EFS home folder as its only
+    """The Studio domain offers ``Studio_EFS`` to its spaces as its only
     custom file system. An earlier revision also tried to mount the
     cluster-shared bucket via ``S3FileSystemConfig`` — aws-cdk-lib
     exposes the property but SageMaker Studio rejects the resource at
@@ -1846,7 +1913,7 @@ class TestDomainCustomFileSystems:
     """
 
     def test_domain_has_efs_custom_file_system(self) -> None:
-        """The Studio domain exposes the per-user EFS mount."""
+        """The Studio domain lists ``Studio_EFS`` for its spaces to attach."""
         template = _synth_analytics()
         domains = template.find_resources("AWS::SageMaker::Domain")
         assert domains, "expected a Studio domain"
@@ -1863,7 +1930,7 @@ class TestDomainCustomFileSystems:
                     efs_seen = True
         assert efs_seen, (
             "Expected an EFSFileSystemConfig entry on CustomFileSystemConfigs "
-            "so per-user home folders on Studio_EFS work."
+            "so spaces can attach Studio_EFS."
         )
 
     def test_domain_does_not_declare_s3_file_system_config(self) -> None:

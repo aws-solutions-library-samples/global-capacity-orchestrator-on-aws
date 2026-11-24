@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T12:23:38Z">
-        <meta name="gco-source-commit" content="e192bb01bb7807a52e11e262c0cb44173133f894">
-        <meta name="gco-flow-digest" content="ce7d8d2a1dc78014">
+        <meta name="gco-generated-at" content="2026-11-22T17:59:03Z">
+        <meta name="gco-source-commit" content="db3de8225c3e025f659096135ffaa4ea72d25097">
+        <meta name="gco-flow-digest" content="d5a39b431afa3f1e">
         <title>Proxy upstream forwarding (HTTPS-only target, one deadline, safe-method retries, TLS fail-closed)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,34 +208,34 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1577=>operation: "Forward over authenticated TLS within one deadline.\n\n    Read-only methods replay retryable statuses and transport failures, each\n    replay with the fresh HMAC envelope ``resign_headers`` returns: the\n    backend accepts a nonce once and refuses a replayed envelope with 403.\n    Mutating methods are replayed only after the load balancer's own 503,\n    which it serves before selecting a target (see ``_is_load_balancer_503``),\n    and that replay is byte-identical because no target saw the first\n    envelope. Every other answer or failure may have reached a target and is\n    relayed after exactly one attempt. Plaintext, non-443, and\n    credential-bearing targets are rejected before any network request.\n    "
-op1579=>operation: parsed_target = urlsplit(target_url)
-op1584=>operation: target_port = parsed_target.port
-cond1581=>condition: exception raised?
-cond1586=>condition: except ValueError as exc
-sub1590=>subroutine: raise ValueError('Backend proxy target has an invalid port') from exc
-cond1596=>operation: raise ValueError('Backend proxy targets must use HTTPS on port 443') if  parsed_target.scheme.lower() != 'https' or not parsed_target.hostname or parsed_target.username is not None or (parsed_target.password is not None) or (target_port not in {None, 443})
-op1606=>operation: deadline = time.monotonic() + max(timeout, 0.0)
-op1611=>operation: transport = _http or get_backend_http_pool()
-cond1608=>condition: exception raised?
-cond1613=>condition: except RuntimeError
-sub1617=>subroutine: logger.exception('Backend TLS trust is unavailable')
-io1622=>inputoutput: output: {'statusCode': 503, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Backend trust is temporarily unavailable'})}
-e1620=>end: end function return
-op1628=>operation: method = http_method.upper()
-op1630=>operation: encoded_body = body.encode('utf-8') if body else None
-op1632=>operation: read_only = method in _RETRYABLE_METHODS
-op1634=>operation: max_attempts = _MAX_RETRIES
-op1636=>operation: last_exception: Exception | None = None
-op1638=>operation: last_response: urllib3.BaseHTTPResponse | None = None
-op1640=>operation: attempts_made = 0
-op1642=>operation: request_headers = _outbound_headers(headers)
-cond1645=>condition: for attempt in range(max_attempts)
-op1649=>operation: remaining = deadline - time.monotonic()
-cond1652=>operation: break if  remaining <= 0
-op1662=>operation: attempts_made = attempt + 1
-cond1665=>operation: request_headers = _outbound_headers({**headers, **resign_headers()}) if  attempt > 0 and read_only and (resign_headers is not None)
-op1676=>operation: response = transport.request(method, target_url, headers=request_headers, body=encoded_body, timeout=urllib3.Timeout(total=remaining))
+        <div><textarea id="code" style="width: 100%;" rows="11">op558=>operation: "Forward over authenticated TLS within one deadline.\n\n    Read-only methods replay retryable statuses and transport failures, each\n    replay with the fresh HMAC envelope ``resign_headers`` returns: the\n    backend accepts a nonce once and refuses a replayed envelope with 403.\n    Mutating methods are replayed only after the load balancer's own 503,\n    which it serves before selecting a target (see ``_is_load_balancer_503``),\n    and that replay is byte-identical because no target saw the first\n    envelope. Every other answer or failure may have reached a target and is\n    relayed after exactly one attempt. Plaintext, non-443, and\n    credential-bearing targets are rejected before any network request.\n    "
+op560=>operation: parsed_target = urlsplit(target_url)
+op565=>operation: target_port = parsed_target.port
+cond562=>condition: exception raised?
+cond567=>condition: except ValueError as exc
+sub571=>subroutine: raise ValueError('Backend proxy target has an invalid port') from exc
+cond577=>operation: raise ValueError('Backend proxy targets must use HTTPS on port 443') if  parsed_target.scheme.lower() != 'https' or not parsed_target.hostname or parsed_target.username is not None or (parsed_target.password is not None) or (target_port not in {None, 443})
+op587=>operation: deadline = time.monotonic() + max(timeout, 0.0)
+op592=>operation: transport = _http or get_backend_http_pool()
+cond589=>condition: exception raised?
+cond594=>condition: except RuntimeError
+sub598=>subroutine: logger.exception('Backend TLS trust is unavailable')
+io603=>inputoutput: output: {'statusCode': 503, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Backend trust is temporarily unavailable'})}
+e601=>end: end function return
+op609=>operation: method = http_method.upper()
+op611=>operation: encoded_body = body.encode('utf-8') if body else None
+op613=>operation: read_only = method in _RETRYABLE_METHODS
+op615=>operation: max_attempts = _MAX_RETRIES
+op617=>operation: last_exception: Exception | None = None
+op619=>operation: last_response: urllib3.BaseHTTPResponse | None = None
+op621=>operation: attempts_made = 0
+op623=>operation: request_headers = _outbound_headers(headers)
+cond626=>condition: for attempt in range(max_attempts)
+op630=>operation: remaining = deadline - time.monotonic()
+cond633=>operation: break if  remaining <= 0
+op643=>operation: attempts_made = attempt + 1
+cond646=>operation: request_headers = _outbound_headers({**headers, **resign_headers()}) if  attempt > 0 and read_only and (resign_headers is not None)
+op657=>operation: response = transport.request(method, target_url, headers=request_headers, body=encoded_body, timeout=urllib3.Timeout(connect=_connect_timeout(target_url, remaining), total=remaining))
 if response.status not in _RETRYABLE_STATUS_CODES:
     return _build_success_response(response)
 last_response = response
@@ -246,100 +246,100 @@ logger.warning('Retryable upstream status %d on attempt %d/%d for %s%s', respons
 if attempt == max_attempts - 1:
     return _build_success_response(response)
 response.release_conn()
-cond1675=>condition: exception raised?
-cond1678=>condition: except urllib3.exceptions.SSLError
-sub1682=>subroutine: logger.exception('Backend TLS verification failed')
-io1687=>inputoutput: output: _tls_failure_response()
-e1685=>end: end function return
-cond1690=>condition: except _TRANSPORT_FAILURES as error
-op1694=>operation: last_exception = error
-cond1697=>condition: if not read_only
-sub1701=>subroutine: logger.warning('Upstream %s failed on attempt %d (%s); not replaying a mutating request', method, attempt + 1, type(error).__name__)
-op1703=>operation: last_response = None
-sub1705=>subroutine: break
-sub1710=>subroutine: logger.warning('Upstream %s failed on attempt %d/%d (%s)', method, attempt + 1, max_attempts, type(error).__name__)
-cond1728=>condition: if attempt < max_attempts - 1
-op1732=>operation: remaining = deadline - time.monotonic()
-op1734=>operation: backoff = _RETRY_BACKOFF_BASE * 2 ** attempt
-cond1737=>operation: break if  remaining <= backoff
-sub1747=>subroutine: time.sleep(backoff)
-cond1712=>condition: except Exception
-sub1716=>subroutine: logger.exception('Unexpected proxy forwarding failure')
-io1721=>inputoutput: output: {'statusCode': 500, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Internal server error'})}
-e1719=>end: end function return
-cond1755=>condition: if last_response is not None
-io1762=>inputoutput: output: _build_success_response(last_response)
-e1760=>end: end function return
-cond1769=>condition: if last_exception is not None
-op1773=>operation: status_code = 503 if isinstance(last_exception, _CONNECTION_FAILURES) else 504
-io1778=>inputoutput: output: {'statusCode': status_code, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Service unavailable' if status_code == 503 else 'Gateway timeout', 'message': f'Upstream failed after {attempts_made} attempt(s)'})}
-e1776=>end: end function return
-io1787=>inputoutput: output: {'statusCode': 504, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Gateway timeout'})}
-e1785=>end: end function return
+cond656=>condition: exception raised?
+cond659=>condition: except urllib3.exceptions.SSLError
+sub663=>subroutine: logger.exception('Backend TLS verification failed')
+io668=>inputoutput: output: _tls_failure_response()
+e666=>end: end function return
+cond671=>condition: except _TRANSPORT_FAILURES as error
+op675=>operation: last_exception = error
+cond678=>condition: if not read_only
+sub682=>subroutine: logger.warning('Upstream %s failed on attempt %d (%s); not replaying a mutating request', method, attempt + 1, type(error).__name__)
+op684=>operation: last_response = None
+sub686=>subroutine: break
+sub691=>subroutine: logger.warning('Upstream %s failed on attempt %d/%d (%s)', method, attempt + 1, max_attempts, type(error).__name__)
+cond709=>condition: if attempt < max_attempts - 1
+op713=>operation: remaining = deadline - time.monotonic()
+op715=>operation: backoff = _RETRY_BACKOFF_BASE * 2 ** attempt
+cond718=>operation: break if  remaining <= backoff
+sub728=>subroutine: time.sleep(backoff)
+cond693=>condition: except Exception
+sub697=>subroutine: logger.exception('Unexpected proxy forwarding failure')
+io702=>inputoutput: output: {'statusCode': 500, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Internal server error'})}
+e700=>end: end function return
+cond736=>condition: if last_response is not None
+io743=>inputoutput: output: _build_success_response(last_response)
+e741=>end: end function return
+cond750=>condition: if last_exception is not None
+op754=>operation: status_code = 503 if isinstance(last_exception, _CONNECTION_FAILURES) else 504
+io759=>inputoutput: output: {'statusCode': status_code, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Service unavailable' if status_code == 503 else 'Gateway timeout', 'message': f'Upstream failed after {attempts_made} attempt(s)'})}
+e757=>end: end function return
+io768=>inputoutput: output: {'statusCode': 504, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Gateway timeout'})}
+e766=>end: end function return
 
-op1577->op1579
-op1579->op1584
-op1584->cond1581
-cond1581(yes)->cond1586
-cond1586(yes)->sub1590
-cond1586(no)->cond1596
-cond1596->op1606
-op1606->op1611
-op1611->cond1608
-cond1608(yes)->cond1613
-cond1613(yes)->sub1617
-sub1617->io1622
-io1622->e1620
-cond1613(no)->op1628
-op1628->op1630
-op1630->op1632
-op1632->op1634
-op1634->op1636
-op1636->op1638
-op1638->op1640
-op1640->op1642
-op1642->cond1645
-cond1645(yes)->op1649
-op1649->cond1652
-cond1652->op1662
-op1662->cond1665
-cond1665->op1676
-op1676->cond1675
-cond1675(yes)->cond1678
-cond1678(yes)->sub1682
-sub1682->io1687
-io1687->e1685
-cond1678(no)->cond1690
-cond1690(yes)->op1694
-op1694->cond1697
-cond1697(yes)->sub1701
-sub1701->op1703
-op1703->sub1705
-cond1697(no)->sub1710
-sub1710->cond1728
-cond1728(yes)->op1732
-op1732->op1734
-op1734->cond1737
-cond1737->sub1747
-sub1747->cond1645
-cond1728(no)->cond1645
-cond1690(no)->cond1712
-cond1712(yes)->sub1716
-sub1716->io1721
-io1721->e1719
-cond1712(no)->cond1728
-cond1675(no)->cond1728
-cond1645(no)->cond1755
-cond1755(yes)->io1762
-io1762->e1760
-cond1755(no)->cond1769
-cond1769(yes)->op1773
-op1773->io1778
-io1778->e1776
-cond1769(no)->io1787
-io1787->e1785
-cond1608(no)->op1628
-cond1581(no)->cond1596
+op558->op560
+op560->op565
+op565->cond562
+cond562(yes)->cond567
+cond567(yes)->sub571
+cond567(no)->cond577
+cond577->op587
+op587->op592
+op592->cond589
+cond589(yes)->cond594
+cond594(yes)->sub598
+sub598->io603
+io603->e601
+cond594(no)->op609
+op609->op611
+op611->op613
+op613->op615
+op615->op617
+op617->op619
+op619->op621
+op621->op623
+op623->cond626
+cond626(yes)->op630
+op630->cond633
+cond633->op643
+op643->cond646
+cond646->op657
+op657->cond656
+cond656(yes)->cond659
+cond659(yes)->sub663
+sub663->io668
+io668->e666
+cond659(no)->cond671
+cond671(yes)->op675
+op675->cond678
+cond678(yes)->sub682
+sub682->op684
+op684->sub686
+cond678(no)->sub691
+sub691->cond709
+cond709(yes)->op713
+op713->op715
+op715->cond718
+cond718->sub728
+sub728->cond626
+cond709(no)->cond626
+cond671(no)->cond693
+cond693(yes)->sub697
+sub697->io702
+io702->e700
+cond693(no)->cond709
+cond656(no)->cond709
+cond626(no)->cond736
+cond736(yes)->io743
+io743->e741
+cond736(no)->cond750
+cond750(yes)->op754
+op754->io759
+io759->e757
+cond750(no)->io768
+io768->e766
+cond589(no)->op609
+cond562(no)->cond577
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -349,17 +349,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T12:23:38Z -->
-        <!-- Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894 -->
+        <!-- Generated at (UTC): 2026-11-22T17:59:03Z -->
+        <!-- Generated from Git commit: db3de8225c3e025f659096135ffaa4ea72d25097 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T12:23:38Z">2026-11-19T12:23:38Z</time>
+            Generated at (UTC): <time datetime="2026-11-22T17:59:03Z">2026-11-22T17:59:03Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>e192bb01bb7807a52e11e262c0cb44173133f894</code>
+            Source commit: <code>db3de8225c3e025f659096135ffaa4ea72d25097</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>ce7d8d2a1dc78014</code>
+            Flow content SHA-256: <code>d5a39b431afa3f1e</code>
           </p>
           <div id="canvas"></div>
         </div>

@@ -1064,7 +1064,8 @@ def add_cognito_suppressions(stack: Stack) -> None:
                 reason=(
                     "The Studio user pool does not configure MFA. Users are created "
                     "by an administrator (self sign-up is disabled) and sign in "
-                    "with SRP from gco analytics studio login, with a password "
+                    "through gco analytics studio login (AdminInitiateAuth, which "
+                    "also needs AWS credentials for the pool), with a password "
                     "policy of at least 12 characters including digits, symbols, "
                     "upper and lower case. Turn MFA on for the pool if your policy "
                     "requires a second factor."
@@ -1246,7 +1247,7 @@ def apply_all_suppressions(
     Args:
         stack: The CDK stack to apply suppressions to
         stack_type: Type of stack - 'regional', 'global', 'api_gateway',
-            'regional_api_gateway', 'monitoring', or 'analytics'
+            'regional_api_gateway', 'regional_persistent', 'monitoring', or 'analytics'
         regions: List of regional deployment regions (for dynamic IAM suppression patterns)
         global_region: Global region for SSM parameters (for dynamic IAM suppression patterns)
         project_name: Deployment prefix (#139), forwarded to
@@ -1280,6 +1281,10 @@ def apply_all_suppressions(
 
     elif stack_type == "regional_api_gateway":
         add_api_gateway_suppressions(stack)
+    elif stack_type == "regional_persistent":
+        # One bucket pair and its KMS key; the bucket-level acknowledgments
+        # are on the buckets in gco/stacks/regional_persistent_stack.py.
+        pass
 
     elif stack_type == "monitoring":
         add_monitoring_suppressions(stack)

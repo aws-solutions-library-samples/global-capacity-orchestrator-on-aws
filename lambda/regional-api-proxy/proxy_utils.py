@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -18,8 +19,8 @@ import urllib3
 from backend_tls import get_backend_http_pool
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T12:23:38Z
-# Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894
+# Generated at (UTC): 2026-11-22T17:59:03Z
+# Generated from Git commit: db3de8225c3e025f659096135ffaa4ea72d25097
 # Flowchart(s) generated from this file:
 #   * ``build_signed_headers`` -> ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.png``)
@@ -310,7 +311,40 @@ def _outbound_headers(headers: dict[str, Any]) -> dict[str, str]:
 
 _MAX_RETRIES = _bounded_env_int("PROXY_MAX_RETRIES", 3, 1, 5)
 _RETRY_BACKOFF_BASE = _bounded_env_float("PROXY_RETRY_BACKOFF_BASE", 0.3, 0.0, 5.0)
+# Longest one address may take to accept the TCP connection and finish the TLS
+# handshake. urllib3 spends the connect timeout on every address the hostname
+# resolves to, one after another, so the per-address limit is also capped at
+# the attempt's budget divided by the address count (_connect_timeout).
+_CONNECT_TIMEOUT_SECONDS = _bounded_env_float("PROXY_CONNECT_TIMEOUT_SECONDS", 5.0, 0.5, 28.0)
 _http: urllib3.PoolManager | None = None
+
+
+def _connect_timeout(target_url: str, remaining: float) -> float:
+    """Per-address connect limit that keeps a whole attempt inside ``remaining``.
+
+    urllib3's ``create_connection`` tries each resolved address in turn and
+    gives each one the full connect timeout. Global Accelerator answers with
+    two anycast addresses, and in the minutes after a Region's load balancer
+    first joins the accelerator both can black-hole the connection: an attempt
+    then took twice its budget, so the Lambda reached its own timeout and API
+    Gateway answered a bare "Endpoint request timed out" with nothing logged.
+    Dividing the budget by the address count keeps the attempt bounded, so the
+    proxy relays its own logged 504 instead. The lookup uses the address family
+    urllib3 will use; a failed lookup counts as one address and leaves the
+    error to the request itself.
+    """
+    hostname = urlsplit(target_url).hostname or ""
+    try:
+        resolved = socket.getaddrinfo(
+            hostname,
+            443,
+            urllib3.util.connection.allowed_gai_family(),
+            socket.SOCK_STREAM,
+        )
+    except OSError:
+        resolved = []
+    addresses = max(len({sockaddr[0] for *_, sockaddr in resolved}), 1)
+    return min(_CONNECT_TIMEOUT_SECONDS, remaining / addresses)
 
 
 def _tls_failure_response() -> dict[str, Any]:
@@ -403,7 +437,9 @@ def forward_request(
                 target_url,
                 headers=request_headers,
                 body=encoded_body,
-                timeout=urllib3.Timeout(total=remaining),
+                timeout=urllib3.Timeout(
+                    connect=_connect_timeout(target_url, remaining), total=remaining
+                ),
             )
             if response.status not in _RETRYABLE_STATUS_CODES:
                 return _build_success_response(response)

@@ -10,6 +10,7 @@ Python. This script keeps the release version and maintained exact-ref examples 
 - ``gco/_version.py``          (mirrors VERSION as ``__version__``)
 - ``cli/__init__.py``          (fallback ``__version__`` when ``gco`` is not importable)
 - ``gco_mcp/README.md``        (exact release refs in copy-paste MCP launch examples)
+- ``docs/ANALYTICS.md``        (the ``GCO_REF`` the in-Studio ``uv tool install`` pins)
 - ``README.md``                (one-click MCP install buttons whose deep links embed
                                 the release ref URL-encoded and base64-encoded; the
                                 whole marked block is regenerated, not regex-patched)
@@ -49,6 +50,7 @@ VERSION_FILE = PROJECT_ROOT / "VERSION"
 VERSION_PY = PROJECT_ROOT / "gco" / "_version.py"
 CLI_INIT_FILE = PROJECT_ROOT / "cli" / "__init__.py"
 MCP_README_FILE = PROJECT_ROOT / "gco_mcp" / "README.md"
+ANALYTICS_DOC_FILE = PROJECT_ROOT / "docs" / "ANALYTICS.md"
 ROOT_README_FILE = PROJECT_ROOT / "README.md"
 
 # Markers delimiting the auto-generated one-click MCP install table in the
@@ -189,6 +191,21 @@ def update_mcp_readme_release_refs(version: str, dry_run: bool = False) -> None:
     print(f"  ✓ Updated {MCP_README_FILE.relative_to(PROJECT_ROOT)}")
 
 
+def update_analytics_doc_release_ref(version: str, dry_run: bool = False) -> None:
+    """Update the ``GCO_REF=`` pin of the SageMaker Studio CLI install."""
+    if dry_run:
+        print(f"  [dry-run] Would update {ANALYTICS_DOC_FILE.relative_to(PROJECT_ROOT)}")
+        return
+    content = ANALYTICS_DOC_FILE.read_text(encoding="utf-8")
+    new_content = re.sub(
+        r"(?m)^GCO_REF=v\d+\.\d+\.\d+",
+        f"GCO_REF=v{version}",
+        content,
+    )
+    ANALYTICS_DOC_FILE.write_text(new_content, encoding="utf-8")
+    print(f"  ✓ Updated {ANALYTICS_DOC_FILE.relative_to(PROJECT_ROOT)}")
+
+
 def update_root_readme_install_table(version: str, dry_run: bool = False) -> None:
     """Regenerate the one-click MCP install table in the top-level README.
 
@@ -246,6 +263,7 @@ def set_version(version: str, dry_run: bool = False) -> None:
     update_version_py(version, dry_run)
     update_cli_init(version, dry_run)
     update_mcp_readme_release_refs(version, dry_run)
+    update_analytics_doc_release_ref(version, dry_run)
     update_root_readme_install_table(version, dry_run)
 
 
@@ -261,6 +279,7 @@ def main() -> None:
         print(f"  - {VERSION_PY.relative_to(PROJECT_ROOT)}")
         print(f"  - {CLI_INIT_FILE.relative_to(PROJECT_ROOT)}")
         print(f"  - {MCP_README_FILE.relative_to(PROJECT_ROOT)}  (MCP launch refs)")
+        print(f"  - {ANALYTICS_DOC_FILE.relative_to(PROJECT_ROOT)}  (Studio CLI install ref)")
         print(f"  - {ROOT_README_FILE.relative_to(PROJECT_ROOT)}  (MCP install buttons)")
         return
 
@@ -278,7 +297,10 @@ def main() -> None:
     else:
         print(f"\n✓ Bumped version: {old_version} -> {new_version}")
         print("\nTo complete the release PR:")
-        print("  git add VERSION gco/_version.py cli/__init__.py gco_mcp/README.md README.md")
+        print(
+            "  git add VERSION gco/_version.py cli/__init__.py gco_mcp/README.md "
+            "docs/ANALYTICS.md README.md"
+        )
         print(f"  git commit -m 'Release v{new_version}'")
         print("  git push -u origin HEAD")
         print(

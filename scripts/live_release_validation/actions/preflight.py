@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -173,8 +174,17 @@ def _hyperpod_preflight(ctx: RunContext) -> dict[str, Any]:
     return summary
 
 
-def action_preflight(ctx: RunContext) -> dict[str, Any]:
-    """Validate exact git/AWS/config identity and prove project ownership."""
+def action_preflight(
+    ctx: RunContext, *, list_target_stacks: Callable[[], list[str]] | None = None
+) -> dict[str, Any]:
+    """Validate exact git/AWS/config identity and prove project ownership.
+
+    ``list_target_stacks`` names the stacks the run deploys and owns. It
+    defaults to the checkout's ``cdk list``. The upgrade harness passes the
+    stacks this checkout synthesizes under the base release's cdk.json, which
+    is what ``gco upgrade`` deploys; it leaves that assembly in the
+    checkout's ``cdk.out``, where the expected images are read from next.
+    """
     settings = ctx.settings
     head = _run_git(settings.repo_root, "rev-parse", "HEAD")
     if head != settings.expected_sha:
@@ -253,7 +263,7 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
             "this run's exact keys for deletion during cleanup."
         )
     enabled_regions = discover_enabled_regions(ctx.session, ctx.config.global_region)
-    target_stacks = ctx.stack_manager.list_stacks()
+    target_stacks = (list_target_stacks or ctx.stack_manager.list_stacks)()
     if not target_stacks:
         raise RuntimeError("CDK returned no target stacks")
     expected_ecr_images = _expected_ecr_images(ctx, target_stacks)

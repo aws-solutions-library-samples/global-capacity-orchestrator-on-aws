@@ -1307,6 +1307,22 @@ class TestStackManagerOperations:
             # they would parse as stack names; the listing pins logs to stderr.
             mock_run.assert_called_once_with(["list", "--no-ci"], capture_output=True)
 
+    def test_a_set_stack_list_answers_without_cdk(self):
+        """The upgrade harness names the stacks gco upgrade deploys; None restores cdk list."""
+        from cli.stacks import StackManager
+
+        with patch.object(StackManager, "_run_cdk") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="from-cdk\n", stderr="")
+            manager = StackManager(MagicMock())
+            manager.set_stack_list(("gco-global", "gco-us-east-1"))
+            listed = manager.list_stacks()
+            assert listed == ["gco-global", "gco-us-east-1"]
+            listed.append("changed")
+            assert manager.list_stacks() == ["gco-global", "gco-us-east-1"]
+            mock_run.assert_not_called()
+            manager.set_stack_list(None)
+            assert manager.list_stacks() == ["from-cdk"]
+
     def test_list_stacks_error(self):
         """Test error handling when listing stacks fails."""
         from cli.stacks import StackManager

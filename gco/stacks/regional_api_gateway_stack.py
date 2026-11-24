@@ -45,6 +45,7 @@ from aws_cdk import aws_logs as logs
 from constructs import Construct
 
 from gco.config.config_loader import ConfigLoader
+from gco.stacks.api_ip_address_type import DEFAULT_IP_ADDRESS_TYPE, api_ip_address_type
 from gco.stacks.constants import (
     AGGREGATOR_REGIONAL_API_ROUTES,
     DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -58,8 +59,8 @@ from gco.stacks.constants import (
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T00:26:15Z
-# Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03
+# Generated at (UTC): 2026-11-22T20:50:27Z
+# Generated from Git commit: c904dd4dd0b819014ff781aa5d888d6c579a8868
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalApiGatewayStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack___init__.png``)
@@ -446,12 +447,16 @@ class GCORegionalApiGatewayStack(Stack):
             )
 
         # Create regional REST API
+        ip_address_type = str(api_config.get("ip_address_type", DEFAULT_IP_ADDRESS_TYPE))
         api = apigateway.RestApi(
             self,
             "RegionalApi",
             rest_api_name=f"{project_name}-regional-api-{self.deployment_region}",
             description=f"Direct regional API for {project_name} in {self.deployment_region}",
-            endpoint_types=[apigateway.EndpointType.REGIONAL],
+            endpoint_configuration=apigateway.EndpointConfiguration(
+                types=[apigateway.EndpointType.REGIONAL],
+                ip_address_type=api_ip_address_type(ip_address_type),
+            ),
             deploy=True,
             deploy_options=apigateway.StageOptions(
                 stage_name="prod",

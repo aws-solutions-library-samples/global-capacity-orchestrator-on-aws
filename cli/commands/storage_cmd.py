@@ -164,7 +164,7 @@ def storage_s3_inventory(config: Any, region: str | None) -> None:
 @click.option(
     "--region",
     "-r",
-    help="Region for the unqualified regional-shared alias",
+    help="Region for the unqualified regional-shared or regional-persistent alias",
 )
 @click.option(
     "--prefix",
@@ -215,8 +215,9 @@ def storage_sync(
     """Sync between a GCO S3 bucket and LOCAL_PATH in one direction.
 
     BUCKET_ALIAS is one of cluster-shared, model-weights,
-    analytics-studio, or regional-shared:REGION. The unqualified
-    regional-shared alias can be paired with --region.
+    analytics-studio, regional-shared:REGION, or regional-persistent:REGION
+    (the Region's bucket that gco upgrade leaves standing). The unqualified
+    regional aliases can be paired with --region.
 
     The default direction downloads from S3. Use --direction upload to send a
     local file or directory to S3. Neither direction deletes destination-only
@@ -226,6 +227,7 @@ def storage_sync(
         gco storage sync cluster-shared ./cluster-data
         gco storage sync regional-shared:us-east-1 ./regional-data
         gco storage sync regional-shared ./regional-data -r us-east-1
+        gco storage sync regional-persistent:us-east-1 ./outputs --direction upload --prefix upgrade/
         gco storage sync model-weights ./models --prefix models/llama3
         gco storage sync cluster-shared ./results --direction upload --prefix results
     """

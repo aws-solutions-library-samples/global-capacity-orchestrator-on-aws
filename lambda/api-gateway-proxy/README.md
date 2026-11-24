@@ -67,6 +67,7 @@ API Gateway proxy response (statusCode, headers, body).
 | `SECRET_ARN` | Yes | ARN of the Secrets Manager secret containing the backend HMAC signing key |
 | `PROXY_MAX_RETRIES` | No | Max attempts per request (default: 3); read-only methods spend them on any retryable answer, mutating methods only on the ALB's own 503 page |
 | `PROXY_RETRY_BACKOFF_BASE` | No | Base backoff in seconds (default: 0.3) |
+| `PROXY_CONNECT_TIMEOUT_SECONDS` | No | Longest one resolved address may take to connect and finish the TLS handshake, in seconds (default: 5, bounds 0.5–28); each attempt also caps it at its remaining budget divided by the address count |
 | `SECRET_CACHE_TTL_SECONDS` | No | Normal signing-key cache TTL in seconds (default: 300) |
 | `SECRET_CACHE_MAX_STALE_SECONDS` | No | Maximum bounded stale-key age during refresh failures (default: 900) |
 | `SECRET_CACHE_RETRY_SECONDS` | No | Minimum delay between failed refresh attempts (default: 5) |

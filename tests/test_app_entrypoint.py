@@ -189,6 +189,7 @@ class TestMain:
             "gco-monitoring",
             *(f"gco-{region}" for region in regions["regional"]),
             *(f"gco-regional-api-{region}" for region in regions["regional"]),
+            *(f"gco-{region}-persistent" for region in regions["regional"]),
         }
         assert set(stacks) == expected
         assembly = app.synth()  # already synthesized by main(); returns the cached assembly
@@ -201,12 +202,18 @@ class TestMain:
         for region in regions["regional"]:
             assert stacks[f"gco-{region}"].region == region
             assert stacks[f"gco-regional-api-{region}"].region == region
+            assert stacks[f"gco-{region}-persistent"].region == region
         assert all(cdk.Token.is_unresolved(stack.account) for stack in stacks.values())
 
         assert _depends_on(stacks["gco-api-gateway"]) == {"gco-global"}
         for region in regions["regional"]:
-            assert _depends_on(stacks[f"gco-{region}"]) == {"gco-global", "gco-api-gateway"}
+            assert _depends_on(stacks[f"gco-{region}"]) == {
+                "gco-global",
+                "gco-api-gateway",
+                f"gco-{region}-persistent",
+            }
             assert _depends_on(stacks[f"gco-regional-api-{region}"]) == {f"gco-{region}"}
+            assert _depends_on(stacks[f"gco-{region}-persistent"]) == set()
         assert _depends_on(stacks["gco-monitoring"]) >= {
             f"gco-{region}" for region in regions["regional"]
         }
@@ -271,6 +278,21 @@ class TestMain:
         ]
         assert owner_only == []
         assert list((outdir / ".cache").iterdir()) == []
+
+    def test_a_cdk_json_without_the_persistent_bucket_block_builds_no_persistent_stacks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An upgraded v9.1.0 cdk.json has no ``regional_persistent_bucket`` block.
+
+        Its upgrade runs v9.1.0's CLI, which cannot deploy a persistent stack,
+        so without the block the app keeps the stack graph that release knows.
+        """
+        app = _run_main(tmp_path, monkeypatch, overrides={"regional_persistent_bucket": None})
+        regions = _regions(app)
+        stacks = _stacks(app)
+        assert not [name for name in stacks if name.endswith("-persistent")]
+        for region in regions["regional"]:
+            assert _depends_on(stacks[f"gco-{region}"]) == {"gco-global", "gco-api-gateway"}
 
     def test_analytics_enabled_wires_studio_into_the_api_gateway(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

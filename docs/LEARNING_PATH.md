@@ -163,6 +163,8 @@ aws service-quotas get-service-quota --service-code ec2 --quota-code L-DB2E81BA 
 gco stacks deploy-all -y
 ```
 
+The dev container builds the deployment's images through your container runtime's socket, which the setup script found and shared. If its summary said `Socket mount : none`, the [Quick Start](../QUICKSTART.md#step-4-deploy-infrastructure) says what to do instead.
+
 With the `cdk.json` in the repository, this deploys GCO's global control plane in `us-east-2` (the global API, the job queue and template tables, monitoring) and one workload Region, `us-east-1`, with a VPC, an EKS Auto Mode cluster, an internal load balancer and the GCO services. It bootstraps CDK where needed and takes about an hour. To use other Regions, edit `deployment_regions` in `cdk.json` first or run `gco stacks regions add <region>`.
 
 When the command finishes, the cluster add-ons (KEDA, Volcano, Kueue, KubeRay, Kubeflow Trainer, cert-manager and the observability stack) are still installing in the background. That takes another 10 to 30 minutes. Follow it with:

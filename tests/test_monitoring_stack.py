@@ -46,6 +46,10 @@ class MockConfigLoader:
         self._valkey_enabled = valkey_enabled
         self._cost_monitoring_enabled = cost_monitoring_enabled
 
+    def get_regional_persistent_bucket_config(self):
+        """Off, as for a cdk.json without the block, so templates match the stack's own tests."""
+        return {"enabled": False, "expiration_days": None}
+
     def get_project_name(self):
         return "gco-test"
 

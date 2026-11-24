@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
-        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
-        <meta name="gco-flow-digest" content="90af5a76e6185965">
+        <meta name="gco-generated-at" content="2026-11-23T16:48:27Z">
+        <meta name="gco-source-commit" content="1fcc830f8bfc0e870b022382a1506c682882515c">
+        <meta name="gco-flow-digest" content="90355f33eb11ea22">
         <title>Studio presigned-URL fetch (gco analytics studio login)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,62 +208,62 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op390=>operation: "GET ``{api_base}/studio/login`` with the Cognito ID token.\n\n    Returns ``(url, expires_in, correlation_id)`` on success. Raises\n    :class:`urllib.error.HTTPError` / :class:`urllib.error.URLError`\n    on transport or HTTP failure; raises ``ValueError`` on malformed\n    response bodies (unexpected JSON shape / missing ``url`` key), or\n    on non-``https://`` ``api_base`` values (guards urllib's\n    ``file://`` / ``ftp://`` scheme support).\n    "
-op392=>operation: import email.message
-op394=>operation: import json as _json
-op396=>operation: import urllib.error
-op398=>operation: import urllib.parse
-op400=>operation: import urllib.request
-op402=>operation: parsed = urllib.parse.urlparse(api_base)
-cond405=>operation: raise ValueError(f'api_base must use https:// scheme (got {parsed.scheme!r}). This guard rejects file:// / ftp:// schemes that urllib would otherwise follow.') if  parsed.scheme != 'https'
-cond416=>operation: raise ValueError(f'api_base is missing a hostname: {api_base!r}') if  not parsed.netloc
-op426=>operation: login_url = api_base.rstrip('/') + '/studio/login'
-op428=>operation: request = urllib.request.Request(login_url, headers={'Authorization': id_token, 'Accept': 'application/json'}, method='GET')
-op430=>operation: with urllib.request.urlopen(request, timeout=30) as response:
+        <div><textarea id="code" style="width: 100%;" rows="11">op42=>operation: "GET ``{api_base}/studio/login`` with the Cognito ID token.\n\n    Returns ``(url, expires_in, correlation_id)`` on success. Raises\n    :class:`urllib.error.HTTPError` / :class:`urllib.error.URLError`\n    on transport or HTTP failure; raises ``ValueError`` on malformed\n    response bodies (unexpected JSON shape / missing ``url`` key), or\n    on non-``https://`` ``api_base`` values (guards urllib's\n    ``file://`` / ``ftp://`` scheme support).\n    "
+op44=>operation: import email.message
+op46=>operation: import json as _json
+op48=>operation: import urllib.error
+op50=>operation: import urllib.parse
+op52=>operation: import urllib.request
+op54=>operation: parsed = urllib.parse.urlparse(api_base)
+cond57=>operation: raise ValueError(f'api_base must use https:// scheme (got {parsed.scheme!r}). This guard rejects file:// / ftp:// schemes that urllib would otherwise follow.') if  parsed.scheme != 'https'
+cond68=>operation: raise ValueError(f'api_base is missing a hostname: {api_base!r}') if  not parsed.netloc
+op78=>operation: login_url = api_base.rstrip('/') + '/studio/login'
+op80=>operation: request = urllib.request.Request(login_url, headers={'Authorization': id_token, 'Accept': 'application/json'}, method='GET')
+op82=>operation: with urllib.request.urlopen(request, timeout=30) as response:
     status = int(response.status)
     body = response.read().decode('utf-8')
     correlation_id = response.headers.get('x-amzn-RequestId') or 'N/A'
-cond433=>condition: if status == 202
-io440=>inputoutput: output: ('', 0, correlation_id)
-e438=>end: end function return
-cond447=>condition: if status != 200
-op451=>operation: headers_msg: email.message.Message = email.message.Message()
-op453=>operation: headers_msg['x-amzn-RequestId'] = correlation_id
-sub455=>subroutine: raise urllib.error.HTTPError(login_url, status, f'Studio login returned HTTP {status}', headers_msg, None)
-op461=>operation: payload = _json.loads(body)
+cond85=>condition: if status == 202
+io92=>inputoutput: output: ('', 0, correlation_id)
+e90=>end: end function return
+cond99=>condition: if status != 200
+op103=>operation: headers_msg: email.message.Message = email.message.Message()
+op105=>operation: headers_msg['x-amzn-RequestId'] = correlation_id
+sub107=>subroutine: raise urllib.error.HTTPError(login_url, status, f'Studio login returned HTTP {status}', headers_msg, None)
+op113=>operation: payload = _json.loads(body)
 url = str(payload['url'])
 expires_in = int(payload.get('expires_in', 0))
-cond460=>condition: exception raised?
-cond463=>condition: except (ValueError, KeyError) as exc
-sub467=>subroutine: raise ValueError(f'malformed /studio/login response: {exc!r}') from exc
-io475=>inputoutput: output: (url, expires_in, correlation_id)
-e473=>end: end function return
+cond112=>condition: exception raised?
+cond115=>condition: except (ValueError, KeyError) as exc
+sub119=>subroutine: raise ValueError(f'malformed /studio/login response: {exc!r}') from exc
+io127=>inputoutput: output: (url, expires_in, correlation_id)
+e125=>end: end function return
 
-op390->op392
-op392->op394
-op394->op396
-op396->op398
-op398->op400
-op400->op402
-op402->cond405
-cond405->cond416
-cond416->op426
-op426->op428
-op428->op430
-op430->cond433
-cond433(yes)->io440
-io440->e438
-cond433(no)->cond447
-cond447(yes)->op451
-op451->op453
-op453->sub455
-cond447(no)->op461
-op461->cond460
-cond460(yes)->cond463
-cond463(yes)->sub467
-cond463(no)->io475
-io475->e473
-cond460(no)->io475
+op42->op44
+op44->op46
+op46->op48
+op48->op50
+op50->op52
+op52->op54
+op54->cond57
+cond57->cond68
+cond68->op78
+op78->op80
+op80->op82
+op82->cond85
+cond85(yes)->io92
+io92->e90
+cond85(no)->cond99
+cond99(yes)->op103
+op103->op105
+op105->sub107
+cond99(no)->op113
+op113->cond112
+cond112(yes)->cond115
+cond115(yes)->sub119
+cond115(no)->io127
+io127->e125
+cond112(no)->io127
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -273,17 +273,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
-        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
+        <!-- Generated at (UTC): 2026-11-23T16:48:27Z -->
+        <!-- Generated from Git commit: 1fcc830f8bfc0e870b022382a1506c682882515c -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
+            Generated at (UTC): <time datetime="2026-11-23T16:48:27Z">2026-11-23T16:48:27Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
+            Source commit: <code>1fcc830f8bfc0e870b022382a1506c682882515c</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>90af5a76e6185965</code>
+            Flow content SHA-256: <code>90355f33eb11ea22</code>
           </p>
           <div id="canvas"></div>
         </div>

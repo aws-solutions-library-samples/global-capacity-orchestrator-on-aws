@@ -59,6 +59,15 @@ need to read source code to get past this step.
 gco stacks deploy-all -y   # CDK bootstrap runs automatically for every Region in cdk.json
 ```
 
+!!! note "Socket mount: none?"
+    The dev container builds the deployment's images through your container
+    runtime's Docker-compatible socket, which the setup script finds and
+    shares. If its summary said `Socket mount : none`, fix what its note names
+    (start Docker or Podman's API service, upgrade Finch to v1.8.0 or later)
+    and re-run the script, or run `CDK_DOCKER=<runtime> gco stacks deploy-all -y`
+    from a
+    [host install](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/QUICKSTART.md#installing-on-your-host-instead-advanced).
+
 By default this deploys the global control plane in `us-east-2` and one
 workload Region, `us-east-1`; edit `deployment_regions` in `cdk.json` (or run
 `gco stacks regions add <region>`) before deploying if you want a different

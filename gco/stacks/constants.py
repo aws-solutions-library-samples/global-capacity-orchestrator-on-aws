@@ -571,6 +571,21 @@ def regional_shared_ssm_parameter_prefix(project_name: str) -> str:
     return f"/{project_name}/regional-shared-bucket"
 
 
+def regional_persistent_ssm_parameter_prefix(project_name: str) -> str:
+    """SSM parameter namespace for a Region's persistent bucket metadata.
+
+    Derived from ``project_name`` (``/<project_name>/regional-persistent-bucket``).
+    Each ``GCORegionalPersistentStack`` writes ``<prefix>/name``,
+    ``<prefix>/arn``, ``<prefix>/region`` and ``<prefix>/kms-key-arn`` in its own
+    Region. The regional stack of the same Region reads them back at deploy
+    time to grant its job-pod role access and to fill the
+    ``gco-regional-persistent-bucket`` ConfigMap, and ``gco storage`` resolves
+    the ``regional-persistent:<region>`` alias from ``<prefix>/name``. For
+    ``project_name="gco"`` this renders ``/gco/regional-persistent-bucket``.
+    """
+    return f"/{project_name}/regional-persistent-bucket"
+
+
 def s3_bucket_kms_conditions(*, region: str, bucket_arn: str, url_suffix: str) -> dict[str, Any]:
     """KMS conditions confining a ``Resource: *`` key grant to S3's use for one bucket.
 

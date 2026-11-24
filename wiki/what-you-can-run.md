@@ -118,7 +118,7 @@ deployment — off by default and zero cost until enabled:
 *The SageMaker Studio landing screen after logging in through the
 `gco analytics` CLI.*
 
-Details, sub-toggles (HyperPod, Canvas, managed MLflow), and cleanup
+Details, the Canvas sub-toggle, managed MLflow, and cleanup
 behavior are in
 [docs/ANALYTICS.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/ANALYTICS.md).
 

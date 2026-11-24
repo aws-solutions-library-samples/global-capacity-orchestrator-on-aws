@@ -289,6 +289,7 @@ def test_stacks_section_lists_expected_and_present_optional_stacks() -> None:
         "test-gco-us-east-1": "UPDATE_COMPLETE",
         "test-gco-us-west-2": "UPDATE_ROLLBACK_COMPLETE",
         "test-gco-regional-api-us-east-1": "CREATE_COMPLETE",
+        "test-gco-us-east-1-persistent": "CREATE_COMPLETE",
     }
     manager = MagicMock()
     manager.get_stack_status.side_effect = lambda name, region: (
@@ -312,7 +313,10 @@ def test_stacks_section_lists_expected_and_present_optional_stacks() -> None:
     assert expected["test-gco-global"]["updated_time"] == "2026-08-11T09:14:22+00:00"
     # Absent optional stacks are omitted; present ones are listed.
     optional = {entry["name"]: entry for entry in section.data["optional"]}
-    assert set(optional) == {"test-gco-regional-api-us-east-1"}
+    assert set(optional) == {
+        "test-gco-regional-api-us-east-1",
+        "test-gco-us-east-1-persistent",
+    }
 
 
 def test_stacks_section_classifies_absent_and_in_progress_stacks() -> None:

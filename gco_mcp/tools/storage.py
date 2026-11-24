@@ -46,7 +46,9 @@ async def list_storage_buckets(region: str | None = None) -> str:
     """List deployed GCO S3 buckets and their human-friendly aliases.
 
     Returns user-facing buckets such as ``cluster-shared``, ``model-weights``,
-    ``regional-shared:<region>``, and the optional ``analytics-studio`` bucket.
+    ``regional-shared:<region>``, ``regional-persistent:<region>`` (the
+    Region's bucket that ``gco upgrade`` leaves standing), and the optional
+    ``analytics-studio`` bucket.
     Physical names are resolved from the deployment's SSM and CloudFormation
     metadata rather than reconstructed.
 
@@ -65,11 +67,11 @@ async def list_storage_buckets(region: str | None = None) -> str:
 async def s3_inventory(region: str | None = None) -> str:
     """Describe every S3 bucket the deployment creates, with its contract.
 
-    Broader than list_storage_buckets, which returns only the four buckets
+    Broader than list_storage_buckets, which returns only the buckets
     addressable by ``storage sync``. This covers the always-on central
     (``Cluster_Shared_Bucket``) and per-region (``Regional_Shared_Bucket``)
-    buckets, model weights, cost reports, the optional analytics Studio bucket,
-    and every server-access-log sink.
+    buckets, each Region's persistent bucket, model weights, cost reports, the
+    optional analytics Studio bucket, and every server-access-log sink.
 
     Each entry carries the owning stack and region, the bucket's purpose,
     reserved object-key prefixes, whether job pods have read-write / read-only /
@@ -238,7 +240,8 @@ if is_enabled(FLAG_LOCAL_STORAGE_SYNC):
             local_dir: Local path relative to ``GCO_STORAGE_LOCAL_ROOT`` (or an
                 absolute path contained by that root).
             direction: ``download`` for S3-to-local or ``upload`` for local-to-S3.
-            region: Region for an unqualified ``regional-shared`` alias.
+            region: Region for an unqualified ``regional-shared`` or
+                ``regional-persistent`` alias.
             prefix: Remote S3 key prefix to download from or upload into.
             dry_run: Return the transfer summary without writing files or S3 objects.
             force: Transfer all matching files even if the destination is current.

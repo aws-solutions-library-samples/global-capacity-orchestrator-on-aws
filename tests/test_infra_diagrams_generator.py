@@ -69,6 +69,7 @@ def test_full_architecture_keeps_every_stack_bridge_and_helm_topology(
         f"{project}-analytics",
         *(f"{project}-{region}" for region in regions["regional"]),
         *(f"{project}-regional-api-{region}" for region in regions["regional"]),
+        *(f"{project}-{region}-persistent" for region in regions["regional"]),
     }
     actual_stacks = {artifact.stack_name for artifact in assembly.stacks}
     assert actual_stacks >= expected_stacks
@@ -199,6 +200,7 @@ def test_build_monitoring_builds_the_full_topology_without_optional_analytics(
         f"{project}-monitoring",
         *(f"{project}-{region}" for region in regions["regional"]),
         *(f"{project}-regional-api-{region}" for region in regions["regional"]),
+        *(f"{project}-{region}-persistent" for region in regions["regional"]),
     }
     assert stacks[f"{project}-monitoring"].region == regions["monitoring"]
 
@@ -209,6 +211,7 @@ def test_build_monitoring_builds_the_full_topology_without_optional_analytics(
         assert _explicit_dependencies(stacks[f"{project}-{region}"]) >= {
             f"{project}-global",
             f"{project}-api-gateway",
+            f"{project}-{region}-persistent",
         }
         assert _explicit_dependencies(stacks[f"{project}-regional-api-{region}"]) >= {
             f"{project}-{region}"
@@ -216,6 +219,29 @@ def test_build_monitoring_builds_the_full_topology_without_optional_analytics(
     assert _explicit_dependencies(stacks[f"{project}-monitoring"]) >= {
         f"{project}-{region}" for region in regions["regional"]
     }
+
+
+def test_build_full_without_the_persistent_bucket_builds_no_persistent_stacks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """With ``regional_persistent_bucket`` off, the regional stacks depend on the global tier only."""
+    monkeypatch.chdir(ROOT)
+    app = cdk.App(
+        outdir=str(tmp_path / "cdk.out"),
+        context={**generate._BASE_CONTEXT, "regional_persistent_bucket": {"enabled": False}},
+    )
+    config = ConfigLoader(app)
+    project = config.get_project_name()
+    regions = config.get_deployment_regions()
+    with generate._mocked_regional_assets():
+        assert generate._build_full(app, config) is None
+    stacks = _stacks_by_id(app)
+    assert not [name for name in stacks if name.endswith("-persistent")]
+    for region in regions["regional"]:
+        assert _explicit_dependencies(stacks[f"{project}-{region}"]) == {
+            f"{project}-global",
+            f"{project}-api-gateway",
+        }
 
 
 def test_build_analytics_constructs_only_the_analytics_stack(tmp_path: Path, monkeypatch) -> None:

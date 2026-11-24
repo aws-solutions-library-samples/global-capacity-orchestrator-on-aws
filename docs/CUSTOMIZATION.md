@@ -120,6 +120,7 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [How It Works](#how-it-works-1)
   - [Using Regional APIs](#using-regional-apis)
   - [Security Considerations](#security-considerations)
+- [API Gateway IP Address Type](#api-gateway-ip-address-type)
 - [Queue Processor (SQS Consumer)](#queue-processor-sqs-consumer)
   - [Queue Processor Configuration](#configuration)
   - [Disabling the Built-In Consumer](#disabling-the-built-in-consumer)
@@ -443,7 +444,7 @@ A workload Region cannot yet be retired on its own while the others keep running
 Retire a Region through the [scale-to-zero](#scaling-to-zero-workload-regions) teardown, which rebuilds the Regions you keep:
 
 1. Delete every inference endpoint that has run in the Region you are retiring, and wait until `gco inference list` no longer shows it.
-2. Back up the data that lives in the regional stacks (EFS and FSx file systems, Valkey, Aurora, the regional-shared buckets), as described in [Scaling to zero workload Regions](#scaling-to-zero-workload-regions). The teardown removes it in every Region, not only the retired one.
+2. Back up the data that lives in the regional stacks (EFS and FSx file systems, Valkey, Aurora, the regional-shared buckets), as described in [Scaling to zero workload Regions](#scaling-to-zero-workload-regions). The teardown removes it in every Region, not only the retired one. The retired Region's [persistent bucket](REGIONAL_PERSISTENT_BUCKET.md) survives the teardown, so copy out what you need from it and delete its stack before the Region leaves `cdk.json`: `gco stacks destroy <project>-<region>-persistent -y`.
 3. Tear down the workload tier, remove the Region, and rebuild the rest:
 
 ```bash
@@ -1647,6 +1648,12 @@ The ALB probes `/healthz` over HTTPS on every target of the health-monitor, mani
 
 The ranges are the ones Elastic Load Balancing accepts for an Application Load Balancer target group ([Health checks for Application Load Balancer target groups](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html)); a value outside them, a non-integer, or an unknown key fails `cdk synth`. Every key is optional and an omitted one keeps its default. The regional stack renders the values into the default `TargetGroupConfiguration` of `post-helm-gateway.yaml`; redeploy the regional stacks to apply a change.
 
+#### Rollouts wait for healthy targets
+
+The `gco-system` namespace carries the label `elbv2.k8s.aws/pod-readiness-gate-inject: enabled`, so the AWS Load Balancer Controller adds a [pod readiness gate](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/deploy/pod_readiness_gate/) to every health-monitor, manifest-processor and inference-proxy pod. A new pod becomes Ready only once the ALB reports its target healthy, and the three Deployments roll with `maxUnavailable: 0`, so an old pod keeps serving until its successor can take traffic. Each pod of a rollout waits about `interval_seconds` × `healthy_threshold` (30 seconds with the defaults above) longer than it would without the gate.
+
+The controller's settings in `lambda/helm-installer/charts.yaml` support this: `keepTLSSecret: true` keeps the controller's webhook certificate across chart upgrades, `targetgroupbindingMaxExponentialBackoffDelay: 60s` retries a failed target registration at least once a minute, and the pod webhook's `failurePolicy: Ignore` lets pods start without the gate while the controller is unavailable.
+
 `gateway_health_check` replaces the `alb_config` block of earlier releases. `alb_config` was required and validated, but nothing read it, and its 30-second interval was never what ran. A `cdk.json` that still has `alb_config` synthesizes with a deprecation warning and its values have no effect; delete the block and set `gateway_health_check` if you want a different probe.
 
 #### Additional Gateways
@@ -2649,7 +2656,7 @@ been running:
   `false` to remove it. For the storage features `false` deletes the
   resource and its data (the file system, the cache, the database cluster,
   the MLflow run-metadata volume), so back up first (see
-  [UPGRADING.md](UPGRADING.md#2-back-up-regional-data-to-the-cluster-shared-bucket)).
+  [UPGRADING.md](UPGRADING.md#2-stage-regional-data-where-it-survives)).
   For a `helm` chart `false` uninstalls it, and for Kueue and Crossplane the
   uninstall first deletes their custom resources across the cluster (Kueue's
   queues and workload objects; Crossplane's composite resources and what they
@@ -2990,6 +2997,58 @@ Regional APIs preserve the backend authentication model used by the global path:
 - Runtime verification of the SSM-registered internal ALB
 - Public SSM trust only; the root private key remains in the certificate-manager's KMS-encrypted secret
 - No public exposure of the ALB or EKS API
+
+## API Gateway IP Address Type
+
+The global API and every regional API bridge are dual-stack by default: API
+Gateway answers each API's `execute-api` host name with IPv6 (AAAA) records as
+well as IPv4 (A) records, so clients on IPv6-only or IPv6-preferring networks
+reach GCO directly, and IPv4 clients reach it as before.
+`api_gateway.ip_address_type` in `cdk.json` sets it:
+
+```json
+"api_gateway": {
+  "throttle_rate_limit": 1000,
+  "throttle_burst_limit": 2000,
+  "log_level": "INFO",
+  "metrics_enabled": true,
+  "tracing_enabled": true,
+  "ip_address_type": "dualstack"
+}
+```
+
+`ipv4` answers with A records only. A change takes effect when the next
+`gco stacks deploy-all -y` has updated the API stacks, and the endpoint URLs
+stay the same either way. Both endpoint types GCO creates take either value:
+the edge-optimized global API in the `aws` partition and the Regional APIs
+everywhere else.
+
+Consider these before you keep the default:
+
+- **`aws:SourceIp` conditions.** A caller whose identity-based policy or a
+  service control policy limits `execute-api:Invoke` to IPv4 ranges with
+  `aws:SourceIp` is refused once it connects over IPv6. Add the caller's IPv6
+  ranges, or set `ipv4`. GCO's own resource policies have no such condition.
+- **The WAF rate limit.** The rate-based rule behind `waf.per_ip_rate_limit`
+  counts requests per source address. A client usually holds a whole IPv6
+  prefix and can send from many of its addresses, each with its own budget,
+  so the rule limits an IPv6 client less than an IPv4 one.
+- **Clients on networks that drop IPv6.** A client with an IPv6 address tries
+  the IPv6 records first. The GCO CLI and MCP server alternate between IPv6
+  and IPv4 addresses and give each address but the last two seconds to
+  connect, so a network that hands out IPv6 addresses but drops IPv6 traffic
+  costs them about two seconds per new connection. Browsers and curl race the
+  two families. Other HTTP clients may wait out their whole connect timeout
+  on each IPv6 address first.
+
+To check the result, look up the host's AAAA records, for example
+`dig AAAA <api-id>.execute-api.us-east-2.amazonaws.com`. The host names are
+in the `ApiEndpoint` output of the `gco-api-gateway` stack and the
+`RegionalApiEndpoint` output of each `gco-regional-api-REGION` stack.
+
+The setting covers only the API Gateway endpoints that clients call. GCO's
+VPCs, EKS clusters, internal ALBs and Global Accelerator stay IPv4, and so do
+the proxy Lambdas' connections to them.
 
 ---
 

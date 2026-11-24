@@ -210,7 +210,7 @@ CloudFormation outputs, so no manual ID wiring is needed.
 | [`gco analytics users list`](#gco-analytics-users-list) | List Cognito users in the analytics user pool. |
 | [`gco analytics users remove`](#gco-analytics-users-remove) | Delete a Cognito user from the analytics user pool. |
 | [`gco analytics users set-password`](#gco-analytics-users-set-password) | Change a Cognito user's password via ``AdminSetUserPassword``. |
-| [`gco analytics studio login`](#gco-analytics-studio-login) | Sign in to SageMaker Studio via Cognito SRP and print a presigned Studio URL on its own line on stdout (pipe-friendly). |
+| [`gco analytics studio login`](#gco-analytics-studio-login) | Sign in to SageMaker Studio through Cognito (`AdminInitiateAuth`, so it needs AWS credentials too) and print a presigned Studio URL on its own line on stdout (pipe-friendly). |
 | [`gco analytics doctor`](#gco-analytics-doctor) | Run pre-flight checks before `gco stacks deploy gco-analytics`. |
 
 </details>
@@ -229,17 +229,16 @@ gco analytics enable [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--hyperpod` | | Also set `analytics_environment.hyperpod.enabled=true` (adds HyperPod training-job permissions to the SageMaker execution role). |
-| `--canvas` | | Also set `analytics_environment.canvas.enabled=true` (attaches `AmazonSageMakerCanvasFullAccess` to the SageMaker execution role and enables the Canvas app on the Studio domain; artifacts land under `Cluster_Shared_Bucket/analytics-canvas/`). |
+| `--hyperpod` | | Deprecated, changes nothing: sets `analytics_environment.hyperpod.enabled=true`, which the analytics stack ignores (the SageMaker execution role's `AmazonSageMakerFullAccess` already allows SageMaker training jobs; see [ANALYTICS.md section (g)](ANALYTICS.md#g-submitting-hyperpod-jobs-and-sagemaker-training-jobs-from-studio)). Prints a warning saying so. |
+| `--canvas` | | Also set `analytics_environment.canvas.enabled=true` (attaches `AmazonSageMakerCanvasFullAccess` to the SageMaker execution role, which is what lights up the Canvas tile in Studio; Canvas keeps its artifacts in its own default locations). |
 | `--yes` | `-y` | Skip the confirmation prompt. |
 
 **Example:**
 
 ```bash
 gco analytics enable
-gco analytics enable --hyperpod
 gco analytics enable --canvas
-gco analytics enable --hyperpod --canvas -y
+gco analytics enable --canvas -y
 
 # Follow-up to actually deploy the stack:
 gco stacks deploy gco-analytics
@@ -293,6 +292,13 @@ stdout exactly once. Optionally sets a permanent password via
 `cognito-idp:AdminSetUserPassword` so the user can sign in without the
 `NEW_PASSWORD_REQUIRED` challenge on first login.
 
+The username also names the user's SageMaker Studio user profile, so it
+must be a name SageMaker accepts there: letters, digits and hyphens,
+starting and ending with a letter or digit, 63 characters at most. A
+name that differs only in case from an existing user's is refused too,
+because SageMaker matches profile names without regard to case. Both
+checks exit `1` before any user is created.
+
 ```bash
 gco analytics users add [OPTIONS]
 ```
@@ -301,7 +307,7 @@ gco analytics users add [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--username` | Cognito username to create (required). |
+| `--username` | Cognito username to create (required): letters, digits and hyphens, starting and ending with a letter or digit, 63 characters at most. |
 | `--email` | Email address for the new user. |
 | `--no-email` | Suppress the Cognito welcome email (`MessageAction=SUPPRESS`). |
 | `--password` | Set a permanent password on the new user (also read from `$GCO_STUDIO_PASSWORD`). Mutually exclusive with `--generate-password`. |
@@ -343,8 +349,10 @@ gco analytics users list --as-json
 #### `gco analytics users remove`
 
 Delete a Cognito user from the analytics user pool. Does not delete
-the user's Studio user profile or EFS home folder — use
-`aws sagemaker delete-user-profile` for that.
+the user's Studio user profile or their directory on `Studio_EFS` — use
+`aws sagemaker delete-user-profile` for the profile. Until the profile
+is deleted, a new user given the same name is refused at
+`gco analytics studio login` (the profile belongs to the removed user).
 
 ```bash
 gco analytics users remove [OPTIONS]
@@ -406,11 +414,27 @@ gco analytics users set-password --username alice \
 
 #### `gco analytics studio login`
 
-Sign in to SageMaker Studio via Cognito SRP and print a presigned
+Sign in to SageMaker Studio through Cognito and print a presigned
 Studio URL on its own line on stdout (pipe-friendly): the progress shown
 while a first login provisions the user profile (30-60 seconds) goes to
 stderr, so `URL=$(gco analytics studio login ...)` captures only the URL.
 The password, `IdToken`, and URL are never written to disk.
+
+The sign-in is `cognito-idp:AdminInitiateAuth` with
+`ADMIN_USER_PASSWORD_AUTH`, an administrator API, so the command needs
+AWS credentials allowing it on the pool (and `cloudformation:DescribeStacks`
+for discovery) as well as the user's Cognito password. A user whose
+password is still temporary cannot sign in this way; set a permanent one
+with `gco analytics users set-password`.
+
+A failed `/studio/login` call exits `2` and prints the HTTP status, the
+presigned-URL Lambda's error token and the correlation ID, for example
+`login failed: HTTP 403 UserProfileOwnedByAnotherUser, correlation_id=...`.
+`UnsupportedUsername` (HTTP 400: the username cannot name a SageMaker
+user profile) and `UserProfileOwnedByAnotherUser` (HTTP 403: the profile
+of that name belongs to another Cognito user) come with a line saying
+what an administrator has to do. See
+[ANALYTICS.md section (d)](ANALYTICS.md#d-logging-into-studio).
 
 ```bash
 gco analytics studio login [OPTIONS]
@@ -457,7 +481,7 @@ Checks performed:
 
 - `cdk.json` is present and parses as JSON
 - `gco-global`, `gco-api-gateway`, and every regional stack are
-  `CREATE_COMPLETE`
+  deployed (`CREATE_COMPLETE`, `UPDATE_COMPLETE` or `IMPORT_COMPLETE`)
 - The three `/gco/cluster-shared-bucket/*` SSM parameters are
   present in the global region
 - No orphaned retained analytics resources are left from a previous
@@ -3829,8 +3853,10 @@ gco jobs logs JOB_NAME [OPTIONS]
 Kubeflow TrainJobs are resolved automatically: logs come from the
 rank-`--node` pod of the training job (rank 0 by default).
 
-When the pod is gone (completed and cleaned up) or still pending, the command
-falls back to CloudWatch Logs (`/aws/containerinsights/<cluster>/application`,
+When the pod is gone (completed and cleaned up), still pending, or its node can
+no longer serve its log (EKS Auto Mode removes an empty node soon after its
+last pod finishes; see [API.md → Get Job Logs](API.md#get-job-logs)), the
+command falls back to CloudWatch Logs (`/aws/containerinsights/<cluster>/application`,
 written by the CloudWatch Observability add-on) and prints the newest `--tail`
 lines of the last `--since` hours, oldest first. It reads only the streams of
 this job's pods in `--namespace` (for a TrainJob, the rank-`--node` pod), and only
@@ -5596,11 +5622,12 @@ unless every stack is gone.
 `--keep-control-plane` scales the deployment to zero workload Regions instead of
 removing it. Only the regional API bridges and the base regional stacks are
 destroyed; `<project>-global`, `<project>-api-gateway`, `<project>-monitoring`
-and, when deployed, `<project>-analytics` stay, together with everything they
-own — the DynamoDB tables, the model and cluster-shared buckets, the image
-registry, EFS recovery points in the backup vault, the cost-report bucket, and
-the analytics stack's Studio home directories, Cognito users and notebook
-outputs. Before anything is deleted the monitoring stack
+and, when deployed, `<project>-analytics` and each Region's
+`<project>-<region>-persistent` stay, together with everything they own — the
+DynamoDB tables, the model, cluster-shared and
+[persistent](REGIONAL_PERSISTENT_BUCKET.md) buckets, the image registry, EFS
+recovery points in the backup vault, the cost-report bucket, and the analytics
+stack's Studio home directories, Cognito users and notebook outputs. Before anything is deleted the monitoring stack
 is updated in place with `--context gco:control-plane-only=true` (the run-scoped
 equivalent of an empty `deployment_regions.regional`) so it stops referencing the
 regional stacks; CloudFormation would otherwise refuse to delete a stack whose
@@ -6279,13 +6306,15 @@ published by the deployed stacks; GCO does not guess or reconstruct them.
 | `cluster-shared` | Global | Cross-region cluster job artifacts and shared data | Global-region SSM parameters |
 | `model-weights` | Global | Central model weights used by inference endpoints | Global-region SSM parameter |
 | `regional-shared:REGION` | Regional | General-purpose data for workloads in one region | That region's SSM parameters |
+| `regional-persistent:REGION` | Regional | One region's staging that survives `gco upgrade` ([REGIONAL_PERSISTENT_BUCKET.md](REGIONAL_PERSISTENT_BUCKET.md)) | That region's SSM parameters |
 | `analytics-studio` | Optional analytics region | SageMaker Studio private scratch data and outputs | `PROJECT-analytics` CloudFormation resources |
 
-`regional-shared` is also accepted with `--region REGION`. When exactly one
-regional deployment is configured, the region may be omitted; multi-region
-deployments must use `--region` or the canonical region-qualified alias. The
-four dedicated access-log buckets are intentionally excluded because they are
-internal compliance sinks, not workload storage.
+`regional-shared` and `regional-persistent` are also accepted with
+`--region REGION`. When exactly one regional deployment is configured, the
+region may be omitted; multi-region deployments must use `--region` or the
+canonical region-qualified alias. The dedicated access-log buckets are
+intentionally excluded because they are internal compliance sinks, not
+workload storage.
 
 #### `gco storage list`
 
@@ -6310,19 +6339,20 @@ gco --output json storage list
 #### `gco storage s3-inventory`
 
 Describe **every** S3 bucket the deployment creates, as a JSON document. Broader
-than [`gco storage list`](#gco-storage-list), which reports only the four
+than [`gco storage list`](#gco-storage-list), which reports only the
 user-facing buckets addressable by [`gco storage sync`](#gco-storage-sync).
 
 Covers the always-on central [`Cluster_Shared_Bucket`](CLUSTER_SHARED_BUCKET.md)
-and per-region [`Regional_Shared_Bucket`](REGIONAL_SHARED_BUCKET.md), the model
-weights bucket, the cost report bucket, the optional analytics Studio bucket, and
-every server-access-log sink.
+and per-region [`Regional_Shared_Bucket`](REGIONAL_SHARED_BUCKET.md), each
+Region's [persistent bucket](REGIONAL_PERSISTENT_BUCKET.md), the model weights
+bucket, the cost report bucket, the optional analytics Studio bucket, and every
+server-access-log sink.
 
 Each entry carries the deployment-contract facts, not just the name:
 
 | Field | Meaning |
 |-------|---------|
-| `id`, `role`, `scope` | Stable identifier; `primary` vs `access-logs`; `global` / `regional` / `monitoring` / `analytics` |
+| `id`, `role`, `scope` | Stable identifier; `primary` vs `access-logs`; `global` / `regional` / `regional-persistent` / `monitoring` / `analytics` |
 | `owning_stack`, `region` | Which stack creates it, and where |
 | `bucket`, `arn`, `s3_uri` | Physical identity, resolved from SSM or CloudFormation — never reconstructed |
 | `status`, `detail` | `deployed` or `not-deployed`, with the reason |
@@ -6385,6 +6415,9 @@ gco storage sync cluster-shared ./downloads/cluster --direction download
 # Download one regional bucket (equivalent alias forms)
 gco storage sync regional-shared:us-east-1 ./downloads/us-east-1
 gco storage sync regional-shared ./downloads/us-east-1 --region us-east-1
+
+# Stage outputs in the Region's persistent bucket before gco upgrade
+gco storage sync regional-persistent:us-east-1 ./outputs --direction upload --prefix upgrade/
 
 # Download only one model prefix
 gco storage sync model-weights ./downloads/llama3 --prefix models/llama3
@@ -6877,7 +6910,8 @@ Runs inside a git checkout of the repository and:
 Step 3 deletes the data inside the regional stacks — EFS and FSx file systems,
 Valkey, Aurora, in-cluster volumes (Prometheus, Grafana, MLflow) and, unless its
 removal policy is `retain`, the regional-shared bucket. The control plane's
-shared state (DynamoDB tables, the model and cluster-shared buckets, the image
+shared state (DynamoDB tables, the model and cluster-shared buckets, each
+Region's [persistent bucket](REGIONAL_PERSISTENT_BUCKET.md), the image
 registry, EFS recovery points in the backup vault, the cost-report bucket) is
 untouched. Unless `-y` is given the command prints this plan, names every stack
 it will destroy, and asks you to type the project name to continue.

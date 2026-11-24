@@ -952,6 +952,23 @@ gco jobs logs multi-container-job -r us-east-1 --container sidecar
 }
 ```
 
+The API server reads a pod's log from the kubelet of the node the pod ran on.
+EKS Auto Mode removes a node once it has been empty for its NodePool's
+`consolidateAfter` (30 seconds for the GPU and CPU pools), and a finished pod
+stays bound to the removed node until the Job's `ttlSecondsAfterFinished`
+deletes it, so the API checks the node first:
+
+| Status | Meaning |
+|--------|---------|
+| `404` | No such Job, or the Job has no pods left |
+| `404` | The pod's node has been removed, is being removed or is not Ready (the detail says `no longer on its node`), or the log has not arrived within 20 seconds (`could not read the pod's log from its node`) |
+| `409` | The pod is still Pending, so it has no log yet |
+
+The two node answers are 404s because the proxy Lambdas and the CLI replay a
+`502`, `503` or `504` to a GET, and a replay would wait on the same node
+again. The container's output is still in CloudWatch Logs, and
+`gco jobs logs` reads it from there when it gets either answer.
+
 ### Get Job Events
 
 ```http
@@ -2121,6 +2138,13 @@ Each attempt has 30 seconds to connect, send the payload, and receive the
 response status line and headers. Only the status code counts: the dispatcher
 never reads the response body, so a receiver should not rely on the
 dispatcher reading anything it sends back.
+
+The URL must use HTTPS, and every address its host resolves to must be
+globally routable unicast; registration and delivery both check this. Each
+attempt then connects to one of those addresses, in turn, using only the
+addresses the cluster has a route to. GCO's clusters are IPv4, so a host's
+IPv6 (AAAA) addresses are skipped, and a host that resolves only to IPv6
+addresses is refused with that reason.
 
 The dispatcher runs inside the health-monitor, which has two replicas for
 availability. Only one of them delivers at a time: the replicas elect a

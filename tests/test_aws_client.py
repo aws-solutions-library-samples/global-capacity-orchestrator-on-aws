@@ -8,7 +8,7 @@ helper the CLI calls: regional job CRUD (list/get/logs/events/pods/
 metrics/retry/delete/bulk-delete), global aggregation endpoints
 (/api/v1/global/jobs|health|status and bulk-delete), ALB endpoint
 discovery, retry/backoff on transient errors, and the regional-vs-API
-Gateway routing toggle. Heavy use of boto3.Session and requests.request
+Gateway routing toggle. Heavy use of boto3.Session and cli.aws_client._http_request
 mocking; every test stubs get_config to avoid reading real CDK context.
 """
 
@@ -309,7 +309,7 @@ class TestGCOAWSClientRequests:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -342,7 +342,7 @@ class TestGCOAWSClientRequests:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_session.return_value.get_credentials.return_value = MagicMock()
@@ -376,7 +376,7 @@ class TestGCOAWSClientRequests:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -412,7 +412,7 @@ class TestGCOAWSClientRequests:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -457,7 +457,7 @@ class TestGCOAWSClientRequests:
             mock_config.return_value = MagicMock(cache_ttl_seconds=300)
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_session.return_value.get_credentials.return_value = MagicMock()
@@ -523,7 +523,7 @@ class TestGCOAWSClientRequests:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -559,7 +559,7 @@ class TestGCOAWSClientRequests:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -596,7 +596,7 @@ class TestGCOAWSClientRequests:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -628,7 +628,7 @@ class TestGCOAWSClientRequests:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -663,7 +663,7 @@ class TestGCOAWSClientRequests:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -990,7 +990,7 @@ class TestGCOAWSClientMakeAuthenticatedRequest:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1023,7 +1023,7 @@ class TestGCOAWSClientMakeAuthenticatedRequest:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1062,7 +1062,7 @@ class TestGCOAWSClientMakeAuthenticatedRequest:
         )
         with (
             patch("boto3.Session") as mock_session,
-            patch("requests.request") as mock_request,
+            patch("cli.aws_client._http_request") as mock_request,
             patch("cli.aws_client.SigV4Auth"),
         ):
             mock_session.return_value.get_credentials.return_value = MagicMock()
@@ -1169,7 +1169,7 @@ class TestGCOAWSClientGetJobs:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1217,7 +1217,7 @@ class TestGCOAWSClientGlobalJobs:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1260,7 +1260,7 @@ class TestGCOAWSClientGlobalJobs:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1300,7 +1300,7 @@ class TestGCOAWSClientGlobalHealth:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1345,7 +1345,7 @@ class TestGCOAWSClientGlobalStatus:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1389,7 +1389,7 @@ class TestGCOAWSClientBulkDeleteGlobal:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1437,7 +1437,7 @@ class TestGCOAWSClientBulkDeleteGlobal:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1485,7 +1485,7 @@ class TestGCOAWSClientJobEvents:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1542,7 +1542,7 @@ class TestGCOAWSClientJobPods:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1592,7 +1592,7 @@ class TestGCOAWSClientJobMetrics:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1680,7 +1680,7 @@ class TestGCOAWSClientRetryJob:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1726,7 +1726,7 @@ class TestGCOAWSClientBulkDeleteJobs:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1773,7 +1773,7 @@ class TestGCOAWSClientBulkDeleteJobs:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1819,7 +1819,7 @@ class TestGCOAWSClientGetHealth:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -1870,7 +1870,7 @@ class TestGCOAWSClientRetryLogic:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
                 patch("time.sleep"),
             ):
@@ -1901,7 +1901,7 @@ class TestGCOAWSClientRetryLogic:
         with (
             patch("cli.aws_client.get_config") as mock_config,
             patch("boto3.Session"),
-            patch("requests.request") as mock_request,
+            patch("cli.aws_client._http_request") as mock_request,
         ):
             mock_config.return_value = MagicMock(cache_ttl_seconds=300)
             client = GCOAWSClient()
@@ -1925,7 +1925,7 @@ class TestGCOAWSClientRetryLogic:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_session.return_value.get_credentials.return_value = MagicMock()
@@ -1959,7 +1959,7 @@ class TestGCOAWSClientRetryLogic:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_session.return_value.get_credentials.return_value = MagicMock()
@@ -1994,7 +1994,7 @@ class TestGCOAWSClientRetryLogic:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
                 patch("time.sleep"),
             ):
@@ -2027,7 +2027,7 @@ class TestGCOAWSClientRetryLogic:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -2057,7 +2057,7 @@ class TestGCOAWSClientRetryLogic:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
                 patch("time.sleep"),
             ):
@@ -2088,7 +2088,7 @@ class TestGCOAWSClientRetryLogic:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -2121,7 +2121,7 @@ class TestGCOAWSClientRetryLogic:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -2180,7 +2180,7 @@ class TestGCOAWSClientCallApi:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_session.return_value.get_credentials.return_value = MagicMock()
@@ -2222,7 +2222,7 @@ class TestGCOAWSClientCallApi:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -2253,7 +2253,7 @@ class TestGCOAWSClientCallApi:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -2286,7 +2286,7 @@ class TestGCOAWSClientCallApi:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()
@@ -3295,7 +3295,7 @@ class TestDecodeLogPayload:
 
             with (
                 patch("boto3.Session") as mock_session,
-                patch("requests.request") as mock_request,
+                patch("cli.aws_client._http_request") as mock_request,
                 patch("cli.aws_client.SigV4Auth"),
             ):
                 mock_credentials = MagicMock()

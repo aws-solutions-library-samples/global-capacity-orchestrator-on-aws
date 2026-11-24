@@ -43,6 +43,18 @@ from gco.services.webhook_dispatcher import (
     create_webhook_dispatcher_from_env,
     validate_webhook_url,
 )
+from gco.services.webhook_dispatcher import _has_route as _real_has_route
+
+
+@pytest.fixture(autouse=True)
+def _every_address_has_a_route(monkeypatch):
+    """Judge addresses without the test host's own routing table.
+
+    The dispatcher pins only addresses its pod can route to; a laptop or CI
+    runner without IPv6 would otherwise turn every IPv6 case into a rejection.
+    TestRouteAwareAddressPinning asserts the real check.
+    """
+    monkeypatch.setattr("gco.services.webhook_dispatcher._has_route", lambda _a, _p: True)
 
 
 def _stream_via_post(client):
@@ -2392,3 +2404,92 @@ class TestWebhookUrlValidationEdgeCases:
             is_valid, error = validate_webhook_url("https://public-v6.example/hook")
         assert is_valid is True
         assert error is None
+
+
+class TestRouteAwareAddressPinning:
+    """An IPv4 cluster pins only the addresses it can route to.
+
+    Each delivery attempt is pinned to one resolved address, in turn. A host
+    with AAAA records used to cost an IPv4 pod one failed attempt per IPv6
+    address, so a host with three of them and one A record exhausted the
+    default three attempts without a delivery.
+    """
+
+    _V4 = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+    _V6 = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1::248", 443, 0, 0))
+    _V6_B = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1::249", 443, 0, 0))
+
+    @staticmethod
+    def _ipv4_only(address, _port):
+        return ":" not in address
+
+    def _resolve(self, monkeypatch, records, has_route):
+        from gco.services import webhook_dispatcher as webhooks
+
+        monkeypatch.setattr(webhooks, "_has_route", has_route)
+        with patch.object(webhooks.socket, "getaddrinfo", return_value=records):
+            return webhooks._resolve_webhook_target("https://hooks.example/notify")
+
+    def test_an_ipv4_pod_pins_only_the_ipv4_address(self, monkeypatch):
+        target, error = self._resolve(
+            monkeypatch, [self._V6, self._V4, self._V6_B], self._ipv4_only
+        )
+        assert error is None
+        assert target.addresses == ("93.184.216.34",)
+        assert target.pinned_url(1) == target.pinned_url(2) == "https://93.184.216.34:443/notify"
+
+    def test_a_dual_stack_pod_keeps_both_families(self, monkeypatch):
+        target, error = self._resolve(monkeypatch, [self._V6, self._V4], lambda _a, _p: True)
+        assert error is None
+        assert target.addresses == ("2606:2800:220:1::248", "93.184.216.34")
+        assert target.pinned_url(1) == "https://[2606:2800:220:1::248]:443/notify"
+
+    def test_an_ipv6_only_host_is_refused_with_the_reason(self, monkeypatch):
+        target, error = self._resolve(monkeypatch, [self._V6, self._V6_B], self._ipv4_only)
+        assert target is None
+        assert "No address hooks.example resolves to is reachable from this cluster" in error
+        assert "2606:2800:220:1::248, 2606:2800:220:1::249" in error
+        assert "cannot reach a host that publishes only IPv6 addresses" in error
+
+    def test_a_host_with_no_routable_address_of_either_family_says_no_route(self, monkeypatch):
+        target, error = self._resolve(monkeypatch, [self._V4, self._V6], lambda _a, _p: False)
+        assert target is None
+        assert "(resolved: 2606:2800:220:1::248, 93.184.216.34)" in error
+        assert "the cluster has no route to any of them" in error
+        assert "only IPv6" not in error
+
+    def test_an_unroutable_address_never_passes_the_ssrf_check_first(self, monkeypatch):
+        """Blocked addresses are refused before any route question is asked."""
+        asked = []
+        loopback = (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 443, 0, 0))
+        target, error = self._resolve(
+            monkeypatch, [self._V4, loopback], lambda a, p: asked.append(a) or True
+        )
+        assert target is None
+        assert "is blocked" in error
+        assert asked == []
+
+    @pytest.mark.parametrize(
+        ("address", "family"),
+        [("93.184.216.34", socket.AF_INET), ("2606:2800:220:1::248", socket.AF_INET6)],
+    )
+    def test_the_route_check_connects_a_udp_socket_of_the_addresss_family(self, address, family):
+        from gco.services import webhook_dispatcher as webhooks
+
+        probe = MagicMock()
+        with patch.object(webhooks.socket, "socket") as make_socket:
+            make_socket.return_value.__enter__.return_value = probe
+            assert _real_has_route(address, 443) is True
+        make_socket.assert_called_once_with(family, socket.SOCK_DGRAM)
+        probe.connect.assert_called_once_with((address, 443))
+        probe.send.assert_not_called()
+        probe.sendto.assert_not_called()
+
+    def test_no_route_reads_as_false(self):
+        from gco.services import webhook_dispatcher as webhooks
+
+        with patch.object(webhooks.socket, "socket") as make_socket:
+            make_socket.return_value.__enter__.return_value.connect.side_effect = OSError(
+                101, "Network is unreachable"
+            )
+            assert _real_has_route("2606:2800:220:1::248", 443) is False

@@ -3610,6 +3610,17 @@ class TestQueueingCustomObjectMapConsistency:
         pruned = {(api_version, kind, name) for api_version, kind, _ns, name in inventory}
         assert pruned == expected
 
+    def test_regional_persistent_prune_inventory_matches_the_gated_manifest(
+        self, handler_module
+    ) -> None:
+        """Turning the persistent bucket off deletes exactly the ConfigMap it shipped."""
+        shipped = self._identities("27-storage-regional-persistent-bucket.yaml")
+        assert shipped == {("v1", "ConfigMap", "gco-jobs", "gco-regional-persistent-bucket")}
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[
+            ("{{REGIONAL_PERSISTENT_BUCKET}}", False)
+        ]
+        assert set(inventory) == shipped
+
     @staticmethod
     def _identities(*filenames: str) -> set[tuple[str, str, str | None, str]]:
         manifests_dir = (

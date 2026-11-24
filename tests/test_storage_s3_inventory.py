@@ -1,6 +1,6 @@
 """`gco storage s3-inventory` — the full S3 bucket inventory.
 
-``storage list`` deliberately reports only the four buckets addressable by
+``storage list`` deliberately reports only the buckets addressable by
 ``storage sync``. ``storage s3-inventory`` answers the broader operator question:
 what buckets does this deployment create, which can my job pods write to, how do
 pods discover them, and what does teardown do to them?
@@ -46,6 +46,10 @@ _SSM_VALUES = {
     "/gco/regional-shared-bucket/arn": (
         "arn:aws:s3:::gco-us-east-1-regionalsharedbucket3ff19783-a1b2c3d4e5f6"
     ),
+    "/gco/regional-persistent-bucket/name": "gco-us-east-1-persistent-persistentbucket-k2j3h4g5",
+    "/gco/regional-persistent-bucket/arn": (
+        "arn:aws:s3:::gco-us-east-1-persistent-persistentbucket-k2j3h4g5"
+    ),
     "/gco/model-bucket-name": "gco-global-modelweightsbucket1891ed1b-svazihoxdslb",
     "/gco/cost-report-bucket/name": "gco-monitoring-costreportbucketea8cce7a-9f8e7d6c5b4a",
     "/gco/cost-report-bucket/arn": (
@@ -65,6 +69,10 @@ _STACK_SWEEPS = {
     ("gco-us-east-1", "us-east-1"): {
         "RegionalSharedBucket": "gco-us-east-1-regionalsharedbucket3ff19783-a1b2c3d4e5f6",
         "RegionalSharedAccessLogsBucket": "gco-us-east-1-regionalshared-ghi789",
+    },
+    ("gco-us-east-1-persistent", "us-east-1"): {
+        "PersistentBucket": "gco-us-east-1-persistent-persistentbucket-k2j3h4g5",
+        "PersistentAccessLogsBucket": "gco-us-east-1-persistent-persistentaccesslogs-mno345",
     },
     ("gco-monitoring", "us-east-2"): {
         "CostReportBucket": "gco-monitoring-costreportbucketea8cce7a-9f8e7d6c5b4a",
@@ -137,7 +145,7 @@ class TestInventoryCompleteness:
         summary = inventory["summary"]
         assert summary["total"] == len(inventory["buckets"])
         assert summary["deployed"] + summary["not_deployed"] == summary["total"]
-        assert summary["deployed"] == 8
+        assert summary["deployed"] == 10
 
     def test_one_entry_per_region_for_regional_buckets(self) -> None:
         regions = ["us-east-1", "us-west-2"]
@@ -161,6 +169,7 @@ class TestPodAccessAnswer:
         inventory = _inventory()
         assert inventory["summary"]["pod_writable"] == [
             _SSM_VALUES["/gco/cluster-shared-bucket/name"],
+            _SSM_VALUES["/gco/regional-persistent-bucket/name"],
             _SSM_VALUES["/gco/regional-shared-bucket/name"],
         ]
 
@@ -227,6 +236,46 @@ class TestPhysicalIdentityResolution:
         assert entry["region"] == "us-east-1"
         assert entry["owning_stack"] == "gco-us-east-1"
         assert entry["sync_alias"] == "regional-shared:us-east-1"
+
+    def test_persistent_entries_resolve_against_their_own_stack(self) -> None:
+        """The persistent bucket lives in <project>-<region>-persistent, not the regional stack."""
+        inventory = _inventory()
+        entries = {item["id"]: item for item in inventory["buckets"]}
+        primary = entries["regional-persistent:us-east-1"]
+        logs = entries["regional-persistent-access-logs:us-east-1"]
+
+        assert primary["owning_stack"] == "gco-us-east-1-persistent"
+        assert primary["bucket"] == _SSM_VALUES["/gco/regional-persistent-bucket/name"]
+        assert primary["arn"] == _SSM_VALUES["/gco/regional-persistent-bucket/arn"]
+        assert primary["sync_alias"] == "regional-persistent:us-east-1"
+        assert primary["pod_access"] == "read-write"
+        assert primary["removal_policy"] == "destroy"
+        assert logs["owning_stack"] == "gco-us-east-1-persistent"
+        assert logs["bucket"] == "gco-us-east-1-persistent-persistentaccesslogs-mno345"
+
+    def test_undeployed_persistent_stack_names_its_toggle(self) -> None:
+        values = {
+            key: value
+            for key, value in _SSM_VALUES.items()
+            if not key.startswith("/gco/regional-persistent-bucket/")
+        }
+        sweeps = {
+            key: value
+            for key, value in _STACK_SWEEPS.items()
+            if key[0] != "gco-us-east-1-persistent"
+        }
+        with patch.dict(_STACK_SWEEPS, sweeps, clear=True):
+            inventory = _inventory(ssm_values=values)
+        entries = {item["id"]: item for item in inventory["buckets"]}
+        for entry_id in (
+            "regional-persistent:us-east-1",
+            "regional-persistent-access-logs:us-east-1",
+        ):
+            assert entries[entry_id]["status"] == "not-deployed"
+            assert entries[entry_id]["detail"] == (
+                "gco-us-east-1-persistent is not deployed "
+                "(opt-in: regional_persistent_bucket.enabled)"
+            )
 
 
 class TestStackSweepBehavior:
@@ -330,7 +379,13 @@ class TestDescriptorTableIntegrity:
     def test_enumerations_are_known_values(self) -> None:
         for item in BUCKET_DESCRIPTORS:
             assert item.role in {"primary", "access-logs"}
-            assert item.scope in {"global", "regional", "monitoring", "analytics"}
+            assert item.scope in {
+                "global",
+                "regional",
+                "regional-persistent",
+                "monitoring",
+                "analytics",
+            }
             assert item.pod_access in {"read-write", "read-only", "none"}
             assert item.removal_policy in {"destroy", "retain"}
 

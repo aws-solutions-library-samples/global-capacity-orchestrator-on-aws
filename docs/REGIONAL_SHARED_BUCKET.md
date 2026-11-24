@@ -373,9 +373,13 @@ survive `gco stacks destroy gco-<region>`:
 - all three resources become unmanaged by CloudFormation — they keep
   billing and must be deleted manually when genuinely done
   (`aws s3 rb --force`, `aws kms schedule-key-deletion`);
-- a subsequent redeploy of the same region **fails on the bucket-name
-  collision** until the retained bucket is deleted or the deployment uses
-  a different project name — plan for one or the other before destroying.
+- a subsequent redeploy of the same region creates a **new, empty bucket**
+  under a new CloudFormation-generated name; the SSM parameters and the
+  ConfigMap then point at it, and the retained bucket stays under its old
+  name until you copy its objects across and delete it. To keep data across
+  `gco upgrade` without that step, use the Region's
+  [persistent bucket](REGIONAL_PERSISTENT_BUCKET.md), which the upgrade
+  leaves in place.
 
 Apply a change with `gco stacks deploy gco-<region> -y` per region. An
 invalid value fails synthesis; `gco storage s3-inventory` reports the

@@ -9,8 +9,8 @@ patch/minor/major bumps with correct field resets, dry-run mode that prints
 but doesn't write, invalid-input error paths, and the main() CLI dispatcher
 including case-insensitive bump arguments. Uses a tmp_path-backed fixture
 that patches the module's ``PROJECT_ROOT``, ``VERSION_FILE``, ``VERSION_PY``,
-``CLI_INIT_FILE``, ``MCP_README_FILE``, and ``ROOT_README_FILE`` constants so
-the real repo files are never touched.
+``CLI_INIT_FILE``, ``MCP_README_FILE``, ``ANALYTICS_DOC_FILE``, and
+``ROOT_README_FILE`` constants so the real repo files are never touched.
 """
 
 import base64
@@ -54,6 +54,14 @@ def version_files(tmp_path):
         encoding="utf-8",
     )
 
+    analytics_doc = tmp_path / "docs" / "ANALYTICS.md"
+    analytics_doc.parent.mkdir(parents=True)
+    analytics_doc.write_text(
+        "GCO_REF=v1.2.3   # the GCO release your deployment runs\n"
+        'uv tool install "git+https://example.invalid/gco.git@${GCO_REF}"\n'
+        "added in v3.2.0\n",
+        encoding="utf-8",
+    )
     root_readme = tmp_path / "README.md"
     root_readme.write_text(
         "# Fake project\n\nintro prose\n\n"
@@ -68,6 +76,7 @@ def version_files(tmp_path):
         patch.object(bump_version, "VERSION_PY", version_py),
         patch.object(bump_version, "CLI_INIT_FILE", cli_init),
         patch.object(bump_version, "MCP_README_FILE", mcp_readme),
+        patch.object(bump_version, "ANALYTICS_DOC_FILE", analytics_doc),
         patch.object(bump_version, "ROOT_README_FILE", root_readme),
     ):
         yield tmp_path, version_file, version_py, cli_init
@@ -202,6 +211,28 @@ class TestUpdateMcpReadme:
         assert readme.read_text(encoding="utf-8") == original
 
 
+class TestUpdateAnalyticsDoc:
+    def test_updates_the_studio_install_pin_only(self, version_files):
+        root, _, _, _ = version_files
+        doc = root / "docs" / "ANALYTICS.md"
+
+        bump_version.update_analytics_doc_release_ref("2.0.0")
+
+        content = doc.read_text(encoding="utf-8")
+        assert content.startswith("GCO_REF=v2.0.0   # the GCO release your deployment runs\n")
+        assert "@${GCO_REF}" in content
+        assert "added in v3.2.0" in content
+
+    def test_dry_run_no_change(self, version_files):
+        root, _, _, _ = version_files
+        doc = root / "docs" / "ANALYTICS.md"
+        original = doc.read_text(encoding="utf-8")
+
+        bump_version.update_analytics_doc_release_ref("2.0.0", dry_run=True)
+
+        assert doc.read_text(encoding="utf-8") == original
+
+
 class TestRenderMcpInstallTable:
     def test_embeds_release_ref_in_every_deeplink(self):
         table = bump_version.render_mcp_install_table("9.9.9")
@@ -268,21 +299,26 @@ class TestSetVersion:
         assert ".git@v5.0.0" in mcp_readme
         root_readme = (root / "README.md").read_text(encoding="utf-8")
         assert bump_version.render_mcp_install_table("5.0.0") in root_readme
+        analytics_doc = (root / "docs" / "ANALYTICS.md").read_text(encoding="utf-8")
+        assert "GCO_REF=v5.0.0" in analytics_doc
 
     def test_dry_run_updates_nothing(self, version_files):
         root, version_file, version_py, cli_init = version_files
         mcp_readme = root / "gco_mcp" / "README.md"
+        analytics_doc = root / "docs" / "ANALYTICS.md"
         root_readme = root / "README.md"
         orig_version = version_file.read_text()
         orig_py = version_py.read_text()
         orig_cli = cli_init.read_text()
         orig_mcp = mcp_readme.read_text(encoding="utf-8")
+        orig_analytics = analytics_doc.read_text(encoding="utf-8")
         orig_root = root_readme.read_text(encoding="utf-8")
         bump_version.set_version("5.0.0", dry_run=True)
         assert version_file.read_text() == orig_version
         assert version_py.read_text() == orig_py
         assert cli_init.read_text() == orig_cli
         assert mcp_readme.read_text(encoding="utf-8") == orig_mcp
+        assert analytics_doc.read_text(encoding="utf-8") == orig_analytics
         assert root_readme.read_text(encoding="utf-8") == orig_root
 
 
@@ -296,6 +332,7 @@ class TestMain:
         assert "gco/_version.py" in out
         assert "cli/__init__.py" in out
         assert "README.md  (MCP install buttons)" in out
+        assert "docs/ANALYTICS.md  (Studio CLI install ref)" in out
 
     def test_patch_bump(self, version_files, capsys):
         _, version_file, version_py, cli_init = version_files

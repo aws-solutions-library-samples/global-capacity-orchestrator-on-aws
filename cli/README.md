@@ -20,7 +20,7 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `jobs.py` | Job submission, listing, logs, and lifecycle management |
 | `inference.py` | Inference endpoint deployment, scaling, canary, and invocation |
 | `models.py` | Model weight upload, listing, and [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) URI management |
-| `storage.py` | Human-friendly GCO S3 bucket discovery and incremental download/upload sync |
+| `storage.py` | Human-friendly GCO S3 bucket discovery (including each Region's persistent bucket) and incremental download/upload sync |
 | `stacks.py` | [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stack deployment, destruction, and status |
 | `ecr_replication.py` | Guard around the global stack's ECR replication configuration: refuses deploys and destroys that would delete or overwrite replication rules GCO did not create, and removes only GCO's rule after the global stack is destroyed |
 | `status.py` | Fleet-wide status document assembly: independent section gathers, findings, degradation model |
@@ -48,6 +48,7 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `analytics_user_mgmt.py` | Cognito user management and Studio login for the analytics environment |
 | `monitoring_user_mgmt.py` | Grafana user management over the admin HTTP API (`gco monitoring users`) |
 | `_container_runtime.py` | Container runtime detection (Docker, Finch, Podman) shared by image builds and mirroring |
+| `_dual_stack_http.py` | HTTPS requests to the GCO APIs that alternate IPv6 and IPv4 addresses and bound each connect attempt, so a network that drops IPv6 does not stall the CLI |
 | `_image_mirror.py` | Shared core that mirrors third-party images into the project ECR (`gco images mirror`, deploy-time auto-mirror, MCP tools) |
 | `_image_reference.py` | Linear-time validation of immutable container image references |
 | `_image_uri.py` | ECR image URI helpers backed by local AWS partition metadata |

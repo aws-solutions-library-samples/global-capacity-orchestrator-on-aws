@@ -2,7 +2,7 @@
 
 The happy-path flows are already covered through the Click-level tests in
 ``tests/test_analytics_cmd.py`` — this module adds targeted tests for the
-pure helpers (SRP math, timestamp formatting, CloudFormation output lookups)
+pure helpers (password generation, the Studio username rule, CloudFormation output lookups)
 and for the error branches of the AWS-facing functions.
 """
 
@@ -107,12 +107,12 @@ class TestDiscoverFunctions:
 
 
 # ---------------------------------------------------------------------------
-# srp_authenticate with pycognito
+# srp_authenticate (AdminInitiateAuth with ADMIN_USER_PASSWORD_AUTH)
 # ---------------------------------------------------------------------------
 
 
 class TestSRPAuthenticate:
-    """Exercise srp_authenticate which delegates to pycognito."""
+    """Exercise srp_authenticate, which calls cognito-idp AdminInitiateAuth."""
 
     def test_srp_authenticate_returns_tokens_on_success(self):
         from unittest.mock import MagicMock, patch
@@ -726,3 +726,83 @@ class TestScanOrphanResources:
         clients = {"cloudformation": _FakeCloudFormation(), "efs": efs, "cognito-idp": cognito}
         with patch("boto3.client", side_effect=lambda service, region_name=None: clients[service]):
             assert aum.scan_orphan_analytics_resources("us-east-2", "gco") == []
+
+
+class TestStudioUsernames:
+    """The checks ``gco analytics users add`` makes before it creates a user."""
+
+    @pytest.mark.parametrize("username", ["alice", "Bob-2", "a--b", "x" * 63])
+    def test_names_sagemaker_accepts(self, username):
+        assert aum.is_studio_username(username)
+
+    @pytest.mark.parametrize(
+        "username", ["alice.smith", "alice_smith", "-a", "a-", "a b", "alice\n", "a" * 64]
+    )
+    def test_names_sagemaker_rejects(self, username):
+        assert not aum.is_studio_username(username)
+
+    def test_the_rule_matches_the_presigned_url_lambda(self):
+        """The CLI's copy of the rule and the Lambda's must not drift apart.
+
+        The Lambda ships on its own (it cannot import ``cli``), so each holds
+        the pattern; a name one accepts and the other refuses would either
+        be created and then fail at login, or be refused for no reason.
+        """
+        from tests._lambda_imports import load_lambda_module
+
+        with patch("boto3.client", return_value=MagicMock()):
+            handler = load_lambda_module("analytics-presigned-url")
+
+        assert handler.STUDIO_USERNAME_PATTERN == aum.STUDIO_USERNAME_PATTERN
+        assert handler.STUDIO_USERNAME_MAX_LENGTH == aum.STUDIO_USERNAME_MAX_LENGTH
+
+    @mock_aws
+    def test_find_user_ignoring_case_reads_every_page(self):
+        cognito = boto3.client("cognito-idp", region_name="us-east-2")
+        pool_id = cognito.create_user_pool(PoolName="gco-studio")["UserPool"]["Id"]
+        # ListUsers returns at most 60 users a page.
+        for index in range(61):
+            cognito.admin_create_user(
+                UserPoolId=pool_id, Username=f"user-{index:02d}", MessageAction="SUPPRESS"
+            )
+        cognito.admin_create_user(UserPoolId=pool_id, Username="Alice", MessageAction="SUPPRESS")
+
+        assert aum.find_user_ignoring_case(pool_id, "us-east-2", "alice") == "Alice"
+        assert aum.find_user_ignoring_case(pool_id, "us-east-2", "USER-60") == "user-60"
+        assert aum.find_user_ignoring_case(pool_id, "us-east-2", "bob") is None
+
+
+class TestStudioLoginErrorToken:
+    @staticmethod
+    def _error(body: bytes | None):
+        import io
+        import urllib.error
+
+        fp = None if body is None else io.BytesIO(body)
+        return urllib.error.HTTPError("https://api.example/studio/login", 403, "x", None, fp)  # type: ignore[arg-type]
+
+    def test_reads_the_lambda_token(self):
+        assert aum.studio_login_error_token(self._error(b'{"error": "UnsupportedUsername"}')) == (
+            "UnsupportedUsername"
+        )
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            None,
+            b"",
+            b"not json",
+            b"\xff\xfe\x00",
+            b'["error"]',
+            b'{"message": "Forbidden"}',
+            b'{"error": 7}',
+        ],
+        ids=["no-body", "empty", "not-json", "not-utf8", "list", "gateway-message", "non-string"],
+    )
+    def test_anything_else_has_no_token(self, body):
+        assert aum.studio_login_error_token(self._error(body)) is None
+
+    def test_an_unreadable_body_has_no_token(self):
+        error = self._error(b"{}")
+        with patch.object(error, "read", side_effect=OSError("connection reset")):
+            assert aum.studio_login_error_token(error) is None

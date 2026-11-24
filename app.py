@@ -36,11 +36,15 @@ from gco.stacks.global_stack import GCOGlobalStack
 from gco.stacks.monitoring_stack import GCOMonitoringStack
 from gco.stacks.nag_suppressions import nag_validation_plugins
 from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
+from gco.stacks.regional_persistent_stack import (
+    GCORegionalPersistentStack,
+    regional_persistent_stack_name,
+)
 from gco.stacks.regional_stack import GCORegionalStack
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T06:05:34Z
-# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
+# Generated at (UTC): 2026-11-23T02:28:23Z
+# Generated from Git commit: 1bf0ef9a749386c6fa50ac7edddbe6eb1b7a9fe0
 # Flowchart(s) generated from this file:
 #   * ``main`` -> ``diagrams/code_diagrams/app.main.html``
 #     (PNG: ``diagrams/code_diagrams/app.main.png``)
@@ -83,6 +87,8 @@ def main() -> None:
        (direct caller access is optional in `aws` and required elsewhere)
     5. Monitoring stack - depends on all regional stacks
     6. Optional analytics stack - feeds Studio routes into the API Gateway stack
+    7. Optional per-Region persistent buckets - control-plane stacks the
+       regional stacks depend on, which gco upgrade leaves standing
     """
     app = cdk.App()
 
@@ -166,6 +172,7 @@ def main() -> None:
     api_gateway_stack.add_stack_dependency(global_stack)
 
     # Create regional stacks for each configured region
+    persistent_bucket_enabled = config.get_regional_persistent_bucket_config()["enabled"]
     regional_stacks = []
     for region in regional_regions:
         regional_stack = GCORegionalStack(
@@ -182,6 +189,20 @@ def main() -> None:
         regional_stack.add_stack_dependency(global_stack)
         regional_stack.add_stack_dependency(api_gateway_stack)
         regional_stacks.append(regional_stack)
+
+        # The Region's persistent bucket is its own control-plane stack, so a
+        # gco upgrade, which destroys the regional stack, leaves it standing.
+        # The regional stack reads its identity from SSM at deploy time.
+        if persistent_bucket_enabled:
+            persistent_stack = GCORegionalPersistentStack(
+                app,
+                regional_persistent_stack_name(project_name, region),
+                config=config,
+                region=region,
+                env=cdk.Environment(account=account, region=region),
+                description=f"Persistent bucket for {region} that survives gco upgrade",
+            )
+            regional_stack.add_stack_dependency(persistent_stack)
 
         # Every region gets an IAM-authenticated API bridge so the centralized
         # aggregator can reach the private ALB through a VPC-attached Lambda.

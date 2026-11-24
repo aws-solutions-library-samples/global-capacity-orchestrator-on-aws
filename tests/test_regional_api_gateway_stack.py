@@ -160,6 +160,33 @@ class TestRegionalApiGatewayStack:
         stack = cdk.Stack(app, "VpcStack", env=cdk.Environment(region="us-east-1"))
         return ec2.Vpc(stack, "TestVpc", max_azs=2)
 
+    @pytest.mark.parametrize("ip_address_type", ["ipv4", "dualstack"])
+    def test_bridge_endpoint_carries_the_configured_ip_address_type(
+        self, app, mock_config, vpc, ip_address_type
+    ):
+        """api_gateway.ip_address_type reaches every regional bridge, not only the global API."""
+        from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
+
+        mock_config.get_api_gateway_config.return_value = {
+            **mock_config.get_api_gateway_config.return_value,
+            "ip_address_type": ip_address_type,
+        }
+        stack = GCORegionalApiGatewayStack(
+            app,
+            "TestRegionalIpAddressType",
+            config=mock_config,
+            region="us-east-1",
+            vpc=vpc,
+            alb_dns_name="internal-test-alb.elb.amazonaws.com",
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
+            aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
+            env=cdk.Environment(region="us-east-1"),
+        )
+        assertions.Template.from_stack(stack).has_resource_properties(
+            "AWS::ApiGateway::RestApi",
+            {"EndpointConfiguration": {"Types": ["REGIONAL"], "IpAddressType": ip_address_type}},
+        )
+
     def test_regional_api_gateway_stack_creation(self, app, mock_config, vpc):
         """Test that the regional API gateway stack can be created."""
         from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
@@ -177,13 +204,12 @@ class TestRegionalApiGatewayStack:
         )
 
         template = assertions.Template.from_stack(stack)
-
         # Verify API Gateway is created
         template.has_resource_properties(
             "AWS::ApiGateway::RestApi",
             {
                 "Name": "gco-regional-api-us-east-1",
-                "EndpointConfiguration": {"Types": ["REGIONAL"]},
+                "EndpointConfiguration": {"Types": ["REGIONAL"], "IpAddressType": "dualstack"},
             },
         )
         template.has_resource_properties(
@@ -995,7 +1021,7 @@ class TestRegionalApiClientIntegration:
         with (
             patch.object(client, "get_regional_api_endpoint", return_value=regional_endpoint),
             patch.object(client, "get_api_endpoint") as mock_global,
-            patch("cli.aws_client.requests") as mock_requests,
+            patch("cli.aws_client._http_request") as mock_request,
             patch.object(client, "_session") as mock_session,
         ):
             mock_creds = MagicMock()
@@ -1006,7 +1032,7 @@ class TestRegionalApiClientIntegration:
 
             mock_response = MagicMock()
             mock_response.ok = True
-            mock_requests.request.return_value = mock_response
+            mock_request.return_value = mock_response
 
             client.make_authenticated_request(
                 method="GET",
@@ -1018,5 +1044,5 @@ class TestRegionalApiClientIntegration:
             mock_global.assert_not_called()
 
             # Should use regional endpoint URL
-            call_args = mock_requests.request.call_args
+            call_args = mock_request.call_args
             assert "regional.execute-api" in call_args.kwargs["url"]

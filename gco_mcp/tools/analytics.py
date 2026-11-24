@@ -33,7 +33,8 @@ async def analytics_status() -> str:
 async def analytics_login_url(username: str, password: str | None = None) -> str:
     """`gco analytics studio login` — get a SageMaker Studio presigned login URL.
 
-    SRP-authenticates the user against Cognito and prints the presigned Studio
+    Signs the user in to Cognito (AdminInitiateAuth, with this server's AWS
+    credentials) and prints the presigned Studio
     URL. The password is read from ``$GCO_STUDIO_PASSWORD`` when not passed here.
     A password passed here reaches the CLI through that variable in the
     child's environment, never on its command line. With neither, the tool
@@ -97,7 +98,11 @@ async def analytics_user_add(username: str, email: str) -> str:
     """`gco analytics users add` — create a Cognito user in the analytics pool.
 
     Args:
-        username: Cognito username for the new user.
+        username: Cognito username for the new user. It also names the
+            user's SageMaker Studio profile, so it must be letters, digits
+            and hyphens, starting and ending with a letter or digit, 63
+            characters at most, and must not differ only in case from an
+            existing user's name.
         email: Email address for the new user.
     """
     return await asyncio.to_thread(

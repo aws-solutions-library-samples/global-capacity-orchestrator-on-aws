@@ -31,13 +31,13 @@ bucket's reference.
 - [(d) Logging into Studio](#d-logging-into-studio)
 - [(e) Optional user-driven install of GCO CLI and MCP server](#e-optional-user-driven-install-of-gco-cli-and-mcp-server)
 - [(f) Using the GCO CLI once installed inside JupyterLab](#f-using-the-gco-cli-once-installed-inside-jupyterlab)
-- [(g) Submitting HyperPod jobs when the sub-toggle is enabled](#g-submitting-hyperpod-jobs-when-the-sub-toggle-is-enabled)
+- [(g) Submitting HyperPod jobs and SageMaker training jobs from Studio](#g-submitting-hyperpod-jobs-and-sagemaker-training-jobs-from-studio)
 - [(g2) Launching SageMaker Canvas when the sub-toggle is enabled](#g2-launching-sagemaker-canvas-when-the-sub-toggle-is-enabled)
 - [(g3) Tracking experiments with managed MLflow](#g3-tracking-experiments-with-managed-mlflow)
 - [(h) Opening the environment in Kiro](#h-opening-the-environment-in-kiro)
 - [(i) Running the example cluster jobs and reading their output from a notebook](#i-running-the-example-cluster-jobs-and-reading-their-output-from-a-notebook)
 - [(j) Two-bucket access model](#j-two-bucket-access-model)
-- [(k) EFS persistent-home-folder behavior](#k-efs-persistent-home-folder-behavior)
+- [(k) Studio_EFS and the Studio home directory](#k-studio_efs-and-the-studio-home-directory)
 - [(l) The `gco-cluster-shared-bucket` ConfigMap schema](#l-the-gco-cluster-shared-bucket-configmap-schema)
 - [(m) Cross-region data-transfer caveat](#m-cross-region-data-transfer-caveat)
 
@@ -63,8 +63,13 @@ When enabled, these resources drive cost:
 - **Cognito** — The Lite tier includes 50,000 monthly active users (MAUs) for free (no automatic expiry). Advanced security features on the Essentials and Plus tiers are additional; see the [Amazon Cognito pricing page](https://aws.amazon.com/cognito/pricing/) for current rates. The new tier names (Lite / Essentials / Plus) landed in November 2024, so older blog posts may reference the legacy free-tier structure.
 - **Lambda** — The presigned-URL Lambda is invoked once per Studio
   login. Effectively free at human-scale usage.
-- **Studio_EFS** — Per-user home folders on EFS. Charged per GB-month
-  of storage plus per-GB for IA-tier transitions.
+- **Studio_EFS** — The EFS file system Studio spaces can attach, one
+  directory per user. Charged per GB-month of storage plus per-GB for
+  IA-tier transitions.
+- **NAT gateway** — The analytics VPC's one NAT gateway, through which
+  notebooks reach the internet (pip, git), is charged per hour it
+  exists and per GB it processes, whether or not anyone is using Studio.
+  See [Amazon VPC pricing](https://aws.amazon.com/vpc/pricing/).
 - **VPC endpoints** — The analytics VPC creates interface endpoints
   for `SAGEMAKER_API`, `SAGEMAKER_RUNTIME`, `SAGEMAKER_STUDIO`,
   `SAGEMAKER_NOTEBOOK`, `STS`, `CLOUDWATCH_LOGS`, `ECR`, `ECR_DOCKER`,
@@ -82,7 +87,7 @@ gco costs regions --days 7
 Disable the feature at any time with `gco analytics disable` followed
 by `gco stacks destroy gco-analytics`. The analytics resources are all
 `RemovalPolicy.DESTROY` so destroy cleanly removes them without
-orphaned retained resources (see section (l) for the opt-in retain
+orphaned retained resources (see [section (k)](#k-studio_efs-and-the-studio-home-directory) for the opt-in retain
 override on `Studio_EFS`).
 
 A cleanup Lambda (`lambda/analytics-cleanup/`) runs automatically as a
@@ -108,10 +113,11 @@ into `/home/sagemaker-user` using `pip install --user`:
 pip install --user pandas pyarrow duckdb
 ```
 
-Because `/home/sagemaker-user` is mounted from `Studio_EFS`, packages
-installed this way **persist across JupyterLab app restarts and user
-sessions**. No container image rebuild is required, and no operator
-intervention is needed to support new libraries.
+`/home/sagemaker-user` is on the space's own storage volume, not on
+`Studio_EFS` (see [section (k)](#k-studio_efs-and-the-studio-home-directory)), so packages installed this way **persist
+across restarts of that space**; a new space starts without them. No
+container image rebuild is required, and no operator intervention is
+needed to support new libraries.
 
 System-level tooling (for example, a binary published via `apt`) is
 out of scope for this feature — use a shell-out to `subprocess` or a
@@ -160,19 +166,19 @@ deployed, the following resources appear in the API-gateway region
      the EMR Serverless app and executes cells against it.
   3. **Native `boto3`** — for scripted pipelines, call
      `boto3.client("emr-serverless").start_job_run(...)` with the
-     application id (published as a CfnOutput on `gco-analytics`)
+     application id (`list_applications()` returns it; the
+     application is named `<project_name>-spark-<region>`)
      and `executionRoleArn=` set to the role the Studio kernel is
      already assuming. Job inputs can come from either
      `Cluster_Shared_Bucket` (cross-region read via the SageMaker
      role's grant) or `Studio_Only_Bucket`, and outputs can write
      back to either — no extra per-user IAM configuration needed.
 
-  Because the application is idle between jobs you pay zero EMR
-  Serverless cost when no jobs are running; charges start at the
-  first `StartJobRun` and stop when the pre-initialized capacity
-  times out. See the [EMR Serverless pricing
-  page](https://aws.amazon.com/emr/serverless/pricing/) for the
-  current per-vCPU and per-GB rates.
+  The application configures no pre-initialized capacity, so billing
+  is per job run: the vCPU, memory and storage the run's workers use
+  while they run. Nothing is charged while no job runs. See the
+  [EMR Serverless pricing page](https://aws.amazon.com/emr/serverless/pricing/)
+  for the current per-vCPU and per-GB rates.
 
 - **SageMaker-managed [MLflow](https://mlflow.org/docs/latest/index.html) + MLflow Apps** — the SageMaker
   execution role is attached to the AWS-managed
@@ -200,15 +206,18 @@ deployed, the following resources appear in the API-gateway region
   for the end-to-end notebook workflow.
 
 - **Cognito user pool** with a strong password policy (12+ chars,
-  digits/symbols/uppercase required), SRP auth flow, and a hosted
+  digits/symbols/uppercase required), an app client that allows the
+  `ADMIN_USER_PASSWORD_AUTH` flow `gco analytics studio login` uses
+  (and SRP), and a hosted
   `UserPoolDomain` at prefix `gco-studio-<account>`.
 - **Analytics VPC** — private subnets for Studio, EMR Serverless and the
   endpoints, and public subnets that hold only the NAT gateway notebooks
   reach the internet through (pip, git); interface endpoints for the
   SageMaker, STS, CloudWatch Logs, ECR, and EFS services and a gateway
   endpoint for S3. It has no VPC flow log (the regional VPCs do).
-- **Studio_EFS** — encrypted EFS file system for per-user home
-  folders, one access point per Studio user profile.
+- **Studio_EFS** — encrypted EFS file system that Studio spaces can
+  attach; each user profile the presigned-URL Lambda creates sees
+  `/home/<username>` on it ([section (k)](#k-studio_efs-and-the-studio-home-directory)).
 - **Studio_Only_Bucket** — KMS-encrypted S3 bucket scoped to the
   SageMaker execution role only. Not accessible from cluster pods.
   Comes with a dedicated access-logs bucket.
@@ -222,12 +231,9 @@ deployed, the following resources appear in the API-gateway region
   job/inference submission, plus the SageMaker-managed MLflow +
   Model Registry API surface (tracking-server lifecycle, MLflow
   experiments/runs/metrics/artifacts/models, and Model Registry
-  read/write). When the `hyperpod` sub-toggle is on, the role
-  additionally gets
-  `sagemaker:CreateTrainingJob|DescribeTrainingJob|StopTrainingJob`
-  and `sagemaker:ClusterInstance*`. When the `canvas` sub-toggle is
+  read/write). When the `canvas` sub-toggle is
   on, the role additionally gets the AWS-managed
-  `AmazonSageMakerCanvasFullAccess` policy (see section (g2)).
+  `AmazonSageMakerCanvasFullAccess` policy (see [section (g2)](#g2-launching-sagemaker-canvas-when-the-sub-toggle-is-enabled)).
 - **Presigned-URL Lambda** — the backend for the `/studio/login`
   API Gateway route. Calls
   `CreatePresignedDomainUrl` and creates per-user profiles on first
@@ -258,17 +264,10 @@ in `cdk.json` and prints the follow-up deploy command — it does not
 deploy automatically. This is deliberate: you review the diff, then
 decide to apply.
 
-With HyperPod:
-
-```bash
-gco analytics enable --hyperpod
-gco stacks deploy gco-analytics
-```
-
-The `--hyperpod` flag additionally sets
-`analytics_environment.hyperpod.enabled=true`, which adds HyperPod
-training-job permissions to the SageMaker execution role. See
-section (g) for what that unlocks.
+`--hyperpod` still sets `analytics_environment.hyperpod.enabled=true`,
+but it is deprecated and changes nothing: the SageMaker execution role
+can already start SageMaker training jobs, and HyperPod work goes through
+GCO. See [section (g)](#g-submitting-hyperpod-jobs-and-sagemaker-training-jobs-from-studio).
 
 With SageMaker Canvas:
 
@@ -282,19 +281,14 @@ The `--canvas` flag additionally sets
 AWS-managed `AmazonSageMakerCanvasFullAccess` policy to the SageMaker
 execution role. The policy is sufficient for Canvas to surface on the
 Studio landing page — SageMaker auto-detects the entitlement when a
-user opens Studio and lights up the Canvas tile. See section (g2)
+user opens Studio and lights up the Canvas tile. See [section (g2)](#g2-launching-sagemaker-canvas-when-the-sub-toggle-is-enabled)
 for the walkthrough.
-
-`--hyperpod` and `--canvas` are independent — pass both to enable
-both sub-toggles at once.
 
 Skip the confirmation prompt with `-y`:
 
 ```bash
 gco analytics enable -y
-gco analytics enable --hyperpod -y
 gco analytics enable --canvas -y
-gco analytics enable --hyperpod --canvas -y
 ```
 
 Run the pre-flight checks before deploying:
@@ -304,19 +298,21 @@ gco analytics doctor
 ```
 
 `doctor` verifies that `gco-global`, `gco-api-gateway`, and every
-regional stack listed in `deployment_regions.regional` are
-`CREATE_COMPLETE`; that the three `/gco/cluster-shared-bucket/*` SSM
+regional stack listed in `deployment_regions.regional` are deployed
+(`CREATE_COMPLETE`, `UPDATE_COMPLETE` or `IMPORT_COMPLETE`); that the
+three `/gco/cluster-shared-bucket/*` SSM
 parameters are present in the global region; and that no orphaned
 analytics resources are left over from a previous retain-policy
 destroy. Exits non-zero on any failure, with a remediation line per
 check.
 
-Deploy takes about 15-20 minutes end-to-end. After the first
-`gco-analytics` deploy, you must redeploy `gco-api-gateway` once so
-the `/studio/*` routes appear on the existing REST API (cold-start
-ordering — the analytics stack is in the same region as the API
-Gateway stack and the `analytics_config` flows in as a constructor
-parameter):
+Deploy takes about 15-20 minutes end-to-end. When it succeeds,
+`gco stacks deploy gco-analytics` redeploys `gco-api-gateway` itself,
+which adds the `/studio/*` routes to the existing REST API (the API
+Gateway stack imports the Cognito pool and the presigned-URL Lambda
+from the analytics stack), and `gco stacks deploy-all` deploys
+`gco-api-gateway` after `gco-analytics` anyway. Only a plain
+`cdk deploy gco-analytics` leaves that step to you:
 
 ```bash
 gco stacks deploy gco-api-gateway
@@ -355,6 +351,14 @@ Create a user:
 ```bash
 gco analytics users add --username alice --email alice@example.com
 ```
+
+The username also names the user's SageMaker Studio user profile, so
+`users add` accepts only names SageMaker accepts there: letters, digits
+and hyphens, starting and ending with a letter or digit, 63 characters
+at most (`alice-smith`, not `alice.smith` or `alice_smith`). It also
+refuses a name that differs only in case from an existing user's:
+Cognito keeps `Alice` and `alice` apart, but SageMaker matches profile
+names without regard to case, so the two would share one profile name.
 
 The command calls `cognito-idp:AdminCreateUser`, prints the
 temporary password exactly once to stdout, and (by default) sends
@@ -396,6 +400,14 @@ Studio user profile; the presigned-URL Lambda creates profiles on
 first login and leaves them in place. If you need to clean up the
 profile side, use `aws sagemaker delete-user-profile` directly.
 
+Each profile the Lambda creates carries a `gco:analytics:cognito-sub`
+tag holding the Cognito `sub` (the user's immutable ID) of the user it
+was created for, and the Lambda serves a profile only to that user. A
+new user given a removed user's name therefore gets an HTTP 403 at
+login until the old profile is deleted, instead of the old user's
+profile. A profile without the tag (created before the Lambda tagged
+profiles, or outside it) is tagged for the first user who logs in to it.
+
 Error path — when `gco-analytics` is not deployed:
 
 ```bash
@@ -417,10 +429,15 @@ gco analytics studio login --username alice
 
 The command prompts for the password (use `--password <p>` or set
 `$GCO_STUDIO_PASSWORD` to pass it non-interactively — for example in
-CI), performs an SRP authentication against the Cognito user pool
-using `USER_SRP_AUTH`, retrieves the Cognito `IdToken`, and exchanges
-it for a SageMaker Studio presigned URL via
+CI), signs in to the Cognito user pool with `AdminInitiateAuth`
+(`AuthFlow=ADMIN_USER_PASSWORD_AUTH`), retrieves the Cognito `IdToken`,
+and exchanges it for a SageMaker Studio presigned URL via
 `GET {API_Gateway_URL}/prod/studio/login`.
+
+`AdminInitiateAuth` is an administrator API, so the command needs AWS
+credentials as well as the Cognito password: `cognito-idp:AdminInitiateAuth`
+on the pool, and `cloudformation:DescribeStacks` on `gco-analytics` and
+`gco-api-gateway`, whose outputs name the pool, its app client and the API.
 
 The URL is printed on its own line on stdout so it's pipe-friendly.
 Add `--open` to launch the default browser automatically:
@@ -429,9 +446,9 @@ Add `--open` to launch the default browser automatically:
 gco analytics studio login --username alice --open
 ```
 
-Override the API endpoint if auto-discovery can't find it (for
-example, during local testing against a deployed API from a machine
-without CloudFormation access):
+Override the API endpoint if auto-discovery can't find it (the pool
+and its app client are still read from the `gco-analytics` stack's
+outputs):
 
 ```bash
 gco analytics studio login \
@@ -442,28 +459,37 @@ gco analytics studio login \
 The password, the `IdToken`, and the Studio URL are never written to
 disk. If login fails, the CLI prints the Cognito error code (for
 example `NotAuthorizedException`, `UserNotFoundException`) or the
-HTTP status + correlation ID from the `/studio/login` call, and exits
-with status 1 or 2 respectively.
+HTTP status, the Lambda's error token and the correlation ID from the
+`/studio/login` call, and exits with status 1 or 2 respectively. For
+`UnsupportedUsername` and `UserProfileOwnedByAnotherUser` it also says
+what an administrator has to do (create a user with a supported name,
+or delete the old profile).
 
-SRP flow explained:
+Login flow:
 
-1. CLI calls `InitiateAuth` with `AuthFlow=USER_SRP_AUTH`.
-2. Cognito returns an SRP challenge; the CLI computes the password
-   verifier locally using the pure-Python SRP implementation (no
-   password is sent over the wire as a hash).
-3. CLI calls `RespondToAuthChallenge`; Cognito returns an
-   `AuthenticationResult` containing `IdToken`, `AccessToken`, and
-   `RefreshToken`.
-4. CLI sends the `IdToken` in the `Authorization` header to
+1. CLI calls `AdminInitiateAuth` with
+   `AuthFlow=ADMIN_USER_PASSWORD_AUTH`, signed with your AWS
+   credentials; the username and password travel to Cognito over TLS.
+2. Cognito returns an `AuthenticationResult` containing `IdToken`,
+   `AccessToken`, and `RefreshToken`. A user whose password is still
+   temporary gets a `NEW_PASSWORD_REQUIRED` challenge instead, which
+   the CLI does not answer: give the user a permanent password with
+   `users add --password` / `--generate-password` or
+   `users set-password`.
+3. CLI sends the `IdToken` in the `Authorization` header to
    `/studio/login`. API Gateway's Cognito authorizer validates the
    JWT against the user-pool ARN.
-5. Presigned-URL Lambda reads the Studio domain id from its
+4. Presigned-URL Lambda reads the Studio domain id from its
    environment and creates the user profile if it doesn't exist
-   (replacing a `Failed` one). While the profile provisions it answers
-   `202` and the CLI polls; a profile it cannot recover is a `409`. Once
-   the profile is `InService` it calls `CreatePresignedDomainUrl` with a
-   300-second expiry.
-6. Lambda returns `{url, expires_in}`; API Gateway returns it to
+   (replacing a `Failed` one), tagged with the caller's Cognito `sub`.
+   A username SageMaker cannot use as a profile name is a `400`
+   (`UnsupportedUsername`), and a profile whose tag names another user
+   is a `403` (`UserProfileOwnedByAnotherUser`). While the profile
+   provisions it answers `202` and the CLI polls; a profile it cannot
+   recover is a `409` (`UserProfileFailed`). Once the profile is
+   `InService` it calls `CreatePresignedDomainUrl` with a 300-second
+   expiry.
+5. Lambda returns `{url, expires_in}`; API Gateway returns it to
    the CLI; the CLI prints `url` on its own line.
 
 The URL expires in 5 minutes — open it promptly.
@@ -491,26 +517,43 @@ is yours to install.
 
 ### Installing the GCO CLI inside SageMaker Studio
 
-Open a JupyterLab terminal (`File` → `New` → `Terminal`) and run:
+GCO needs Python 3.14 or later, and the SageMaker Distribution images run
+an older Python (3.13 in SageMaker Distribution 5.x, see the image's
+[`cpu.env.in`](https://github.com/aws/sagemaker-distribution/blob/main/build_artifacts/v5/v5.1/v5.1.0/cpu.env.in)),
+so `pip install` of GCO fails there. Install it with
+[`uv`](https://docs.astral.sh/uv/) instead, which downloads a managed
+Python 3.14 for it. Open a JupyterLab terminal (`File` → `New` → `Terminal`)
+and run:
 
 ```bash
-git clone https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws ~/gco
-pip install -e ~/gco
+# SageMaker Distribution 5.x includes uv; on an image without it: pip install --user uv
+GCO_REF=v9.1.0   # the GCO release your deployment runs
+uv tool install --python 3.14 "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@${GCO_REF}"
+```
+
+That installs the `gco` and `gco-mcp` commands into `~/.local/bin`. The
+example manifests the sections below submit are not part of the install;
+clone the same release for them:
+
+```bash
+git clone --depth 1 --branch "${GCO_REF}" https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws ~/gco
 ```
 
 ![Cloning GCO in JupyterLab](../images/sagemaker_studio_cloning_gco_in_jupyter.png)
 
-Because `/home/sagemaker-user` (which contains `~/gco`) is mounted
-from `Studio_EFS`, the install **persists across JupyterLab restarts
-and kernel switches**. You install it once, and every subsequent
-session has `gco` on the `PATH`.
+The install and the clone live in your home directory,
+`/home/sagemaker-user`, which is on the space's own storage volume (see
+[section (k)](#k-studio_efs-and-the-studio-home-directory)), so they survive restarts of the space. A new space starts
+without them.
 
 Point the CLI at your deployment. Add these to `~/.bashrc` so they
-survive terminal restarts (replace the region values with your own —
-see the note at the top of this guide):
+survive terminal restarts (replace the values with your own — see the
+note at the top of this guide):
 
 ```bash
 cat >> ~/.bashrc <<'BASHRC_EOF'
+export PATH="$HOME/.local/bin:$PATH"
+export GCO_PROJECT_NAME=gco
 export GCO_API_GATEWAY_REGION=us-east-2
 export GCO_DEFAULT_REGION=us-east-1
 BASHRC_EOF
@@ -522,31 +565,49 @@ The CLI discovers the API URL itself from the `ApiEndpoint` output of the
 region that stack lives in (your `deployment_regions.api_gateway`).
 `GCO_DEFAULT_REGION` should point at the regional cluster you want the CLI
 to talk to by default — typically the region closest to the Studio domain.
+`GCO_PROJECT_NAME` is your `cdk.json` `project_name`. Run `gco` from your
+home directory rather than from `~/gco`: in a directory holding a
+`cdk.json`, the CLI reads the project name and Regions from that file, and
+the clone's `cdk.json` is the shipped default, not your deployment's.
 
 Verify:
 
 ```bash
 gco --help
-gco capacity status
+gco jobs list --all-regions
 ```
 
-Because the Studio execution role has the invoke permissions the CLI
-needs (SQS send, API Gateway invoke, CloudWatch read), the CLI works
-out of the box without additional IAM configuration.
+What the Studio execution role lets the CLI do:
 
-### Optional: wiring GCO's MCP server into Amazon Q inside Studio
+- The `gco jobs` commands that go through the GCO API: `submit` (with or
+  without `-r`), `list`, `get`, `logs` and `delete`. The role may call the
+  global API and each workload Region's regional API (where a command with
+  `-r` goes), and read this project's CloudFormation stacks, whose outputs
+  name those APIs.
+- Not the fallback `gco jobs logs` uses for a job whose pods are gone: it
+  queries CloudWatch Logs Insights (`logs:StartQuery`), which the role
+  cannot. Read those logs from a workstation.
+- Not the commands that call AWS services directly instead of the API, for
+  example `gco jobs submit-direct` (kubectl), `gco jobs submit-sqs` (EC2
+  and SQS), `gco inference deploy` (DynamoDB) and `gco capacity status` or
+  `gco capacity recommend-region` (SQS, EC2 and Pricing). Run those from a
+  workstation with credentials that allow them.
 
-If you want to talk to the GCO MCP server from Amazon Q's chat
-interface inside Studio, add an entry to `~/.aws/amazonq/default.json`:
+### Optional: wiring GCO's MCP server into the Studio coding assistant
+
+The `uv tool install` above also installs the GCO MCP server as the
+`gco-mcp` command. Register it with the assistant as a stdio server with no
+arguments; the absolute path keeps it working when the assistant's
+environment does not have `~/.local/bin` on its `PATH`:
 
 ```json
 {
   "mcpServers": {
     "gco": {
-      "command": "python",
-      "args": ["-m", "mcp.run_mcp"],
-      "cwd": "/home/sagemaker-user/gco",
+      "command": "/home/sagemaker-user/.local/bin/gco-mcp",
       "env": {
+        "GCO_PROJECT_NAME": "gco",
+        "GCO_API_GATEWAY_REGION": "us-east-2",
         "GCO_DEFAULT_REGION": "us-east-1"
       }
     }
@@ -554,39 +615,37 @@ interface inside Studio, add an entry to `~/.aws/amazonq/default.json`:
 }
 ```
 
-This is **manual and user-driven, not part of the CDK deploy**. The
-CDK code knows nothing about Amazon Q. You edit the file once inside
-your Studio home directory and the MCP server is available to Amazon
-Q from then on.
+Where that block goes depends on the assistant:
 
-Restart Amazon Q from inside Studio to pick up the new server.
+- **Kiro**, the default assistant in the JupyterLab chat panel on
+  SageMaker Distribution 4.1 and later
+  ([Using a coding assistant](https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated-jl-coding-assistant.html)),
+  reads `~/.kiro/settings/mcp.json`.
+- **Amazon Q Developer** in Code Editor keeps globally configured MCP
+  servers in `~/.aws/amazonq/default.json`
+  ([MCP configuration for Q Developer in the IDE](https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/mcp-ide.html)).
+  Add the server from its MCP configuration panel (command
+  `/home/sagemaker-user/.local/bin/gco-mcp`, no arguments) rather than
+  editing that file by hand.
+
+This is **manual and user-driven, not part of the CDK deploy**; the CDK
+code knows nothing about either assistant. The server runs with the
+Studio execution role, so its tools can do what the CLI can (see the list
+above). Start a new chat session after adding it so the assistant loads
+the server.
 
 ## (f) Using the GCO CLI once installed inside JupyterLab
 
-With the CLI installed and env vars exported per section (e), every
-`gco` command works from a JupyterLab terminal or from a notebook
-cell via `!` shell-out. Replace `-r us-east-1` with your regional
-cluster region in the examples below.
+With the CLI installed and the environment variables set per [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server),
+the `gco jobs` commands that go through the GCO API work from a
+JupyterLab terminal or from a notebook cell via `!` shell-out. The
+examples read the manifests from the clone in `~/gco`; replace
+`-r us-east-1` with your regional cluster region.
 
-Submit a job directly to a cluster:
-
-```bash
-gco jobs submit-direct examples/cluster-shared-bucket-upload-job.yaml -r us-east-1
-```
-
-Get a capacity recommendation before launching a training run:
+Submit a job to a cluster:
 
 ```bash
-gco capacity recommend-region --gpu --instance-type g5.xlarge
-```
-
-Deploy an inference endpoint from a notebook:
-
-```bash
-gco inference deploy exploration-llm \
-  --image vllm/vllm-openai:v0.32.0 \
-  --replicas 1 --gpu-count 1 \
-  --region us-east-1
+gco jobs submit ~/gco/examples/cluster-shared-bucket-upload-job.yaml -r us-east-1
 ```
 
 List jobs across all regions:
@@ -598,41 +657,78 @@ gco jobs list --all-regions
 Tail logs for a specific job:
 
 ```bash
-gco jobs logs analytics-s3-upload -r us-east-1 -n gco-jobs
+gco jobs logs cluster-shared-bucket-upload -r us-east-1 -n gco-jobs
 ```
 
-All of these commands work identically from a workstation — the
-Studio instance simply happens to have AWS credentials and network
-access to the deployed stacks, so the same CLI invocations succeed
-there too.
+These commands work the same from a workstation. Capacity
+recommendations (`gco capacity recommend-region`), inference endpoints
+(`gco inference deploy`) and the other commands [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server) lists as
+needing workstation credentials are run from a workstation.
 
-## (g) Submitting HyperPod jobs when the sub-toggle is enabled
+## (g) Submitting HyperPod jobs and SageMaker training jobs from Studio
 
-When `analytics_environment.hyperpod.enabled=true` (flipped via
-`gco analytics enable --hyperpod`), the SageMaker execution role gets
-these additional permissions:
+`analytics_environment.hyperpod.enabled`, which
+`gco analytics enable --hyperpod` sets, is deprecated and changes nothing.
+It used to add SageMaker training-job and cluster-node actions to the
+SageMaker execution role, all of which the role's `AmazonSageMakerFullAccess`
+policy already allows (two of them were not IAM actions at all). Neither way
+of training from Studio below depends on it, and a `cdk.json` that still sets
+it synthesizes unchanged.
 
-- `sagemaker:CreateTrainingJob`
-- `sagemaker:DescribeTrainingJob`
-- `sagemaker:StopTrainingJob`
-- `sagemaker:ClusterInstance*` (cluster-instance management actions)
+### HyperPod jobs, through GCO
 
-Notebook users can then launch HyperPod training jobs directly from
-a Studio cell via `boto3` — no additional IAM setup, no cluster-side
-changes:
+In GCO, [SageMaker HyperPod](HYPERPOD.md) is capacity of a regional EKS
+cluster: a Region whose `cdk.json` `hyperpod` block is on runs a HyperPod
+cluster whose instance groups join the EKS cluster as nodes, behind the
+`gco-hyperpod` Kueue queue. Work reaches those nodes as an ordinary
+Kubernetes Job that carries the queue's label, and Kueue adds the node
+selector and toleration. [HYPERPOD.md → How work reaches HyperPod
+nodes](HYPERPOD.md#how-work-reaches-hyperpod-nodes) has a complete manifest;
+the part that routes it is:
+
+```yaml
+metadata:
+  namespace: gco-jobs
+  labels:
+    kueue.x-k8s.io/queue-name: gco-hyperpod
+```
+
+Submit it from a Studio terminal through the GCO API like any other job
+([section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server) covers the install and what the Studio role allows), naming a
+Region that runs HyperPod:
+
+```bash
+gco jobs submit train-on-hyperpod.yaml -r us-east-1
+gco jobs logs train-on-hyperpod -r us-east-1 -n gco-jobs
+```
+
+### SageMaker training jobs, from a notebook
+
+A SageMaker training job runs on instances SageMaker manages, not on a GCO
+cluster, and works whether or not any Region runs HyperPod. The execution
+role can start one with `boto3` from a notebook: `AmazonSageMakerFullAccess`
+allows `CreateTrainingJob` and passing a role whose name contains
+`AmazonSageMaker` to SageMaker, which this role's does.
 
 ```python
 import boto3
 
-sm = boto3.client("sagemaker")
+region = boto3.Session().region_name  # the Studio domain's Region
+account = boto3.client("sts").get_caller_identity()["Account"]
+sm = boto3.client("sagemaker", region_name=region)
 
 response = sm.create_training_job(
     TrainingJobName="exploration-run-001",
     AlgorithmSpecification={
-        "TrainingImage": "763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-training:2.4.0-gpu-py311-cu124-ubuntu22.04-sagemaker",
+        # A Deep Learning Containers image from the job's own Region.
+        "TrainingImage": (
+            f"763104351884.dkr.ecr.{region}.amazonaws.com/"
+            "pytorch-training:2.4.0-gpu-py311-cu124-ubuntu22.04-sagemaker"
+        ),
         "TrainingInputMode": "File",
     },
-    RoleArn="arn:aws:iam::123456789012:role/AmazonSageMaker-gco-analytics-exec-us-east-2",
+    # The execution role: AmazonSageMaker-<project_name>-analytics-exec-<region>.
+    RoleArn=f"arn:aws:iam::{account}:role/AmazonSageMaker-gco-analytics-exec-{region}",
     InputDataConfig=[
         {
             "ChannelName": "training",
@@ -660,24 +756,19 @@ print(response["TrainingJobArn"])
 
 Notes:
 
-- Replace the `RoleArn` with the actual role ARN from the
-  `gco-analytics` stack outputs (key
-  `SageMakerExecutionRoleArn`).
+- Deep Learning Containers images are published per Region; pick the
+  image URI for the job's Region from the
+  [available images list](https://github.com/aws/deep-learning-containers/blob/master/available_images.md)
+  (the `763104351884` account serves most commercial Regions, not all).
 - `Cluster_Shared_Bucket` works as both input and output because
   the SageMaker role has RW on it (always, whenever analytics is
-  enabled).
-- HyperPod-style multi-node jobs use the same API — set
-  `InstanceCount > 1` and configure a VPC peering between the
-  training job and the analytics VPC if you want EFS access from
-  the training containers.
-
-Disable HyperPod later by flipping the sub-toggle off in `cdk.json`
-and redeploying `gco-analytics`:
-
-```bash
-python3 -c "import json; d=json.load(open('cdk.json')); d['context']['analytics_environment']['hyperpod']['enabled']=False; json.dump(d, open('cdk.json','w'), indent=2)"
-gco stacks deploy gco-analytics
-```
+  enabled). Replace the bucket name with your deployment's
+  (`/gco/cluster-shared-bucket/name` in SSM, see [section (i)](#i-running-the-example-cluster-jobs-and-reading-their-output-from-a-notebook)).
+- Multi-node training is the same call with `InstanceCount > 1`. To let the
+  training containers reach something inside the analytics VPC, such as
+  `Studio_EFS`, run the job in that VPC with `VpcConfig` (the analytics
+  VPC's private subnets and a security group the resource admits); no VPC
+  peering is involved.
 
 ## (g2) Launching SageMaker Canvas when the sub-toggle is enabled
 
@@ -711,10 +802,13 @@ Canvas workspaces use Canvas's own default artifact locations
 (typically a Canvas-managed S3 bucket in the analytics region).
 Per-feature Canvas configuration — workspace S3 artifact path,
 Bedrock role for generative AI, time-series forecasting settings,
-direct-deploy / model-register defaults — lives on
-`AWS::SageMaker::UserProfile` rather than `AWS::SageMaker::Domain`,
-so any defaults you want to pin have to be set at the user-profile
-level rather than from CDK.
+direct-deploy / model-register defaults — is the `CanvasAppSettings`
+block of the SageMaker API's user settings (`CreateDomain`,
+`CreateUserProfile`, `UpdateUserProfile`). CloudFormation's
+`AWS::SageMaker::Domain` and `AWS::SageMaker::UserProfile` take no such
+property, so GCO cannot set it from CDK; pin defaults with
+`aws sagemaker update-user-profile --user-settings` on a profile (or
+`update-domain --default-user-settings` for the domain).
 
 Disable Canvas later by flipping the sub-toggle off in `cdk.json`
 and redeploying `gco-analytics`:
@@ -868,13 +962,10 @@ End-to-end flow:
     gco --help
     ```
 
-    If the CLI was installed per section (e), `--help` prints the
-    full command tree. If not, install it first via:
-
-    ```bash
-    git clone https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws ~/gco
-    pip install -e ~/gco
-    ```
+    If the CLI was installed per [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server), `--help` prints the
+    full command tree. If not, install it first as [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server)
+    describes (`uv tool install`; GCO needs Python 3.14 and the image
+    runs an older one).
 
 GCO does not add Kiro-specific configuration beyond what's documented
 above. No workspace URL, SSH key, or SSM tunnel is provisioned by
@@ -896,10 +987,10 @@ for their full descriptions.
 End-to-end example — cluster writes, notebook reads:
 
 **Step 1 — submit the upload job from a CLI** (from your workstation
-or from a JupyterLab terminal once section (e) is done):
+or from a JupyterLab terminal once [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server) is done):
 
 ```bash
-gco jobs submit-direct examples/analytics-s3-upload-job.yaml -r us-east-1
+gco jobs submit ~/gco/examples/analytics-s3-upload-job.yaml -r us-east-1
 ```
 
 The job reads the `gco-cluster-shared-bucket` ConfigMap via
@@ -944,7 +1035,7 @@ global region (default `us-east-2`). If your Studio domain is also
 in `us-east-2` (the default), the notebook-to-S3 calls are
 same-region — no egress charges. Cluster pods, however, may be in
 `us-east-1` or elsewhere — their uploads cross a region boundary.
-See section (n) and
+See [section (m)](#m-cross-region-data-transfer-caveat) and
 [`docs/CLUSTER_SHARED_BUCKET.md`](CLUSTER_SHARED_BUCKET.md#cross-region-egress)
 for the full discussion.
 
@@ -1022,16 +1113,40 @@ on both `/prod/*/api/v1/*` and `/prod/*/inference/*` — notebooks can
 submit jobs (`POST`), update templates (`PUT`), and tear things down
 (`DELETE`) via SigV4-signed requests in addition to read-only
 `GET`s. In practice you will usually reach for the `gco` CLI from a
-JupyterLab terminal (see section (f)) — the broader IAM surface is
+JupyterLab terminal (see [section (f)](#f-using-the-gco-cli-once-installed-inside-jupyterlab)) — the broader IAM surface is
 there so `boto3` / `requests_aws4auth`-style SigV4 scripting works
 the same way it does from a developer workstation.
 
-## (k) EFS persistent-home-folder behavior
+## (k) Studio_EFS and the Studio home directory
 
-Each Studio user gets a per-user home folder on `Studio_EFS`,
-accessed via a per-user EFS access point created by the presigned-
-URL Lambda on first login. The access point POSIX-isolates the user
-to `/home/<username>` on the EFS file system.
+What follows is what the stack and the presigned-URL Lambda configure,
+and what the SageMaker documentation says Studio does with it:
+
+- **The home directory is not on EFS.** A JupyterLab space runs on one
+  instance with one EBS volume, and the space's files, the home
+  directory `/home/sagemaker-user` included, live on that volume
+  ([JupyterLab user guide](https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated-jl-user-guide.html)).
+  `pip install --user` packages and the [section (e)](#e-optional-user-driven-install-of-gco-cli-and-mcp-server) install therefore
+  belong to one space.
+- **`Studio_EFS` is a custom file system a space can attach.** The
+  domain lists it in `DefaultUserSettings.CustomFileSystemConfigs`, and
+  in a space that has it attached, SageMaker links it at
+  `/home/sagemaker-user/custom-file-systems/efs/<file-system-id>`
+  ([Adding a custom file system to a domain](https://docs.aws.amazon.com/sagemaker/latest/dg/domain-custom-file-system.html)).
+  Files written there are on `Studio_EFS`, shared by every space of that
+  user that attaches it.
+- **Per-user separation is the profile's path on the file system.** Each
+  profile the Lambda creates sets `FileSystemPath=/home/<username>`, and
+  SageMaker gives the profile's spaces that directory and nothing above
+  it. The domain's default path is `/home/sagemaker-user`, so profiles
+  created outside the Lambda (console, CLI) all share that one directory.
+- **The per-user access points are not used.** On first login the Lambda
+  also creates an EFS access point rooted at `/home/<username>`, with a
+  POSIX owner derived from the username and mode `0700`. A profile's
+  `EFSFileSystemConfig` takes only a file system ID and a path, so
+  nothing mounts through the access point and its owner and mode never
+  apply. No `CustomPosixUserConfig` is set either, so spaces use
+  SageMaker's default POSIX identity.
 
 ### Default removal policy: DESTROY
 
@@ -1039,16 +1154,17 @@ By default, `Studio_EFS` uses `RemovalPolicy.DESTROY`. This means:
 
 - `cdk destroy gco-analytics` cleanly removes the EFS file system,
   its mount targets, and every access point.
-- User home folders (installed packages, notebook history,
-  checkpoints saved under `/home/sagemaker-user`) are **lost on
-  destroy**.
-- The iteration loop (section (j)) relies on this — each
-  deploy/destroy cycle leaves no retained EFS behind.
+- Everything users stored on `Studio_EFS` is **lost on destroy**, and
+  so are their spaces (home directories included), which the cleanup
+  Lambda deletes so the domain can be deleted.
+- Repeated deploy/destroy cycles rely on this: each one leaves no
+  retained EFS behind.
 
 ### Opt-in: retain across destroys
 
 Set `analytics_environment.efs.removal_policy = "retain"` in
-`cdk.json` to preserve user home folders across `cdk destroy`:
+`cdk.json` to keep `Studio_EFS` and its files across `cdk destroy`
+(the spaces and their home directories are still deleted):
 
 ```json
 {

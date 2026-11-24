@@ -4436,6 +4436,17 @@ class TestActionPreflight:
         )
         ctx.session.client.assert_called_once_with("sts", region_name="us-east-1")
 
+    def test_a_supplied_stack_lister_names_the_targets(self, tmp_path: Path) -> None:
+        """The upgrade harness lists the stacks the upgrade deploys, not ``cdk list``."""
+        ctx = self._ctx(tmp_path)
+        with self._boundaries() as boundaries:
+            result = actions_preflight.action_preflight(
+                ctx, list_target_stacks=lambda: ["gco-live-us-east-1"]
+            )
+        ctx.stack_manager.list_stacks.assert_not_called()
+        assert result["target_stack_regions"] == {"gco-live-us-east-1": "us-east-1"}
+        boundaries["ecr"].assert_called_once_with(ctx, ["gco-live-us-east-1"])
+
     def test_resumed_preflight_reconciles_ownership_and_keeps_preexisting_evidence(
         self, tmp_path: Path
     ) -> None:
