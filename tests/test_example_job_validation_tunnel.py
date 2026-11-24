@@ -639,6 +639,41 @@ class TestSessionKubectl:
         assert runner.through_tunnel(call) == (1, "", HANDSHAKE_TIMEOUT)
         assert made == [0]
 
+    def test_a_call_that_timed_out_on_the_tunnel_is_repeated_once_after_recovery(self) -> None:
+        """A request sent into a stalled tunnel hangs until its timeout instead
+        of failing with a transport error, so the timeout asks the keeper too."""
+        keeper = _KeeperStub(generation=7)
+        attempts: list[int] = []
+
+        def call() -> tuple[int, str, str]:
+            attempts.append(len(attempts))
+            if len(attempts) == 1:
+                raise subprocess.TimeoutExpired(["kubectl", "get", "pods"], 30.0)
+            return 0, "ok", ""
+
+        runner = kube.SessionKubectl(None, keeper)  # type: ignore[arg-type]
+        assert runner.through_tunnel(call) == (0, "ok", "")
+        assert attempts == [0, 1]
+        assert keeper.recovered == [7]
+
+    @pytest.mark.parametrize(
+        ("recovers", "guard"), [(False, None), (True, lambda: False)], ids=("healthy", "guarded")
+    )
+    def test_a_timeout_the_tunnel_cannot_explain_is_raised(
+        self, recovers: bool, guard: Any
+    ) -> None:
+        keeper = _KeeperStub(recovers=recovers)
+        attempts: list[int] = []
+
+        def call() -> tuple[int, str, str]:
+            attempts.append(len(attempts))
+            raise subprocess.TimeoutExpired(["kubectl"], 30.0)
+
+        runner = kube.SessionKubectl(None, keeper)  # type: ignore[arg-type]
+        with pytest.raises(subprocess.TimeoutExpired):
+            runner.through_tunnel(call, safe_to_repeat=guard)
+        assert attempts == [0]
+
     def test_the_guard_is_asked_after_recovery_and_can_refuse(self) -> None:
         keeper = _KeeperStub()
         asked: list[list[int]] = []

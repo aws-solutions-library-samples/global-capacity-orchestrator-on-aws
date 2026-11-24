@@ -11,6 +11,7 @@ Common issues and their solutions.
   - [Stack Creation Fails](#stack-creation-fails)
   - [Deploy Fails on Image Mirror or linux/amd64 Asset Build (Apple Silicon)](#deploy-fails-on-image-mirror-or-linuxamd64-asset-build-apple-silicon)
   - [Dev Container Shares No Runtime Socket](#dev-container-shares-no-runtime-socket)
+  - [Image Builds Run Out of Space or Memory in the Finch VM](#image-builds-run-out-of-space-or-memory-in-the-finch-vm)
   - [Deploy Refuses Owner-Only Sources (Restrictive umask)](#deploy-refuses-owner-only-sources-restrictive-umask)
   - [Deploy Asks for a Different npm (Inference Streaming Lambda)](#deploy-asks-for-a-different-npm-inference-streaming-lambda)
   - [Stack Stuck in REVIEW_IN_PROGRESS](#stack-stuck-in-review_in_progress)
@@ -230,6 +231,40 @@ found: no answering API at the paths it tried, a Finch VM without finch-daemon,
 
 `--socket PATH` takes the path as the runtime's containers see it, which for a
 VM-based runtime is a path inside its VM.
+
+### Image Builds Run Out of Space or Memory in the Finch VM
+
+**Symptom**: under [Finch](https://runfinch.com/), an asset image build in
+`gco stacks deploy-all` (or in a `gco release validate` deploy) fails with
+`no space left on device`, or it is killed or slows to a crawl while macOS swaps.
+
+**Cause**: Finch builds inside a Lima VM. The images and the BuildKit build cache
+live on the VM's data disk, a sparse file under `~/.finch/.disks/` whose size
+`datadisk` in `~/.finch/finch.yaml` sets. That disk can fill while the home volume
+still has space, and removing images inside the VM does not shrink the file until
+the guest trims it. The VM also keeps the `memory` the same file sets for as long
+as it runs.
+
+**Solution**:
+
+```bash
+# How full the VM's data disk is
+LIMA_HOME=/Applications/Finch/lima/data /Applications/Finch/lima/bin/limactl shell finch df -h /mnt/lima-finch
+
+# Remove dangling images and the unused build cache (the next build rebuilds its layers)
+finch image prune -f
+finch builder prune -a -f
+
+# Hand the freed blocks back to macOS; until then the file keeps its size
+LIMA_HOME=/Applications/Finch/lima/data /Applications/Finch/lima/bin/limactl shell finch sudo fstrim -av
+```
+
+The paths are the Finch macOS installer's. `gco release validate` removes the CDK
+asset images each `deploy` publishes and prunes dangling layers, but leaves the
+build cache. For more build memory or CPUs, change `memory` or `cpus` in
+`~/.finch/finch.yaml`, then run `finch vm stop` and `finch vm start`. Leave the
+host enough memory for the CLI and CDK synthesis, and stop the VM with
+`finch vm stop` when nothing is building.
 
 ### Deploy Refuses Owner-Only Sources (Restrictive umask)
 
