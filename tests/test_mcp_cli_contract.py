@@ -92,6 +92,9 @@ _VALUES = {
     "local_dir": "sync",
     "backend": "pcs",
     "fault_tolerance": "high",
+    # ai-recommend refuses names that are not EC2 instance types or Regions.
+    "ai_recommend.instance_type": ["p5.48xlarge"],
+    "bedrock_region": "us-east-1",
     "configure_mooncake_store.offload": "cpu",
     "cost_k8s_top.by": "namespace",
     "cost_k8s_trend.granularity": "daily",

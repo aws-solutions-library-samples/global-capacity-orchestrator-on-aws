@@ -1197,6 +1197,7 @@ Exit status and options:
 | `gco inference deploy` | **BREAKING:** exits 2 for `-e`, `-l` or `--node-selector` without `KEY=VALUE`, an `--autoscale-metric` other than `TYPE[:TARGET]` (`cpu`, `memory`, `gpu` or `gpu_memory`, target a whole number of at least 1), `--min-replicas` or `--max-replicas` below 1 or a maximum below the minimum, and replica bounds without `--autoscale-metric`, which were ignored | Fix the value; use `--replicas` for a fixed count |
 | `gco capacity reserve`, `gco capacity create-reservation` | **BREAKING:** ask for confirmation before spending money; without a terminal on stdin, exit 2 unless `--yes` or `--dry-run` is given | Add `--yes` to unattended runs |
 | `gco capacity cancel-reservation` | **BREAKING:** without a terminal on stdin, exits 2 unless `--yes` or `--dry-run` is given; a piped answer no longer works | Add `--yes` |
+| `gco capacity ai-recommend` | **BREAKING (narrow):** exits 2 for an `-i` that is not an EC2 instance type once aliases are expanded (an `ml.` HyperPod type, `gb200`), an `-r` or `--bedrock-region` that is not a Region name, a `--max-cost` of 0 or less, and a negative `--min-gpus` or `--min-memory-gb`. `--min-memory-gb` is the workload's total GPU memory and `--min-gpus` and `--max-cost` are totals across its instances; the model used to get a bare "Minimum Memory" | Fix the value; give totals |
 | `gco capacity reserve`, `create-reservation`, `cancel-reservation` with `-o json` or `-o yaml` | Exit 1 when the request fails (they exited 0); the result document is still printed | Check the exit status |
 | `gco costs forecast` | **BREAKING:** exits 1 when Cost Explorer cannot forecast (it exited 0 with an `error` field) | Handle the failure |
 | `gco costs workloads` | **BREAKING:** exits 1 when a Region's cluster cannot be read; the workloads it read are still printed | Run it where each cluster's API endpoint is reachable |
@@ -1227,7 +1228,7 @@ data.
 | `gco stacks addons status` | A list of `{region, name, status, message}` rows |
 | `gco stacks access` | `cluster`, `region`, `principal_arn`, `api_server_reachable`, `node_count`, `kubectl_error`, `warning` |
 | `gco analytics doctor` | `{"passed": ..., "checks": [{"name", "ok", "remediation"}]}`, also when it exits 1 |
-| `gco capacity ai-recommend` | The recommendation's fields |
+| `gco capacity ai-recommend` | The recommendation's fields, now with `instance_count`, `reservation_advice`, `validation_warnings` (GCO's checks of the answer, a failed one lowering `confidence` to `low`), `model_id`, `bedrock_region`, `data_collected_at`, `regions_analyzed`, `instance_types_analyzed`, `data_gaps`, `usage`, `latency_ms` and `disclaimer`. `recommended_capacity_type` is `unknown` when the model names no type it recognizes; it read `spot` |
 | `gco capacity check --enrich-historical` | `{"estimates": [...], "historical": {...}}` |
 | `gco capacity spot-prices`, `gco files list`, `gco files access-points`, `gco images replication status` and `gco nodepools list` with nothing to list | `[]` |
 | `gco images replication get` with no replication rules | `{"registryId": ..., "policy": {"rules": []}}`, the document it prints when there are rules |
@@ -1413,6 +1414,13 @@ has the details.
   where ECR's `ImageNotFoundException` used to come back as an error.
 - **`deps_scan` is tagged `low-risk`** instead of `safe`: its full scan
   pip-installs into the server's environment.
+- **`ai_recommend` runs asynchronously, for up to 10 minutes.** Cancelling
+  the call stops its CLI process; the two-minute limit used to cut the gather
+  and the model off. It takes a list (or a comma-separated string) of
+  instance types and Regions, `bedrock_region` and `data_only`, and
+  `workload` is optional. `fault_tolerance` now defaults to `medium` and is
+  always passed on; the old default `low` was never sent, so such calls ran at
+  `medium` anyway, and an explicit `low` now reaches the CLI.
 - **Audit records are written.** The server writes one JSON line per record
   to stderr, or appends them to the file `GCO_MCP_AUDIT_LOG` names;
   `GCO_MCP_AUDIT_LOG_LEVEL` filters them. Earlier releases wrote none.

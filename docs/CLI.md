@@ -767,16 +767,36 @@ gco capacity ai-recommend [OPTIONS]
 This command gathers comprehensive capacity data including:
 
 - Spot placement scores, pricing, and 7-day per-AZ price trends across regions
-- On-demand availability and pricing
-- Capacity Reservations (ODCRs), Capacity Block offerings, and the near-term
-  block-availability trend over the window EC2 answers (about nine days)
-- Current cluster utilization (queue depth, GPU/CPU usage)
-- Running and pending job counts
-- The algorithmic multi-signal region ranking as advisory context
+- On-demand availability and pricing, and each type's GPUs, GPU memory, vCPUs and memory
+- Capacity Reservations (ODCRs), Capacity Block offerings sized for the workload,
+  and the near-term block-availability trend over the window EC2 answers (about
+  nine days)
+- The GCO cluster's queue depth, running jobs and GPU/CPU utilization in each
+  Region; a signal that could not be read reaches the model as unknown, not as zero
+- The algorithmic multi-signal region ranking for the first instance type, kept to
+  the analyzed Regions, as advisory context
+- Up to seven days of recorded capacity history, when the history table is deployed
+
+The (instance type, Region) pairs are read eight at a time, and each lookup stands
+alone: one that fails is listed under `data_gaps` with its AWS error code, and the
+model is told to treat it as unknown. Types EC2 does not sell as Capacity Blocks
+skip the two block searches.
 
 Without `--instance-type`, one representative type per current GPU generation
 is scanned (T4, L4, A10G, L40S, RTX PRO 4500/6000 Blackwell, A100, H100, H200,
 B200, B300).
+
+`--min-gpus`, `--min-memory-gb` and `--max-cost` are totals for the whole
+workload, and `--min-memory-gb` is GPU memory (compared with EC2's GiB figures),
+not host memory. Each type is sized in whole instances, rounded up: 16 GPUs on an
+8-GPU type is 2 instances, as `recommend-region --gpu-count` rounds. The Spot
+placement score and the Capacity Block search ask for that many instances.
+
+The workload description reaches the model between untrusted-data markers, as a
+description and never as instructions, and only its first 4000 characters are
+used. Instance types and Region names are checked first: a name that is not an EC2
+instance type once aliases are expanded (`p5` is `p5.48xlarge`; an `ml.` HyperPod
+type or `gb200` is refused) or not a Region name exits 2.
 
 The data is analyzed by the Bedrock model selected by `cdk.json`
 `context.bedrock.capacity_advisor_default_model_id` (Anthropic Claude Opus 5.5's
@@ -786,38 +806,73 @@ global inference profile in the stock configuration). The stock
 increase latency. Explicit model overrides do not inherit the default's
 thinking fields.
 
+**Checking the answer.** The model's answer is checked against the gathered data,
+and each failed check is listed under `validation_warnings` (CHECKS AGAINST THE
+GATHERED DATA in the table):
+
+- a Region or instance type that was not analyzed;
+- a type without GPUs for a workload that needs them, or an `instance_count` below
+  what the requirements need (without a count from the model, the computed one is
+  used);
+- a type EC2 does not offer in the Region;
+- an hourly cost over `--max-cost`: the cheapest zone's Spot price, or the
+  On-Demand price for `on-demand` and `odcr`, times the instance count;
+- `odcr` without a listed reservation that has free instances, or
+  `capacity-block` without a listed offering.
+
+A failed check lowers `confidence` to `low`. An alternative that names a Region or
+type outside the analysis is listed as well, without changing the confidence. A
+capacity type other than `spot`, `on-demand`, `odcr` and `capacity-block` (after
+spellings such as "On Demand" are normalized) is reported as `unknown`.
+
 **Requirements:**
 
 - AWS credentials with `bedrock:InvokeModel` permission
 - The specified Bedrock model must be enabled in your account
 
-Bedrock is called in `AWS_REGION`, else `AWS_DEFAULT_REGION`, else the CLI's default
-region (`gco --region`, `GCO_DEFAULT_REGION`, the config file, or the first regional
-Region in `cdk.json`), the same order `gco autopilot` uses. A geography-scoped
-inference profile (`eu.`, `apac.`, `jp.`, `au.`) only answers in its geography's
-Regions, so pick a Region there when passing one with `--model`. Bedrock errors name
-the Region that was called. [`gco capacity predict`](#gco-capacity-predict) uses the
-same Region.
+Bedrock is called in `--bedrock-region`, else `AWS_REGION`, else
+`AWS_DEFAULT_REGION`, else the CLI's default region (`gco --region`,
+`GCO_DEFAULT_REGION`, the config file, or the first regional Region in `cdk.json`),
+the order `gco autopilot` uses after the option. A geography-scoped inference
+profile (`eu.`, `apac.`, `jp.`, `au.`) only answers in its geography's Regions, so
+pick a Region there when passing one with `--model`. Bedrock errors name the Region
+that was called, and a refused request carries Bedrock's reason.
+[`gco capacity predict`](#gco-capacity-predict) uses the same Region order, without
+the option.
 
 **Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--workload` | `-w` | Description of your workload |
-| `--instance-type` | `-i` | Instance types to consider (can specify multiple) |
-| `--region` | `-r` | Regions to consider (can specify multiple) |
+| `--workload` | `-w` | What the workload does, in your own words (the first 4000 characters reach the model) |
+| `--instance-type` | `-i` | Instance type or alias to compare; repeat for more (default: one per current GPU generation) |
+| `--region` | `-r` | Region to compare; repeat for more (default: the deployed Regions) |
 | `--gpu` | | Workload requires GPUs |
-| `--min-gpus` | | Minimum GPUs required |
-| `--min-memory-gb` | | Minimum memory in GB |
-| `--fault-tolerance` | `-f` | Fault tolerance level: `high`, `medium`, `low` |
-| `--max-cost` | | Maximum cost per hour in USD |
+| `--min-gpus` | | GPUs the workload needs in total, across all its instances |
+| `--min-memory-gb` | | GPU memory the workload needs in total across all its instances, in GB |
+| `--fault-tolerance` | `-f` | How well the workload survives interruptions: `high` (it checkpoints, so Spot fits), `medium` (default), or `low` (it must not be interrupted) |
+| `--max-cost` | | Most the workload may cost per hour in USD, all its instances together (above 0) |
 | `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.capacity_advisor_default_model_id`) |
+| `--bedrock-region` | | Region to call Bedrock in (default: `AWS_REGION`, then `AWS_DEFAULT_REGION`, then the CLI's default region) |
+| `--data-only` | | Print the gathered capacity data as one JSON document and stop; Bedrock is not called |
 | `--raw` | | Show raw AI response |
 
 With `--output json` or `--output yaml`, the command prints one document with
 `recommended_region`, `recommended_instance_type`, `recommended_capacity_type`,
-`confidence`, `cost_estimate`, `reasoning`, `alternative_options` and `warnings`
-(plus `raw_response` with `--raw`); the disclaimer goes to stderr.
+`instance_count`, `confidence`, `cost_estimate`, `reasoning`,
+`reservation_advice`, `alternative_options`, `warnings` (the model's) and
+`validation_warnings` (GCO's checks); what the answer rests on (`model_id`,
+`bedrock_region`, `data_collected_at`, `regions_analyzed`,
+`instance_types_analyzed`, `data_gaps`, `usage` with Bedrock's token counts and
+`latency_ms`); and the `disclaimer`, plus `raw_response` with `--raw`. The
+disclaimer also goes to stderr. The table shows the same, with the data gaps
+summarized per lookup and error.
+
+`--data-only` prints the data the model would be given,
+`{"requirements", "capacity_data", "historical_context"}`, as JSON in every output
+mode and without the disclaimer; `--model`, `--bedrock-region` and `--raw` do
+nothing with it. An agent on the MCP server can call `ai_recommend` with
+`data_only=True` to reason over the data itself, without a Bedrock call.
 
 **Example:**
 
@@ -828,14 +883,20 @@ gco capacity ai-recommend --workload "Training a large language model"
 # GPU workload with specific requirements
 gco capacity ai-recommend -w "Inference workload" --gpu --min-gpus 4
 
+# A multi-node job: 16 GPUs in total that tolerate interruptions
+gco capacity ai-recommend -w "Fine-tune a 70B model" --gpu --min-gpus 16 -f high
+
 # Compare specific instance types and regions
 gco capacity ai-recommend -i g5.xlarge -i g5.2xlarge -r us-east-1 -r us-west-2
 
 # Cost-constrained recommendation
 gco capacity ai-recommend --fault-tolerance high --max-cost 5.00
 
-# Use a different model
-gco capacity ai-recommend -w "ML training" --model us.anthropic.claude-sonnet-4-6
+# Use a different model, called in another Region of its geography
+gco capacity ai-recommend -w "ML training" --model us.anthropic.claude-sonnet-4-6 --bedrock-region us-west-2
+
+# The gathered data alone, for your own analysis
+gco capacity ai-recommend -i p5 -i p6-b200 -r us-east-1 --min-gpus 16 --data-only
 ```
 
 #### `gco capacity reservations`

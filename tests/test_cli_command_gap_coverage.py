@@ -1309,7 +1309,9 @@ def test_capacity_ai_recommend_forwards_constraints_and_limits_alternatives(
     assert "Capacity can change" in result.output
     assert "ap-south-1" not in result.output
     assert "Est. Cost" not in result.output
-    factory.assert_called_once_with(factory.call_args.args[0], model_id="test-model")
+    factory.assert_called_once_with(
+        factory.call_args.args[0], model_id="test-model", bedrock_region=None
+    )
     advisor.get_recommendation.assert_called_once_with(
         workload_description="batch inference",
         instance_types=["g6.xlarge"],

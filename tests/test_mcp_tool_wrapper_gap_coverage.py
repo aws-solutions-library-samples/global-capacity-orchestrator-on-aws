@@ -68,6 +68,7 @@ def _stub_module(name: str, **attributes: Any) -> types.ModuleType:
 class _LoadedTool:
     module: types.ModuleType
     run_cli: Mock
+    run_cli_async: AsyncMock
     long_task: AsyncMock
     dependencies: types.ModuleType
     get_task: Mock
@@ -86,6 +87,7 @@ def _isolated_tool_module(
     """Execute one tool source file against side-effect-free dependency stubs."""
     enabled = frozenset(enabled_flags)
     run_cli = Mock(return_value=CLI_RESULT)
+    run_cli_async = AsyncMock(return_value=CLI_RESULT)
     long_task = AsyncMock(return_value=LONG_TASK_RESULT)
     get_task = Mock()
     list_tasks = Mock(return_value=[])
@@ -99,6 +101,7 @@ def _isolated_tool_module(
     cli_runner = _stub_module(
         "cli_runner",
         _run_cli=run_cli,
+        _run_cli_async=run_cli_async,
         TRANSFER_TIMEOUT_SECONDS=3600,
         reject_paths_outside_project_root=Mock(return_value=None),
         reject_traversal_segments=Mock(return_value=None),
@@ -180,6 +183,7 @@ def _isolated_tool_module(
         yield _LoadedTool(
             module=module,
             run_cli=run_cli,
+            run_cli_async=run_cli_async,
             long_task=long_task,
             dependencies=dependencies,
             get_task=get_task,
@@ -296,18 +300,26 @@ def test_capacity_fixed_and_small_option_wrappers(
 @pytest.mark.parametrize(
     ("kwargs", "expected_argv"),
     [
-        ({"workload": "batch"}, ("capacity", "ai-recommend", "-w", "batch")),
+        # The fault tolerance always reaches the CLI; the old "low" default
+        # was never sent, so the tool ran at the CLI's "medium".
+        ({}, ("capacity", "ai-recommend", "--fault-tolerance", "medium")),
+        (
+            {"workload": "batch", "fault_tolerance": "low"},
+            ("capacity", "ai-recommend", "-w", "batch", "--fault-tolerance", "low"),
+        ),
         (
             {
                 "workload": "train",
-                "instance_type": "p5.48xlarge",
-                "region": "us-west-2",
+                "instance_type": ["p5.48xlarge", "p6-b200"],
+                "region": "us-west-2,us-east-1",
                 "gpu": True,
                 "min_gpus": 8,
                 "min_memory_gb": 640,
                 "fault_tolerance": "medium",
                 "max_cost": 0.0,
                 "model": "bedrock.model-v2",
+                "bedrock_region": "us-east-1",
+                "data_only": True,
             },
             (
                 "capacity",
@@ -316,8 +328,12 @@ def test_capacity_fixed_and_small_option_wrappers(
                 "train",
                 "-i",
                 "p5.48xlarge",
+                "-i",
+                "p6-b200",
                 "-r",
                 "us-west-2",
+                "-r",
+                "us-east-1",
                 "--gpu",
                 "--min-gpus",
                 "8",
@@ -325,10 +341,14 @@ def test_capacity_fixed_and_small_option_wrappers(
                 "640",
                 "--fault-tolerance",
                 "medium",
+                # Forwarded as given; the CLI refuses a limit of zero itself.
                 "--max-cost",
                 "0.0",
                 "--model",
                 "bedrock.model-v2",
+                "--bedrock-region",
+                "us-east-1",
+                "--data-only",
             ),
         ),
     ],
@@ -337,7 +357,10 @@ def test_capacity_ai_recommend_option_matrix(
     kwargs: dict[str, Any], expected_argv: tuple[str, ...]
 ) -> None:
     with _isolated_tool_module("capacity") as loaded:
-        _assert_cli_call(loaded, "ai_recommend", (), kwargs, expected_argv)
+        result = _invoke(loaded.module.ai_recommend, **kwargs)
+    assert result == CLI_RESULT
+    loaded.run_cli_async.assert_awaited_once_with(*expected_argv, timeout_seconds=600)
+    loaded.run_cli.assert_not_called()
 
 
 @pytest.mark.parametrize(

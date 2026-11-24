@@ -60,6 +60,7 @@ import math
 import re
 import statistics
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -394,12 +395,21 @@ class CapacityChecker:
     def __init__(self, config: GCOConfig | None = None):
         self.config = config or get_config()
         self._session = boto3.Session()
+        # boto3.Session.client() is not thread-safe, and the capacity advisor
+        # calls this checker from several threads at once; the clients it
+        # returns are. Every client is created through _client() under this lock.
+        self._client_lock = threading.Lock()
         self._pricing_cache: dict[str, Any] = {}
         self._offerings_cache: dict[str, set[str]] = {}
         # Instance descriptions are now always resolved from EC2, and callers
         # like _enrich_reservation_pricing ask per row. Memoize per
         # (type, region) so listing 50 reservations of one type stays one call.
         self._instance_info_cache: dict[tuple[str, str], InstanceTypeInfo | None] = {}
+
+    def _client(self, service: str, **kwargs: Any) -> Any:
+        """A client for ``service`` from this checker's session, created under the lock."""
+        with self._client_lock:
+            return self._session.client(service, **kwargs)
 
     def get_instance_info(
         self, instance_type: str, region: str | None = None
@@ -433,7 +443,7 @@ class CapacityChecker:
         target_region = region or self.config.default_region
 
         try:
-            ec2 = self._session.client("ec2", region_name=target_region)
+            ec2 = self._client("ec2", region_name=target_region)
             response = ec2.describe_instance_types(InstanceTypes=[canonical])
         except ClientError as e:
             logger.debug(
@@ -513,7 +523,7 @@ class CapacityChecker:
         # this region does not offer it, so it must not be reported invalid.
         region = self.config.default_region
         try:
-            ec2 = self._session.client("ec2", region_name=region)
+            ec2 = self._client("ec2", region_name=region)
             response = ec2.describe_instance_types(InstanceTypes=[canonical])
             types = response.get("InstanceTypes", [])
             if not types:
@@ -553,7 +563,7 @@ class CapacityChecker:
         cache_key = f"{region}"
         if cache_key not in self._offerings_cache:
             try:
-                ec2 = self._session.client("ec2", region_name=region)
+                ec2 = self._client("ec2", region_name=region)
                 paginator = ec2.get_paginator("describe_instance_type_offerings")
                 offerings = set()
                 for page in paginator.paginate(LocationType="region"):
@@ -571,7 +581,7 @@ class CapacityChecker:
     def get_availability_zones(self, region: str) -> list[str]:
         """Get availability zones for a region."""
         try:
-            ec2 = self._session.client("ec2", region_name=region)
+            ec2 = self._client("ec2", region_name=region)
             response = ec2.describe_availability_zones(
                 Filters=[{"Name": "state", "Values": ["available"]}]
             )
@@ -591,7 +601,7 @@ class CapacityChecker:
         """
         zones = self.get_availability_zones(region)
         try:
-            ec2 = self._session.client("ec2", region_name=region)
+            ec2 = self._client("ec2", region_name=region)
             paginator = ec2.get_paginator("describe_instance_type_offerings")
             offered: set[str] = set()
             for page in paginator.paginate(
@@ -613,7 +623,7 @@ class CapacityChecker:
         Constrained instances are often available in fewer AZs.
         """
         try:
-            ec2 = self._session.client("ec2", region_name=region)
+            ec2 = self._client("ec2", region_name=region)
             total_azs = self.get_availability_zones(region)
             if not total_azs:
                 return None
@@ -694,7 +704,7 @@ class CapacityChecker:
             return {}
         pool_name, members = pool
         try:
-            ec2 = self._session.client("ec2", region_name=region)
+            ec2 = self._client("ec2", region_name=region)
 
             response = ec2.get_spot_placement_scores(
                 InstanceTypes=list(members),
@@ -760,7 +770,7 @@ class CapacityChecker:
         The per-zone series is what trend analysis (``compute_price_trend``)
         reads, so a caller that wants both makes one sweep of the window.
         """
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._client("ec2", region_name=region)
 
         end_time = datetime.now(UTC)
         start_time = end_time - timedelta(days=days)
@@ -821,7 +831,7 @@ class CapacityChecker:
             return float(cached_value) if cached_value is not None else None
 
         try:
-            pricing = self._session.client("pricing", region_name="us-east-1")
+            pricing = self._client("pricing", region_name="us-east-1")
 
             # Filter on the regionCode product attribute — the AWS region
             # identifier itself — never on the human-readable location name.
@@ -1420,7 +1430,7 @@ class CapacityChecker:
                 reported as "no reservations"; multi-Region callers record it
                 per Region.
         """
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._client("ec2", region_name=region)
 
         filters: list[dict[str, Any]] = []
         if state:
@@ -1611,7 +1621,7 @@ class CapacityChecker:
                 permission, throttling past the retry budget, an internal error,
                 a failed connection); nothing was searched in the Region.
         """
-        ec2 = self._session.client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
+        ec2 = self._client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
         offerings: list[dict[str, Any]] = []
 
         if gpus_per_instance is None:
@@ -1698,7 +1708,7 @@ class CapacityChecker:
               = 0 = stable or no data
               < 0 = capacity shrinking (offerings decreasing day over day)
         """
-        ec2 = self._session.client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
+        ec2 = self._client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
 
         now = datetime.now(UTC)
         window_end = now + timedelta(days=blocks.MAX_DURATION_DAYS)
@@ -2466,7 +2476,7 @@ class CapacityChecker:
         Returns:
             Dictionary with the created capacity reservation details
         """
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._client("ec2", region_name=region)
 
         if dry_run:
             try:
@@ -2602,7 +2612,7 @@ class CapacityChecker:
                 ),
             }
 
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._client("ec2", region_name=region)
         parsed_end = blocks.parse_date_input(end_date)
         api_kwargs: dict[str, Any] = {
             "InstanceType": canonical,
@@ -2708,7 +2718,7 @@ class CapacityChecker:
         Returns:
             Dict describing the outcome.
         """
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._client("ec2", region_name=region)
 
         if dry_run:
             try:

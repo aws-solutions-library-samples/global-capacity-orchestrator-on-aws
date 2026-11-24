@@ -11,7 +11,11 @@ import yaml
 from botocore.exceptions import ClientError
 from click.testing import CliRunner
 
-from cli.capacity.advisor import BedrockCapacityRecommendation, CapacityPredictionResult
+from cli.capacity.advisor import (
+    AI_RECOMMENDATION_DISCLAIMER,
+    BedrockCapacityRecommendation,
+    CapacityPredictionResult,
+)
 from cli.capacity.traffic_dial import RegionDialStatus
 from cli.commands.capacity_cmd import (
     _format_patterns_grid,
@@ -688,13 +692,26 @@ _AI_DOCUMENT = {
     "recommended_region": "us-west-2",
     "recommended_instance_type": "g5.xlarge",
     "recommended_capacity_type": "spot",
+    "instance_count": None,
     "confidence": "high",
     "cost_estimate": "$0.40/hr",
     "reasoning": "High spot score. Low queue depth.",
+    "reservation_advice": None,
     "alternative_options": [
         {"region": "us-east-1", "instance_type": "g5.xlarge", "capacity_type": "on-demand"}
     ],
     "warnings": ["Spot can be interrupted"],
+    "validation_warnings": [],
+    "model_id": None,
+    "bedrock_region": None,
+    "data_collected_at": None,
+    "regions_analyzed": [],
+    "instance_types_analyzed": [],
+    "data_gaps": [],
+    "usage": {},
+    "latency_ms": None,
+    # stdout is all the MCP tool reads, so the disclaimer is in the document too.
+    "disclaimer": AI_RECOMMENDATION_DISCLAIMER,
 }
 
 

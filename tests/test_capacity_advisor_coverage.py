@@ -63,9 +63,10 @@ def test_build_prompt_requirement_fields():
         data,
         requirements={"min_memory_gb": 16, "fault_tolerance": "high", "max_cost_per_hour": 5.0},
     )
-    assert "Minimum Memory: 16 GB" in prompt
-    assert "Fault Tolerance: high" in prompt
-    assert "Max Cost/Hour: $5.0" in prompt
+    # The memory figure is the workload's total GPU memory, not host RAM.
+    assert "Minimum GPU Memory: 16 GB in total" in prompt
+    assert "Fault Tolerance: high (the workload checkpoints" in prompt
+    assert "Max Cost/Hour: $5.0 for all instances together" in prompt
 
 
 def test_build_prompt_reservations_and_blocks():

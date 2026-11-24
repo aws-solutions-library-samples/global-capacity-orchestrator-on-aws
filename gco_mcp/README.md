@@ -751,7 +751,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `capacity_status` | View capacity across all deployed regions | safe | — |
 | `recommend_region` | Get optimal region recommendation (supports instance-type-aware weighted scoring; `backend="hyperpod"` or `"pcs"` ranks only the Regions running that backend on its own capacity) | safe | — |
 | `spot_prices` | Get current spot prices and their history for an instance type, per zone | safe | — |
-| `ai_recommend` | Get AI-powered capacity recommendation using Amazon [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) | safe | — |
+| `ai_recommend` | Get AI-powered capacity recommendation using Amazon [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html), checked against the gathered data (`validation_warnings`); `data_only=True` returns the gathered data without calling Bedrock | safe | — |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions | safe | — |
 | `reservation_check` | Check reservation availability and Capacity Block offerings | safe | — |
 | `find_capacity_blocks` | Search Capacity Block offerings across regions, durations, and a start-date window | safe | — |

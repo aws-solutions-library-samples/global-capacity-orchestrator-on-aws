@@ -1,7 +1,10 @@
 """Capacity checking commands."""
 
+import json
+import re
 import shlex
 import sys
+import textwrap
 from typing import Any
 
 import click
@@ -566,49 +569,271 @@ _AI_DISCLAIMER_LINES = (
     "",
 )
 
+#: An AWS Region name (us-east-1, ap-southeast-5, us-gov-west-1).
+_AWS_REGION_NAME = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
+#: An EC2 instance type once aliases are expanded (g5.xlarge, p6-b200.48xlarge).
+_EC2_INSTANCE_TYPE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9-]+$")
+
+
+def _ai_instance_types(ctx: click.Context, param: click.Parameter, value: Any) -> tuple[str, ...]:
+    """Expand aliases, drop repeats and refuse names that are not EC2 instance types.
+
+    The names reach the model's prompt as well as the AWS APIs, so only
+    instance-type names are accepted.
+    """
+    from ..capacity.blocks import normalize_instance_type
+
+    names: list[str] = []
+    for item in value or ():
+        canonical, note = normalize_instance_type(item)
+        canonical = canonical.strip().lower()
+        if not _EC2_INSTANCE_TYPE.match(canonical):
+            raise click.BadParameter(
+                f"{item!r} is not an EC2 instance type" + (f" ({note})" if note else ""),
+                ctx=ctx,
+                param=param,
+            )
+        if canonical not in names:
+            names.append(canonical)
+    return tuple(names)
+
+
+def _aws_region_names(ctx: click.Context, param: click.Parameter, value: Any) -> Any:
+    """Refuse names that are not AWS Regions, in one value or a repeatable option's tuple."""
+    if value is None:
+        return None
+    regions: list[str] = []
+    for item in value if isinstance(value, tuple) else (value,):
+        name = item.strip().lower()
+        if not _AWS_REGION_NAME.match(name):
+            raise click.BadParameter(f"{item!r} is not an AWS Region name", ctx=ctx, param=param)
+        if name not in regions:
+            regions.append(name)
+    return tuple(regions) if isinstance(value, tuple) else regions[0]
+
 
 def _recommendation_to_dict(recommendation: Any, raw: bool) -> dict[str, Any]:
     """Serialize a BedrockCapacityRecommendation for JSON/YAML output.
 
-    The model's raw response is long and only for debugging, so it is
-    included only with --raw, as in table mode.
+    The document carries the disclaimer, so a caller that reads only stdout
+    (the MCP tool) has it too, along with GCO's checks of the answer against
+    the gathered data and what the answer rests on. The model's raw response
+    is long and only for debugging, so it is included only with --raw, as in
+    table mode.
     """
+    from ..capacity.advisor import AI_RECOMMENDATION_DISCLAIMER
+
     document: dict[str, Any] = {
         "recommended_region": recommendation.recommended_region,
         "recommended_instance_type": recommendation.recommended_instance_type,
         "recommended_capacity_type": recommendation.recommended_capacity_type,
+        "instance_count": recommendation.instance_count,
         "confidence": recommendation.confidence,
         "cost_estimate": recommendation.cost_estimate,
         "reasoning": recommendation.reasoning,
+        "reservation_advice": recommendation.reservation_advice,
         "alternative_options": recommendation.alternative_options,
         "warnings": recommendation.warnings,
+        "validation_warnings": recommendation.validation_warnings,
+        "model_id": recommendation.model_id,
+        "bedrock_region": recommendation.bedrock_region,
+        "data_collected_at": recommendation.data_collected_at,
+        "regions_analyzed": recommendation.regions_analyzed,
+        "instance_types_analyzed": recommendation.instance_types_analyzed,
+        "data_gaps": recommendation.data_gaps,
+        "usage": recommendation.usage,
+        "latency_ms": recommendation.latency_ms,
+        "disclaimer": AI_RECOMMENDATION_DISCLAIMER,
     }
     if raw:
         document["raw_response"] = recommendation.raw_response
     return document
 
 
+def _print_section(title: str, lines: list[str]) -> None:
+    """A titled block of the ai-recommend report; nothing when ``lines`` is empty."""
+    if not lines:
+        return
+    print(f"  {title}:")
+    print("  " + "-" * 68)
+    for line in lines:
+        print(f"  {line}")
+    print()
+
+
+def _wrapped(text: Any) -> list[str]:
+    """``text`` wrapped to the report's width, paragraph by paragraph."""
+    lines: list[str] = []
+    for paragraph in str(text or "").strip().splitlines():
+        lines.extend(textwrap.wrap(paragraph, width=68, break_on_hyphens=False) or [""])
+    return lines
+
+
+def _bullets(items: list[Any]) -> list[str]:
+    """Each item as a bullet wrapped to the report's width."""
+    lines: list[str] = []
+    for item in items:
+        lines.extend(
+            textwrap.wrap(
+                str(item),
+                width=68,
+                initial_indent="• ",
+                subsequent_indent="  ",
+                break_on_hyphens=False,
+            )
+        )
+    return lines
+
+
+def _data_gap_lines(gaps: list[dict[str, Any]]) -> list[str]:
+    """One entry per failed lookup source and error, naming the Regions."""
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for gap in gaps:
+        grouped.setdefault((str(gap.get("source")), str(gap.get("error"))), []).append(gap)
+    lines = []
+    for (source, error), rows in sorted(grouped.items()):
+        regions = ", ".join(sorted({str(row.get("region")) for row in rows}))
+        lookups = f"{len(rows)} lookup" + ("s" if len(rows) > 1 else "")
+        lines.append(f"{source}: {error} ({lookups} in {regions})")
+    return lines
+
+
+def _provenance_line(recommendation: Any) -> str:
+    """The model, Region, data time, tokens and latency behind a recommendation."""
+    parts = []
+    model_id = getattr(recommendation, "model_id", None)
+    if model_id:
+        region = getattr(recommendation, "bedrock_region", None)
+        parts.append(f"Model {model_id}" + (f" in {region}" if region else ""))
+    collected = getattr(recommendation, "data_collected_at", None)
+    if collected:
+        parts.append(f"data read {collected}")
+    usage = getattr(recommendation, "usage", None) or {}
+    if "inputTokens" in usage and "outputTokens" in usage:
+        parts.append(f"{usage['inputTokens']} input + {usage['outputTokens']} output tokens")
+    latency = getattr(recommendation, "latency_ms", None)
+    if latency is not None:
+        parts.append(f"{latency / 1000:.1f} s")
+    return "; ".join(parts)
+
+
+def _print_ai_recommendation(recommendation: Any, raw: bool) -> None:
+    """The table-mode report of a recommendation."""
+    print()
+    print("  " + "=" * 70)
+    print("  🤖 AI RECOMMENDATION")
+    print("  " + "=" * 70)
+    print()
+    print(f"  Region:        {recommendation.recommended_region}")
+    print(f"  Instance Type: {recommendation.recommended_instance_type}")
+    instance_count = getattr(recommendation, "instance_count", None)
+    if instance_count:
+        print(f"  Instances:     {instance_count}")
+    print(f"  Capacity Type: {str(recommendation.recommended_capacity_type or 'unknown').upper()}")
+    print(f"  Confidence:    {str(recommendation.confidence or 'low').upper()}")
+    if recommendation.cost_estimate:
+        print(f"  Est. Cost:     {recommendation.cost_estimate}")
+    print()
+    _print_section("REASONING", _wrapped(recommendation.reasoning))
+    _print_section("RESERVATIONS", _wrapped(getattr(recommendation, "reservation_advice", None)))
+
+    alternatives = []
+    for i, alt in enumerate(recommendation.alternative_options[:3], 1):
+        alternatives.append(
+            f"{i}. {alt.get('region') or 'N/A'} / "
+            f"{alt.get('instance_type') or 'N/A'} / "
+            f"{str(alt.get('capacity_type') or 'N/A').upper()}"
+        )
+        if alt.get("reason"):
+            alternatives.extend(
+                textwrap.wrap(
+                    str(alt["reason"]),
+                    width=68,
+                    initial_indent="   ",
+                    subsequent_indent="   ",
+                    break_on_hyphens=False,
+                )
+            )
+    _print_section("ALTERNATIVE OPTIONS", alternatives)
+    _print_section("⚠️  WARNINGS", _bullets(recommendation.warnings))
+    _print_section(
+        "⚠️  CHECKS AGAINST THE GATHERED DATA",
+        _bullets(getattr(recommendation, "validation_warnings", None) or []),
+    )
+    gaps = getattr(recommendation, "data_gaps", None) or []
+    _print_section(
+        f"DATA GAPS ({len(gaps)} failed lookup{'s' if len(gaps) > 1 else ''}, "
+        "given to the model as unknown)",
+        _bullets(_data_gap_lines(gaps)),
+    )
+    provenance = _provenance_line(recommendation)
+    if provenance:
+        print(f"  {provenance}")
+        print()
+
+    # Show raw response if requested
+    if raw:
+        print("  RAW AI RESPONSE:")
+        print("  " + "-" * 68)
+        print(recommendation.raw_response)
+        print()
+
+    print("  " + "=" * 70)
+    print()
+
+
 @capacity.command("ai-recommend")
-@click.option("--workload", "-w", help="Description of your workload")
+@click.option(
+    "--workload",
+    "-w",
+    help="What the workload does, in your own words (the first 4000 characters reach the model)",
+)
 @click.option(
     "--instance-type",
     "-i",
     multiple=True,
-    callback=_canonical_instance_types,
-    help="Instance types or aliases to consider (can specify multiple)",
+    callback=_ai_instance_types,
+    help=(
+        "Instance type or alias to compare; repeat for more "
+        "(default: one per current GPU generation)"
+    ),
 )
-@click.option("--region", "-r", multiple=True, help="Regions to consider (can specify multiple)")
+@click.option(
+    "--region",
+    "-r",
+    multiple=True,
+    callback=_aws_region_names,
+    help="Region to compare; repeat for more (default: the deployed Regions)",
+)
 @click.option("--gpu", is_flag=True, help="Workload requires GPUs")
-@click.option("--min-gpus", default=0, help="Minimum GPUs required")
-@click.option("--min-memory-gb", default=0, help="Minimum memory in GB")
+@click.option(
+    "--min-gpus",
+    type=click.IntRange(min=0),
+    default=0,
+    help="GPUs the workload needs in total, across all its instances",
+)
+@click.option(
+    "--min-memory-gb",
+    type=click.IntRange(min=0),
+    default=0,
+    help="GPU memory the workload needs in total across all its instances, in GB",
+)
 @click.option(
     "--fault-tolerance",
     "-f",
     type=click.Choice(["high", "medium", "low"]),
     default="medium",
-    help="Fault tolerance level",
+    show_default=True,
+    help=(
+        "How well the workload survives interruptions: high (it checkpoints, so Spot "
+        "fits), medium, or low (it must not be interrupted)"
+    ),
 )
-@click.option("--max-cost", type=float, help="Maximum cost per hour in USD")
+@click.option(
+    "--max-cost",
+    type=click.FloatRange(min=0, min_open=True),
+    help="Most the workload may cost per hour in USD, all its instances together",
+)
 @click.option(
     "--model",
     "-m",
@@ -617,6 +842,19 @@ def _recommendation_to_dict(recommendation: Any, raw: bool) -> dict[str, Any]:
         "Bedrock model ID to use "
         "(default: cdk.json context.bedrock.capacity_advisor_default_model_id)."
     ),
+)
+@click.option(
+    "--bedrock-region",
+    callback=_aws_region_names,
+    help=(
+        "Region to call Bedrock in (default: AWS_REGION, then AWS_DEFAULT_REGION, "
+        "then the CLI's default region)"
+    ),
+)
+@click.option(
+    "--data-only",
+    is_flag=True,
+    help="Print the gathered capacity data as one JSON document and stop; Bedrock is not called",
 )
 @click.option("--raw", is_flag=True, help="Show raw AI response")
 @pass_config
@@ -631,25 +869,36 @@ def ai_recommend(
     fault_tolerance: Any,
     max_cost: Any,
     model: Any,
+    bedrock_region: Any,
+    data_only: Any,
     raw: Any,
 ) -> None:
     """Get AI-powered capacity recommendation using Amazon Bedrock.
 
     This command gathers comprehensive capacity data including:
     - Spot placement scores, pricing, and 7-day per-AZ price trends across regions
-    - On-demand availability and pricing
-    - Capacity Reservations (ODCRs), Capacity Block offerings, and 26-week
-      block-availability trends
-    - Current cluster utilization (queue depth, GPU/CPU usage)
-    - Running and pending job counts
+    - On-demand availability and pricing, and each type's GPUs and memory
+    - Capacity Reservations (ODCRs), Capacity Block offerings, and the near-term
+      block-availability trend over the window EC2 answers (about nine days)
+    - The GCO cluster's queue depth, running jobs and GPU/CPU utilization in
+      each Region (a signal that could not be read is reported as unknown)
     - The algorithmic multi-signal region ranking as advisory context
+    - Up to seven days of recorded capacity history, when it is deployed
 
     Without --instance-type, one representative type per current GPU
     generation is scanned (T4, L4, A10G, L40S, RTX PRO 4500/6000 Blackwell,
     A100, H100, H200, B200, B300).
 
-    The data is analyzed by an LLM to provide intelligent recommendations
-    for where to place your workload.
+    --min-gpus, --min-memory-gb (GPU memory) and --max-cost are totals for
+    the whole workload: 16 GPUs on an 8-GPU type is two instances, and the
+    cost limit covers both. The answer is checked against the gathered data
+    (a Region or type that was not analyzed, too few GPUs, over the cost
+    limit, a type EC2 does not offer in the Region); each failed check is
+    listed and lowers the confidence to low.
+
+    --data-only prints the gathered data as one JSON document and stops, for
+    a caller that reasons over it itself; Bedrock is not called, so --model,
+    --bedrock-region and --raw do nothing.
 
     ⚠️  DISCLAIMER: Recommendations are AI-generated and should be validated
     before making production decisions. Capacity availability and pricing
@@ -668,98 +917,65 @@ def ai_recommend(
         gco capacity ai-recommend -i g5.xlarge -i g5.2xlarge -r us-east-1 -r us-west-2
 
         gco capacity ai-recommend --fault-tolerance high --max-cost 5.00
+
+        gco capacity ai-recommend -i p5 -r us-east-1 --min-gpus 16 --data-only
     """
     from ..capacity import get_bedrock_capacity_advisor
 
     formatter = get_output_formatter(config)
 
-    # The disclaimer is for the person reading; in JSON/YAML mode it goes to
-    # stderr so stdout stays one document.
-    for line in _AI_DISCLAIMER_LINES:
-        interactive_echo(line)
+    requirements = {
+        "gpu_required": gpu,
+        "min_gpus": min_gpus if min_gpus > 0 else None,
+        "min_memory_gb": min_memory_gb if min_memory_gb > 0 else None,
+        "fault_tolerance": fault_tolerance,
+        "max_cost_per_hour": max_cost,
+    }
+    # Remove None values
+    requirements = {k: v for k, v in requirements.items() if v is not None}
+    instance_types = list(instance_type) if instance_type else None
+    regions = list(region) if region else None
+
+    if not data_only:
+        # The disclaimer is for the person reading; in JSON/YAML mode it goes
+        # to stderr so stdout stays one document.
+        for line in _AI_DISCLAIMER_LINES:
+            interactive_echo(line)
 
     try:
+        advisor = get_bedrock_capacity_advisor(
+            config, model_id=model, bedrock_region=bedrock_region
+        )
+
+        if data_only:
+            # stdout carries only the document, in table mode too.
+            click.echo("ℹ Gathering capacity data across regions...", err=True)
+            document = {
+                "requirements": requirements,
+                **advisor.collect_context(
+                    instance_types=instance_types, regions=regions, requirements=requirements
+                ),
+            }
+            if config.output_format == "table":
+                click.echo(json.dumps(document, indent=2, default=str))
+            else:
+                formatter.print(document)
+            return
+
         formatter.print_info("Gathering capacity data across regions...")
-
-        advisor = get_bedrock_capacity_advisor(config, model_id=model)
-
-        # Build requirements dict
-        requirements = {
-            "gpu_required": gpu,
-            "min_gpus": min_gpus if min_gpus > 0 else None,
-            "min_memory_gb": min_memory_gb if min_memory_gb > 0 else None,
-            "fault_tolerance": fault_tolerance,
-            "max_cost_per_hour": max_cost,
-        }
-        # Remove None values
-        requirements = {k: v for k, v in requirements.items() if v is not None}
-
-        formatter.print_info(f"Analyzing with {advisor.model_id}...")
+        formatter.print_info(f"Analyzing with {advisor.model_id} in {advisor.bedrock_region()}...")
 
         recommendation = advisor.get_recommendation(
             workload_description=workload,
-            instance_types=list(instance_type) if instance_type else None,
-            regions=list(region) if region else None,
+            instance_types=instance_types,
+            regions=regions,
             requirements=requirements if requirements else None,
         )
 
         if config.output_format != "table":
             formatter.print(_recommendation_to_dict(recommendation, raw))
             return
-
-        # Display recommendation
-        print()
-        print("  " + "=" * 70)
-        print("  🤖 AI RECOMMENDATION")
-        print("  " + "=" * 70)
-        print()
-        print(f"  Region:        {recommendation.recommended_region}")
-        print(f"  Instance Type: {recommendation.recommended_instance_type}")
-        print(f"  Capacity Type: {recommendation.recommended_capacity_type.upper()}")
-        print(f"  Confidence:    {recommendation.confidence.upper()}")
-        if recommendation.cost_estimate:
-            print(f"  Est. Cost:     {recommendation.cost_estimate}")
-        print()
-        print("  REASONING:")
-        print("  " + "-" * 68)
-        # Word wrap the reasoning
-        reasoning_lines = recommendation.reasoning.split(". ")
-        for line in reasoning_lines:
-            if line.strip():
-                print(f"  {line.strip()}.")
-        print()
-
-        # Show alternatives
-        if recommendation.alternative_options:
-            print("  ALTERNATIVE OPTIONS:")
-            print("  " + "-" * 68)
-            for i, alt in enumerate(recommendation.alternative_options[:3], 1):
-                print(
-                    f"  {i}. {alt.get('region', 'N/A')} / "
-                    f"{alt.get('instance_type', 'N/A')} / "
-                    f"{alt.get('capacity_type', 'N/A').upper()}"
-                )
-                if alt.get("reason"):
-                    print(f"     {alt['reason']}")
-            print()
-
-        # Show warnings
-        if recommendation.warnings:
-            print("  ⚠️  WARNINGS:")
-            print("  " + "-" * 68)
-            for warning in recommendation.warnings:
-                print(f"  • {warning}")
-            print()
-
-        # Show raw response if requested
-        if raw:
-            print("  RAW AI RESPONSE:")
-            print("  " + "-" * 68)
-            print(recommendation.raw_response)
-            print()
-
-        print("  " + "=" * 70)
-        print()
+        _print_ai_recommendation(recommendation, raw)
 
     except Exception as e:
         if is_bedrock_ftu_form_error(e):

@@ -2424,12 +2424,14 @@ gco mission run --directive "Find documentation about inference endpoints." \
   --tool-allowlist find_docs --bedrock-model-id us.meta.llama3-3-70b-instruct-v1:0
 ```
 
-The capacity advisor calls Bedrock in `AWS_REGION`, else `AWS_DEFAULT_REGION`,
-else the CLI's default Region (`gco -r`), not in the Region `-r` names after the
-subcommand, so a geography-scoped profile such as `eu.amazon.nova-pro-v1:0`
-needs an `AWS_REGION` in that geography.
+The capacity advisor calls Bedrock in `ai-recommend --bedrock-region`, else
+`AWS_REGION`, else `AWS_DEFAULT_REGION`, else the CLI's default Region (`gco -r`),
+not in the Region `-r` names after the subcommand, so a geography-scoped profile
+such as `eu.amazon.nova-pro-v1:0` needs a `--bedrock-region` (or, for `predict`,
+an `AWS_REGION`) in that geography.
 
-The `ai_recommend` MCP tool takes the same override as a `model="..."` argument; omit it to use the default.
+The `ai_recommend` MCP tool takes the same overrides as `model="..."` and
+`bedrock_region="..."` arguments; omit them to use the defaults.
 
 **2. Per environment (env vars)** — the first two apply to Mission; the
 remaining controls select an Autopilot engine/model for one environment:
