@@ -142,9 +142,9 @@
       "source_commit": "c904dd4dd0b819014ff781aa5d888d6c579a8868"
     },
     "gco/stacks/regional_stack.py": {
-      "digest": "f112a1d74a7899a0053d1514884729c69c261eb1d5ca4056a493e1c6abbfe0bf",
-      "generated_at": "2026-11-23T02:28:23Z",
-      "source_commit": "1bf0ef9a749386c6fa50ac7edddbe6eb1b7a9fe0"
+      "digest": "3b085d7da80f97fc17648b8329c51cba33c908191e2d7723f09f8c050d435fd6",
+      "generated_at": "2026-11-24T13:19:24Z",
+      "source_commit": "d15bfff96330b5e27dac1c6e91d3fd0096d37722"
     },
     "gco_mcp/audit.py": {
       "digest": "1f59f38629f4afb688d78240715f616049e222beaae38d5644da14b196e00af5",
