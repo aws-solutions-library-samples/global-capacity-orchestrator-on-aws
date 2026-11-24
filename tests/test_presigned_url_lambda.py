@@ -508,6 +508,90 @@ def test_handler_module_exposes_pure_helpers(monkeypatch: pytest.MonkeyPatch) ->
 # ---------------------------------------------------------------------------
 
 
+class TestStudioHomeDirectories:
+    """SageMaker refuses a space whose FileSystemPath is missing, and creates none."""
+
+    @pytest.fixture
+    def home(self, handler_module, tmp_path, monkeypatch):
+        handler, sagemaker_mock = handler_module
+        monkeypatch.setattr(handler, "STUDIO_HOME_MOUNT_PATH", str(tmp_path))
+        chown = MagicMock()
+        monkeypatch.setattr(handler.os, "chown", chown)
+        return handler, sagemaker_mock, tmp_path, chown
+
+    def test_both_directories_exist_before_the_url_is_minted(self, home) -> None:
+        handler, sagemaker_mock, root, chown = home
+
+        def mint(**_kwargs: Any) -> dict[str, str]:
+            assert (root / "alice").is_dir()
+            assert (root / "sagemaker-user").is_dir()
+            return {"AuthorizedUrl": "https://d-abc123xyz.studio.us-east-2.sagemaker.aws/auth"}
+
+        sagemaker_mock.create_presigned_domain_url.side_effect = mint
+        response = handler.lambda_handler(_make_event(), None)
+
+        assert response["statusCode"] == 200
+        assert (root / "alice").stat().st_mode & 0o777 == 0o700
+        # Given to the POSIX identity SageMaker uses on the file system.
+        assert [c.args for c in chown.call_args_list] == [
+            (str(root / "alice"), 200001, 1001),
+            (str(root / "sagemaker-user"), 200001, 1001),
+        ]
+
+    def test_a_directory_the_notebook_user_owns_is_left_alone(self, home, monkeypatch) -> None:
+        handler, _sagemaker_mock, root, chown = home
+        (root / "alice").mkdir(mode=0o750)
+        (root / "sagemaker-user").mkdir()
+        owned = {str(root / "alice"), str(root / "sagemaker-user")}
+        real_stat = os.stat
+
+        def stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+            result = real_stat(path, *args, **kwargs)
+            if str(path) not in owned:
+                return result
+            values = list(result)
+            values[4:6] = [200001, 1001]  # st_uid, st_gid
+            return os.stat_result(values)
+
+        monkeypatch.setattr(handler.os, "stat", stat)
+
+        assert handler.lambda_handler(_make_event(), None)["statusCode"] == 200
+        chown.assert_not_called()
+        assert (root / "alice").stat().st_mode & 0o777 == 0o750
+
+    def test_a_failure_is_logged_and_the_url_still_returned(self, home, monkeypatch, caplog):
+        handler, _sagemaker_mock, root, _chown = home
+        real_mkdir = os.mkdir
+
+        def mkdir(path: Any, *args: Any, **kwargs: Any) -> None:
+            if str(path).startswith(str(root)):
+                raise PermissionError("denied")
+            real_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(handler.os, "mkdir", mkdir)
+
+        response = handler.lambda_handler(_make_event(), None)
+
+        assert response["statusCode"] == 200
+        assert "Could not create the Studio home directory alice: denied" in caplog.text
+        assert "Could not create the Studio home directory sagemaker-user" in caplog.text
+
+    def test_a_refused_caller_gets_no_directory(self, home) -> None:
+        handler, sagemaker_mock, root, _chown = home
+        sagemaker_mock.list_tags.return_value = _owner_tags(_OTHER_SUB)
+
+        assert handler.lambda_handler(_make_event(), None)["statusCode"] == 403
+        assert not (root / "alice").exists()
+
+    def test_without_a_mount_path_nothing_is_created(self, handler_module, monkeypatch) -> None:
+        handler, _sagemaker_mock = handler_module
+        ensure = MagicMock()
+        monkeypatch.setattr(handler, "_ensure_home_directory", ensure)
+
+        assert handler.lambda_handler(_make_event(), None)["statusCode"] == 200
+        ensure.assert_not_called()
+
+
 class TestParseClaimsShapes:
     @pytest.mark.parametrize(
         "event",

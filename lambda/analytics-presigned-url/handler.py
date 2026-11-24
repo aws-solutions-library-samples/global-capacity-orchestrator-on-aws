@@ -28,15 +28,24 @@ Flow (happy path):
    ``Delete_Failed``, or a ``Failed`` one whose delete is refused) is an
    HTTP 409 ``UserProfileFailed`` instead of a 202 the CLI would poll
    until it gives up.
-4. ``sagemaker:CreatePresignedDomainUrl`` and return the URL (HTTP 200).
+4. Create ``/home/<username>`` on the Studio EFS, and the domain's default
+   ``/home/sagemaker-user``, if they are missing (see below).
+5. ``sagemaker:CreatePresignedDomainUrl`` and return the URL (HTTP 200).
 
 The profile reaches ``/home/<username>`` on the Studio EFS through its
 ``EFSFileSystemConfig``, which takes only a file system ID and a path, with
-Studio's own POSIX identity. Earlier releases also created a per-user EFS
-access point at that path on every login; nothing mounted through it, so
-it never applied (EFS creates an access point's root directory only when a
-client mounts through the access point), and it is no longer created. The
-stack's cleanup still deletes the ones earlier releases left.
+Studio's own POSIX identity. SageMaker refuses to start a space whose path
+does not exist and creates none, so this function mounts the file system's
+``/home`` (through the stack's one access point, as root) and creates the
+directory, mode ``0700``, owned by the notebook user (:data:`NOTEBOOK_UID`,
+:data:`NOTEBOOK_GID`), before it mints the URL that lets the user start a
+space. A failure is logged and the URL is still returned: only spaces with
+the Studio EFS attached need the directory. Earlier releases also created a
+per-user EFS access point at that path on every login; nothing mounted
+through it, so it never applied (EFS creates an access point's root
+directory only when a client mounts through the access point), and it is no
+longer created. The stack's cleanup still deletes the ones earlier releases
+left.
 
 The Lambda never blocks waiting for profile provisioning.  Instead it
 returns HTTP 202 ``{"status": "provisioning"}`` and the CLI retries
@@ -52,6 +61,8 @@ Environment variables (set by ``GCOAnalyticsStack._create_presigned_url_lambda``
 - ``STUDIO_DOMAIN_ID`` -- the Studio domain ID (e.g. ``d-abc123xyz``).
 - ``SAGEMAKER_EXECUTION_ROLE_ARN`` -- passed on ``CreateUserProfile``.
 - ``STUDIO_EFS_ID`` -- the file system each profile's home directory is on.
+- ``STUDIO_HOME_MOUNT_PATH`` -- where the function mounts that file system's
+  ``/home``; without it no directory is created.
 - ``URL_EXPIRES_SECONDS`` -- default ``300`` (5 minutes).
 - ``SESSION_EXPIRES_SECONDS`` -- default ``43200`` (12 hours).
 
@@ -99,6 +110,7 @@ sagemaker = boto3.client("sagemaker")
 STUDIO_DOMAIN_ID = os.environ.get("STUDIO_DOMAIN_ID", "")
 SAGEMAKER_EXECUTION_ROLE_ARN = os.environ.get("SAGEMAKER_EXECUTION_ROLE_ARN", "")
 STUDIO_EFS_ID = os.environ.get("STUDIO_EFS_ID", "")
+STUDIO_HOME_MOUNT_PATH = os.environ.get("STUDIO_HOME_MOUNT_PATH", "")
 URL_EXPIRES_SECONDS = int(os.environ.get("URL_EXPIRES_SECONDS", "300"))
 SESSION_EXPIRES_SECONDS = int(os.environ.get("SESSION_EXPIRES_SECONDS", "43200"))
 
@@ -131,6 +143,17 @@ _STUDIO_USERNAME_RE = re.compile(STUDIO_USERNAME_PATTERN)
 
 #: Tag recording the Cognito ``sub`` a user profile belongs to.
 PROFILE_OWNER_TAG_KEY = "gco:analytics:cognito-sub"
+
+#: The POSIX identity SageMaker uses for a custom file system's operations
+#: when no ``CustomPosixUserConfig`` is set, as on this domain and its
+#: profiles (https://docs.aws.amazon.com/sagemaker/latest/dg/domain-custom-file-system.html),
+#: so the owner a home directory needs for a space to write to it. The app's
+#: own ``sagemaker-user`` (1000:100) is not what reaches the file system.
+NOTEBOOK_UID = 200001
+NOTEBOOK_GID = 1001
+#: The directory under ``/home`` that the domain's default ``FileSystemPath``
+#: names, shared by profiles created outside this function.
+DOMAIN_DEFAULT_HOME = "sagemaker-user"
 
 #: Profile states a retry cannot fix: an update or a delete of the profile
 #: failed, so it is neither usable nor safe to recreate. They need an operator.
@@ -330,6 +353,43 @@ def _ensure_user_profile(domain_id: str, username: str, sub: str, efs_id: str) -
     return "Provisioning"
 
 
+def _ensure_home_directory(name: str) -> None:
+    """Create ``/home/<name>`` on the Studio EFS for the notebook user, if it is missing.
+
+    Created ``0700``; a directory with another owner (a create interrupted
+    before the ``chown``) is given to the notebook user as well. ``name`` is
+    a Studio username or :data:`DOMAIN_DEFAULT_HOME`: letters, digits and
+    hyphens only, so it stays one path component.
+    """
+    path = os.path.join(STUDIO_HOME_MOUNT_PATH, name)
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    else:
+        logger.info("Created the Studio home directory %s", name)
+    status = os.stat(path)
+    if (status.st_uid, status.st_gid) != (NOTEBOOK_UID, NOTEBOOK_GID):
+        os.chown(path, NOTEBOOK_UID, NOTEBOOK_GID)
+
+
+def _ensure_home_directories(username: str) -> None:
+    """Create the user's and the domain default's home directories; log a failure.
+
+    Best-effort: a space without the Studio EFS attached does not need them,
+    so a failure here must not cost the user the URL.
+    """
+    if not STUDIO_HOME_MOUNT_PATH:
+        return
+    for name in (username, DOMAIN_DEFAULT_HOME):
+        try:
+            _ensure_home_directory(name)
+        except OSError as exc:
+            logger.error(
+                "Could not create the Studio home directory %s: %s", name, exc, exc_info=True
+            )
+
+
 def _create_user_profile(domain_id: str, username: str, sub: str, efs_id: str) -> None:
     """Create a SageMaker user profile owned by ``sub``. Silently ignores ResourceInUse.
 
@@ -414,7 +474,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         if profile_status != "InService":
             return _format_provisioning()
 
-        # Step 4: mint the presigned URL.
+        # Step 4: the directories the user's spaces mount, before the URL
+        # that lets the user start one.
+        _ensure_home_directories(username)
+
+        # Step 5: mint the presigned URL.
         response = sagemaker.create_presigned_domain_url(
             DomainId=domain_id,
             UserProfileName=username,

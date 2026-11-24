@@ -48,10 +48,11 @@ from aws_cdk import aws_sagemaker as sagemaker
 from aws_cdk import custom_resources as cr
 from constructs import Construct
 
-from gco.config.config_loader import ConfigLoader
+from gco.config.config_loader import ConfigLoader, parse_bool_flag
 from gco.stacks.constants import (
     EMR_SERVERLESS_RELEASE_LABEL,
     LAMBDA_PYTHON_RUNTIME,
+    LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT,
     SAGEMAKER_ROLE_NAME_PREFIX,
     cluster_shared_ssm_parameter_prefix,
     cognito_domain_prefix_default,
@@ -82,6 +83,9 @@ PRESIGNED_URL_HANDLER = "handler.lambda_handler"
 #: API Gateway's maximum integration timeout, so the function times out first.
 PRESIGNED_URL_TIMEOUT_SECONDS = 29
 PRESIGNED_URL_MEMORY_MB = 256
+#: Where the presigned-URL function mounts ``Studio_EFS``'s ``/home`` (Lambda
+#: requires a mount path under ``/mnt``); it creates each user's directory there.
+STUDIO_HOME_MOUNT_PATH = "/mnt/studio-home"
 
 #: The GCO API path trees the SageMaker execution role may invoke, on the
 #: global API and on every regional bridge (``/studio/*`` is not among them).
@@ -140,6 +144,20 @@ class GCOAnalyticsStack(Stack):
         self.efs_removal: RemovalPolicy = _parse_removal(cfg["efs"]["removal_policy"])
         self.cognito_removal: RemovalPolicy = _parse_removal(cfg["cognito"]["removal_policy"])
         self._cognito_domain_prefix_override: str | None = cfg["cognito"].get("domain_prefix")
+        # A live release validation run destroys this stack within hours, and the
+        # AWS-managed automatic backups of the Studio EFS would outlive it for
+        # the backup vault's fixed retention.
+        raw_disable_backups = self.node.try_get_context(LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT)
+        self.disable_efs_automatic_backups: bool = raw_disable_backups is not None and (
+            parse_bool_flag(
+                (
+                    raw_disable_backups.strip()
+                    if isinstance(raw_disable_backups, str)
+                    else raw_disable_backups
+                ),
+                LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT,
+            )
+        )
 
         # Wiring order is load-bearing — each helper consumes resources from
         # earlier helpers (EFS ARN → execution role → studio domain, etc.).
@@ -382,9 +400,13 @@ class GCOAnalyticsStack(Stack):
     def _create_studio_efs(self) -> None:
         """Create ``Studio_EFS`` with KMS encryption + TLS in transit.
 
-        No access points are defined: each Studio user profile reaches its
-        own ``/home/<username>`` directory through its ``EFSFileSystemConfig``
-        (see :meth:`_create_studio_domain`).
+        Each Studio user profile reaches its own ``/home/<username>``
+        directory through its ``EFSFileSystemConfig`` (see
+        :meth:`_create_studio_domain`), and SageMaker refuses to start a space
+        whose directory does not exist. The one access point,
+        ``StudioHomeAccessPoint``, roots ``/home`` for the presigned-URL
+        function, which creates those directories as root; no space mounts
+        through it.
 
         The dedicated security group only allows the VPC's private
         CIDR on TCP/2049 (NFS). SageMaker Studio mount traffic originates
@@ -426,11 +448,26 @@ class GCOAnalyticsStack(Stack):
             vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
             encrypted=True,
             kms_key=self.kms_key,
-            enable_automatic_backups=True,
+            enable_automatic_backups=not self.disable_efs_automatic_backups,
             removal_policy=self.efs_removal,
             security_group=self.studio_efs_security_group,
         )
+        if self.disable_efs_automatic_backups:
+            cfn_file_system = self.studio_efs.node.default_child
+            if not isinstance(cfn_file_system, efs.CfnFileSystem):
+                raise TypeError("StudioEfs default child must be AWS::EFS::FileSystem")
+            cfn_file_system.backup_policy = efs.CfnFileSystem.BackupPolicyProperty(
+                status="DISABLED"
+            )
         self._tag_retainable(self.studio_efs)
+        # EFS creates /home (root, 0755) the first time a client mounts through
+        # the access point; the presigned-URL function then works below it as root.
+        self.studio_home_access_point = self.studio_efs.add_access_point(
+            "StudioHomeAccessPoint",
+            path="/home",
+            create_acl=efs.Acl(owner_uid="0", owner_gid="0", permissions="755"),
+            posix_user=efs.PosixUser(uid="0", gid="0"),
+        )
 
     # ==================================================================
     # SageMaker execution role + grants
@@ -831,12 +868,17 @@ class GCOAnalyticsStack(Stack):
         # EFS file-system policies authorize NFS client access only. Keep
         # control-plane Describe/Delete permissions on the identities that
         # need them (the execution and cleanup roles), rather than exposing
-        # them through a wildcard resource principal. The Studio runtime
-        # mounts as its execution role and only through a VPC mount target.
+        # them through a wildcard resource principal. A Studio app mounts a
+        # custom file system without IAM authorization, so a statement that
+        # names the execution role never matched it and every space with
+        # Studio_EFS attached failed to start ("SageMaker is unable to mount
+        # the file system. Check your file system policy"). Any client may
+        # mount, as the regional stack's EFS allows, but only through a mount
+        # target, which only the analytics VPC reaches (StudioEfsSecurityGroup).
         self.studio_efs.add_to_resource_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                principals=[self.sagemaker_execution_role],
+                principals=[iam.AnyPrincipal()],
                 actions=[
                     "elasticfilesystem:ClientMount",
                     "elasticfilesystem:ClientWrite",
@@ -1188,6 +1230,8 @@ class GCOAnalyticsStack(Stack):
             environment={
                 "DOMAIN_ID": self.studio_domain.attr_domain_id,
                 "EFS_ID": self.studio_efs.file_system_id,
+                # CloudFormation deletes this one, after the function mounting it.
+                "HOME_ACCESS_POINT_ID": self.studio_home_access_point.access_point_id,
                 "REGION": self.region,
                 "VPC_ID": self.vpc.vpc_id,
             },
@@ -1626,6 +1670,18 @@ class GCOAnalyticsStack(Stack):
           condition so the role can only ever be handed to SageMaker.
         * ``AWSLambdaBasicExecutionRole`` managed policy for the CloudWatch
           Logs + X-Ray write path.
+        * The function runs in the analytics VPC's private subnets and mounts
+          ``Studio_EFS``'s ``/home`` through ``StudioHomeAccessPoint`` at
+          :data:`STUDIO_HOME_MOUNT_PATH`, to create ``/home/<username>``
+          before it mints a user's first URL: ``ClientMount`` and
+          ``ClientWrite`` (granted by the file-system mount) and
+          ``ClientRootAccess`` on the file system through that access point
+          only. Lambda adds ``AWSLambdaVPCAccessExecutionRole`` for the
+          function's network interfaces. Its SageMaker calls go through the
+          VPC's SageMaker API endpoint.
+        * ``elasticfilesystem:DescribeMountTargets`` on ``Studio_EFS``:
+          ``CreateUserProfile`` checks the profile's custom file system with
+          the caller's identity.
         """
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
@@ -1645,7 +1701,13 @@ class GCOAnalyticsStack(Stack):
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name(
                     "service-role/AWSLambdaBasicExecutionRole"
-                )
+                ),
+                # The function runs in the analytics VPC, to mount Studio_EFS. A
+                # role passed to the function gets none of the policies Lambda
+                # would add to one it creates, so this one names it.
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaVPCAccessExecutionRole"
+                ),
             ],
         )
 
@@ -1690,6 +1752,36 @@ class GCOAnalyticsStack(Stack):
             )
         )
 
+        # CreateUserProfile checks a profile's custom file system with the
+        # caller's identity: without this every profile the function created
+        # went to Failed ("You don't have permission to describe the mount
+        # targets for the following file system"), and it deleted and
+        # recreated the profile on each poll.
+        self.presigned_url_lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["elasticfilesystem:DescribeMountTargets"],
+                resources=[self.studio_efs.file_system_arn],
+            )
+        )
+
+        # Root on Studio_EFS, through the home access point only: the function
+        # creates each user's directory and gives it to the notebook user.
+        self.presigned_url_lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["elasticfilesystem:ClientRootAccess"],
+                resources=[self.studio_efs.file_system_arn],
+                conditions={
+                    "StringEquals": {
+                        "elasticfilesystem:AccessPointArn": (
+                            self.studio_home_access_point.access_point_arn
+                        )
+                    }
+                },
+            )
+        )
+
         # CloudWatch log group with 1-month retention. We own
         # the group explicitly (rather than letting Lambda auto-create
         # one) so the retention setting is captured in the template.
@@ -1716,10 +1808,16 @@ class GCOAnalyticsStack(Stack):
                 "SageMaker Studio URL. Wired into /studio/login by "
                 "GCOApiGatewayGlobalStack."
             ),
+            vpc=self.vpc,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            filesystem=lambda_.FileSystem.from_efs_access_point(
+                self.studio_home_access_point, STUDIO_HOME_MOUNT_PATH
+            ),
             environment={
                 "STUDIO_DOMAIN_ID": self.studio_domain.attr_domain_id,
                 "SAGEMAKER_EXECUTION_ROLE_ARN": self.sagemaker_execution_role.role_arn,
                 "STUDIO_EFS_ID": self.studio_efs.file_system_id,
+                "STUDIO_HOME_MOUNT_PATH": STUDIO_HOME_MOUNT_PATH,
                 "URL_EXPIRES_SECONDS": "300",
                 "SESSION_EXPIRES_SECONDS": "43200",
             },
@@ -1747,8 +1845,10 @@ class GCOAnalyticsStack(Stack):
                         "The SageMaker profile actions take user-profile/<domain-id>/* "
                         "on this stack's Studio domain: each profile is named after "
                         "the Cognito user and created at first login, so its name is "
-                        "known only at invoke time. Resource: * is only on the X-Ray "
-                        "actions that active tracing adds, which take no resource."
+                        "known only at invoke time. Resource: * is on the X-Ray "
+                        "actions that active tracing adds, which take no resource, and "
+                        "on the elasticfilesystem:ClientMount the file-system mount adds, "
+                        "conditioned on the one home access point's ARN."
                     ),
                     "appliesTo": [
                         "Resource::*",

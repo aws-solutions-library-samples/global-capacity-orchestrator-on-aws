@@ -62,7 +62,8 @@ When enabled, these resources drive cost:
   you stage.
 - **Cognito** — The Lite tier includes 50,000 monthly active users (MAUs) for free (no automatic expiry). Advanced security features on the Essentials and Plus tiers are additional; see the [Amazon Cognito pricing page](https://aws.amazon.com/cognito/pricing/) for current rates. The new tier names (Lite / Essentials / Plus) landed in November 2024, so older blog posts may reference the legacy free-tier structure.
 - **Lambda** — The presigned-URL Lambda is invoked once per Studio
-  login. Effectively free at human-scale usage.
+  login. Effectively free at human-scale usage. It runs in the analytics
+  VPC, to mount `Studio_EFS`, and its network interfaces cost nothing.
 - **Studio_EFS** — The EFS file system Studio spaces can attach, one
   directory per user. Charged per GB-month of storage plus per-GB for
   IA-tier transitions.
@@ -218,7 +219,8 @@ deployed, the following resources appear in the API-gateway region
   endpoint for S3. It has no VPC flow log (the regional VPCs do).
 - **Studio_EFS** — encrypted EFS file system that Studio spaces can
   attach; each user profile the presigned-URL Lambda creates sees
-  `/home/<username>` on it ([section (k)](#k-studio_efs-and-the-studio-home-directory)).
+  `/home/<username>` on it, which the Lambda creates
+  ([section (k)](#k-studio_efs-and-the-studio-home-directory)).
 - **Studio_Only_Bucket** — KMS-encrypted S3 bucket scoped to the
   SageMaker execution role only. Not accessible from cluster pods.
   Comes with a dedicated access-logs bucket.
@@ -336,6 +338,11 @@ Disable and tear down:
 gco analytics disable
 gco stacks destroy gco-analytics
 ```
+
+The destroy takes about 20 minutes: before CloudFormation can delete the
+presigned-URL Lambda, which runs in the analytics VPC, Lambda has to
+release the function's network interfaces (19 of the 21 minutes in a
+test teardown).
 
 `disable` leaves the `hyperpod`, `canvas`, `cognito`, and `efs`
 sub-blocks untouched so a subsequent `enable` preserves your
@@ -1168,15 +1175,34 @@ and what the SageMaker documentation says Studio does with it:
   SageMaker gives the profile's spaces that directory and nothing above
   it. The domain's default path is `/home/sagemaker-user`, so profiles
   created outside the Lambda (console, CLI) all share that one directory.
-- **No access points are involved.** A profile's `EFSFileSystemConfig`
-  takes only a file system ID and a path. Earlier releases also created
-  an EFS access point rooted at `/home/<username>` at every login, with a
-  POSIX owner derived from the username and mode `0700`; nothing mounted
-  through it, so its owner and mode never applied (EFS creates an access
-  point's root directory only when a client mounts through it), and the
-  Lambda no longer creates them. The ones left from earlier releases go
-  with the stack, or by hand as below. No `CustomPosixUserConfig` is set
-  either, so spaces use SageMaker's default POSIX identity.
+- **The Lambda creates the directory.** SageMaker refuses to start a space
+  whose path does not exist ("SageMaker is unable to mount the custom file
+  system. Check your file system path input to ensure that the path
+  provided exists") and creates none. Before it returns a user's URL, the
+  presigned-URL Lambda, which runs in the analytics VPC and mounts
+  `Studio_EFS`'s `/home` as root through the stack's one access point
+  (`StudioHomeAccessPoint`), creates `/home/<username>` and
+  `/home/sagemaker-user` when they are missing: mode `0700`, owned by
+  `200001:1001`. No `CustomPosixUserConfig` is set, so that is the POSIX
+  identity SageMaker uses for the file system's operations; in the app the
+  directory shows as `sagemaker-user`'s. A user whose profile predates this
+  gets the directory at the next `gco analytics studio login`. A failure is
+  logged and the URL is still returned: spaces without `Studio_EFS` need
+  no directory.
+- **Studio mounts it without IAM authorization.** The file system policy
+  therefore lets any client mount it, write and act as root, as the
+  regional stacks' EFS does, but only through a mount target, and only the
+  analytics VPC's private range reaches those (`StudioEfsSecurityGroup`).
+  With the mount actions granted to the execution role alone, every space
+  with `Studio_EFS` attached failed to start ("SageMaker is unable to
+  mount the file system. Check your file system policy").
+- **No space mounts through an access point.** A profile's
+  `EFSFileSystemConfig` takes only a file system ID and a path. Earlier
+  releases also created an EFS access point rooted at `/home/<username>`
+  at every login; nothing mounted through it, so its owner and mode never
+  applied (EFS creates an access point's root directory only when a client
+  mounts through it), and the Lambda no longer creates them. The ones left
+  from earlier releases go with the stack, or by hand as below.
 
 ### Default removal policy: DESTROY
 

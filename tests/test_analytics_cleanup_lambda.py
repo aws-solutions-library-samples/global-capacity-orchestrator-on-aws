@@ -55,6 +55,7 @@ _delete_access_points = _module._delete_access_points
 _ENV = {
     "DOMAIN_ID": "d-test123",
     "EFS_ID": "fs-abc123",
+    "HOME_ACCESS_POINT_ID": "fsap-home",
     "REGION": "us-east-2",
     "VPC_ID": "vpc-test123",
 }
@@ -121,7 +122,7 @@ class TestHandler:
         mock_apps.assert_called_once_with("us-east-2", "d-test123")
         mock_spaces.assert_called_once_with("us-east-2", "d-test123")
         mock_profiles.assert_called_once_with("us-east-2", "d-test123")
-        mock_access_points.assert_called_once_with("us-east-2", "fs-abc123")
+        mock_access_points.assert_called_once_with("us-east-2", "fs-abc123", keep="fsap-home")
         mock_efs.assert_called_once_with("us-east-2", "d-test123")
 
     @patch("analytics_cleanup_handler._delete_access_points", return_value=[])
@@ -223,7 +224,7 @@ class TestHandler:
         calls = []
 
         def record(name, result=None):
-            def step(*args):
+            def step(*args, **_kwargs):
                 calls.append((name, *args))
                 return result if result is not None else []
 
@@ -736,6 +737,17 @@ class TestDeleteAccessPoints:
 
         assert errors == []
         assert mock_efs.delete_access_point.call_count == 2
+
+    def test_the_stacks_home_access_point_is_kept(self):
+        """CloudFormation deletes it, after the presigned-URL function mounting it."""
+        mock_efs = MagicMock()
+        mock_efs.get_paginator.return_value.paginate.return_value = [
+            {"AccessPoints": [{"AccessPointId": "fsap-home"}, {"AccessPointId": "fsap-old"}]}
+        ]
+        with patch("boto3.client", return_value=mock_efs):
+            errors = _delete_access_points("us-east-2", "fs-abc123", keep="fsap-home")
+        assert errors == []
+        mock_efs.delete_access_point.assert_called_once_with(AccessPointId="fsap-old")
 
     def test_empty_filesystem_returns_no_errors(self):
         mock_efs = MagicMock()

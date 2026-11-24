@@ -50,6 +50,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Analytics roles act on their own domain](#analytics-roles-act-on-their-own-domain)
   - [Studio login takes an access token](#studio-login-takes-an-access-token)
   - [Studio users: first sign-in and removal](#studio-users-first-sign-in-and-removal)
+  - [Studio spaces can attach Studio_EFS](#studio-spaces-can-attach-studio_efs)
   - [`Project` tag on PCS instances](#project-tag-on-pcs-instances)
   - [Add-on replay input in parts](#add-on-replay-input-in-parts)
   - [Volcano Jobs get their pods](#volcano-jobs-get-their-pods)
@@ -1129,6 +1130,44 @@ requiring scopes because nothing else tells the two token types apart.
   the same. The ones already created stay until the stack is destroyed,
   whose cleanup deletes them, or until you delete them with
   `aws efs delete-access-point`.
+
+### Studio spaces can attach Studio_EFS
+
+In earlier releases the analytics environment's `Studio_EFS` could not be
+used, and new users could not sign in:
+
+- A user's first `gco analytics studio login` created a Studio profile that
+  went to `Failed` ("You don't have permission to describe the mount
+  targets for the following file system"): `CreateUserProfile` checks the
+  profile's custom file system with the caller's identity, and the
+  presigned-URL Lambda lacked `elasticfilesystem:DescribeMountTargets`. The
+  Lambda replaced the profile at every poll, and the command gave up with
+  `User profile did not become ready within 120s`.
+- A JupyterLab or Code Editor space with `Studio_EFS` attached failed to
+  start with "SageMaker is unable to mount the file system. Check your file
+  system policy": the file system policy granted the mount actions to the
+  execution role, and Studio mounts without IAM authorization.
+- With that fixed, the space would still fail ("Check your file system path
+  input to ensure that the path provided exists"): nothing created
+  `/home/<username>`.
+
+The redeploy of `<project>-analytics` fixes all three
+([ANALYTICS.md → Studio_EFS](ANALYTICS.md#k-studio_efs-and-the-studio-home-directory)):
+
+- **The presigned-URL Lambda moves into the analytics VPC** and mounts
+  `Studio_EFS`'s `/home` through a new access point, `StudioHomeAccessPoint`.
+  Its role gains `elasticfilesystem:DescribeMountTargets`,
+  `elasticfilesystem:ClientRootAccess` through that access point, and the
+  `AWSLambdaVPCAccessExecutionRole` managed policy. Its SageMaker calls go
+  through the VPC's SageMaker API endpoint.
+- **The file system policy lets any client mount `Studio_EFS`**, write and
+  act as root, only through a mount target in the analytics VPC.
+- **Each user's directory is created at the next `studio login`**, with
+  `/home/sagemaker-user` for profiles created outside the Lambda. A profile
+  an earlier release left `Failed` is replaced at that login too.
+- **Destroying `<project>-analytics` takes about 20 minutes longer**:
+  CloudFormation deletes a VPC-attached Lambda function only once Lambda
+  has released its network interfaces.
 
 ### `Project` tag on PCS instances
 

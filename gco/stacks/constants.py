@@ -152,6 +152,12 @@ def validated_deployment_partition(
     return next(iter(regions_by_partition))
 
 
+#: Live-validation-only context that keeps AWS-managed EFS automatic backups
+#: from outliving a disposable stack for the service's fixed retention window.
+#: The regional stack's file system and the analytics stack's Studio EFS honor
+#: it; normal deployments omit this key and keep their automatic backups.
+LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT = "gco_live_validation_disable_efs_automatic_backups"
+
 CONTROL_PLANE_ONLY_CONTEXT_KEY = "gco:control-plane-only"
 """Run-scoped CDK context key that synthesizes the app with zero workload Regions.
 

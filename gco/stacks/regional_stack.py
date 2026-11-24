@@ -190,6 +190,7 @@ from gco.stacks.constants import (
     EKS_ADDON_POD_IDENTITY_AGENT,
     EKS_UNSUPPORTED_AZ_IDS,
     LAMBDA_PYTHON_RUNTIME,
+    LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT,
     MOONCAKE_MASTER_DEFAULT_IMAGE,
     VALKEY_MAJOR_ENGINE_VERSION,
     api_gateway_auth_secret_name,
@@ -505,9 +506,8 @@ _INTERFACE_ENDPOINT_SERVICES: dict[str, ec2.InterfaceVpcEndpointAwsService] = {
 _HELM_OVERRIDE_CONTEXT_KEY = "helm_enabled_overrides"
 
 #: Live-validation-only context that prevents AWS-managed EFS automatic backups
-#: from outliving a disposable stack for the service's fixed retention window.
-#: Normal deployments omit this key and preserve automatic backups.
-_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT = "gco_live_validation_disable_efs_automatic_backups"
+#: from outliving a disposable stack (see ``gco.stacks.constants``).
+_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT = LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT
 
 
 def _explicit_context_bool(raw: object, *, key: str) -> bool:
