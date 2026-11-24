@@ -760,9 +760,12 @@ echo "=== Checking EKS Kubernetes version ==="
 
 EKS_K8S_RESULTS="$(mktemp)"
 EKS_K8S_SKIP_REASON=""
-# The newest EKS minor HyperPod supports; "" until the lookup below succeeds.
-# The Version Consistency surface reads it, outside this block.
+# The newest EKS minor a Region with HyperPod on can run: the newest minor
+# HyperPod publishes a node AMI for, capped by the newest one its CreateCluster
+# is known to accept. "" until the lookup below succeeds. The Version
+# Consistency surface reads both, outside this block.
 HYPERPOD_NEWEST_K8S=""
+HYPERPOD_AMI_NEWEST_K8S=""
 
 if ! aws sts get-caller-identity >/dev/null 2>&1; then
   EKS_K8S_SKIP_REASON="No AWS credentials available (scan needs eks:DescribeClusterVersions). Configure OIDC to enable."
@@ -880,6 +883,19 @@ for row in data.get('clusterVersions', []):
       # the cluster runs cdk.json's minor, whose pin the add-on check above
       # and tests/test_integration.py already cover.
       HYPERPOD_NEWEST_K8S="$(newest_hyperpod_eks_minor us-east-1)" || HYPERPOD_NEWEST_K8S=""
+      # The tree can list a minor before CreateCluster accepts it (it carried
+      # eks-1.37 while CreateCluster refused 1.37), and no API lists the
+      # minors CreateCluster accepts, so the HyperPod preflight caps the minor
+      # at HYPERPOD_CREATE_CLUSTER_NEWEST_K8S; so does this check.
+      HYPERPOD_AMI_NEWEST_K8S="$HYPERPOD_NEWEST_K8S"
+      if [ -n "$HYPERPOD_NEWEST_K8S" ]; then
+        HYPERPOD_CREATE_CLUSTER_K8S="$(extract_python_string_constant HYPERPOD_CREATE_CLUSTER_NEWEST_K8S cli/hyperpod_preflight.py)"
+        if ! [[ "$HYPERPOD_CREATE_CLUSTER_K8S" =~ ^[0-9]+\.[0-9]+$ ]]; then
+          mark_scan_incomplete "Could not read HYPERPOD_CREATE_CLUSTER_NEWEST_K8S from cli/hyperpod_preflight.py."
+        elif [ "$(compare_semver "$HYPERPOD_CREATE_CLUSTER_K8S" "$HYPERPOD_NEWEST_K8S")" = "newer" ]; then
+          HYPERPOD_NEWEST_K8S="$HYPERPOD_CREATE_CLUSTER_K8S"
+        fi
+      fi
       if [ -z "$HYPERPOD_NEWEST_K8S" ]; then
         mark_scan_incomplete "HyperPod node AMI lookup failed (ssm get-parameters-by-path /aws/service/sagemaker-hyperpod/ami/x86_64)."
       elif [ "$(compare_semver "$CURRENT_K8S" "$HYPERPOD_NEWEST_K8S")" = "older" ] \
@@ -2594,8 +2610,22 @@ fi
 HYPERPOD_K8S_LAG_CURRENT="$(extract_k8s_version cdk.json)"
 if [ -n "$HYPERPOD_NEWEST_K8S" ] \
    && [ "$(compare_semver "$HYPERPOD_K8S_LAG_CURRENT" "$HYPERPOD_NEWEST_K8S")" = "older" ]; then
-  echo "  - HyperPod EKS minor vs cdk.json: HyperPod node AMIs stop at ${HYPERPOD_NEWEST_K8S}, cdk.json pins ${HYPERPOD_K8S_LAG_CURRENT}"
-  echo "SageMaker HyperPod EKS minor (cdk.json / HyperPod node AMIs)|HyperPod node AMIs stop at ${HYPERPOD_NEWEST_K8S}; cdk.json kubernetes_version is ${HYPERPOD_K8S_LAG_CURRENT}. A Region with HyperPod on runs ${HYPERPOD_NEWEST_K8S} (gco release validate --kubernetes-version ${HYPERPOD_NEWEST_K8S})" >> "$CONSISTENCY_RESULTS"
+  if [ "$HYPERPOD_NEWEST_K8S" = "$HYPERPOD_AMI_NEWEST_K8S" ]; then
+    echo "  - HyperPod EKS minor vs cdk.json: HyperPod node AMIs stop at ${HYPERPOD_NEWEST_K8S}, cdk.json pins ${HYPERPOD_K8S_LAG_CURRENT}"
+    echo "SageMaker HyperPod EKS minor (cdk.json / HyperPod node AMIs)|HyperPod node AMIs stop at ${HYPERPOD_NEWEST_K8S}; cdk.json kubernetes_version is ${HYPERPOD_K8S_LAG_CURRENT}. A Region with HyperPod on runs ${HYPERPOD_NEWEST_K8S} (gco release validate --kubernetes-version ${HYPERPOD_NEWEST_K8S})" >> "$CONSISTENCY_RESULTS"
+  else
+    echo "  - HyperPod EKS minor vs cdk.json: HyperPod's CreateCluster accepts up to ${HYPERPOD_NEWEST_K8S}, cdk.json pins ${HYPERPOD_K8S_LAG_CURRENT}"
+    echo "SageMaker HyperPod EKS minor (cdk.json / HyperPod CreateCluster)|HyperPod's CreateCluster accepts EKS up to ${HYPERPOD_NEWEST_K8S} (HYPERPOD_CREATE_CLUSTER_NEWEST_K8S); cdk.json kubernetes_version is ${HYPERPOD_K8S_LAG_CURRENT}. A Region with HyperPod on runs ${HYPERPOD_NEWEST_K8S} (gco release validate --kubernetes-version ${HYPERPOD_NEWEST_K8S})" >> "$CONSISTENCY_RESULTS"
+  fi
+fi
+# The node AMI tree reaching past HYPERPOD_CREATE_CLUSTER_NEWEST_K8S is the
+# cue to find out whether CreateCluster has caught up. It cannot be asked
+# (there is no dry run), so the test is a release run at the newer minor with
+# the pin raised on a branch: the run creates a HyperPod cluster.
+if [ -n "$HYPERPOD_AMI_NEWEST_K8S" ] && [ -n "$HYPERPOD_NEWEST_K8S" ] \
+   && [ "$HYPERPOD_NEWEST_K8S" != "$HYPERPOD_AMI_NEWEST_K8S" ]; then
+  echo "  - HyperPod CreateCluster pin vs node AMIs: HyperPod node AMIs reach ${HYPERPOD_AMI_NEWEST_K8S}, HYPERPOD_CREATE_CLUSTER_NEWEST_K8S is ${HYPERPOD_NEWEST_K8S}"
+  echo "SageMaker HyperPod CreateCluster minor (cli/hyperpod_preflight.py / HyperPod node AMIs)|HyperPod node AMIs reach ${HYPERPOD_AMI_NEWEST_K8S}; HYPERPOD_CREATE_CLUSTER_NEWEST_K8S is ${HYPERPOD_NEWEST_K8S}. Raise the pin on a branch and run gco release validate --kubernetes-version ${HYPERPOD_AMI_NEWEST_K8S}: the run creates a HyperPod cluster, which is the only test of what CreateCluster accepts" >> "$CONSISTENCY_RESULTS"
 fi
 
 # Build-backend pins must use the same exact ``==`` shape as every other

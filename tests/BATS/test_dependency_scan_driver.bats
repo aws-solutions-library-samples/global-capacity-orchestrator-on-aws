@@ -1053,6 +1053,12 @@ HEALTH_MONITORING_AGENT_ACCOUNTS: Mapping[str, str] = {
     "eu-west-1": "444455556666",
 }
 PY
+    # HyperPod's CreateCluster accepts cdk.json's minor here, so the AMI tree
+    # alone decides the minor a HyperPod Region runs.
+    cat > "$root/cli/hyperpod_preflight.py" <<'PY'
+import boto3  # not importable here: the scan must read, not import
+HYPERPOD_CREATE_CLUSTER_NEWEST_K8S = "1.37"
+PY
     cat > "$root/cli/autopilot.py" <<'PY'
 CLAUDE_CODE_VERSION = "2.1.252"
 CODEX_VERSION = "0.152.0"
@@ -1281,6 +1287,9 @@ findings_path() {
     [[ "$output" == *"  - kube-proxy@1.36: v1.36.0-eksbuild.1 -> v2.36.0-eksbuild.1"* ]]
     [[ "$output" != *"kube-proxy@2.37"* ]]
     [[ "$output" != *"HyperPod node AMIs stop at"* ]]
+    # ...but its CreateCluster pin does: the newer AMI is the cue to try the
+    # newer minor in a release run.
+    [[ "$output" == *"  - HyperPod CreateCluster pin vs node AMIs: HyperPod node AMIs reach 2.37, HYPERPOD_CREATE_CLUSTER_NEWEST_K8S is 1.37"* ]]
     [[ "$output" == *"  - aurora-postgresql: 17.10 -> 18.10"* ]]
     [[ "$output" == *"  - valkey: 9 -> 10"* ]]
     [[ "$output" == *"  - emr-serverless: emr-7.14.0 -> emr-7.14.1"* ]]
@@ -2227,6 +2236,33 @@ PY
     run_scan "$root" FAKE_HYPERPOD_AMI=fail
     [ "$status" -eq 0 ]
     [[ "$output" == *"INCOMPLETE: HyperPod node AMI lookup failed (ssm get-parameters-by-path /aws/service/sagemaker-hyperpod/ami/x86_64)."* ]]
+    # The AMI tree lists cdk.json's minor before CreateCluster accepts it (it
+    # carried eks-1.37 while CreateCluster refused 1.37): the CreateCluster
+    # pin caps the minor a HyperPod Region runs. Its add-on pins are checked
+    # at that minor, and two consistency rows say which minor to run and that
+    # the pin has a newer AMI to try.
+    printf 'HYPERPOD_CREATE_CLUSTER_NEWEST_K8S = "1.36"\n' > "$root/cli/hyperpod_preflight.py"
+    run_scan "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - HyperPod EKS minor vs cdk.json: HyperPod's CreateCluster accepts up to 1.36, cdk.json pins 1.37"* ]]
+    [[ "$output" == *"  - HyperPod CreateCluster pin vs node AMIs: HyperPod node AMIs reach 1.37, HYPERPOD_CREATE_CLUSTER_NEWEST_K8S is 1.36"* ]]
+    [[ "$output" != *"HyperPod node AMIs stop at"* ]]
+    [[ "$output" == *"EKS Kubernetes version:   0"* ]]
+    [[ "$output" != *"INCOMPLETE:"* ]]
+    grep -qx 'scan_complete=true' "$GITHUB_OUTPUT"
+    grep -q -- '^aws eks describe-addon-versions --addon-name vpc-cni --kubernetes-version 1.36 --query addons\[0\].addonVersions\[\].addonVersion' "$CALLS"
+    grep -qF -- "| SageMaker HyperPod EKS minor (cdk.json / HyperPod CreateCluster) | HyperPod's CreateCluster accepts EKS up to 1.36 (HYPERPOD_CREATE_CLUSTER_NEWEST_K8S); cdk.json kubernetes_version is 1.37. A Region with HyperPod on runs 1.36 (gco release validate --kubernetes-version 1.36) |" "$(report_path)"
+    grep -qF -- "| SageMaker HyperPod CreateCluster minor (cli/hyperpod_preflight.py / HyperPod node AMIs) | HyperPod node AMIs reach 1.37; HYPERPOD_CREATE_CLUSTER_NEWEST_K8S is 1.36. Raise the pin on a branch and run gco release validate --kubernetes-version 1.37: the run creates a HyperPod cluster, which is the only test of what CreateCluster accepts |" "$(report_path)"
+    [ "$(jq -r '.surfaces[] | select(.surface == "Version Consistency") | .count' "$(findings_path)")" = "2" ]
+    # A pin the scan cannot read leaves the tree's minor in charge and the
+    # scan incomplete.
+    printf 'HYPERPOD_CREATE_CLUSTER_NEWEST_K8S = HYPERPOD_DEFAULT\n' > "$root/cli/hyperpod_preflight.py"
+    run_scan "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"INCOMPLETE: Could not read HYPERPOD_CREATE_CLUSTER_NEWEST_K8S from cli/hyperpod_preflight.py."* ]]
+    [[ "$output" != *"HyperPod CreateCluster pin vs node AMIs"* ]]
+    grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+    printf 'HYPERPOD_CREATE_CLUSTER_NEWEST_K8S = "1.37"\n' > "$root/cli/hyperpod_preflight.py"
 
     # A pin for a minor EKS no longer keeps in standard support is a row to
     # retire; its build is looked up nowhere.

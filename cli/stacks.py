@@ -1895,6 +1895,20 @@ class StackManager:
     _MAX_EVENT_PAGES = 10
     #: How many root-cause events to print before truncating.
     _MAX_DIAGNOSED_EVENTS = 5
+    #: Failure reasons GCO can explain, and what to do about each. A marker is
+    #: matched as a substring of a printed event's reason.
+    _FAILURE_REASON_HINTS: tuple[tuple[str, str], ...] = (
+        (
+            # AWS::SageMaker::Cluster: CreateCluster refuses the EKS minor,
+            # though HyperPod's node AMI tree can already list it.
+            "Specified EKS cluster version is not supported",
+            "SageMaker HyperPod's CreateCluster does not accept the EKS minor this cluster "
+            "runs. Deploy the cluster at a minor the error lists before HyperPod is created "
+            "(cdk.json kubernetes_version, or --kubernetes-version on gco release validate); "
+            "EKS cannot downgrade a running cluster. `gco stacks hyperpod preflight` checks "
+            "the minor before a deploy.",
+        ),
+    )
 
     @classmethod
     def _collect_operation_events(cls, cfn: Any, stack_name: str) -> list[dict[str, Any]]:
@@ -2005,6 +2019,10 @@ class StackManager:
                     label = f"{resource} ({resource_type})" if resource_type else str(resource)
                     print(f"    {label}: {status}")
                     print(f"      {reason}")
+                reasons = " ".join(str(event.get("ResourceStatusReason") or "") for event in failed)
+                for marker, hint in self._FAILURE_REASON_HINTS:
+                    if marker in reasons:
+                        print(f"\n  Likely cause: {hint}")
 
             # Check stack status for actionable advice
             try:
