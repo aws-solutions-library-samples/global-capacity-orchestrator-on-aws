@@ -2310,6 +2310,8 @@ class TestCapacityStatusCommand:
         with patch("cli.capacity.get_multi_region_capacity_checker") as mock_checker:
             mock_cc = MagicMock()
             mock_cc.get_all_regions_capacity.return_value = []
+            # Discovery succeeded and found nothing; a failure would exit 1.
+            mock_cc.region_errors = []
             mock_checker.return_value = mock_cc
 
             result = runner.invoke(cli, ["capacity", "status"])
