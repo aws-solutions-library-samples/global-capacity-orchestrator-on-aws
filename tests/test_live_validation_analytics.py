@@ -324,6 +324,13 @@ class TestRunGco:
         assert commands[0]["stdout"].endswith("end")
         assert len(commands[0]["stderr"]) == 4000
 
+    def test_a_longer_minimum_timeout_wins(self) -> None:
+        gco = _Gco(_done(0), _done(0))
+        with _patched(gco):
+            checks_analytics._run_gco(_ctx(), [], "remove", ["x"], minimum_timeout=1200.0)
+            checks_analytics._run_gco(_ctx(), [], "doctor", ["x"], minimum_timeout=10.0)
+        assert [c["timeout"] for c in gco.calls] == [1200.0, 300.0]
+
     def test_a_timeout_is_recorded_and_raised(self) -> None:
         commands: list[dict[str, Any]] = []
         gco = _Gco(subprocess.TimeoutExpired(cmd="gco", timeout=300))
@@ -1159,6 +1166,9 @@ class TestOwnerRefusal:
         assert readd["env"]["GCO_STUDIO_PASSWORD"] == "Permanent-1!"
         assert login["env"]["GCO_STUDIO_PASSWORD"] == "Permanent-1!"
         assert remove["args"][-3:] == ["--username", "first", "--yes"]
+        # users remove waits for SageMaker itself, up to its own 15 minutes.
+        assert keep["timeout"] == remove["timeout"] == 1200.0
+        assert readd["timeout"] == login["timeout"] == 300.0
 
     @pytest.mark.parametrize(
         "kept",
@@ -1257,6 +1267,7 @@ class TestProfileRemoval:
         assert add["env"]["GCO_STUDIO_PASSWORD"] == "Permanent-1!"
         assert login["env"]["GCO_STUDIO_PASSWORD"] == "Permanent-1!"
         assert remove["args"][-3:] == ["--username", "second", "--yes"]
+        assert remove["timeout"] == 1200.0
         assert sagemaker.create_space.call_args.kwargs["OwnershipSettings"] == {
             "OwnerUserProfileName": "second"
         }

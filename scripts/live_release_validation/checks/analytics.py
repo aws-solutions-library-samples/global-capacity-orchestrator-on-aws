@@ -50,7 +50,7 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-from cli.analytics_user_mgmt import generate_strong_password
+from cli.analytics_user_mgmt import STUDIO_REMOVAL_TIMEOUT_SECONDS, generate_strong_password
 from gco.config.config_loader import (
     ANALYTICS_OVERRIDES_CONTEXT_KEY,
     apply_analytics_environment_overrides,
@@ -108,6 +108,10 @@ _REPORT_TIMEOUT_SECONDS = 600
 _LOGIN_ATTEMPTS = 3
 _PROFILE_NOT_READY = "did not become ready"
 _MAX_OUTPUT = 4000
+#: ``users remove`` waits up to ``STUDIO_REMOVAL_TIMEOUT_SECONDS`` for SageMaker
+#: to delete the profile's apps and spaces and the profile, longer than the
+#: run's command timeout; the margin covers Cognito and the CLI's start.
+_USERS_REMOVE_TIMEOUT_SECONDS = STUDIO_REMOVAL_TIMEOUT_SECONDS + 300
 #: The CLI's password variables; an operator's own values never reach a probe.
 _PASSWORD_ENV = frozenset({"GCO_STUDIO_PASSWORD", "GCO_STUDIO_NEW_PASSWORD"})
 _PASSWORD_FIELD = re.compile(r'("password"\s*:\s*)"(?:[^"\\]|\\.)*"')
@@ -177,11 +181,13 @@ def _run_gco(
     args: Sequence[str],
     *,
     secrets: Mapping[str, str] | None = None,
+    minimum_timeout: float = 0.0,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``gco <args>`` from the checkout and record it without its secrets.
 
     ``secrets`` are environment variables the CLI reads its passwords from
-    (``GCO_STUDIO_PASSWORD``, ``GCO_STUDIO_NEW_PASSWORD``).
+    (``GCO_STUDIO_PASSWORD``, ``GCO_STUDIO_NEW_PASSWORD``). The run's command
+    timeout applies, or ``minimum_timeout`` when that is longer.
     """
     argv = [sys.executable, "-m", "cli.main", *args]
     environment = {key: value for key, value in os.environ.items() if key not in _PASSWORD_ENV}
@@ -193,7 +199,7 @@ def _run_gco(
             cwd=ctx.settings.repo_root,
             capture_output=True,
             text=True,
-            timeout=float(ctx.settings.command_timeout_seconds),
+            timeout=max(float(ctx.settings.command_timeout_seconds), minimum_timeout),
             env=environment,
             shell=False,
             check=False,
@@ -725,10 +731,7 @@ def _check_owner_refusal(
         "--keep-studio-profile",
         "--yes",
     ]
-    kept = _json_output(
-        _checked(_run_gco(ctx, commands, "keep-profile-remove", args), "keep-profile-remove"),
-        "keep-profile-remove",
-    )
+    kept = _users_remove(ctx, commands, "keep-profile-remove", args)
     if kept.get("cognito_user_deleted") is not True or kept.get("studio_profile") is not None:
         raise AnalyticsValidationError(f"users remove --keep-studio-profile reported {kept}")
     password = generate_strong_password()
@@ -748,10 +751,7 @@ def _check_owner_refusal(
     refused = _login(ctx, commands, "foreign-login", username, {"GCO_STUDIO_PASSWORD": password})
     evidence = _require_refusal(refused, "foreign-login", "403 UserProfileOwnedByAnotherUser")
     remove = ["--output", "json", "analytics", "users", "remove", "--username", username, "--yes"]
-    removed = _json_output(
-        _checked(_run_gco(ctx, commands, "foreign-remove", remove), "foreign-remove"),
-        "foreign-remove",
-    )
+    removed = _users_remove(ctx, commands, "foreign-remove", remove)
     studio = removed.get("studio_profile") or {}
     if studio.get("profile") != "owned_by_another_user":
         raise AnalyticsValidationError(f"users remove acted on another user's profile: {studio}")
@@ -765,6 +765,14 @@ def _checked(
 ) -> subprocess.CompletedProcess[str]:
     _require_exit(result, stage, 0)
     return result
+
+
+def _users_remove(
+    ctx: RunContext, commands: list[dict[str, Any]], stage: str, args: Sequence[str]
+) -> dict[str, Any]:
+    """``gco analytics users remove``, given the time its own SageMaker waits may take."""
+    result = _run_gco(ctx, commands, stage, args, minimum_timeout=_USERS_REMOVE_TIMEOUT_SECONDS)
+    return _json_output(_checked(result, stage), stage)
 
 
 def _check_profile_removal(
@@ -789,10 +797,7 @@ def _check_profile_removal(
     _check_profile(sagemaker, deployment, username, sub)
     _create_space(ctx, sagemaker, deployment, owner=username, space=names["second_space"])
     remove = ["--output", "json", "analytics", "users", "remove", "--username", username, "--yes"]
-    removed = _json_output(
-        _checked(_run_gco(ctx, commands, "second-user-remove", remove), "second-user-remove"),
-        "second-user-remove",
-    )
+    removed = _users_remove(ctx, commands, "second-user-remove", remove)
     studio = removed.get("studio_profile") or {}
     if studio.get("profile") != "deleted" or studio.get("spaces") != [names["second_space"]]:
         raise AnalyticsValidationError(f"users remove reported {studio}")
