@@ -573,7 +573,7 @@ and run:
 
 ```bash
 # SageMaker Distribution 5.x includes uv; on an image without it: pip install --user uv
-GCO_REF=v9.2.0   # the GCO release your deployment runs
+GCO_REF=v9.3.0   # the GCO release your deployment runs
 uv tool install --python 3.14 "git+https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws.git@${GCO_REF}"
 ```
 
