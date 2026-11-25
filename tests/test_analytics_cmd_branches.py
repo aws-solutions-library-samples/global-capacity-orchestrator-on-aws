@@ -224,13 +224,23 @@ class TestUsersClientErrorBranches:
                 ),
             ):
                 runner = CliRunner()
+                # --keep-studio-profile skips the profile, whose owner lookup
+                # would fail first, so the failing AdminDeleteUser is reached.
                 result = runner.invoke(
                     cli,
-                    ["analytics", "users", "remove", "--username", "ghost", "--yes"],
+                    [
+                        "analytics",
+                        "users",
+                        "remove",
+                        "--username",
+                        "ghost",
+                        "--keep-studio-profile",
+                        "--yes",
+                    ],
                 )
 
         assert result.exit_code == 1
-        assert "UserNotFoundException" in result.output
+        assert "Failed to delete user ghost: UserNotFoundException" in result.output
 
     def test_users_add_without_email_prints_the_password_to_hand_over(
         self, aws_creds_env, tmp_cdk_json

@@ -495,6 +495,15 @@ class TestUsersRemove:
             "studio_profile": None if keep else remove_doubles.profile.return_value,
         }
 
+    def test_a_cognito_delete_that_fails_after_the_profile_went_is_an_error(
+        self, remove_doubles
+    ) -> None:
+        remove_doubles.delete.side_effect = _client_error("InternalErrorException")
+        result = _invoke(["users", "remove", "--username", "alice", "--yes"])
+        assert result.exit_code == 1
+        assert "Failed to delete user alice: InternalErrorException" in result.output
+        remove_doubles.profile.assert_called_once()
+
     def test_a_user_cognito_does_not_have_is_an_error(self, remove_doubles) -> None:
         remove_doubles.sub.side_effect = _client_error("UserNotFoundException")
         result = _invoke(["users", "remove", "--username", "alice", "--yes"])
