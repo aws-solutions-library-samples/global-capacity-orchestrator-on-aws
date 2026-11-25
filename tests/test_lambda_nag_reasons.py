@@ -5,8 +5,8 @@ reserved-concurrency, dead-letter-queue, VPC, runtime and default-memory
 findings for every function of every stack, so each reason has to hold for
 every function family the stacks build. The earlier reasons described only
 custom-resource functions ("invoked only during stack deployment", "user-facing
-Lambda functions ARE placed in VPC"), while the API proxies, the aggregator and
-the Studio presigned-URL function are request-path functions outside any VPC,
+Lambda functions ARE placed in VPC"), while the API proxies and the aggregator
+are request-path functions outside any VPC,
 and two GCO functions relied on the default memory size the reason said none
 did. These tests synthesize the whole app with every function family present
 (analytics, the traffic dial, the vector store) and check what the reasons now
@@ -90,12 +90,18 @@ def test_the_functions_in_a_vpc_are_the_ones_the_reason_names(app: SimpleNamespa
         "HelmInstallerFunction",
         "InferenceStreamingProxyFunction",
         "KubectlApplierFunction",
+        "PresignedUrlFunction",
         "RegionalProxyFunction",
     ]
     vpc_stacks = {
         path.split("/")[0] for path, function in app.functions.items() if function.vpc_config
     }
-    assert vpc_stacks == {"gco-us-east-1", "gco-regional-api-us-east-1"}
+    assert vpc_stacks == {"gco-us-east-1", "gco-regional-api-us-east-1", "gco-analytics"}
+    from gco.stacks.nag_suppressions import _LAMBDA_OUTSIDE_VPC_REASON
+
+    assert "presigned-URL function, which mounts Studio_EFS, runs in the analytics VPC" in (
+        _LAMBDA_OUTSIDE_VPC_REASON
+    )
 
 
 def test_only_the_backend_tls_manager_reserves_concurrency(app: SimpleNamespace) -> None:

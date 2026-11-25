@@ -408,7 +408,8 @@ _LAMBDA_OUTSIDE_VPC_REASON = (
     "a private address, so a VPC would add NAT or VPC endpoint cost without isolating "
     "anything. The functions that reach a private cluster endpoint or the internal ALB "
     "(kubectl applier, Helm installer, GA registration, and each regional bridge's proxy "
-    "and inference streaming proxy) run in the regional VPC."
+    "and inference streaming proxy) run in the regional VPC, and the Studio presigned-URL "
+    "function, which mounts Studio_EFS, runs in the analytics VPC."
 )
 _LAMBDA_DEFAULT_MEMORY_REASON = (
     "Only the functions aws-cdk-lib creates for custom resources (provider frameworks and "
