@@ -6,7 +6,9 @@ record redacted), the deployment read from the stack, and every probe step
 with its failure branches. ``actions/analytics.py``: validated, or skipped
 with the source. ``cleanup/analytics.py``: the run's Studio lifecycle
 configurations deleted once the stacks are gone, and the Studio domain's home
-EFS proved gone. ``models.RunSettings``: the override in the CDK context.
+EFS proved gone. ``ownership/analytics_resources.py``: the Tagging API's stale records of a
+deleted user pool or EMR Serverless application accepted once the service
+proves it gone. ``models.RunSettings``: the override in the CDK context.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from scripts.live_release_validation.actions import analytics as actions_analyti
 from scripts.live_release_validation.checks import analytics as checks_analytics
 from scripts.live_release_validation.cleanup import analytics as cleanup_analytics
 from scripts.live_release_validation.models import RunSettings
+from scripts.live_release_validation.ownership import analytics_resources
 
 _REGION = "us-east-2"
 _ACCOUNT = "123456789012"
@@ -1617,3 +1620,153 @@ class TestCleanup:
         ) as raised:
             cleanup_analytics.cleanup_analytics_residue(ctx)
         assert "home_efs" not in raised.value.details
+
+
+# ---------------------------------------------------------------------------
+# The Tagging API's stale records of deleted analytics resources
+# ---------------------------------------------------------------------------
+
+
+class TestStripDeletedAnalyticsResources:
+    """A deleted user pool or EMR Serverless application stays in the Tagging API for hours.
+
+    A release run's baseline, nearly four hours after a test deployment's
+    teardown, still listed both with their stack tags while Cognito answered
+    ``ResourceNotFoundException`` and EMR Serverless ``TERMINATED``.
+    """
+
+    _POOL_ARN = f"arn:aws:cognito-idp:{_REGION}:{_ACCOUNT}:userpool/{_POOL}"
+    _APP_ID = "00gaic0lu6kect0d"
+    _APP_ARN = f"arn:aws:emr-serverless:{_REGION}:{_ACCOUNT}:/applications/{_APP_ID}"
+    _TAGS = {"aws:cloudformation:stack-name": f"{_PROJECT}-analytics", "Project": "GCO"}
+
+    @staticmethod
+    def _inventory(*entries: dict[str, Any], **other: list[str]) -> dict[str, Any]:
+        return {"regional": {_REGION: {"tagged_resources": list(entries), **other}}}
+
+    @staticmethod
+    def _environment(
+        *, pool: Any = None, application: Any = None
+    ) -> tuple[SimpleNamespace, MagicMock, MagicMock]:
+        """``None`` makes the service answer ResourceNotFoundException."""
+        cognito = MagicMock()
+        if pool is None:
+            cognito.describe_user_pool.side_effect = _client_error("ResourceNotFoundException")
+        elif isinstance(pool, BaseException):
+            cognito.describe_user_pool.side_effect = pool
+        else:
+            cognito.describe_user_pool.return_value = {"UserPool": {"Id": _POOL}}
+        emr = MagicMock()
+        if application is None:
+            emr.get_application.side_effect = _client_error("ResourceNotFoundException")
+        elif isinstance(application, BaseException):
+            emr.get_application.side_effect = application
+        else:
+            emr.get_application.return_value = {"application": application}
+        ctx = _ctx()
+        clients = {"cognito-idp": cognito, "emr-serverless": emr}
+        ctx.session.client.side_effect = lambda service, **_kwargs: clients[service]
+        return ctx, cognito, emr
+
+    def _strip(self, ctx: SimpleNamespace, inventory: dict[str, Any]) -> Any:
+        return analytics_resources._strip_deleted_analytics_resources(ctx, inventory)
+
+    def test_a_pool_cognito_no_longer_knows_is_accepted_with_evidence(self) -> None:
+        ctx, cognito, emr = self._environment()
+        residual, accepted = self._strip(
+            ctx, self._inventory({"arn": self._POOL_ARN, "tags": dict(self._TAGS)})
+        )
+        assert _REGION not in residual["regional"]
+        assert accepted == [
+            {
+                "region": _REGION,
+                "arn": self._POOL_ARN,
+                "kind": "cognito-user-pool",
+                "state": "ABSENT",
+                "authority": "cognito-idp:DescribeUserPool",
+                "tags": self._TAGS,
+                "note": (
+                    "the Resource Groups Tagging API index lags this deletion by hours; "
+                    "the service is the authority for existence"
+                ),
+            }
+        ]
+        cognito.describe_user_pool.assert_called_once_with(UserPoolId=_POOL)
+        emr.get_application.assert_not_called()
+        ctx.session.client.assert_called_once_with("cognito-idp", region_name=_REGION)
+
+    @pytest.mark.parametrize("application", [None, {"state": "TERMINATED"}])
+    def test_a_terminated_or_unknown_application_is_accepted(self, application: Any) -> None:
+        ctx, _cognito, emr = self._environment(application=application)
+        residual, accepted = self._strip(ctx, self._inventory({"arn": self._APP_ARN}))
+        assert residual == {"regional": {}}
+        assert [(a["kind"], a["state"]) for a in accepted] == [
+            ("emr-serverless-application", "TERMINATED" if application else "ABSENT")
+        ]
+        assert accepted[0]["authority"] == "emr-serverless:GetApplication"
+        assert accepted[0]["tags"] == {}
+        emr.get_application.assert_called_once_with(applicationId=self._APP_ID)
+
+    @pytest.mark.parametrize(
+        ("pool", "application"),
+        [
+            ({"Id": _POOL}, {"state": "TERMINATED"}),
+            (None, {"state": "STOPPED"}),
+            (None, {"state": "STARTED"}),
+            (None, {}),
+        ],
+    )
+    def test_anything_the_service_still_has_stays_residue(
+        self, pool: Any, application: Any
+    ) -> None:
+        ctx, _cognito, _emr = self._environment(pool=pool, application=application)
+        pool_entry = {"arn": self._POOL_ARN, "tags": {}}
+        app_entry = {"arn": self._APP_ARN, "tags": {}}
+        residual, accepted = self._strip(ctx, self._inventory(pool_entry, app_entry))
+        kept = residual["regional"][_REGION]["tagged_resources"]
+        assert (pool_entry in kept) is (pool is not None)
+        assert (app_entry in kept) is (application.get("state") != "TERMINATED")
+        assert len(kept) + len(accepted) == 2
+        states = {a["kind"]: a["state"] for a in accepted}
+        assert states.get("emr-serverless-application", "TERMINATED") == "TERMINATED"
+
+    def test_other_and_foreign_records_are_left_alone(self) -> None:
+        ctx, cognito, emr = self._environment()
+        entries = [
+            {"arn": f"arn:aws:cognito-idp:{_REGION}:999999999999:userpool/{_POOL}"},
+            {"arn": f"arn:aws:cognito-idp:eu-west-1:{_ACCOUNT}:userpool/{_POOL}"},
+            {"arn": f"{self._APP_ARN}/jobruns/x"},
+            {"arn": f"arn:aws:sagemaker:{_REGION}:{_ACCOUNT}:domain/{_DOMAIN}"},
+            {"tags": {}},
+        ]
+        residual, accepted = self._strip(ctx, self._inventory(*entries))
+        assert residual["regional"][_REGION]["tagged_resources"] == entries
+        assert accepted == []
+        cognito.describe_user_pool.assert_not_called()
+        emr.get_application.assert_not_called()
+
+    def test_a_region_with_other_residue_keeps_its_bucket(self) -> None:
+        ctx, _cognito, _emr = self._environment()
+        inventory = self._inventory({"arn": self._POOL_ARN}, kms_keys=["key"])
+        residual, accepted = self._strip(ctx, inventory)
+        assert residual["regional"][_REGION] == {"tagged_resources": [], "kms_keys": ["key"]}
+        assert len(accepted) == 1
+
+    @pytest.mark.parametrize("service", ["cognito-idp", "emr-serverless"])
+    def test_an_unexpected_error_propagates(self, service: str) -> None:
+        denied = _client_error("AccessDeniedException")
+        if service == "cognito-idp":
+            ctx, _cognito, _emr = self._environment(pool=denied)
+            arn = self._POOL_ARN
+        else:
+            ctx, _cognito, _emr = self._environment(application=denied)
+            arn = self._APP_ARN
+        with pytest.raises(ClientError):
+            self._strip(ctx, self._inventory({"arn": arn}))
+
+    def test_the_input_inventory_is_not_mutated(self) -> None:
+        ctx, _cognito, _emr = self._environment()
+        inventory = self._inventory({"arn": self._POOL_ARN}, {"arn": self._APP_ARN})
+        snapshot = json.loads(json.dumps(inventory))
+        self._strip(ctx, inventory)
+        assert inventory == snapshot

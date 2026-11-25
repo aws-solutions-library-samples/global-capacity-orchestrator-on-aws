@@ -7312,6 +7312,8 @@ class TestActionBaselineCheckpointPurity:
         assert "accepted_deleted_volumes" not in ctx.checkpoint.baseline
         assert result["accepted_deleted_hyperpod_clusters"] == []
         assert "accepted_deleted_hyperpod_clusters" not in ctx.checkpoint.baseline
+        assert result["accepted_deleted_analytics_resources"] == []
+        assert "accepted_deleted_analytics_resources" not in ctx.checkpoint.baseline
         # The persisted checkpoint is the pure capture — byte-for-byte what
         # compare_baseline will re-capture against after teardown.
         assert ctx.checkpoint.baseline == self._BASELINE

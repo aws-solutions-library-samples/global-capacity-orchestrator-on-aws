@@ -17,6 +17,7 @@ from ..inventory import (
     summarize_project_resources,
 )
 from ..models import RunContext, utc_now
+from ..ownership.analytics_resources import _strip_deleted_analytics_resources
 from ..ownership.dynamodb_streams import (
     _strip_expired_table_streams,
 )
@@ -110,6 +111,9 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         ctx,
         residual_inventory,
     )
+    residual_inventory, accepted_deleted_analytics_resources = _strip_deleted_analytics_resources(
+        ctx, residual_inventory
+    )
     transaction_search = _verify_transaction_search_restored(ctx)
     summary = summarize_project_resources(residual_inventory)
     result = {
@@ -126,6 +130,7 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         "accepted_deleted_vpc_endpoints": accepted_deleted_vpc_endpoints,
         "accepted_deleted_volumes": accepted_deleted_volumes,
         "accepted_deleted_hyperpod_clusters": accepted_deleted_hyperpod_clusters,
+        "accepted_deleted_analytics_resources": accepted_deleted_analytics_resources,
         "residual_project_resources": residual_inventory,
         "transaction_search": transaction_search,
     }
