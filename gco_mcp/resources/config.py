@@ -100,6 +100,7 @@ def env_vars_resource() -> str:
             "| `GCO_CACHE_DIR` | `~/.gco/cache` | CLI cache directory. |",
             "| `GCO_REGIONAL_API` | `false` | Call the regional APIs instead of API Gateway (private access). |",
             "| `GCO_STUDIO_PASSWORD` | (unset) | Password for `gco analytics studio login`; `analytics_login_url` passes it to the child this way, never on the command line. |",
+            "| `GCO_STUDIO_NEW_PASSWORD` | (unset) | The new password `gco analytics studio login` sets at a first sign-in with a temporary password; `analytics_login_url` passes its `new_password` this way. |",
             "| `GCO_GRAFANA_USER_PASSWORD` | (unset) | Password for `gco monitoring users add`; `monitoring_user_add` passes it this way. |",
             "| `GCO_WEBHOOK_URL` / `GCO_WEBHOOK_SECRET` | (unset) | URL and HMAC secret for `gco webhooks create`; `webhooks_create` passes them this way. |",
             "| `AWS_REGION` / `AWS_DEFAULT_REGION` | (AWS SDK default) | Region for AWS SDK calls that have no Region from the GCO configuration; not the CLI's default Region (that is `GCO_DEFAULT_REGION`). |",
