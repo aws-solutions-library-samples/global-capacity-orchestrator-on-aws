@@ -253,6 +253,12 @@ shipping a skew.
    enforces it, and `gco release validate --kubernetes-version` deploys the
    release run at that minor — but a HyperPod Region cannot follow the bump
    until the AMI exists, and EKS cannot downgrade a cluster that already did.
+   The tree can also list a minor before HyperPod's `CreateCluster` accepts
+   it, so the preflight caps the minor at `HYPERPOD_CREATE_CLUSTER_NEWEST_K8S`
+   (`cli/hyperpod_preflight.py`). When the scan's **Version Consistency**
+   surface reports the tree past that pin, raise the pin on a branch and run
+   `gco release validate --kubernetes-version <minor>`: the run creates a
+   HyperPod cluster, the only test of what `CreateCluster` accepts.
 4. Check whether the pinned `aws-cdk-lib` exposes
    `eks.KubernetesVersion.V1_<minor>`. The enum usually trails a new EKS minor
    by a release or two, and that is expected and harmless: `GCORegionalStack`

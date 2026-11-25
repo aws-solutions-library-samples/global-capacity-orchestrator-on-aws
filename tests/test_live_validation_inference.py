@@ -4188,13 +4188,55 @@ class TestRestartAudit:
         assert "SIGTERM received" in container["previous_log_tail"]
         assert [event["reason"] for event in snapshot["events"]] == ["Unhealthy", "Killing"]
 
-    def test_the_audit_fails_closed_when_pods_cannot_be_listed(self, tmp_path: Path) -> None:
+    def test_the_audit_fails_closed_when_pods_cannot_be_listed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         runner, plan, record, kubectl = self._runner(tmp_path)
         kubectl.failures["pods"] = (1, "", "forbidden")
-
+        pauses: list[float] = []
+        monkeypatch.setattr(runtime_module.time, "sleep", pauses.append)
         with pytest.raises(ManagedInferenceValidationError, match="could not list"):
             runner.verify_no_container_restarts(plan, record)
         assert "restart_audit" not in record
+        # Three tries, ten seconds apart, before the audit gives up.
+        assert [call[1] for call in kubectl.calls if call[0] == "get"].count("pods") == 3
+        assert pauses == [10.0, 10.0]
+        snapshot = record["workload_diagnostics"][-1]
+        assert snapshot["pods_read_errors"] == ["kubectl exited 1: forbidden"] * 2
+        assert snapshot["pods_error"] == "kubectl exited 1: forbidden"
+
+    def test_a_pod_listing_that_timed_out_is_tried_again_before_the_audit_decides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        pod = _probe_killed_pod(plan.name)
+        pod["status"]["containerStatuses"][0]["restartCount"] = 0
+        del pod["status"]["containerStatuses"][0]["lastState"]
+        kubectl.pods = {"items": [pod]}
+        kubectl.failures["pods"] = subprocess.TimeoutExpired(["kubectl"], 30.0)
+        pauses: list[float] = []
+
+        def pause(seconds: float) -> None:
+            pauses.append(seconds)
+            kubectl.failures.pop("pods", None)
+
+        monkeypatch.setattr(runtime_module.time, "sleep", pause)
+        runner.verify_no_container_restarts(plan, record)
+
+        assert record["phase"] == "restart-audited"
+        assert pauses == [10.0]
+        snapshot = record["workload_diagnostics"][-1]
+        assert snapshot["pods_read_errors"] == [
+            "TimeoutExpired: Command '['kubectl']' timed out after 30.0 seconds"
+        ]
+        assert "pods_error" not in snapshot
+
+    def test_periodic_snapshots_read_the_pods_once(self, tmp_path: Path) -> None:
+        runner, plan, record, kubectl = self._runner(tmp_path)
+        kubectl.failures["pods"] = (1, "", "forbidden")
+        snapshot = runner.capture_workload_diagnostics(plan, record, reason="periodic")
+        assert snapshot["pods_error"] == "kubectl exited 1: forbidden"
+        assert "pods_read_errors" not in snapshot
 
     def test_the_audit_fails_closed_when_no_pods_exist(self, tmp_path: Path) -> None:
         runner, plan, record, kubectl = self._runner(tmp_path)

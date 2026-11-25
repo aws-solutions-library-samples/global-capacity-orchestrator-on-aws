@@ -194,10 +194,12 @@ harness's cluster-facing actions share it):
   same bastion, so the kubeconfig and every `gco` process reading it keep
   working;
 - `SessionKubectl.through_tunnel(call, safe_to_repeat=...)` runs anything that
-  crosses the tunnel and repeats it once when it failed on the transport and
-  the keeper found the tunnel broken (and reopened it) or already replaced. A
-  healthy tunnel is never reopened for a failed call, so a failure that was
-  not the tunnel's is reported as it happened. `kube.through_tunnel` and
+  crosses the tunnel and repeats it once when it failed on the transport, or
+  ran out its `subprocess` timeout (a request sent into a stalled tunnel hangs
+  instead of failing), and the keeper found the tunnel broken (and reopened
+  it) or already replaced. A healthy tunnel is never reopened for a failed
+  call, so a failure that was not the tunnel's is reported, or its timeout
+  raised, as it happened. `kube.through_tunnel` and
   `kube.ensure_tunnel` accept any runner, so drivers and tests can pass a
   plain function;
 - drivers treat an unreadable object as unreadable: `_job_status` returns

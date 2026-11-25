@@ -152,6 +152,12 @@ def validated_deployment_partition(
     return next(iter(regions_by_partition))
 
 
+#: Live-validation-only context that keeps AWS-managed EFS automatic backups
+#: from outliving a disposable stack for the service's fixed retention window.
+#: The regional stack's file system and the analytics stack's Studio EFS honor
+#: it; normal deployments omit this key and keep their automatic backups.
+LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT = "gco_live_validation_disable_efs_automatic_backups"
+
 CONTROL_PLANE_ONLY_CONTEXT_KEY = "gco:control-plane-only"
 """Run-scoped CDK context key that synthesizes the app with zero workload Regions.
 
@@ -456,6 +462,21 @@ against ``rds describe-db-engine-versions`` — the authoritative source — so
 a newer minor is reported the day RDS ships it, independent of the CDK
 library's enum catalog.
 """
+
+# ---------------------------------------------------------------------------
+# ElastiCache Serverless Valkey Engine Version
+# ---------------------------------------------------------------------------
+
+VALKEY_MAJOR_ENGINE_VERSION = "9"
+"""Valkey major engine version of the optional ElastiCache Serverless cache.
+
+``AWS::ElastiCache::ServerlessCache`` takes a major version as an integer
+string ("8", "9"); ElastiCache Serverless applies minor and patch releases
+itself. Raising it upgrades an existing cache in place, without downtime and
+with the same endpoint (CloudFormation: "No interruption"); a cache cannot go
+back to an older major. The monthly dependency scan compares this pin with
+the newest Valkey major ``elasticache describe-cache-engine-versions`` lists.
+"""
 # ---------------------------------------------------------------------------
 # Analytics Environment Constants
 # ---------------------------------------------------------------------------
@@ -507,6 +528,20 @@ def cognito_domain_prefix_default(project_name: str) -> str:
     """
     return f"{project_name}-studio"
 
+
+STUDIO_LOGIN_AUTHORIZATION_SCOPE = "aws.cognito.signin.user.admin"
+"""OAuth scope the ``/studio/login`` method requires of its Cognito token.
+
+A Cognito user pool authorizer treats the ``Authorization`` header as an ID
+token when the method lists no scopes, and as an access token when it lists
+some; ID tokens carry no ``scope`` claim, so requiring a scope means only
+access tokens are accepted. ``gco analytics studio login`` signs in with
+``AdminInitiateAuth``, and Cognito gives the access tokens of that API (and of
+``InitiateAuth``) exactly one scope, this reserved one. A custom resource-
+server scope would need either the hosted sign-in pages (an OAuth grant) or an
+access-token-customizing pre-token-generation trigger, which the pool's Lite
+feature plan does not offer.
+"""
 
 STUDIO_PRESIGNED_URL_EXPIRY_SECONDS = 300
 """Default expiry (in seconds) for SageMaker Studio presigned domain URLs.

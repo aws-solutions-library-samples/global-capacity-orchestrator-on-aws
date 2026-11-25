@@ -58,7 +58,10 @@ DEFAULT_TOOLS_OUTSIDE_ROLE: Mapping[str, str] = {
     "list_storage_contents": "starts, execs into and deletes a helper pod",
     "metrics_from_shared_storage_file": "starts, execs into and deletes a helper pod",
     "analytics_users_list": "reads the Cognito users of the analytics user pool",
-    "analytics_login_url": "signs in to the analytics user pool (AdminInitiateAuth)",
+    "analytics_login_url": (
+        "signs in to the analytics user pool (AdminInitiateAuth, and "
+        "AdminRespondToAuthChallenge for a new password)"
+    ),
     "analytics_user_add": "creates a Cognito user",
     "cost_allocation_activate": "changes the account's cost allocation tag settings",
     "cost_k8s_namespaces": "queries Athena over the monitoring stack's cost report bucket",

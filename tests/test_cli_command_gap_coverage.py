@@ -1010,36 +1010,74 @@ def test_capacity_status_sorts_regions_and_recommends_lowest_score(
     runner: CliRunner,
 ) -> None:
     checker = MagicMock()
+    checker.region_errors = []
     checker.get_all_regions_capacity.return_value = [
-        SimpleNamespace(
+        RegionCapacity(
             region="us-west-2",
             queue_depth=9,
             running_jobs=3,
             gpu_utilization=70.0,
             cpu_utilization=60.0,
             recommendation_score=85.0,
+            telemetry_status="complete",
         ),
-        SimpleNamespace(
+        RegionCapacity(
             region="us-east-1",
             queue_depth=1,
             running_jobs=1,
             gpu_utilization=20.0,
             cpu_utilization=30.0,
             recommendation_score=15.0,
+            telemetry_status="complete",
         ),
     ]
-
     with patch("cli.capacity.get_multi_region_capacity_checker", return_value=checker):
         result = _invoke(runner, capacity, ["status"])
-
     assert result.exit_code == 0, result.output
     assert result.output.index("us-east-1") < result.output.index("us-west-2")
     assert "Recommended region: us-east-1" in result.output
+    assert "us-east-1           1        1   20%    30%     15  complete" in result.output
+
+
+def test_capacity_status_shows_unread_signals_as_unknown_and_names_failed_regions(
+    runner: CliRunner,
+) -> None:
+    """A signal that could not be read is "-", not a measured 0%."""
+    checker = MagicMock()
+    checker.region_errors = ["eu-west-1: AccessDenied"]
+    checker.get_all_regions_capacity.return_value = [
+        RegionCapacity(
+            region="us-east-1",
+            queue_depth=0,
+            running_jobs=0,
+            recommendation_score=2000.0,
+            telemetry_status="partial",
+            unavailable_signals=["gpu", "cpu", "jobs"],
+        ),
+    ]
+    with patch("cli.capacity.get_multi_region_capacity_checker", return_value=checker):
+        result = _invoke(runner, capacity, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "us-east-1           0        -     -      -   2000  partial" in result.output
+    assert "Capacity status check failed for eu-west-1: AccessDenied" in result.output
+
+
+def test_capacity_status_fails_when_every_region_check_failed(runner: CliRunner) -> None:
+    """Discovery failing is not "No GCO stacks found", and must not exit 0."""
+    checker = MagicMock()
+    checker.get_all_regions_capacity.return_value = []
+    checker.region_errors = ["region discovery: ExpiredToken"]
+    with patch("cli.capacity.get_multi_region_capacity_checker", return_value=checker):
+        result = _invoke(runner, capacity, ["status"], config=_config(output_format="json"))
+    assert result.exit_code == 1
+    assert "Could not read capacity status: region discovery: ExpiredToken" in result.stderr
+    assert "No GCO stacks found" not in result.output
 
 
 def test_capacity_status_json_emits_empty_array_when_no_stacks(runner: CliRunner) -> None:
     checker = MagicMock()
     checker.get_all_regions_capacity.return_value = []
+    checker.region_errors = []
 
     with patch("cli.capacity.get_multi_region_capacity_checker", return_value=checker):
         result = _invoke(
@@ -1271,7 +1309,9 @@ def test_capacity_ai_recommend_forwards_constraints_and_limits_alternatives(
     assert "Capacity can change" in result.output
     assert "ap-south-1" not in result.output
     assert "Est. Cost" not in result.output
-    factory.assert_called_once_with(factory.call_args.args[0], model_id="test-model")
+    factory.assert_called_once_with(
+        factory.call_args.args[0], model_id="test-model", bedrock_region=None
+    )
     advisor.get_recommendation.assert_called_once_with(
         workload_description="batch inference",
         instance_types=["g6.xlarge"],

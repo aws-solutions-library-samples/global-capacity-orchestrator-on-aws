@@ -6,8 +6,9 @@ Exchanges a Cognito-authorized API Gateway event for a time-limited
 Flow (happy path):
 
 1. Extract ``claims = event["requestContext"]["authorizer"]["claims"]`` and
-   read ``cognito:username`` (falling back to ``username`` if the token
-   shape doesn't namespace Cognito claims) and ``sub``. A username
+   read ``cognito:username`` (an ID token's name for it) or ``username``
+   (an access token's, which is what the route requires since it lists a
+   scope) and ``sub``, which both tokens carry. A username
    SageMaker cannot use as a ``UserProfileName`` (``STUDIO_USERNAME_PATTERN``,
    63 characters at most) is an HTTP 400 ``UnsupportedUsername``.
 2. Read the Studio ``DomainId`` from the ``STUDIO_DOMAIN_ID`` env var,
@@ -27,12 +28,24 @@ Flow (happy path):
    ``Delete_Failed``, or a ``Failed`` one whose delete is refused) is an
    HTTP 409 ``UserProfileFailed`` instead of a 202 the CLI would poll
    until it gives up.
-4. Once the profile is ``InService``, ensure the per-user EFS access
-   point exists (lazy creation). Studio does not mount through it: a
-   profile's ``EFSFileSystemConfig`` takes only a file system ID and a
-   path, so the profile reaches ``/home/<username>`` on the file system
-   with Studio's own POSIX identity.
+4. Create ``/home/<username>`` on the Studio EFS, and the domain's default
+   ``/home/sagemaker-user``, if they are missing (see below).
 5. ``sagemaker:CreatePresignedDomainUrl`` and return the URL (HTTP 200).
+
+The profile reaches ``/home/<username>`` on the Studio EFS through its
+``EFSFileSystemConfig``, which takes only a file system ID and a path, with
+Studio's own POSIX identity. SageMaker refuses to start a space whose path
+does not exist and creates none, so this function mounts the file system's
+``/home`` (through the stack's one access point, as root) and creates the
+directory, mode ``0700``, owned by the notebook user (:data:`NOTEBOOK_UID`,
+:data:`NOTEBOOK_GID`), before it mints the URL that lets the user start a
+space. A failure is logged and the URL is still returned: only spaces with
+the Studio EFS attached need the directory. Earlier releases also created a
+per-user EFS access point at that path on every login; nothing mounted
+through it, so it never applied (EFS creates an access point's root
+directory only when a client mounts through the access point), and it is no
+longer created. The stack's cleanup still deletes the ones earlier releases
+left.
 
 The Lambda never blocks waiting for profile provisioning.  Instead it
 returns HTTP 202 ``{"status": "provisioning"}`` and the CLI retries
@@ -47,18 +60,19 @@ Environment variables (set by ``GCOAnalyticsStack._create_presigned_url_lambda``
 
 - ``STUDIO_DOMAIN_ID`` -- the Studio domain ID (e.g. ``d-abc123xyz``).
 - ``SAGEMAKER_EXECUTION_ROLE_ARN`` -- passed on ``CreateUserProfile``.
-- ``STUDIO_EFS_ID`` -- used by ``_ensure_access_point``.
+- ``STUDIO_EFS_ID`` -- the file system each profile's home directory is on.
+- ``STUDIO_HOME_MOUNT_PATH`` -- where the function mounts that file system's
+  ``/home``; without it no directory is created.
 - ``URL_EXPIRES_SECONDS`` -- default ``300`` (5 minutes).
 - ``SESSION_EXPIRES_SECONDS`` -- default ``43200`` (12 hours).
 
-The module-level boto3 clients (``sagemaker`` and ``efs``) are created
-once at cold start so repeat invocations inside a warm container reuse
-the same HTTP connection pools.
+The module-level ``sagemaker`` boto3 client is created once at cold start
+so repeat invocations inside a warm container reuse its HTTP connection
+pool.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -69,8 +83,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-23T16:48:27Z
-# Generated from Git commit: 1fcc830f8bfc0e870b022382a1506c682882515c
+# Generated at (UTC): 2026-11-24T22:25:50Z
+# Generated from Git commit: afbf93e626d691e7aa49495693b396b7ec7188ac
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/analytics-presigned-url/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/analytics-presigned-url/handler.lambda_handler.png``)
@@ -88,7 +102,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 sagemaker = boto3.client("sagemaker")
-efs = boto3.client("efs")
 
 # ---------------------------------------------------------------------------
 # Environment variables (read at module import, i.e. cold start)
@@ -97,6 +110,7 @@ efs = boto3.client("efs")
 STUDIO_DOMAIN_ID = os.environ.get("STUDIO_DOMAIN_ID", "")
 SAGEMAKER_EXECUTION_ROLE_ARN = os.environ.get("SAGEMAKER_EXECUTION_ROLE_ARN", "")
 STUDIO_EFS_ID = os.environ.get("STUDIO_EFS_ID", "")
+STUDIO_HOME_MOUNT_PATH = os.environ.get("STUDIO_HOME_MOUNT_PATH", "")
 URL_EXPIRES_SECONDS = int(os.environ.get("URL_EXPIRES_SECONDS", "300"))
 SESSION_EXPIRES_SECONDS = int(os.environ.get("SESSION_EXPIRES_SECONDS", "43200"))
 
@@ -130,17 +144,22 @@ _STUDIO_USERNAME_RE = re.compile(STUDIO_USERNAME_PATTERN)
 #: Tag recording the Cognito ``sub`` a user profile belongs to.
 PROFILE_OWNER_TAG_KEY = "gco:analytics:cognito-sub"
 
+#: The POSIX identity SageMaker uses for a custom file system's operations
+#: when no ``CustomPosixUserConfig`` is set, as on this domain and its
+#: profiles (https://docs.aws.amazon.com/sagemaker/latest/dg/domain-custom-file-system.html),
+#: so the owner a home directory needs for a space to write to it. The app's
+#: own ``sagemaker-user`` (1000:100) is not what reaches the file system.
+NOTEBOOK_UID = 200001
+NOTEBOOK_GID = 1001
+#: The directory under ``/home`` that the domain's default ``FileSystemPath``
+#: names, shared by profiles created outside this function.
+DOMAIN_DEFAULT_HOME = "sagemaker-user"
+
 #: Profile states a retry cannot fix: an update or a delete of the profile
 #: failed, so it is neither usable nor safe to recreate. They need an operator.
 _UNRECOVERABLE_PROFILE_STATUSES = frozenset({"Update_Failed", "Delete_Failed"})
 #: DescribeUserProfile / DeleteUserProfile error codes for a missing profile.
 _PROFILE_MISSING_CODES = frozenset({"ValidationException", "ResourceNotFound"})
-
-# POSIX id derivation constants. 2**31 - 19 keeps the result comfortably
-# within the 32-bit signed-int range EFS accepts; the 100000 offset pushes
-# the uid/gid out of the system-user range reserved for the base image.
-_POSIX_ID_MODULUS = 2147483629
-_POSIX_ID_OFFSET = 100000
 
 # ==========================================================================
 # Pure helpers (unit-testable without mocking)
@@ -183,25 +202,6 @@ def _is_studio_username(username: str) -> bool:
         len(username) <= STUDIO_USERNAME_MAX_LENGTH
         and _STUDIO_USERNAME_RE.fullmatch(username) is not None
     )
-
-
-def _derive_posix_ids(username: str) -> tuple[int, int]:
-    """Derive a deterministic POSIX ``(uid, gid)`` pair from a username.
-
-    Uses SHA-256 over the UTF-8 encoded username; the first four bytes
-    are interpreted as a big-endian unsigned int, reduced modulo
-    ``_POSIX_ID_MODULUS``, and shifted by ``_POSIX_ID_OFFSET`` so the
-    result is always ``>= 100000`` and fits within the 32-bit signed
-    range EFS expects.
-
-    The gid is always equal to the uid -- per-user home directories own
-    a single-user group, matching the ``0700`` permissions on
-    ``/home/<username>`` access points.
-    """
-    digest = hashlib.sha256(username.encode("utf-8")).digest()
-    raw = int.from_bytes(digest[:4], byteorder="big", signed=False)
-    uid = (raw % _POSIX_ID_MODULUS) + _POSIX_ID_OFFSET
-    return uid, uid
 
 
 def _format_success(url: str, expires: int) -> dict[str, Any]:
@@ -353,6 +353,43 @@ def _ensure_user_profile(domain_id: str, username: str, sub: str, efs_id: str) -
     return "Provisioning"
 
 
+def _ensure_home_directory(name: str) -> None:
+    """Create ``/home/<name>`` on the Studio EFS for the notebook user, if it is missing.
+
+    Created ``0700``; a directory with another owner (a create interrupted
+    before the ``chown``) is given to the notebook user as well. ``name`` is
+    a Studio username or :data:`DOMAIN_DEFAULT_HOME`: letters, digits and
+    hyphens only, so it stays one path component.
+    """
+    path = os.path.join(STUDIO_HOME_MOUNT_PATH, name)
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    else:
+        logger.info("Created the Studio home directory %s", name)
+    status = os.stat(path)
+    if (status.st_uid, status.st_gid) != (NOTEBOOK_UID, NOTEBOOK_GID):
+        os.chown(path, NOTEBOOK_UID, NOTEBOOK_GID)
+
+
+def _ensure_home_directories(username: str) -> None:
+    """Create the user's and the domain default's home directories; log a failure.
+
+    Best-effort: a space without the Studio EFS attached does not need them,
+    so a failure here must not cost the user the URL.
+    """
+    if not STUDIO_HOME_MOUNT_PATH:
+        return
+    for name in (username, DOMAIN_DEFAULT_HOME):
+        try:
+            _ensure_home_directory(name)
+        except OSError as exc:
+            logger.error(
+                "Could not create the Studio home directory %s: %s", name, exc, exc_info=True
+            )
+
+
 def _create_user_profile(domain_id: str, username: str, sub: str, efs_id: str) -> None:
     """Create a SageMaker user profile owned by ``sub``. Silently ignores ResourceInUse.
 
@@ -382,58 +419,6 @@ def _create_user_profile(domain_id: str, username: str, sub: str, efs_id: str) -
         if code != "ResourceInUse":
             raise
         logger.info("User profile %s already exists (ResourceInUse)", username)
-
-
-def _ensure_access_point(username: str, efs_id: str) -> str:
-    """Ensure a per-user EFS access point at ``/home/<username>`` exists.
-
-    Searches existing access points on ``efs_id`` for one whose
-    ``RootDirectory.Path`` equals ``/home/<username>``; creates one if
-    absent with a POSIX ``(uid, gid)`` derived from
-    :func:`_derive_posix_ids` and ``0700`` permissions.
-
-    Returns the ``AccessPointArn``. Nothing associates it with the user
-    profile: ``EFSFileSystemConfig`` has no access-point field, so Studio
-    never mounts through it and its POSIX identity and ``0700`` mode do not
-    apply to the profile's spaces.
-    """
-    uid, gid = _derive_posix_ids(username)
-    target_path = f"/home/{username}"
-
-    # Paginate describe_access_points. EFS returns at most 100 APs per
-    # page by default; we explicitly cap at 1000 to stay inside a single
-    # request for typical deployments.
-    next_token: str | None = None
-    while True:
-        kwargs: dict[str, Any] = {"FileSystemId": efs_id, "MaxResults": 1000}
-        if next_token is not None:
-            kwargs["NextToken"] = next_token
-        response = efs.describe_access_points(**kwargs)
-        for ap in response.get("AccessPoints", []):
-            root_dir = ap.get("RootDirectory", {})
-            if root_dir.get("Path") == target_path:
-                return str(ap.get("AccessPointArn", ""))
-        next_token = response.get("NextToken")
-        if not next_token:
-            break
-
-    created = efs.create_access_point(
-        FileSystemId=efs_id,
-        PosixUser={"Uid": uid, "Gid": gid},
-        RootDirectory={
-            "Path": target_path,
-            "CreationInfo": {
-                "OwnerUid": uid,
-                "OwnerGid": gid,
-                "Permissions": "0700",
-            },
-        },
-        Tags=[
-            {"Key": "gco:analytics:user", "Value": username},
-            {"Key": "gco:analytics:managed", "Value": "true"},
-        ],
-    )
-    return str(created.get("AccessPointArn", ""))
 
 
 # ==========================================================================
@@ -489,8 +474,9 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         if profile_status != "InService":
             return _format_provisioning()
 
-        # Step 4: lazy per-user EFS access point.
-        _ensure_access_point(username, STUDIO_EFS_ID)
+        # Step 4: the directories the user's spaces mount, before the URL
+        # that lets the user start one.
+        _ensure_home_directories(username)
 
         # Step 5: mint the presigned URL.
         response = sagemaker.create_presigned_domain_url(

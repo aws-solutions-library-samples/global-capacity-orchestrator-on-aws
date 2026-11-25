@@ -30,7 +30,9 @@ async def analytics_status() -> str:
 
 @mcp.tool(tags={"safe", "analytics"})
 @audit_logged
-async def analytics_login_url(username: str, password: str | None = None) -> str:
+async def analytics_login_url(
+    username: str, password: str | None = None, new_password: str | None = None
+) -> str:
     """`gco analytics studio login` — get a SageMaker Studio presigned login URL.
 
     Signs the user in to Cognito (AdminInitiateAuth, with this server's AWS
@@ -41,9 +43,17 @@ async def analytics_login_url(username: str, password: str | None = None) -> str
     returns ``code: password_required`` without running the CLI, whose
     password prompt the MCP server cannot answer.
 
+    An account that still has its temporary password must choose a new one
+    before Cognito signs it in: pass it as ``new_password`` (it reaches the
+    CLI as ``$GCO_STUDIO_NEW_PASSWORD``) and it becomes the account's
+    password. Without it such an account gets an error that says so.
+
     Args:
         username: Cognito username to sign in with.
         password: Cognito password. Omit to use ``$GCO_STUDIO_PASSWORD``.
+        new_password: The new password for an account with a temporary one;
+            it must meet the pool's password policy (12 characters or more,
+            with upper and lower case letters, a digit and a symbol).
     """
     if not password and not os.environ.get("GCO_STUDIO_PASSWORD"):
         return json.dumps(
@@ -54,7 +64,8 @@ async def analytics_login_url(username: str, password: str | None = None) -> str
             }
         )
     args = ["analytics", "studio", "login", "--username", username]
-    env = {"GCO_STUDIO_PASSWORD": password} if password else None
+    secrets = {"GCO_STUDIO_PASSWORD": password, "GCO_STUDIO_NEW_PASSWORD": new_password}
+    env = {name: value for name, value in secrets.items() if value} or None
     return await asyncio.to_thread(cli_runner._run_cli, *args, env=env)
 
 
@@ -96,6 +107,10 @@ async def disable_analytics() -> str:
 @audit_logged
 async def analytics_user_add(username: str, email: str) -> str:
     """`gco analytics users add` — create a Cognito user in the analytics pool.
+
+    Cognito emails the user an invitation with a temporary password, which the
+    result also carries once (``password``); the user chooses a new password
+    at the first sign-in (``analytics_login_url`` with ``new_password``).
 
     Args:
         username: Cognito username for the new user. It also names the
@@ -143,23 +158,24 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
 
     @mcp.tool(tags={"destructive", "analytics"})
     @audit_logged
-    async def analytics_user_remove(username: str) -> str:
+    async def analytics_user_remove(username: str, keep_studio_profile: bool = False) -> str:
         """[gated by GCO_ENABLE_DESTRUCTIVE_OPERATIONS] destructive.
 
         `gco analytics users remove` — delete a Cognito user from the
-        analytics user pool. Cannot be undone — the user record and any
-        Studio profile artefacts owned by them are permanently removed.
+        analytics user pool, and with it the user's SageMaker Studio profile,
+        the spaces it owns and their apps. Cannot be undone. A profile whose
+        owner tag names another Cognito user is left in place, and the files
+        under /home/<username> on the Studio EFS stay. When the profile
+        cannot be deleted the Cognito user is kept and the tool returns the
+        error. Deleting the apps and spaces can take a few minutes.
 
         Args:
             username: Cognito username to remove.
+            keep_studio_profile: Delete only the Cognito user.
         """
         await _ctx_warning(f"Removing analytics user {username!r} — this cannot be undone.")
-        return await asyncio.to_thread(
-            cli_runner._run_cli,
-            "analytics",
-            "users",
-            "remove",
-            "--username",
-            username,
-            "--yes",
-        )
+        args = ["analytics", "users", "remove", "--username", username, "--yes"]
+        if keep_studio_profile:
+            args.append("--keep-studio-profile")
+        # The SageMaker deletions wait for apps and spaces to go.
+        return await asyncio.to_thread(cli_runner._run_cli, *args, timeout_seconds=1200)

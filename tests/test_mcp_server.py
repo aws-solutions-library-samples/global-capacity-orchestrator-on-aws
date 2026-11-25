@@ -969,39 +969,61 @@ class TestCapacityTools:
             cmd = mock.call_args[0][0]
             assert "spot-prices" in cmd
 
-    def test_ai_recommend_basic(self):
-        with patch("cli_runner.subprocess.run") as mock:
-            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
-            run_mcp.ai_recommend(workload="Fine-tuning a 20B parameter LLM")
-            cmd = mock.call_args[0][0]
-            assert "ai-recommend" in cmd
-            assert "-w" in cmd
-            assert "Fine-tuning a 20B parameter LLM" in cmd
+    @pytest.mark.asyncio
+    async def test_ai_recommend_basic(self):
+        # Async, with ten minutes for the gather and the model: the sync tool
+        # ran under the two-minute default and kept its child running when
+        # the client cancelled.
+        with patch("cli_runner._run_cli_async", new=AsyncMock(return_value="{}")) as mock:
+            await run_mcp.ai_recommend(workload="Fine-tuning a 20B parameter LLM")
+        cmd = mock.call_args.args
+        assert "ai-recommend" in cmd
+        assert "-w" in cmd
+        assert "Fine-tuning a 20B parameter LLM" in cmd
+        assert cmd[-2:] == ("--fault-tolerance", "medium")
+        assert mock.call_args.kwargs == {"timeout_seconds": 600}
 
-    def test_ai_recommend_with_options(self):
-        with patch("cli_runner.subprocess.run") as mock:
-            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
-            run_mcp.ai_recommend(
+    @pytest.mark.asyncio
+    async def test_ai_recommend_with_options(self):
+        with patch("cli_runner._run_cli_async", new=AsyncMock(return_value="{}")) as mock:
+            await run_mcp.ai_recommend(
                 workload="Training job",
-                instance_type="p4d.24xlarge",
-                region="us-east-1",
+                instance_type=["p4d.24xlarge", "p5"],
+                region="us-east-1, us-west-2",
                 gpu=True,
                 min_gpus=8,
                 min_memory_gb=320,
                 fault_tolerance="high",
                 max_cost=25.0,
+                bedrock_region="eu-west-1",
+                data_only=True,
             )
-            cmd = mock.call_args[0][0]
-            assert "ai-recommend" in cmd
-            assert "-i" in cmd
-            assert "p4d.24xlarge" in cmd
-            assert "-r" in cmd
-            assert "--gpu" in cmd
-            assert "--min-gpus" in cmd
-            assert "--min-memory-gb" in cmd
-            assert "--fault-tolerance" in cmd
-            assert "high" in cmd
-            assert "--max-cost" in cmd
+        assert mock.call_args.args == (
+            "capacity",
+            "ai-recommend",
+            "-w",
+            "Training job",
+            "-i",
+            "p4d.24xlarge",
+            "-i",
+            "p5",
+            "-r",
+            "us-east-1",
+            "-r",
+            "us-west-2",
+            "--gpu",
+            "--min-gpus",
+            "8",
+            "--min-memory-gb",
+            "320",
+            "--fault-tolerance",
+            "high",
+            "--max-cost",
+            "25.0",
+            "--bedrock-region",
+            "eu-west-1",
+            "--data-only",
+        )
 
     def test_list_reservations(self):
         with patch("cli_runner.subprocess.run") as mock:

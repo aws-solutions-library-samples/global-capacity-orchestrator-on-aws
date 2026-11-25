@@ -68,6 +68,7 @@ def _stub_module(name: str, **attributes: Any) -> types.ModuleType:
 class _LoadedTool:
     module: types.ModuleType
     run_cli: Mock
+    run_cli_async: AsyncMock
     long_task: AsyncMock
     dependencies: types.ModuleType
     get_task: Mock
@@ -86,6 +87,7 @@ def _isolated_tool_module(
     """Execute one tool source file against side-effect-free dependency stubs."""
     enabled = frozenset(enabled_flags)
     run_cli = Mock(return_value=CLI_RESULT)
+    run_cli_async = AsyncMock(return_value=CLI_RESULT)
     long_task = AsyncMock(return_value=LONG_TASK_RESULT)
     get_task = Mock()
     list_tasks = Mock(return_value=[])
@@ -99,6 +101,7 @@ def _isolated_tool_module(
     cli_runner = _stub_module(
         "cli_runner",
         _run_cli=run_cli,
+        _run_cli_async=run_cli_async,
         TRANSFER_TIMEOUT_SECONDS=3600,
         reject_paths_outside_project_root=Mock(return_value=None),
         reject_traversal_segments=Mock(return_value=None),
@@ -180,6 +183,7 @@ def _isolated_tool_module(
         yield _LoadedTool(
             module=module,
             run_cli=run_cli,
+            run_cli_async=run_cli_async,
             long_task=long_task,
             dependencies=dependencies,
             get_task=get_task,
@@ -296,18 +300,26 @@ def test_capacity_fixed_and_small_option_wrappers(
 @pytest.mark.parametrize(
     ("kwargs", "expected_argv"),
     [
-        ({"workload": "batch"}, ("capacity", "ai-recommend", "-w", "batch")),
+        # The fault tolerance always reaches the CLI; the old "low" default
+        # was never sent, so the tool ran at the CLI's "medium".
+        ({}, ("capacity", "ai-recommend", "--fault-tolerance", "medium")),
+        (
+            {"workload": "batch", "fault_tolerance": "low"},
+            ("capacity", "ai-recommend", "-w", "batch", "--fault-tolerance", "low"),
+        ),
         (
             {
                 "workload": "train",
-                "instance_type": "p5.48xlarge",
-                "region": "us-west-2",
+                "instance_type": ["p5.48xlarge", "p6-b200"],
+                "region": "us-west-2,us-east-1",
                 "gpu": True,
                 "min_gpus": 8,
                 "min_memory_gb": 640,
                 "fault_tolerance": "medium",
                 "max_cost": 0.0,
                 "model": "bedrock.model-v2",
+                "bedrock_region": "us-east-1",
+                "data_only": True,
             },
             (
                 "capacity",
@@ -316,8 +328,12 @@ def test_capacity_fixed_and_small_option_wrappers(
                 "train",
                 "-i",
                 "p5.48xlarge",
+                "-i",
+                "p6-b200",
                 "-r",
                 "us-west-2",
+                "-r",
+                "us-east-1",
                 "--gpu",
                 "--min-gpus",
                 "8",
@@ -325,10 +341,14 @@ def test_capacity_fixed_and_small_option_wrappers(
                 "640",
                 "--fault-tolerance",
                 "medium",
+                # Forwarded as given; the CLI refuses a limit of zero itself.
                 "--max-cost",
                 "0.0",
                 "--model",
                 "bedrock.model-v2",
+                "--bedrock-region",
+                "us-east-1",
+                "--data-only",
             ),
         ),
     ],
@@ -337,7 +357,10 @@ def test_capacity_ai_recommend_option_matrix(
     kwargs: dict[str, Any], expected_argv: tuple[str, ...]
 ) -> None:
     with _isolated_tool_module("capacity") as loaded:
-        _assert_cli_call(loaded, "ai_recommend", (), kwargs, expected_argv)
+        result = _invoke(loaded.module.ai_recommend, **kwargs)
+    assert result == CLI_RESULT
+    loaded.run_cli_async.assert_awaited_once_with(*expected_argv, timeout_seconds=600)
+    loaded.run_cli.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -1587,7 +1610,16 @@ def test_analytics_wrapper_matrix(
 
 @pytest.mark.parametrize(
     ("kwargs", "expected_env"),
-    [({}, None), ({"password": "secret"}, {"GCO_STUDIO_PASSWORD": "secret"})],
+    [
+        ({}, None),
+        ({"password": "secret"}, {"GCO_STUDIO_PASSWORD": "secret"}),
+        # The first sign-in of an account with a temporary password.
+        ({"new_password": "chosen"}, {"GCO_STUDIO_NEW_PASSWORD": "chosen"}),
+        (
+            {"password": "secret", "new_password": "chosen"},
+            {"GCO_STUDIO_PASSWORD": "secret", "GCO_STUDIO_NEW_PASSWORD": "chosen"},
+        ),
+    ],
 )
 def test_analytics_login_url_passes_the_password_in_the_environment(
     kwargs: dict[str, Any], expected_env: dict[str, str] | None, monkeypatch: pytest.MonkeyPatch
@@ -1598,6 +1630,27 @@ def test_analytics_login_url_passes_the_password_in_the_environment(
         assert _invoke(loaded.module.analytics_login_url, "alice", **kwargs) == CLI_RESULT
         loaded.run_cli.assert_called_once_with(
             "analytics", "studio", "login", "--username", "alice", env=expected_env
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "flags"), [({}, ()), ({"keep_studio_profile": True}, ("--keep-studio-profile",))]
+)
+def test_analytics_user_remove_deletes_the_studio_profile_unless_kept(
+    kwargs: dict[str, Any], flags: tuple[str, ...]
+) -> None:
+    """The SageMaker deletions wait for the apps and spaces, so the call gets 20 minutes."""
+    with _isolated_tool_module("analytics", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
+        assert _invoke(loaded.module.analytics_user_remove, "alice", **kwargs) == CLI_RESULT
+        loaded.run_cli.assert_called_once_with(
+            "analytics",
+            "users",
+            "remove",
+            "--username",
+            "alice",
+            "--yes",
+            *flags,
+            timeout_seconds=1200,
         )
 
 
@@ -2033,3 +2086,30 @@ def test_slurm_context_warning_paths() -> None:
         # A context whose warning fails is swallowed.
         context.warning = AsyncMock(side_effect=RuntimeError("closed"))
         assert asyncio.run(loaded.module._ctx_warning("careful")) is None
+
+
+@pytest.mark.parametrize(
+    ("function_name", "kwargs", "expected_argv"),
+    [
+        (
+            "check_capacity",
+            {"instance_type": "p5", "region": "us-east-1", "capacity_type": "spot"},
+            ("capacity", "check", "-i", "p5", "-r", "us-east-1", "-t", "spot"),
+        ),
+        (
+            "spot_prices",
+            {"instance_type": "g5.xlarge", "region": "us-west-2", "days": 30},
+            ("capacity", "spot-prices", "-i", "g5.xlarge", "-r", "us-west-2", "-d", "30"),
+        ),
+        (
+            "spot_prices",
+            {"instance_type": "g5.xlarge", "region": "us-west-2"},
+            ("capacity", "spot-prices", "-i", "g5.xlarge", "-r", "us-west-2"),
+        ),
+    ],
+)
+def test_capacity_lookup_tools_forward_the_cli_options_they_expose(
+    function_name: str, kwargs: dict[str, Any], expected_argv: tuple[str, ...]
+) -> None:
+    with _isolated_tool_module("capacity") as loaded:
+        _assert_cli_call(loaded, function_name, (), kwargs, expected_argv)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import statistics
+import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -35,8 +36,13 @@ from .models import CapacityCheckError
 
 logger = logging.getLogger(__name__)
 
+#: boto3.Session.client() is not thread-safe, and the capacity advisor reads
+#: several Regions' telemetry at once; every client is created under this lock.
+_CLIENT_LOCK = threading.Lock()
 _TELEMETRY_MISSING_SIGNAL_PENALTY = 1000.0
 _SCORED_TELEMETRY_SIGNALS = frozenset({"queue", "gpu", "jobs"})
+#: Sorts a CloudWatch datapoint without a timestamp before every real one.
+_OLDEST_TIMESTAMP = datetime.min.replace(tzinfo=UTC)
 #: The health monitor publishes the Region's active Job count (Jobs in the job
 #: namespaces with a pending or running pod) every 30 seconds.
 _ACTIVE_JOBS_NAMESPACE = "GCO/HealthMonitor"
@@ -114,6 +120,21 @@ class MultiRegionCapacityChecker:
         # empty result can be distinguished as "checks failed" vs "no regions".
         self._last_region_errors: list[str] = []
 
+    def _client(self, service: str, **kwargs: Any) -> Any:
+        """A client for ``service`` from this checker's session, created under the lock."""
+        with _CLIENT_LOCK:
+            return self._session.client(service, **kwargs)
+
+    @property
+    def region_errors(self) -> list[str]:
+        """The failures of the latest :meth:`get_all_regions_capacity` sweep.
+
+        One ``"<region>: <error>"`` (or ``"region discovery: <error>"``) per
+        failure, so a caller can tell "no deployed Regions" from "every check
+        failed".
+        """
+        return list(self._last_region_errors)
+
     def get_region_capacity(self, region: str, *, backend: str = BACKEND_EKS) -> RegionCapacity:
         """Get capacity information while retaining telemetry uncertainty.
 
@@ -144,7 +165,7 @@ class MultiRegionCapacityChecker:
 
         # Get queue depth from SQS.
         try:
-            cfn = self._session.client("cloudformation", region_name=region)
+            cfn = self._client("cloudformation", region_name=region)
             response = cfn.describe_stacks(StackName=stack.stack_name)
             outputs = {
                 output["OutputKey"]: output["OutputValue"]
@@ -153,7 +174,7 @@ class MultiRegionCapacityChecker:
 
             queue_url = outputs.get("JobQueueUrl")
             if queue_url:
-                sqs = self._session.client("sqs", region_name=region)
+                sqs = self._client("sqs", region_name=region)
                 # In-flight (not visible) messages are being applied right now
                 # or waiting out a failed attempt; the processor deletes a
                 # message once its manifests are applied, so they are not a
@@ -176,7 +197,7 @@ class MultiRegionCapacityChecker:
         # Query GPU and CPU independently so one failed metric does not erase
         # the other useful signal.
         try:
-            cloudwatch = self._session.client("cloudwatch", region_name=region)
+            cloudwatch = self._client("cloudwatch", region_name=region)
         except Exception as e:
             logger.warning("Failed to create CloudWatch client for %s: %s", region, e)
             capacity.telemetry_errors.append(f"CloudWatch telemetry failed: {e}")
@@ -198,7 +219,13 @@ class MultiRegionCapacityChecker:
                     )
                     datapoints = response.get("Datapoints", [])
                     if datapoints:
-                        setattr(capacity, attribute, datapoints[0]["Average"])
+                        # CloudWatch returns datapoints unordered; read the
+                        # newest, as the running-job reading below does.
+                        newest = max(
+                            datapoints,
+                            key=lambda point: point.get("Timestamp") or _OLDEST_TIMESTAMP,
+                        )
+                        setattr(capacity, attribute, newest["Average"])
                         available[signal] = True
                     else:
                         capacity.telemetry_errors.append(

@@ -1,5 +1,8 @@
 """Capacity checking and recommendation MCP tools."""
 
+import re
+from typing import Literal
+
 import cli_runner
 from audit import audit_logged
 from feature_flags import (
@@ -13,14 +16,24 @@ from server import mcp
 
 @mcp.tool(tags={"safe", "capacity"})
 @audit_logged
-def check_capacity(instance_type: str, region: str) -> str:
+def check_capacity(
+    instance_type: str,
+    region: str,
+    capacity_type: Literal["spot", "on-demand", "both"] = "both",
+) -> str:
     """Check spot and on-demand capacity for a specific instance type.
 
     Args:
-        instance_type: EC2 instance type (e.g. g4dn.xlarge, g5.2xlarge, p4d.24xlarge).
+        instance_type: EC2 instance type or alias (e.g. g4dn.xlarge, g5.2xlarge,
+            p4d.24xlarge, p5).
         region: AWS region to check.
+        capacity_type: Which estimates to return: ``spot``, ``on-demand`` or
+            ``both`` (default).
     """
-    return cli_runner._run_cli("capacity", "check", "-i", instance_type, "-r", region)
+    args = ["capacity", "check", "-i", instance_type, "-r", region]
+    if capacity_type != "both":
+        args += ["-t", capacity_type]
+    return cli_runner._run_cli(*args)
 
 
 @mcp.tool(tags={"safe", "capacity"})
@@ -134,70 +147,123 @@ def recommend_region(
 
 @mcp.tool(tags={"safe", "capacity"})
 @audit_logged
-def spot_prices(instance_type: str, region: str) -> str:
-    """Get current spot prices for an instance type.
+def spot_prices(instance_type: str, region: str, days: int = 7) -> str:
+    """Get current spot prices and their history for an instance type, per zone.
 
     Args:
-        instance_type: EC2 instance type.
+        instance_type: EC2 instance type or alias.
         region: AWS region.
+        days: Days of price history to summarize (default 7).
     """
-    return cli_runner._run_cli("capacity", "spot-prices", "-i", instance_type, "-r", region)
+    args = ["capacity", "spot-prices", "-i", instance_type, "-r", region]
+    if days != 7:
+        args += ["-d", str(days)]
+    return cli_runner._run_cli(*args)
+
+
+#: ``gco capacity ai-recommend`` reads up to nine AWS lookups for every
+#: (instance type, Region) pair and then waits for the model, which with
+#: adaptive thinking can take minutes; the default two minutes cut it off.
+AI_RECOMMEND_TIMEOUT_SECONDS = 600
+
+
+def _names(value: str | list[str] | None) -> list[str]:
+    """One name, a list of names, or a comma- or space-separated string of them."""
+    items = [value] if isinstance(value, str) else list(value or [])
+    return [name for item in items for name in re.split(r"[\s,]+", str(item)) if name]
 
 
 @mcp.tool(tags={"safe", "capacity"})
 @audit_logged
-def ai_recommend(
-    workload: str,
-    instance_type: str | None = None,
-    region: str | None = None,
+async def ai_recommend(
+    workload: str | None = None,
+    instance_type: str | list[str] | None = None,
+    region: str | list[str] | None = None,
     gpu: bool = False,
     min_gpus: int = 0,
     min_memory_gb: int = 0,
-    fault_tolerance: str = "low",
+    fault_tolerance: Literal["high", "medium", "low"] = "medium",
     max_cost: float | None = None,
     model: str | None = None,
+    bedrock_region: str | None = None,
+    data_only: bool = False,
 ) -> str:
     """Get AI-powered capacity recommendation using Amazon Bedrock.
 
-    Gathers comprehensive capacity data (spot scores, pricing, cluster
-    utilization, queue depth) and sends it to an LLM for analysis.
-    Returns a recommended region, instance type, capacity type, and reasoning.
+    Gathers live capacity data for every instance type and Region compared:
+    Spot placement scores and prices with 7-day trends, On-Demand prices and
+    availability, each type's GPUs and memory, ODCRs, Capacity Block
+    offerings sized for the workload, the GCO cluster's queue and utilization
+    (unread signals are reported as unknown), the algorithmic region ranking
+    and recorded capacity history. A Bedrock model then recommends a Region,
+    instance type, capacity type (spot, on-demand, odcr or capacity-block)
+    and instance count, with reasoning, a cost estimate, reservation advice,
+    alternatives and warnings.
 
-    Requires AWS credentials with bedrock:InvokeModel permission and the
-    specified model enabled in your account.
+    The answer is checked against the gathered data: ``validation_warnings``
+    lists a Region or type that was not analyzed, too few GPUs, a cost over
+    ``max_cost`` or a type EC2 does not offer there, and any failed check on
+    the recommendation lowers ``confidence`` to ``low``. ``data_gaps`` lists
+    the lookups that failed, and ``disclaimer`` says to validate the
+    AI-generated answer before production use. The call can take several
+    minutes (up to 10).
+
+    Set ``data_only=True`` to get the gathered data alone (``capacity_data``,
+    ``historical_context``, ``requirements``) and reason over it yourself;
+    Bedrock is not called, so no Bedrock permission or model is needed.
+    Otherwise it requires bedrock:InvokeModel and the model enabled in the
+    account.
 
     Args:
-        workload: Description of the workload (e.g. "Fine-tuning a 20B parameter LLM").
-        instance_type: Specific instance type(s) to consider (e.g. "p4d.24xlarge").
-        region: Specific region(s) to consider (e.g. "us-east-1").
+        workload: Description of the workload (e.g. "Fine-tuning a 20B
+            parameter LLM"); the first 4000 characters reach the model.
+        instance_type: Instance type(s) or aliases to compare (e.g.
+            "p4d.24xlarge", ["p5", "p6-b200"]). Omit for one type per current
+            GPU generation.
+        region: Region(s) to compare (e.g. "us-east-1", ["us-east-1",
+            "us-west-2"]). Omit for the deployed Regions.
         gpu: Whether the workload requires GPUs.
-        min_gpus: Minimum number of GPUs required.
-        min_memory_gb: Minimum GPU memory in GB.
-        fault_tolerance: Tolerance for interruptions ("low", "medium", "high").
-        max_cost: Maximum acceptable cost per hour in USD.
+        min_gpus: GPUs the workload needs in total, across all its instances.
+        min_memory_gb: GPU memory the workload needs in total across all its
+            instances, in GB.
+        fault_tolerance: How well the workload survives interruptions:
+            ``high`` (it checkpoints, so Spot fits), ``medium`` (default) or
+            ``low`` (it must not be interrupted).
+        max_cost: Most the workload may cost per hour in USD, all its
+            instances together (above zero).
         model: Bedrock model ID to use for analysis. Omit to use
             `cdk.json` `context.bedrock.capacity_advisor_default_model_id`,
             the advisor's own knob (Mission sampling has a separate
             `mission_default_model_id`).
+        bedrock_region: Region to call Bedrock in. Omit for AWS_REGION,
+            AWS_DEFAULT_REGION or the configured default Region; a
+            geography-scoped profile (``eu.``) answers only in its geography.
+        data_only: Return the gathered data without calling Bedrock.
     """
-    args = ["capacity", "ai-recommend", "-w", workload]
-    if instance_type:
-        args += ["-i", instance_type]
-    if region:
-        args += ["-r", region]
+    args = ["capacity", "ai-recommend"]
+    if workload:
+        args += ["-w", workload]
+    for name in _names(instance_type):
+        args += ["-i", name]
+    for name in _names(region):
+        args += ["-r", name]
     if gpu:
         args.append("--gpu")
     if min_gpus > 0:
         args += ["--min-gpus", str(min_gpus)]
     if min_memory_gb > 0:
         args += ["--min-memory-gb", str(min_memory_gb)]
-    if fault_tolerance != "low":
-        args += ["--fault-tolerance", fault_tolerance]
+    args += ["--fault-tolerance", fault_tolerance]
     if max_cost is not None:
         args += ["--max-cost", str(max_cost)]
     if model:
         args += ["--model", model]
-    return cli_runner._run_cli(*args)
+    if bedrock_region:
+        args += ["--bedrock-region", bedrock_region]
+    if data_only:
+        args.append("--data-only")
+    # Async so the CLI child is terminated when the client cancels the call.
+    return await cli_runner._run_cli_async(*args, timeout_seconds=AI_RECOMMEND_TIMEOUT_SECONDS)
 
 
 @mcp.tool(tags={"safe", "capacity"})
@@ -256,9 +322,11 @@ def reservation_check(
         latest_start: Latest block start date (YYYY-MM-DD or ISO datetime); a
             date means the whole of that day.
 
-    A Capacity Block request EC2 refuses (an instance count it does not sell,
-    a start window it cannot serve) is returned as an error with EC2's
-    reason rather than as "no offerings".
+    A Region whose Capacity Block search EC2 refused or that failed (a
+    denied permission, throttling) is listed under ``capacity_blocks.errors``
+    with EC2's reason, and the other Regions' results stand; when the search
+    ran nowhere (an instance count EC2 does not sell, say) the tool returns
+    an error with EC2's reasons rather than "no offerings".
     """
     args = ["capacity", "reservation-check", "-i", instance_type, "-c", str(count)]
     for r in regions or []:
@@ -320,8 +388,9 @@ def find_capacity_blocks(
         find_longest: Sweep the duration ladder and surface the longest block.
 
     A probe EC2 refuses (an instance count it does not sell, a start window
-    it cannot serve) is listed in the report's ``rejected_probes`` and named
-    in ``recommendation``; when EC2 refuses every probe the tool returns an
+    it cannot serve) or that fails (a denied permission, throttling past the
+    retry budget) is listed in the report's ``rejected_probes`` and named in
+    ``recommendation``; when no probe searched anything the tool returns an
     error with EC2's reason instead of an empty report.
     """
     args = ["capacity", "find-blocks", "-i", instance_type]

@@ -342,7 +342,9 @@ def _no_real_mission_memory():
 # watchdog and its final pass, the implicit log-group sweep (CloudWatch
 # DeleteLogGroup on every Lambda/EKS/Container Insights group the stacks
 # imply), the sweep of explicit log groups Lambda recreated
-# after CloudFormation deleted them, bastion IAM retirement, the traffic-dial
+# after CloudFormation deleted them, the listing of the monitoring stack's
+# functions around a keep-control-plane update (CloudFormation
+# ListStackResources), bastion IAM retirement, the traffic-dial
 # SSM purge, and the post-regional EBS volume and add-on SSM sweeps.
 # Orchestration tests that mock ``destroy`` / ``list_stacks`` but not these
 # helpers otherwise fire real AWS calls: slow and non-hermetic, and outright
@@ -374,6 +376,8 @@ _DESTROY_CLEANUP_STUBS: dict[str, object] = {
     "_cleanup_implicit_log_groups": {"deleted": [], "missing": [], "errors": []},
     "_collect_stack_identities": {},
     "_cleanup_regenerated_log_groups": {"deleted": [], "errors": []},
+    "_collect_stack_functions": None,
+    "_removed_function_log_groups": {},
     "_cleanup_bastion_iam": {"completed_steps": 0, "absent_steps": 0, "errors": []},
     "_detach_stack_roles_from_instance_profiles": {"detached": [], "errors": []},
     "_cleanup_traffic_dial_parameters": {"deleted": [], "errors": []},
@@ -413,6 +417,13 @@ _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
     ),
     "TestRegeneratedLogGroupCleanup": frozenset(
         {"_collect_stack_identities", "_cleanup_regenerated_log_groups"}
+    ),
+    "TestRemovedFunctionLogGroups": frozenset(
+        {
+            "_collect_stack_functions",
+            "_removed_function_log_groups",
+            "_cleanup_implicit_log_groups",
+        }
     ),
     "TestBastionIamCleanup": frozenset({"_cleanup_bastion_iam"}),
     "TestRoleInstanceProfileDetach": frozenset({"_detach_stack_roles_from_instance_profiles"}),

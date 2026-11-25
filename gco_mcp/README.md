@@ -639,7 +639,7 @@ No statement lets the role assume or pass a role, so it cannot use the CDK boots
 - `list_storage_contents`: starts, execs into and deletes a helper pod.
 - `metrics_from_shared_storage_file`: starts, execs into and deletes a helper pod.
 - `analytics_users_list`: reads the Cognito users of the analytics user pool.
-- `analytics_login_url`: signs in to the analytics user pool (AdminInitiateAuth).
+- `analytics_login_url`: signs in to the analytics user pool (AdminInitiateAuth, and AdminRespondToAuthChallenge for a new password).
 - `analytics_user_add`: creates a Cognito user.
 - `cost_allocation_activate`: changes the account's cost allocation tag settings.
 - `cost_k8s_namespaces`: queries Athena over the monitoring stack's cost report bucket.
@@ -750,8 +750,8 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `recommend_capacity` | Recommend spot or on-demand capacity from interruption tolerance | safe | — |
 | `capacity_status` | View capacity across all deployed regions | safe | — |
 | `recommend_region` | Get optimal region recommendation (supports instance-type-aware weighted scoring; `backend="hyperpod"` or `"pcs"` ranks only the Regions running that backend on its own capacity) | safe | — |
-| `spot_prices` | Get current spot prices for an instance type | safe | — |
-| `ai_recommend` | Get AI-powered capacity recommendation using Amazon [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) | safe | — |
+| `spot_prices` | Get current spot prices and their history for an instance type, per zone | safe | — |
+| `ai_recommend` | Get AI-powered capacity recommendation using Amazon [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html), checked against the gathered data (`validation_warnings`); `data_only=True` returns the gathered data without calling Bedrock | safe | — |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions | safe | — |
 | `reservation_check` | Check reservation availability and Capacity Block offerings | safe | — |
 | `find_capacity_blocks` | Search Capacity Block offerings across regions, durations, and a start-date window | safe | — |
@@ -1446,7 +1446,7 @@ Most operational tools shell out to the `gco` CLI, while discovery, introspectio
 LLM ←→ MCP Protocol (stdio) ←→ run_mcp.py ←→ gco CLI ←→ AWS APIs
 ```
 
-Arguments reach the CLI as separate argv elements (no shell). Before the call, each tool checks the arguments that are paths: a local file or directory must resolve, symlinks included, inside the project root, and a name or ID that the CLI puts into an API request path must not contain a `..` segment. Free text such as prompts and chat messages is passed through unchanged. Secrets go through the child's environment instead of its command line, which every local user can read: `analytics_login_url` sets `GCO_STUDIO_PASSWORD`, `monitoring_user_add` sets `GCO_GRAFANA_USER_PASSWORD`, and `webhooks_create` sets `GCO_WEBHOOK_URL` and `GCO_WEBHOOK_SECRET` (webhook URLs often embed a token). The audit log redacts password, secret, token and key arguments and records a URL argument as its scheme and host only. Child processes get `/dev/null` as stdin, never the server's stdin (the client's message stream under the stdio transport): a CLI prompt reads end-of-file and fails at once, `destroy_stack`/`destroy_all` with `yes=False` stop before destroying anything, and `analytics_login_url` with neither a `password` argument nor `GCO_STUDIO_PASSWORD` returns `code: password_required` without running the CLI. See [How Tools Work](tools/README.md#how-tools-work).
+Arguments reach the CLI as separate argv elements (no shell). Before the call, each tool checks the arguments that are paths: a local file or directory must resolve, symlinks included, inside the project root, and a name or ID that the CLI puts into an API request path must not contain a `..` segment. Free text such as prompts and chat messages is passed through unchanged. Secrets go through the child's environment instead of its command line, which every local user can read: `analytics_login_url` sets `GCO_STUDIO_PASSWORD` (and `GCO_STUDIO_NEW_PASSWORD` at a first sign-in), `monitoring_user_add` sets `GCO_GRAFANA_USER_PASSWORD`, and `webhooks_create` sets `GCO_WEBHOOK_URL` and `GCO_WEBHOOK_SECRET` (webhook URLs often embed a token). The audit log redacts password, secret, token and key arguments and records a URL argument as its scheme and host only. Child processes get `/dev/null` as stdin, never the server's stdin (the client's message stream under the stdio transport): a CLI prompt reads end-of-file and fails at once, `destroy_stack`/`destroy_all` with `yes=False` stop before destroying anything, and `analytics_login_url` with neither a `password` argument nor `GCO_STUDIO_PASSWORD` returns `code: password_required` without running the CLI. See [How Tools Work](tools/README.md#how-tools-work).
 
 ## Examples
 

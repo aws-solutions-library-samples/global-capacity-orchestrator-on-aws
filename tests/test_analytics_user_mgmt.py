@@ -107,39 +107,67 @@ class TestDiscoverFunctions:
 
 
 # ---------------------------------------------------------------------------
-# srp_authenticate (AdminInitiateAuth with ADMIN_USER_PASSWORD_AUTH)
+# authenticate_with_password / complete_new_password_challenge
 # ---------------------------------------------------------------------------
 
 
-class TestSRPAuthenticate:
-    """Exercise srp_authenticate, which calls cognito-idp AdminInitiateAuth."""
+class TestPasswordSignIn:
+    """AdminInitiateAuth and the NEW_PASSWORD_REQUIRED answer."""
 
-    def test_srp_authenticate_returns_tokens_on_success(self):
-        from unittest.mock import MagicMock, patch
-
-        mock_cognito_instance = MagicMock()
-        mock_cognito_instance.id_token = "id-token"
-        mock_cognito_instance.access_token = "access-token"
-        mock_cognito_instance.refresh_token = "refresh-token"
-
-        with patch("cli.analytics_user_mgmt.srp_authenticate") as mock_auth:
-            mock_auth.return_value = {
-                "IdToken": "id-token",
-                "AccessToken": "access-token",
-                "RefreshToken": "refresh-token",
-            }
-            tokens = mock_auth(
-                pool_id="us-east-2_abc",
-                client_id="client-id",
-                username="alice",
-                password="hunter2",
-                region="us-east-2",
-            )
-        assert tokens == {
-            "IdToken": "id-token",
-            "AccessToken": "access-token",
-            "RefreshToken": "refresh-token",
+    def test_a_temporary_password_raises_the_challenge_with_its_session(self):
+        """Cognito answers a temporary password with a challenge and no tokens,
+        which used to surface as "no AccessToken returned"."""
+        cognito = MagicMock()
+        cognito.admin_initiate_auth.return_value = {
+            "ChallengeName": "NEW_PASSWORD_REQUIRED",
+            "Session": "session-1",
+            "ChallengeParameters": {"USER_ID_FOR_SRP": "alice"},
         }
+        with (
+            patch("boto3.client", return_value=cognito),
+            pytest.raises(aum.NewPasswordRequiredError) as excinfo,
+        ):
+            aum.authenticate_with_password("pool", "client", "alice", "Temp!1", "us-east-2")
+        assert excinfo.value.session == "session-1"
+
+    def test_a_challenge_gco_cannot_answer_is_named(self):
+        cognito = MagicMock()
+        cognito.admin_initiate_auth.return_value = {"ChallengeName": "SMS_MFA", "Session": "s"}
+        with (
+            patch("boto3.client", return_value=cognito),
+            pytest.raises(ValueError, match="SMS_MFA challenge, which gco cannot answer"),
+        ):
+            aum.authenticate_with_password("pool", "client", "alice", "Secret!1", "us-east-2")
+
+    def test_the_new_password_answers_the_challenge_and_returns_the_tokens(self):
+        cognito = MagicMock()
+        cognito.admin_respond_to_auth_challenge.return_value = {
+            "AuthenticationResult": {"IdToken": "id", "AccessToken": "access"}
+        }
+        with patch("boto3.client", return_value=cognito) as client:
+            tokens = aum.complete_new_password_challenge(
+                "pool", "client", "alice", "New!Password12", "session-1", "us-east-2"
+            )
+        assert tokens == {"IdToken": "id", "AccessToken": "access", "RefreshToken": ""}
+        client.assert_called_once_with("cognito-idp", region_name="us-east-2")
+        cognito.admin_respond_to_auth_challenge.assert_called_once_with(
+            UserPoolId="pool",
+            ClientId="client",
+            ChallengeName="NEW_PASSWORD_REQUIRED",
+            Session="session-1",
+            ChallengeResponses={"USERNAME": "alice", "NEW_PASSWORD": "New!Password12"},
+        )
+
+    def test_a_further_challenge_after_the_new_password_is_named(self):
+        cognito = MagicMock()
+        cognito.admin_respond_to_auth_challenge.return_value = {"ChallengeName": "MFA_SETUP"}
+        with (
+            patch("boto3.client", return_value=cognito),
+            pytest.raises(ValueError, match="MFA_SETUP"),
+        ):
+            aum.complete_new_password_challenge(
+                "pool", "client", "alice", "New!Password12", "session-1", "us-east-2"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -165,33 +193,58 @@ class TestUserMgmtHelpers:
         # moto does not surface a temporary password — the helper returns None.
         assert temp_pw is None or isinstance(temp_pw, str)
 
-    def test_admin_create_user_extracts_temp_pw_from_attributes(self):
-        """Covers the TemporaryPassword-in-attributes branch (rare)."""
+    def test_admin_create_user_sends_the_temporary_password_and_emails_the_invitation(self):
+        """AdminCreateUser never returns the password Cognito generates, and
+        sends its invitation by SMS unless asked otherwise, so the CLI used to
+        print no password and send no email."""
         fake = MagicMock()
-        fake.admin_create_user.return_value = {
-            "User": {
-                "Username": "alice",
-                "Attributes": [{"Name": "temporary_password", "Value": "Temp!123"}],
-            }
-        }
+        fake.admin_create_user.return_value = {"User": {"Username": "alice"}}
         with patch("boto3.client", return_value=fake):
             _, temp_pw = aum.admin_create_user(
-                pool_id="pool-id", region="us-east-2", username="alice"
+                pool_id="pool-id",
+                region="us-east-2",
+                username="alice",
+                email="alice@example.com",
+                temporary_password="Temp!Password123",
             )
-        assert temp_pw == "Temp!123"
+        assert temp_pw == "Temp!Password123"
+        fake.admin_create_user.assert_called_once_with(
+            UserPoolId="pool-id",
+            Username="alice",
+            UserAttributes=[
+                {"Name": "email", "Value": "alice@example.com"},
+                {"Name": "email_verified", "Value": "true"},
+            ],
+            TemporaryPassword="Temp!Password123",
+            DesiredDeliveryMediums=["EMAIL"],
+        )
 
-    def test_admin_create_user_extracts_temp_pw_from_top_level(self):
-        """Covers the ``response.get('TemporaryPassword')`` fallback."""
+    @pytest.mark.parametrize(
+        ("email", "suppress", "expected"),
+        [
+            ("alice@example.com", True, {"MessageAction": "SUPPRESS"}),
+            (None, False, {}),
+        ],
+        ids=["suppressed", "no-email"],
+    )
+    def test_admin_create_user_asks_for_no_email_it_cannot_or_must_not_send(
+        self, email, suppress, expected
+    ):
         fake = MagicMock()
-        fake.admin_create_user.return_value = {
-            "User": {"Username": "alice", "Attributes": []},
-            "TemporaryPassword": "FromTopLevel!1",
-        }
         with patch("boto3.client", return_value=fake):
             _, temp_pw = aum.admin_create_user(
-                pool_id="pool-id", region="us-east-2", username="alice"
+                pool_id="pool-id",
+                region="us-east-2",
+                username="alice",
+                email=email,
+                suppress_email=suppress,
             )
-        assert temp_pw == "FromTopLevel!1"
+        assert temp_pw is None
+        kwargs = fake.admin_create_user.call_args.kwargs
+        assert "TemporaryPassword" not in kwargs
+        assert {
+            key: kwargs[key] for key in ("MessageAction", "DesiredDeliveryMediums") if key in kwargs
+        } == expected
 
     @mock_aws
     def test_list_users_returns_rows_with_email(self):

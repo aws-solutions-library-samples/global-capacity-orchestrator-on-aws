@@ -8,9 +8,12 @@ exercising in isolation from Click:
   / :func:`discover_api_endpoint` — single-stack CloudFormation output
   lookups used by every sub-command to avoid forcing operators to hand a
   pool id / api url on the command line.
-* :func:`srp_authenticate` — Cognito sign-in with ``AdminInitiateAuth``
-  (``ADMIN_USER_PASSWORD_AUTH``; the name predates the flow), used by
+* :func:`authenticate_with_password` / :func:`complete_new_password_challenge`
+  — Cognito sign-in with ``AdminInitiateAuth`` (``ADMIN_USER_PASSWORD_AUTH``)
+  and the answer to its ``NEW_PASSWORD_REQUIRED`` challenge, used by
   ``gco analytics studio login``.
+* :func:`delete_studio_user_profile` — removes a user's SageMaker Studio
+  profile with its apps and spaces, for ``gco analytics users remove``.
 * :func:`is_studio_username` / :func:`find_user_ignoring_case` — the
   checks ``gco analytics users add`` makes before it creates a user whose
   name must also work as a SageMaker Studio user profile name.
@@ -20,15 +23,17 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import urllib.error
+from collections.abc import Callable
 from typing import Any
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-23T16:48:27Z
-# Generated from Git commit: 1fcc830f8bfc0e870b022382a1506c682882515c
+# Generated at (UTC): 2026-11-24T19:00:27Z
+# Generated from Git commit: 21c18ee43b7d5814a559de944c67a84889dff8d5
 # Flowchart(s) generated from this file:
-#   * ``srp_authenticate`` -> ``diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.html``
-#     (PNG: ``diagrams/code_diagrams/cli/analytics_user_mgmt.srp_authenticate.png``)
+#   * ``authenticate_with_password`` -> ``diagrams/code_diagrams/cli/analytics_user_mgmt.authenticate_with_password.html``
+#     (PNG: ``diagrams/code_diagrams/cli/analytics_user_mgmt.authenticate_with_password.png``)
 #   * ``fetch_studio_url`` -> ``diagrams/code_diagrams/cli/analytics_user_mgmt.fetch_studio_url.html``
 #     (PNG: ``diagrams/code_diagrams/cli/analytics_user_mgmt.fetch_studio_url.png``)
 # Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
@@ -123,24 +128,56 @@ def discover_api_endpoint(region: str, project_name: str = "gco") -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def srp_authenticate(
+class NewPasswordRequiredError(Exception):
+    """Cognito answered a sign-in with the ``NEW_PASSWORD_REQUIRED`` challenge.
+
+    A user who still has a temporary password (``users add`` without
+    ``--password`` or ``--generate-password``, or ``users set-password
+    --temporary``) gets it on the first sign-in. ``session`` answers it
+    through :func:`complete_new_password_challenge`.
+    """
+
+    def __init__(self, session: str) -> None:
+        super().__init__("Cognito requires a new password before it signs this user in")
+        self.session = session
+
+
+def _auth_tokens(response: dict[str, Any]) -> dict[str, str]:
+    """The ``AuthenticationResult`` tokens, refusing a challenge this CLI cannot answer."""
+    challenge = response.get("ChallengeName")
+    if challenge:
+        raise ValueError(
+            f"Cognito asked for the {challenge} challenge, which gco cannot answer; "
+            "an administrator can reset the user with `gco analytics users set-password`"
+        )
+    tokens = response.get("AuthenticationResult") or {}
+    return {
+        "IdToken": str(tokens.get("IdToken", "")),
+        "AccessToken": str(tokens.get("AccessToken", "")),
+        "RefreshToken": str(tokens.get("RefreshToken", "")),
+    }
+
+
+def authenticate_with_password(
     pool_id: str,
     client_id: str,
     username: str,
     password: str,
     region: str,
 ) -> dict[str, str]:
-    """Authenticate a Cognito user via the ADMIN_USER_PASSWORD_AUTH flow.
+    """Sign a Cognito user in with their password (``ADMIN_USER_PASSWORD_AUTH``).
 
-    Uses ``admin_initiate_auth`` which sends the password over TLS
-    directly (no client-side SRP math). This requires the user pool
-    client to have ``ALLOW_ADMIN_USER_PASSWORD_AUTH`` enabled and the
-    caller to have ``cognito-idp:AdminInitiateAuth`` permission.
+    ``AdminInitiateAuth`` sends the password over TLS; there is no SRP
+    exchange. It needs ``ALLOW_ADMIN_USER_PASSWORD_AUTH`` on the app client
+    and ``cognito-idp:AdminInitiateAuth`` for the caller's AWS credentials.
 
-    Returns a dict with ``IdToken``, ``AccessToken``, and
-    ``RefreshToken`` on success. Raises ``botocore.exceptions.ClientError``
-    for Cognito-side failures (``NotAuthorizedException``,
-    ``UserNotFoundException``, etc.).
+    Returns ``IdToken``, ``AccessToken`` and ``RefreshToken``.
+
+    Raises:
+        NewPasswordRequiredError: the user still has a temporary password.
+        ValueError: Cognito asked for another challenge (MFA, for one).
+        botocore.exceptions.ClientError: Cognito refused the sign-in
+            (``NotAuthorizedException``, ``UserNotFoundException``, ...).
     """
     import boto3
 
@@ -154,32 +191,68 @@ def srp_authenticate(
             "PASSWORD": password,
         },
     )
-    tokens = response.get("AuthenticationResult") or {}
-    return {
-        "IdToken": str(tokens.get("IdToken", "")),
-        "AccessToken": str(tokens.get("AccessToken", "")),
-        "RefreshToken": str(tokens.get("RefreshToken", "")),
-    }
+    if response.get("ChallengeName") == "NEW_PASSWORD_REQUIRED":
+        raise NewPasswordRequiredError(str(response.get("Session") or ""))
+    return _auth_tokens(response)
+
+
+def complete_new_password_challenge(
+    pool_id: str,
+    client_id: str,
+    username: str,
+    new_password: str,
+    session: str,
+    region: str,
+) -> dict[str, str]:
+    """Answer ``NEW_PASSWORD_REQUIRED`` with the user's new password; return the tokens.
+
+    ``AdminRespondToAuthChallenge`` makes ``new_password`` the user's
+    permanent password, so it must meet the pool's password policy. It
+    needs ``cognito-idp:AdminRespondToAuthChallenge`` for the caller.
+
+    Raises:
+        ValueError: Cognito asked for a further challenge.
+        botocore.exceptions.ClientError: Cognito refused the new password
+            (``InvalidPasswordException``) or the session expired.
+    """
+    import boto3
+
+    cognito = boto3.client("cognito-idp", region_name=region)
+    response = cognito.admin_respond_to_auth_challenge(
+        UserPoolId=pool_id,
+        ClientId=client_id,
+        ChallengeName="NEW_PASSWORD_REQUIRED",
+        Session=session,
+        ChallengeResponses={"USERNAME": username, "NEW_PASSWORD": new_password},
+    )
+    return _auth_tokens(response)
 
 
 __all__ = [
+    "STUDIO_PROFILE_OWNER_TAG_KEY",
     "STUDIO_USERNAME_MAX_LENGTH",
     "STUDIO_USERNAME_PATTERN",
+    "NewPasswordRequiredError",
+    "StudioProfileRemovalError",
     "admin_create_user",
     "admin_delete_user",
+    "admin_get_user_sub",
     "admin_set_user_password",
+    "authenticate_with_password",
     "check_ssm_parameter",
     "check_stack_complete",
+    "complete_new_password_challenge",
+    "delete_studio_user_profile",
     "discover_api_endpoint",
     "discover_cognito_client_id",
     "discover_cognito_pool_id",
+    "discover_studio_domain_id",
     "fetch_studio_url",
     "find_user_ignoring_case",
     "generate_strong_password",
     "is_studio_username",
     "list_users",
     "scan_orphan_analytics_resources",
-    "srp_authenticate",
     "studio_login_error_token",
 ]
 
@@ -252,14 +325,20 @@ def admin_create_user(
     username: str,
     email: str | None = None,
     suppress_email: bool = False,
+    temporary_password: str | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Create a Cognito user via AdminCreateUser.
 
-    Returns ``(response, temporary_password)``. The temporary password
-    is only set when Cognito echoes it in the response (it does this
-    on some versions of the API when ``MessageAction=SUPPRESS``); when
-    absent the caller should direct the operator to
-    ``admin-set-user-password`` out-of-band.
+    ``temporary_password`` becomes the user's temporary password; without
+    it Cognito generates one, and AdminCreateUser never returns that one.
+    The user is asked to choose a new password at the first sign-in either
+    way. Unless ``suppress_email`` is set, a user with an ``email`` gets
+    Cognito's invitation, which carries the temporary password, by email:
+    the invitation goes by SMS unless asked otherwise, and these users have
+    no phone number.
+
+    Returns ``(response, temporary_password)``, the password being the one
+    passed in.
     """
     import boto3
 
@@ -273,21 +352,15 @@ def admin_create_user(
         "Username": username,
         "UserAttributes": user_attributes,
     }
+    if temporary_password:
+        kwargs["TemporaryPassword"] = temporary_password
     if suppress_email:
         kwargs["MessageAction"] = "SUPPRESS"
+    elif email:
+        kwargs["DesiredDeliveryMediums"] = ["EMAIL"]
 
     cognito = boto3.client("cognito-idp", region_name=region)
     response = cognito.admin_create_user(**kwargs)
-
-    temporary_password: str | None = None
-    user = response.get("User", {})
-    for attr in user.get("Attributes", []) or []:
-        if attr.get("Name") == "temporary_password":
-            temporary_password = attr.get("Value")
-            break
-    if temporary_password is None:
-        temporary_password = response.get("TemporaryPassword")
-
     return response, temporary_password
 
 
@@ -396,12 +469,242 @@ def admin_delete_user(pool_id: str, region: str, username: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# SageMaker Studio user profiles
+# ---------------------------------------------------------------------------
+
+#: The tag the presigned-URL Lambda puts on each Studio user profile, holding
+#: the Cognito ``sub`` of the user it belongs to.
+#: ``lambda/analytics-presigned-url/handler.py`` holds the same key.
+STUDIO_PROFILE_OWNER_TAG_KEY = "gco:analytics:cognito-sub"
+#: The longest ``users remove`` waits for SageMaker to delete a profile's
+#: apps, spaces and the profile itself, and how often it looks.
+STUDIO_REMOVAL_TIMEOUT_SECONDS = 900.0
+STUDIO_REMOVAL_POLL_SECONDS = 10.0
+#: Error codes SageMaker answers a describe or delete of something absent with.
+_SAGEMAKER_MISSING_CODES = frozenset({"ResourceNotFound", "ValidationException"})
+
+
+class StudioProfileRemovalError(RuntimeError):
+    """SageMaker did not finish deleting a Studio profile, one of its spaces or apps."""
+
+
+def admin_get_user_sub(pool_id: str, region: str, username: str) -> str | None:
+    """The Cognito ``sub`` of ``username`` (AdminGetUser); None when it carries none.
+
+    Raises ``botocore.exceptions.ClientError`` (``UserNotFoundException``
+    for a user the pool does not have).
+    """
+    import boto3
+
+    cognito = boto3.client("cognito-idp", region_name=region)
+    response = cognito.admin_get_user(UserPoolId=pool_id, Username=username)
+    for attribute in response.get("UserAttributes") or []:
+        if attribute.get("Name") == "sub":
+            value = attribute.get("Value")
+            return value if isinstance(value, str) else None
+    return None
+
+
+def discover_studio_domain_id(region: str, project_name: str = "gco") -> str | None:
+    """The SageMaker Studio domain id of ``<project>-analytics``.
+
+    Read from the stack's ``StudioDomainId`` output, or, for a stack deployed
+    before it published that output, by looking up its ``StudioDomainName`` in
+    ``sagemaker:ListDomains``. None when neither finds the domain.
+    """
+    import boto3
+
+    outputs = _describe_stack_outputs(region, f"{project_name}-analytics")
+    if outputs is None:
+        return None
+    domain_id = _find_output(outputs, "StudioDomainId")
+    if domain_id:
+        return domain_id
+    name = _find_output(outputs, "StudioDomainName")
+    if not name:
+        return None
+    sagemaker = boto3.client("sagemaker", region_name=region)
+    for domain in _paged(sagemaker, "list_domains", "Domains"):
+        if domain.get("DomainName") == name:
+            found = domain.get("DomainId")
+            return found if isinstance(found, str) else None
+    return None
+
+
+def _paged(client: Any, operation: str, key: str, **kwargs: Any) -> list[dict[str, Any]]:
+    """Every item of a paginated SageMaker list call."""
+    items: list[dict[str, Any]] = []
+    for page in client.get_paginator(operation).paginate(**kwargs):
+        items.extend(item for item in page.get(key) or [] if isinstance(item, dict))
+    return items
+
+
+def _is_missing(exc: Any) -> bool:
+    return exc.response.get("Error", {}).get("Code") in _SAGEMAKER_MISSING_CODES
+
+
+def delete_studio_user_profile(
+    region: str,
+    domain_id: str,
+    username: str,
+    owner_sub: str | None,
+    *,
+    timeout_seconds: float = STUDIO_REMOVAL_TIMEOUT_SECONDS,
+    poll_seconds: float = STUDIO_REMOVAL_POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """Delete ``username``'s Studio profile, the spaces it owns and their apps.
+
+    SageMaker deletes a profile only after its apps and the spaces it owns,
+    so they go first; every wait shares one ``timeout_seconds`` budget. The
+    profile is deleted only when its owner tag holds ``owner_sub``, or when it
+    has no owner tag (made before the Lambda tagged profiles). A profile
+    tagged with another sub belongs to another Cognito user whose name
+    matches this one ignoring case, and is left in place. Files under
+    ``/home/<username>`` on the Studio EFS are not touched.
+
+    Returns ``{"profile": "deleted" | "absent" | "owned_by_another_user",
+    "spaces": [...], "apps": [...]}``, the apps as ``<AppType>/<AppName>``.
+
+    Raises:
+        StudioProfileRemovalError: SageMaker reported a failed deletion, or
+            did not finish within ``timeout_seconds``.
+        botocore.exceptions.ClientError: SageMaker refused a call.
+    """
+    import boto3
+    from botocore.exceptions import ClientError
+
+    sagemaker = boto3.client("sagemaker", region_name=region)
+    deadline = clock() + timeout_seconds
+
+    def status_of(describe: Callable[[], dict[str, Any]], what: str) -> str | None:
+        """The resource's status, None once it is gone; a failed deletion raises."""
+        try:
+            described = describe()
+        except ClientError as exc:
+            if _is_missing(exc):
+                return None
+            raise
+        status = described.get("Status")
+        if status == "Delete_Failed":
+            raise StudioProfileRemovalError(
+                f"SageMaker could not delete {what}: {described.get('FailureReason') or status}"
+            )
+        return str(status or "")
+
+    def wait_until(done: Callable[[], bool], what: str) -> None:
+        while not done():
+            if clock() >= deadline:
+                raise StudioProfileRemovalError(
+                    f"SageMaker did not finish deleting {what} of the Studio profile "
+                    f"{username!r} within {timeout_seconds:g} seconds; run the command "
+                    "again to finish"
+                )
+            sleep(poll_seconds)
+
+    def describe_profile() -> dict[str, Any]:
+        result: dict[str, Any] = sagemaker.describe_user_profile(
+            DomainId=domain_id, UserProfileName=username
+        )
+        return result
+
+    profile_what = f"the Studio profile {username!r}"
+    try:
+        profile = describe_profile()
+    except ClientError as exc:
+        if _is_missing(exc):
+            return {"profile": "absent", "spaces": [], "apps": []}
+        raise
+    owners = [
+        tag.get("Value")
+        for tag in _paged(sagemaker, "list_tags", "Tags", ResourceArn=profile["UserProfileArn"])
+        if tag.get("Key") == STUDIO_PROFILE_OWNER_TAG_KEY
+    ]
+    if owners and owners[0] != owner_sub:
+        return {"profile": "owned_by_another_user", "spaces": [], "apps": []}
+
+    spaces = sorted(
+        str(space["SpaceName"])
+        for space in _paged(sagemaker, "list_spaces", "Spaces", DomainIdEquals=domain_id)
+        if (space.get("OwnershipSettingsSummary") or {}).get("OwnerUserProfileName") == username
+    )
+
+    def live_apps() -> list[dict[str, Any]]:
+        """The profile's and its spaces' apps not yet deleted, each listed once."""
+        apps = _paged(
+            sagemaker, "list_apps", "Apps", DomainIdEquals=domain_id, UserProfileNameEquals=username
+        )
+        for space in spaces:
+            apps += _paged(
+                sagemaker, "list_apps", "Apps", DomainIdEquals=domain_id, SpaceNameEquals=space
+            )
+        unique = {
+            (app.get("AppType"), app.get("AppName"), app.get("SpaceName") or ""): app
+            for app in apps
+            if app.get("Status") != "Deleted"
+        }
+        return list(unique.values())
+
+    apps = live_apps()
+    for app in apps:
+        if app.get("Status") == "Deleting":
+            continue
+        owner = (
+            {"SpaceName": app["SpaceName"]}
+            if app.get("SpaceName")
+            else {"UserProfileName": username}
+        )
+        try:
+            sagemaker.delete_app(
+                DomainId=domain_id, AppType=app["AppType"], AppName=app["AppName"], **owner
+            )
+        except ClientError as exc:
+            if not _is_missing(exc):
+                raise
+    wait_until(lambda: not live_apps(), "the apps")
+
+    def space_gone(space: str) -> bool:
+        return (
+            status_of(
+                lambda: sagemaker.describe_space(DomainId=domain_id, SpaceName=space),
+                f"the space {space!r}",
+            )
+            is None
+        )
+
+    for space in spaces:
+        try:
+            sagemaker.delete_space(DomainId=domain_id, SpaceName=space)
+        except ClientError as exc:
+            if not _is_missing(exc):
+                raise
+    wait_until(lambda: all(space_gone(space) for space in spaces), "the spaces")
+
+    if status_of(describe_profile, profile_what) not in (None, "Deleting"):
+        try:
+            sagemaker.delete_user_profile(DomainId=domain_id, UserProfileName=username)
+        except ClientError as exc:
+            if not _is_missing(exc):
+                raise
+    wait_until(lambda: status_of(describe_profile, profile_what) is None, "the profile")
+    return {
+        "profile": "deleted",
+        "spaces": spaces,
+        "apps": sorted(f"{app['AppType']}/{app['AppName']}" for app in apps),
+    }
+
+
+# ---------------------------------------------------------------------------
 # HTTP helper for /studio/login
 # ---------------------------------------------------------------------------
 
 
-def fetch_studio_url(api_base: str, id_token: str) -> tuple[str, int, str]:
-    """GET ``{api_base}/studio/login`` with the Cognito ID token.
+def fetch_studio_url(api_base: str, access_token: str) -> tuple[str, int, str]:
+    """GET ``{api_base}/studio/login`` with the Cognito access token.
+
+    The route's authorizer requires a scope, so it accepts an access token
+    and refuses an ID token with a 401.
 
     Returns ``(url, expires_in, correlation_id)`` on success. Raises
     :class:`urllib.error.HTTPError` / :class:`urllib.error.URLError`
@@ -445,7 +748,7 @@ def fetch_studio_url(api_base: str, id_token: str) -> tuple[str, int, str]:
     # fmt: off
     request = urllib.request.Request(  # nosec B310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         login_url,
-        headers={"Authorization": id_token, "Accept": "application/json"},
+        headers={"Authorization": access_token, "Accept": "application/json"},
         method="GET",
     )
     with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected

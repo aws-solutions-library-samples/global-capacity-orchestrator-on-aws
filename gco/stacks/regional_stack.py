@@ -190,7 +190,9 @@ from gco.stacks.constants import (
     EKS_ADDON_POD_IDENTITY_AGENT,
     EKS_UNSUPPORTED_AZ_IDS,
     LAMBDA_PYTHON_RUNTIME,
+    LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT,
     MOONCAKE_MASTER_DEFAULT_IMAGE,
+    VALKEY_MAJOR_ENGINE_VERSION,
     api_gateway_auth_secret_name,
     backend_tls_certificate_arn_parameter_name,
     cluster_shared_ssm_parameter_prefix,
@@ -205,8 +207,8 @@ from gco.stacks.lambda_assets import lambda_source_code
 from gco.stacks.pcs_cluster import PcsCluster
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-23T02:28:23Z
-# Generated from Git commit: 1bf0ef9a749386c6fa50ac7edddbe6eb1b7a9fe0
+# Generated at (UTC): 2026-11-24T22:25:50Z
+# Generated from Git commit: afbf93e626d691e7aa49495693b396b7ec7188ac
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -504,9 +506,8 @@ _INTERFACE_ENDPOINT_SERVICES: dict[str, ec2.InterfaceVpcEndpointAwsService] = {
 _HELM_OVERRIDE_CONTEXT_KEY = "helm_enabled_overrides"
 
 #: Live-validation-only context that prevents AWS-managed EFS automatic backups
-#: from outliving a disposable stack for the service's fixed retention window.
-#: Normal deployments omit this key and preserve automatic backups.
-_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT = "gco_live_validation_disable_efs_automatic_backups"
+#: from outliving a disposable stack (see ``gco.stacks.constants``).
+_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT = LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT
 
 
 def _explicit_context_bool(raw: object, *, key: str) -> bool:
@@ -7379,7 +7380,7 @@ class GCORegionalStack(Stack):
             engine="valkey",
             serverless_cache_name=f"{self.config.get_project_name()}-{self.deployment_region}",
             description=f"GCO K/V cache for {self.deployment_region}",
-            major_engine_version="8",
+            major_engine_version=VALKEY_MAJOR_ENGINE_VERSION,
             security_group_ids=[valkey_sg.security_group_id],
             subnet_ids=private_subnet_ids,
             cache_usage_limits=elasticache.CfnServerlessCache.CacheUsageLimitsProperty(

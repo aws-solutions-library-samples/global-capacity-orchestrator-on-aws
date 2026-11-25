@@ -6928,3 +6928,55 @@ def test_implicit_log_collection_continues_after_error_to_next_stack(
             "log_groups": ["/aws/lambda/fn-after-error"],
         }
     }
+
+
+def test_diagnose_deploy_failure_explains_a_hyperpod_minor_create_cluster_refuses(
+    stack_manager: Any,
+    capsys: Any,
+) -> None:
+    """SageMaker refused EKS 1.37 an hour into a deploy; the diagnosis says what to change."""
+    stack_manager._get_deploy_region = MagicMock(return_value="us-east-1")
+    client = MagicMock()
+    client.describe_stack_events.return_value = {
+        "StackEvents": [
+            {
+                "LogicalResourceId": "HyperpodCluster",
+                "ResourceType": "AWS::SageMaker::Cluster",
+                "ResourceStatus": "CREATE_FAILED",
+                "ResourceStatusReason": (
+                    "Specified EKS cluster version is not supported. Supported versions are "
+                    "1.29, 1.30, 1.31, 1.32, 1.33, 1.34, 1.35, 1.36 (Service: SageMaker)"
+                ),
+            }
+        ]
+    }
+    client.describe_stacks.return_value = {"Stacks": [{"StackStatus": "ROLLBACK_COMPLETE"}]}
+    with patch("boto3.client", return_value=client):
+        stack_manager._diagnose_deploy_failure("gco-us-east-1")
+    output = capsys.readouterr().out
+    assert "HyperpodCluster (AWS::SageMaker::Cluster): CREATE_FAILED" in output
+    cause = output.index("Likely cause: SageMaker HyperPod's CreateCluster does not accept")
+    assert "--kubernetes-version on gco release validate" in output
+    assert "gco stacks hyperpod preflight" in output
+    assert cause < output.index("Suggested fix:"), "the cause comes before the stack advice"
+
+
+def test_diagnose_deploy_failure_adds_no_hint_to_an_unexplained_reason(
+    stack_manager: Any,
+    capsys: Any,
+) -> None:
+    stack_manager._get_deploy_region = MagicMock(return_value="us-east-1")
+    client = MagicMock()
+    client.describe_stack_events.return_value = {
+        "StackEvents": [
+            {
+                "LogicalResourceId": "Bucket",
+                "ResourceStatus": "CREATE_FAILED",
+                "ResourceStatusReason": "BucketAlreadyExists",
+            }
+        ]
+    }
+    client.describe_stacks.return_value = {"Stacks": [{"StackStatus": "ROLLBACK_COMPLETE"}]}
+    with patch("boto3.client", return_value=client):
+        stack_manager._diagnose_deploy_failure("gco-global")
+    assert "Likely cause:" not in capsys.readouterr().out

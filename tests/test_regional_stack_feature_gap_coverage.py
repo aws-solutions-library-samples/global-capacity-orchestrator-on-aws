@@ -19,6 +19,7 @@ from aws_cdk import aws_ecr as ecr
 from aws_cdk import aws_lambda as lambda_
 
 from gco.stacks import regional_stack as rs
+from gco.stacks.constants import VALKEY_MAJOR_ENGINE_VERSION
 from tests._cfn_json import decode_cfn_json
 from tests._lambda_imports import load_lambda_module
 from tests.test_regional_stack import MockConfigLoader
@@ -443,7 +444,7 @@ def test_optional_data_services_are_private_and_discoverable(feature_stack):
     cache_props = cache["Properties"]
 
     assert cache_props["Engine"] == "valkey"
-    assert cache_props["MajorEngineVersion"] == "8"
+    assert cache_props["MajorEngineVersion"] == VALKEY_MAJOR_ENGINE_VERSION == "9"
     assert cache_props["SnapshotRetentionLimit"] == 7
     assert cache_props["CacheUsageLimits"] == {
         "DataStorage": {"Maximum": 37, "Minimum": 1, "Unit": "GB"},

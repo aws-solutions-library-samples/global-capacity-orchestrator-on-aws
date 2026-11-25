@@ -300,7 +300,7 @@ spec:
 esac
 FAKE_CURL
 
-    # aws: the credential probe and the five lookups, answered from the tree's
+    # aws: the credential probe and the lookups, answered from the tree's
     # own pins. FAKE_AWS=none removes the credentials; the per-section switches
     # provoke each lookup's failure branch.
     write_stub "$FAKE_BIN" aws <<'FAKE_AWS'
@@ -362,6 +362,16 @@ case "${1:-} ${2:-}" in
     "rds describe-db-engine-versions")
         [ "${FAKE_AWS_AURORA:-ok}" = "invalid" ] && { echo "unavailable"; exit 0; }
         printf '%s\t%s\n' "$(catalog_get aurora current)" "$(answer aurora current 17.0)"
+        ;;
+    "elasticache describe-cache-engine-versions")
+        # Every Valkey release ElastiCache offers, oldest first and
+        # tab-separated as ``--output text`` prints a list: an older major and
+        # two minors of the pinned one, then the next major under FAKE_DRIFT=1.
+        [ "${FAKE_AWS_VALKEY:-ok}" = "invalid" ] && { echo "None"; exit 0; }
+        current="$(catalog_get valkey current)"
+        versions="7.2\t${current}.0\t${current}.1"
+        [ "${FAKE_DRIFT:-0}" = "1" ] && versions="${versions}\t$(bump "$current").0"
+        printf '%b\n' "$versions"
         ;;
     "emr list-release-labels")
         # Two pages, as the real API answers: the classic emr-N.x.y labels
@@ -790,6 +800,7 @@ PY
             extract_kube_proxy_pins gco/stacks/constants.py | sed 's/^/kube-proxy|/'
             echo "k8s|current|$(extract_k8s_version cdk.json)"
             extract_aurora_versions gco/stacks/regional_stack.py | sed 's/^/aurora|current|/'
+            extract_valkey_major_version gco/stacks/constants.py | sed 's/^/valkey|current|/'
             extract_emr_versions gco/stacks/constants.py | sed 's/^/emr|current|/'
             for leaf in mission_default_model_id capacity_advisor_default_model_id claude_code_default_model_id codex_default_model_id opencode_default_model_id; do
                 echo "bedrock-profile|${leaf}|$(extract_default_bedrock_model cdk.json "$leaf")"
@@ -940,6 +951,7 @@ EKS_ADDON_KUBE_PROXY_BY_MINOR: Mapping[str, str] = MappingProxyType(
     }
 )
 AURORA_POSTGRES_VERSION = "17.10"
+VALKEY_MAJOR_ENGINE_VERSION = "9"
 EMR_SERVERLESS_RELEASE_LABEL = "emr-7.14.0"
 LAMBDA_PYTHON_RUNTIME = "PYTHON_3_14"
 LAMBDA_NODEJS_RUNTIME = "NODEJS_24_X"
@@ -1040,6 +1052,12 @@ HEALTH_MONITORING_AGENT_ACCOUNTS: Mapping[str, str] = {
     "us-east-1": "111122223333",
     "eu-west-1": "444455556666",
 }
+PY
+    # HyperPod's CreateCluster accepts cdk.json's minor here, so the AMI tree
+    # alone decides the minor a HyperPod Region runs.
+    cat > "$root/cli/hyperpod_preflight.py" <<'PY'
+import boto3  # not importable here: the scan must read, not import
+HYPERPOD_CREATE_CLUSTER_NEWEST_K8S = "1.37"
 PY
     cat > "$root/cli/autopilot.py" <<'PY'
 CLAUDE_CODE_VERSION = "2.1.252"
@@ -1180,7 +1198,7 @@ findings_path() {
     [ "$(jq -r '.schema' "$findings")" = "gco.dependency-scan.findings/1" ]
     [ "$(jq -r '.has_drift' "$findings")" = "false" ]
     [ "$(jq -r '.scan_complete' "$findings")" = "true" ]
-    [ "$(jq -r '.surfaces | length' "$findings")" = "27" ]
+    [ "$(jq -r '.surfaces | length' "$findings")" = "28" ]
     [ "$(jq -r '[.surfaces[].count] | add' "$findings")" = "0" ]
     [ "$(jq -r '[.surfaces[] | select(.skipped != null)] | length' "$findings")" = "0" ]
     # Every surface was consulted through the faked tools.
@@ -1269,7 +1287,11 @@ findings_path() {
     [[ "$output" == *"  - kube-proxy@1.36: v1.36.0-eksbuild.1 -> v2.36.0-eksbuild.1"* ]]
     [[ "$output" != *"kube-proxy@2.37"* ]]
     [[ "$output" != *"HyperPod node AMIs stop at"* ]]
+    # ...but its CreateCluster pin does: the newer AMI is the cue to try the
+    # newer minor in a release run.
+    [[ "$output" == *"  - HyperPod CreateCluster pin vs node AMIs: HyperPod node AMIs reach 2.37, HYPERPOD_CREATE_CLUSTER_NEWEST_K8S is 1.37"* ]]
     [[ "$output" == *"  - aurora-postgresql: 17.10 -> 18.10"* ]]
+    [[ "$output" == *"  - valkey: 9 -> 10"* ]]
     [[ "$output" == *"  - emr-serverless: emr-7.14.0 -> emr-7.14.1"* ]]
     [[ "$output" == *"  - bedrock mission_default_model_id: global.anthropic.claude-opus-5 -> global.anthropic.claude-opus-6"* ]]
     # The Kimi generation marker (k3 -> k4) folds into one model family, so the
@@ -1326,7 +1348,8 @@ findings_path() {
     [ -f "$report" ]
     local section
     for section in "## Summary" "## Python Packages" "## npm Packages" "## Docker Images" "## Helm Charts" \
-            "## EKS Add-ons" "## EKS Kubernetes Version" "## Aurora PostgreSQL Engine" "## EMR Serverless" \
+            "## EKS Add-ons" "## EKS Kubernetes Version" "## Aurora PostgreSQL Engine" \
+            "## ElastiCache Valkey Engine" "## EMR Serverless" \
             "## Bedrock Default Model" "## PCS Slurm Versions" "## PCS Lifecycle Scripts and AMIs" \
             "## HyperPod Health Monitoring Agent" "## Accelerator Catalog and NodePools" "## Dockerfile.dev Pins" \
             "## GCO Autopilot Pins" "## Pre-commit Hooks" "## CDK Enum Constants" "## Python Release" \
@@ -1336,6 +1359,8 @@ findings_path() {
     done
     grep -qF -- "| [Python Packages](#python-packages) | 3 update(s) | routine |" "$report"
     grep -qF -- "| [Ubuntu LTS Base](#ubuntu-lts-base) | 1 update(s) | informational |" "$report"
+    grep -qF -- "| [ElastiCache Valkey Engine](#elasticache-valkey-engine) | 1 update(s) | routine |" "$report"
+    grep -qF -- "| valkey | 9 | 10 |" "$report"
     grep -qF -- "| [HyperPod Health Monitoring Agent](#hyperpod-health-monitoring-agent) | 4 update(s) | routine |" "$report"
     grep -qF -- "| health-monitoring-agent nodeAffinity (51-hyperpod-health-monitoring-agent.yaml) | 2 instance types | 3 instance types | add ml.p6.48xlarge |" "$report"
     grep -qF -- "| HEALTH_MONITORING_AGENT_TAG (gco/hyperpod_config.py) | 1.0.2710.0_1.0.501.0 | 2.0.2710.0_1.0.501.0 | bump the tag |" "$report"
@@ -1399,6 +1424,8 @@ findings_path() {
     [[ "$output" == *"No AWS credentials available (scan needs eks:DescribeAddonVersions)"* ]]
     [[ "$output" == *"No AWS credentials available (scan needs eks:DescribeClusterVersions)"* ]]
     [[ "$output" == *"No AWS credentials available (scan needs rds:DescribeDBEngineVersions)"* ]]
+    [[ "$output" == *"No AWS credentials available (scan needs elasticache:DescribeCacheEngineVersions)"* ]]
+    [[ "$output" == *"ElastiCache Valkey:       (skipped)"* ]]
     [[ "$output" == *"No AWS credentials available (scan needs elasticmapreduce:ListReleaseLabels)"* ]]
     [[ "$output" == *"No AWS credentials available (scan needs bedrock:ListInferenceProfiles)"* ]]
     [[ "$output" == *"No AWS credentials available for the online EC2 catalog check"* ]]
@@ -1415,6 +1442,7 @@ findings_path() {
     grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
     grep -q '_Incomplete or skipped checks: EKS add-ons skipped: No AWS credentials' "$GITHUB_STEP_SUMMARY"
     ! grep -q '^aws eks' "$CALLS"
+    ! grep -q '^aws elasticache' "$CALLS"
     ! grep -q '^aws s3api' "$CALLS"
     grep -q '^curl https://docs.aws.amazon.com/pcs/latest/userguide/slurm-versions.html$' "$CALLS"
 }
@@ -1464,6 +1492,7 @@ STUB
     grep -qF -- "| EKS Add-ons | skipped | — |" "$report"
     grep -qF -- "<summary>Skipped checks</summary>" "$report"
     grep -qF -- "- **EKS Add-ons:** No AWS credentials available" "$report"
+    grep -qF -- "- **ElastiCache Valkey Engine:** No AWS credentials available" "$report"
     grep -qF -- "- **CDK Enum Constants:** aws-cdk-lib not importable" "$report"
     grep -qF -- "- **Runner Images:** Could not read the actions/runner-images catalog" "$report"
     grep -qF -- "- **NVIDIA Run:ai API:** Could not read the NVIDIA Run:ai API reference" "$report"
@@ -1476,7 +1505,7 @@ STUB
     make_consistent_checkout "$root"
     build_catalog "$root"
     run_scan "$root" FAKE_NETWORK=down FAKE_PIP=list-fails FAKE_AWS_ADDON=invalid FAKE_AWS_K8S=fail \
-        FAKE_AWS_AURORA=invalid FAKE_AWS_EMR=empty FAKE_AWS_BEDROCK=empty FAKE_AWS_PCS=empty FAKE_HELM=oci-fails FAKE_ACCELERATOR=error
+        FAKE_AWS_AURORA=invalid FAKE_AWS_VALKEY=invalid FAKE_AWS_EMR=empty FAKE_AWS_BEDROCK=empty FAKE_AWS_PCS=empty FAKE_HELM=oci-fails FAKE_ACCELERATOR=error
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"INCOMPLETE: pip list --outdated failed."* ]]
@@ -1492,6 +1521,7 @@ STUB
     [[ "$output" == *"EKS add-on lookup failed or returned an invalid version for eks-pod-identity-agent."* ]]
     [[ "$output" == *"EKS Kubernetes version lookup failed: An error occurred (AccessDeniedException)"* ]]
     [[ "$output" == *"Aurora PostgreSQL engine lookup failed or returned an invalid version for major 17."* ]]
+    [[ "$output" == *"ElastiCache Valkey engine lookup failed or returned no valid version."* ]]
     [[ "$output" == *"EMR release-label lookup failed or returned an empty response."* ]]
     [[ "$output" == *"Bedrock model lookup failed or returned no active release in the model family of context.bedrock.mission_default_model_id."* ]]
     [[ "$output" == *"Could not read the supported Slurm versions from the AWS PCS User Guide (network, or the page layout changed)."* ]]
@@ -1804,6 +1834,7 @@ YAML
     [[ "$output" == *"INCOMPLETE: lambda/helm-installer/charts.yaml is missing."* ]]
     [[ "$output" == *"Could not read EKS add-on pins from gco/stacks/regional_stack.py."* ]]
     [[ "$output" == *"Could not read AURORA_POSTGRES_VERSION from gco/stacks/constants.py."* ]]
+    [[ "$output" == *"Could not read VALKEY_MAJOR_ENGINE_VERSION from gco/stacks/constants.py."* ]]
     [[ "$output" == *"Could not read the EMR Serverless release-label pin from gco/stacks/constants.py."* ]]
     [[ "$output" == *"Could not read PCS_SUPPORTED_SLURM_VERSIONS and the managed slurm_version default from gco/pcs_config.py."* ]]
     [[ "$output" == *"Could not read the PCS lifecycle script pins from gco/stacks/pcs_cluster.py."* ]]
@@ -1905,6 +1936,7 @@ YAML
     notes="$(grep '_Incomplete or skipped checks:' "$GITHUB_STEP_SUMMARY")"
     [[ "$notes" == *"GCO autopilot pins skipped: cli/autopilot.py not found."* ]]
     [[ "$notes" == *"CDK enums skipped: aws-cdk-lib not importable."* ]]
+    [[ "$notes" == *"Valkey engine skipped: No AWS credentials available (scan needs elasticache:DescribeCacheEngineVersions)."* ]]
     [[ "$notes" == *"Python release skipped: endoflife.date query failed"* ]]
     [[ "$notes" == *"Ruby release skipped: endoflife.date query failed"* ]]
     [[ "$notes" == *"Ubuntu LTS base skipped: endoflife.date query failed"* ]]
@@ -2204,6 +2236,33 @@ PY
     run_scan "$root" FAKE_HYPERPOD_AMI=fail
     [ "$status" -eq 0 ]
     [[ "$output" == *"INCOMPLETE: HyperPod node AMI lookup failed (ssm get-parameters-by-path /aws/service/sagemaker-hyperpod/ami/x86_64)."* ]]
+    # The AMI tree lists cdk.json's minor before CreateCluster accepts it (it
+    # carried eks-1.37 while CreateCluster refused 1.37): the CreateCluster
+    # pin caps the minor a HyperPod Region runs. Its add-on pins are checked
+    # at that minor, and two consistency rows say which minor to run and that
+    # the pin has a newer AMI to try.
+    printf 'HYPERPOD_CREATE_CLUSTER_NEWEST_K8S = "1.36"\n' > "$root/cli/hyperpod_preflight.py"
+    run_scan "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - HyperPod EKS minor vs cdk.json: HyperPod's CreateCluster accepts up to 1.36, cdk.json pins 1.37"* ]]
+    [[ "$output" == *"  - HyperPod CreateCluster pin vs node AMIs: HyperPod node AMIs reach 1.37, HYPERPOD_CREATE_CLUSTER_NEWEST_K8S is 1.36"* ]]
+    [[ "$output" != *"HyperPod node AMIs stop at"* ]]
+    [[ "$output" == *"EKS Kubernetes version:   0"* ]]
+    [[ "$output" != *"INCOMPLETE:"* ]]
+    grep -qx 'scan_complete=true' "$GITHUB_OUTPUT"
+    grep -q -- '^aws eks describe-addon-versions --addon-name vpc-cni --kubernetes-version 1.36 --query addons\[0\].addonVersions\[\].addonVersion' "$CALLS"
+    grep -qF -- "| SageMaker HyperPod EKS minor (cdk.json / HyperPod CreateCluster) | HyperPod's CreateCluster accepts EKS up to 1.36 (HYPERPOD_CREATE_CLUSTER_NEWEST_K8S); cdk.json kubernetes_version is 1.37. A Region with HyperPod on runs 1.36 (gco release validate --kubernetes-version 1.36) |" "$(report_path)"
+    grep -qF -- "| SageMaker HyperPod CreateCluster minor (cli/hyperpod_preflight.py / HyperPod node AMIs) | HyperPod node AMIs reach 1.37; HYPERPOD_CREATE_CLUSTER_NEWEST_K8S is 1.36. Raise the pin on a branch and run gco release validate --kubernetes-version 1.37: the run creates a HyperPod cluster, which is the only test of what CreateCluster accepts |" "$(report_path)"
+    [ "$(jq -r '.surfaces[] | select(.surface == "Version Consistency") | .count' "$(findings_path)")" = "2" ]
+    # A pin the scan cannot read leaves the tree's minor in charge and the
+    # scan incomplete.
+    printf 'HYPERPOD_CREATE_CLUSTER_NEWEST_K8S = HYPERPOD_DEFAULT\n' > "$root/cli/hyperpod_preflight.py"
+    run_scan "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"INCOMPLETE: Could not read HYPERPOD_CREATE_CLUSTER_NEWEST_K8S from cli/hyperpod_preflight.py."* ]]
+    [[ "$output" != *"HyperPod CreateCluster pin vs node AMIs"* ]]
+    grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+    printf 'HYPERPOD_CREATE_CLUSTER_NEWEST_K8S = "1.37"\n' > "$root/cli/hyperpod_preflight.py"
 
     # A pin for a minor EKS no longer keeps in standard support is a row to
     # retire; its build is looked up nowhere.

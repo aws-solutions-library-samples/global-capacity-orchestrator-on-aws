@@ -111,7 +111,6 @@ class _AnalyticsMockConfig:
                 "removal_policy": self._cognito_removal,
             },
             "efs": {"removal_policy": self._efs_removal},
-            "studio": {"user_profile_name_prefix": None},
         }
 
     def get_analytics_enabled(self) -> bool:
@@ -218,7 +217,6 @@ class TestAnalyticsStackOffByDefault:
                     "canvas": {"enabled": False},
                     "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
                     "efs": {"removal_policy": "destroy"},
-                    "studio": {"user_profile_name_prefix": None},
                 }
             }
         )
@@ -650,25 +648,20 @@ class TestStudioEfs:
             f"expected KmsKeyId to GetAtt analytics key ARN, got {get_att!r}"
         )
 
-    def test_efs_client_policy_is_scoped_to_the_sagemaker_role(self) -> None:
-        """Only the Studio role receives NFS client actions through mount targets."""
+    def test_any_client_may_mount_through_a_mount_target(self) -> None:
+        """Studio mounts a custom file system without IAM authorization.
+
+        With the NFS client actions granted to the execution role alone,
+        every JupyterLab app with Studio_EFS attached failed to start:
+        "SageMaker is unable to mount the file system. Check your file system
+        policy". Only the analytics VPC reaches the mount targets.
+        """
         template = _synth_analytics()
         fs = next(iter(template.find_resources("AWS::EFS::FileSystem").values()))
         statements = fs["Properties"]["FileSystemPolicy"]["Statement"]
         assert len(statements) == 1
         statement = statements[0]
-
-        roles = template.find_resources("AWS::IAM::Role")
-        role_ids = [
-            logical_id
-            for logical_id, role in roles.items()
-            if isinstance(role["Properties"].get("RoleName"), str)
-            and role["Properties"]["RoleName"].startswith("AmazonSageMaker")
-        ]
-        assert len(role_ids) == 1
-        assert statement["Principal"] == {
-            "AWS": {"Fn::GetAtt": [role_ids[0], "Arn"]},
-        }
+        assert statement["Principal"] == {"AWS": "*"}
         assert set(statement["Action"]) == {
             "elasticfilesystem:ClientMount",
             "elasticfilesystem:ClientWrite",
@@ -897,6 +890,132 @@ class TestStudioEfs:
         assert get_att[0] == vpc_lid and get_att[1] == "CidrBlock", (
             f"expected ingress CidrIp to GetAtt <VPC>.CidrBlock, got {get_att!r}"
         )
+
+
+class TestStudioHomeDirectories:
+    """The presigned-URL function creates each user's ``/home/<username>``.
+
+    SageMaker refuses to start a space whose profile's FileSystemPath does
+    not exist ("Check your file system path input to ensure that the path
+    provided exists") and creates none, so the function mounts the file
+    system's ``/home`` as root through the stack's one access point.
+    """
+
+    @staticmethod
+    def _resource(template: assertions.Template, kind: str, prefix: str) -> Mapping[str, Any]:
+        matches = [
+            resource
+            for logical_id, resource in template.find_resources(kind).items()
+            if logical_id.startswith(prefix)
+        ]
+        assert len(matches) == 1, f"expected one {kind} named {prefix}*, found {len(matches)}"
+        return matches[0]
+
+    def test_one_access_point_roots_home_for_root(self) -> None:
+        template = _synth_analytics()
+        points = template.find_resources("AWS::EFS::AccessPoint")
+        assert len(points) == 1
+        properties = next(iter(points.values()))["Properties"]
+        assert properties["RootDirectory"] == {
+            "Path": "/home",
+            "CreationInfo": {"OwnerUid": "0", "OwnerGid": "0", "Permissions": "755"},
+        }
+        assert properties["PosixUser"] == {"Uid": "0", "Gid": "0"}
+
+    def test_the_function_mounts_home_from_the_private_subnets(self) -> None:
+        template = _synth_analytics()
+        function = self._resource(template, "AWS::Lambda::Function", "PresignedUrlFunction")
+        properties = function["Properties"]
+        access_point_id = next(iter(template.find_resources("AWS::EFS::AccessPoint")))
+        [mount] = properties["FileSystemConfigs"]
+        assert mount["LocalMountPath"] == "/mnt/studio-home"
+        assert {"Ref": access_point_id} in mount["Arn"]["Fn::Join"][1]
+        assert properties["Environment"]["Variables"]["STUDIO_HOME_MOUNT_PATH"] == (
+            "/mnt/studio-home"
+        )
+        subnets = properties["VpcConfig"]["SubnetIds"]
+        assert subnets and all("AnalyticsPrivateSubnet" in subnet["Ref"] for subnet in subnets)
+
+    def test_the_role_has_root_through_that_access_point_and_eni_access(self) -> None:
+        template = _synth_analytics()
+        access_point_id = next(iter(template.find_resources("AWS::EFS::AccessPoint")))
+        role = self._resource(template, "AWS::IAM::Role", "PresignedUrlLambdaRole")
+        managed = json.dumps(role["Properties"]["ManagedPolicyArns"])
+        assert "service-role/AWSLambdaVPCAccessExecutionRole" in managed
+        statements = [
+            statement
+            for logical_id, policy in template.find_resources("AWS::IAM::Policy").items()
+            if logical_id.startswith("PresignedUrlLambdaRole")
+            for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+        ]
+        [root] = [s for s in statements if s["Action"] == "elasticfilesystem:ClientRootAccess"]
+        assert root["Resource"] == {"Fn::GetAtt": [next(iter(_efs_ids(template))), "Arn"]}
+        condition = root["Condition"]["StringEquals"]["elasticfilesystem:AccessPointArn"]
+        assert {"Ref": access_point_id} in condition["Fn::Join"][1]
+
+    def test_the_teardown_leaves_that_access_point_to_cloudformation(self) -> None:
+        template = _synth_analytics()
+        access_point_id = next(iter(template.find_resources("AWS::EFS::AccessPoint")))
+        cleanup = self._resource(template, "AWS::Lambda::Function", "CleanupFunction")
+        variables = cleanup["Properties"]["Environment"]["Variables"]
+        assert variables["HOME_ACCESS_POINT_ID"] == {"Ref": access_point_id}
+
+
+def _efs_ids(template: assertions.Template) -> list[str]:
+    return list(template.find_resources("AWS::EFS::FileSystem"))
+
+
+class TestStudioEfsAutomaticBackups:
+    """A live validation run turns the Studio EFS automatic backups off.
+
+    The run destroys the stack within hours, and the AWS-managed recovery
+    points would outlive it for the backup vault's fixed retention.
+    """
+
+    _FLAG = "gco_live_validation_disable_efs_automatic_backups"
+
+    @staticmethod
+    def _backup_policy(app: cdk.App) -> Any:
+        template = _synth_analytics(app=app)
+        fs = next(iter(template.find_resources("AWS::EFS::FileSystem").values()))
+        return fs["Properties"].get("BackupPolicy")
+
+    @pytest.mark.parametrize("flag", ["true", True, " TRUE "])
+    def test_the_live_validation_flag_disables_them(self, flag: object) -> None:
+        assert self._backup_policy(cdk.App(context={self._FLAG: flag})) == {"Status": "DISABLED"}
+
+    @pytest.mark.parametrize("context", [{}, {_FLAG: "false"}])
+    def test_they_stay_on_otherwise(self, context: dict[str, object]) -> None:
+        assert self._backup_policy(cdk.App(context=context)) == {"Status": "ENABLED"}
+
+    def test_an_unparseable_flag_fails_the_synth(self) -> None:
+        from gco.config.config_loader import ConfigValidationError
+
+        with pytest.raises(ConfigValidationError, match=self._FLAG):
+            _synth_analytics(app=cdk.App(context={self._FLAG: "yes"}))
+
+    def test_a_file_system_without_its_cloudformation_child_is_refused(self) -> None:
+        """The backup override edits the L1 file system; anything else fails loudly."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        from gco.stacks import analytics_stack, nag_suppressions
+
+        subject = SimpleNamespace(
+            vpc=MagicMock(vpc_cidr_block="10.0.0.0/16"),
+            kms_key=MagicMock(),
+            efs_removal=MagicMock(),
+            disable_efs_automatic_backups=True,
+        )
+        file_system = MagicMock()
+        file_system.node.default_child = object()
+        with (
+            patch.object(analytics_stack.ec2, "SecurityGroup", return_value=MagicMock()),
+            patch.object(nag_suppressions, "acknowledge_nag_findings"),
+            patch.object(analytics_stack.efs, "FileSystem", return_value=file_system),
+            pytest.raises(TypeError, match="StudioEfs default child must be AWS::EFS::FileSystem"),
+        ):
+            GCOAnalyticsStack._create_studio_efs(subject)  # type: ignore[arg-type]
 
 
 class TestStudioEfsRemovalRetain:
@@ -1146,17 +1265,24 @@ class TestSageMakerExecutionRole:
         rendered = json.dumps(sagemaker["Resource"])
         assert rendered.count(json.dumps(domain)) == 2, rendered
         assert ":domain/*" not in rendered and ":user-profile/*/*" not in rendered
+        wildcard = [statement for statement in statements if statement["Resource"] == "*"]
         wildcard_actions = {
             action
-            for statement in statements
-            if statement["Resource"] == "*"
+            for statement in wildcard
             for action in (
                 statement["Action"]
                 if isinstance(statement["Action"], list)
                 else [statement["Action"]]
             )
         }
-        assert wildcard_actions == {"xray:PutTraceSegments", "xray:PutTelemetryRecords"}
+        assert wildcard_actions == {
+            "xray:PutTraceSegments",
+            "xray:PutTelemetryRecords",
+            "elasticfilesystem:ClientMount",
+        }
+        # The file-system mount's ClientMount takes the one home access point.
+        (mount,) = [s for s in wildcard if s["Action"] == "elasticfilesystem:ClientMount"]
+        assert set(mount["Condition"]["StringEquals"]) == {"elasticfilesystem:AccessPointArn"}
 
     def test_cluster_shared_arn_reader_reads_only_its_parameter(self) -> None:
         """The cross-Region SSM reader's policy names the one parameter it reads.
@@ -1354,6 +1480,30 @@ class TestSageMakerExecutionRole:
             }
             for region in ("us-east-1", "us-west-2")
         ]
+
+    def test_role_runs_the_logs_insights_query_gco_jobs_logs_falls_back_to(self) -> None:
+        """A job whose pods are gone is read from Container Insights in its Region.
+
+        The role used to have no ``logs:StartQuery``, so ``gco jobs logs``
+        from a Studio terminal failed once the pods were gone.
+        """
+        template = _synth_analytics()
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+        assert self._granted(statements, "logs:StartQuery") == [
+            f"arn:aws:logs:{region}:123456789012:log-group:"
+            f"/aws/containerinsights/gco-test-{region}/application{suffix}"
+            for suffix in ("", ":*")
+            for region in ("us-east-1", "us-west-2")
+        ]
+        assert self._granted(statements, "logs:GetQueryResults") == ["*"]
+
+    def test_role_has_no_logs_insights_grant_without_workload_regions(self) -> None:
+        template = _synth_analytics(config=_AnalyticsMockConfig(workload_regions=()))
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+        assert self._granted(statements, "logs:StartQuery") == []
+        assert self._granted(statements, "logs:GetQueryResults") == []
 
     def test_role_has_no_sqs_grant_without_workload_regions(self) -> None:
         """With no workload Region there is no queue, so no statement (an
@@ -1599,6 +1749,16 @@ class TestEmrServerlessApp:
     def test_exactly_one_emr_application_is_created(self) -> None:
         template = _synth_analytics()
         template.resource_count_is("AWS::EMRServerless::Application", 1)
+
+    def test_the_stack_publishes_the_ids_the_cli_and_jobs_take(self) -> None:
+        """``users remove`` reads the domain id; StartJobRun takes the application id."""
+        template = _synth_analytics()
+        outputs = template.to_json()["Outputs"]
+        (emr,) = template.find_resources("AWS::EMRServerless::Application")
+        assert outputs["StudioDomainId"]["Value"] == _DOMAIN_ID
+        assert outputs["EmrServerlessApplicationId"]["Value"] == {
+            "Fn::GetAtt": [emr, "ApplicationId"]
+        }
 
     def test_emr_app_is_spark_with_pinned_release_label(self) -> None:
         """``Type=SPARK`` and ``ReleaseLabel`` matches the pinned

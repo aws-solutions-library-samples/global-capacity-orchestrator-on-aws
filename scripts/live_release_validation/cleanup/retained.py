@@ -10,6 +10,7 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
+from ..cleanup.analytics import AnalyticsResidueError, cleanup_analytics_residue
 from ..cleanup.ecr import _cleanup_new_ecr_images, _cleanup_new_ecr_repositories
 from ..cleanup.log_groups import (
     _cleanup_owned_log_groups,
@@ -166,6 +167,15 @@ def _retained_resource_cleanup(ctx: RunContext) -> dict[str, Any]:
         result["pcs_nodes"] = _wait_for_pcs_nodes_terminated(ctx)
     except Exception as exc:  # preserve partial evidence
         result["errors"].append({"phase": "pcs-nodes", "error": f"{type(exc).__name__}: {exc}"})
+    # The analytics probe's Studio lifecycle configuration is account-level
+    # and stayed attached to the profile and app the stack's teardown
+    # deleted, so it goes only now; the Studio domain's home EFS must be gone.
+    try:
+        result["analytics"] = cleanup_analytics_residue(ctx)
+    except Exception as exc:  # preserve partial evidence
+        if isinstance(exc, AnalyticsResidueError):
+            result["analytics"] = copy.deepcopy(exc.details)
+        result["errors"].append({"phase": "analytics", "error": f"{type(exc).__name__}: {exc}"})
     # Account-level state the stacks' deletion never reverts: the enabler's
     # Delete is a no-op, so the run puts Transaction Search back itself.
     try:

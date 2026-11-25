@@ -473,6 +473,45 @@ EOF
     rm -rf "$tmpdir"
 }
 
+# ── extract_valkey_major_version / newest_valkey_major ───────────────────────
+
+@test "extract_valkey_major_version: reads the committed whole-number pin" {
+    run extract_valkey_major_version "$REPO_ROOT/gco/stacks/constants.py"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]+$ ]]
+}
+
+@test "extract_valkey_major_version: a minor version, a name or a missing pin prints nothing" {
+    # ElastiCache Serverless takes a whole major; anything else must not reach the query.
+    local constants="$BATS_TEST_TMPDIR/constants.py" value
+    for value in '"9.1"' '"VALKEY_9"' '9'; do
+        printf 'VALKEY_MAJOR_ENGINE_VERSION = %s\n' "$value" > "$constants"
+        run extract_valkey_major_version "$constants"
+        [ "$status" -eq 0 ]
+        [ -z "$output" ]
+    done
+    printf 'AURORA_POSTGRES_VERSION = "17.10"\n' > "$constants"
+    run extract_valkey_major_version "$constants"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run extract_valkey_major_version "$BATS_TEST_TMPDIR/absent.py"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "newest_valkey_major: the major of the newest version, ranked by version" {
+    [ "$(printf '7.2\t8.0\t8.1\t8.2\t9.0\t9.1\n' | newest_valkey_major)" = "9" ]
+    # 10.0 outranks 9.1, though it sorts first as text; any whitespace separates.
+    [ "$(printf '9.1 10.0\n8.2\n' | newest_valkey_major)" = "10" ]
+    [ "$(printf '9.1.2\t9.1\n' | newest_valkey_major)" = "9" ]
+}
+
+@test "newest_valkey_major: an empty or reshaped response prints nothing" {
+    [ -z "$(printf 'None\n' | newest_valkey_major)" ]
+    [ -z "$(printf 'valkey9\t9\tv9.0\n' | newest_valkey_major)" ]
+    [ -z "$(printf '' | newest_valkey_major)" ]
+}
+
 # ── extract_emr_versions ─────────────────────────────────────────────────────
 
 @test "extract_emr_versions: reads EMR_SERVERLESS_RELEASE_LABEL from constants.py" {

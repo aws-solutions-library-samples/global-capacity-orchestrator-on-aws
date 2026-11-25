@@ -60,6 +60,7 @@ import math
 import re
 import statistics
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -165,7 +166,35 @@ _CB_UNSUPPORTED_TYPE_PHRASE = "not supported for Capacity Blocks"
 _CB_REQUEST_ERROR_CODES = frozenset({"InvalidParameterValue", "InvalidParameterCombination"})
 
 
-class CapacityBlockRequestError(CapacityCheckError):
+class CapacityBlockSearchError(CapacityCheckError):
+    """A ``DescribeCapacityBlockOfferings`` probe that searched nothing.
+
+    Never to be reported as "no offerings". ``error_code`` and ``message`` are
+    EC2's (or the failure's type and text); ``region`` and ``duration_hours``
+    identify the probe. :class:`CapacityBlockRequestError` is EC2 refusing the
+    request's parameters, :class:`CapacityBlockLookupError` any other failure.
+    """
+
+    def __init__(
+        self, summary: str, region: str, duration_hours: int, error_code: str, message: str
+    ) -> None:
+        super().__init__(summary)
+        self.region = region
+        self.duration_hours = duration_hours
+        self.error_code = error_code
+        self.message = message
+
+    def as_probe(self) -> dict[str, Any]:
+        """The ``rejected_probes`` / per-Region ``errors`` row for this probe."""
+        return {
+            "region": self.region,
+            "duration_hours": self.duration_hours,
+            "error_code": self.error_code,
+            "error": self.message,
+        }
+
+
+class CapacityBlockRequestError(CapacityBlockSearchError):
     """EC2 rejected the parameters of a ``DescribeCapacityBlockOfferings`` call.
 
     Nothing was searched, so this must not be reported as "no offerings".
@@ -175,12 +204,31 @@ class CapacityBlockRequestError(CapacityCheckError):
 
     def __init__(self, region: str, duration_hours: int, error_code: str, message: str) -> None:
         super().__init__(
-            f"EC2 rejected the Capacity Block search in {region} ({error_code}): {message}"
+            f"EC2 rejected the Capacity Block search in {region} ({error_code}): {message}",
+            region,
+            duration_hours,
+            error_code,
+            message,
         )
-        self.region = region
-        self.duration_hours = duration_hours
-        self.error_code = error_code
-        self.message = message
+
+
+class CapacityBlockLookupError(CapacityBlockSearchError):
+    """A ``DescribeCapacityBlockOfferings`` call failed for a reason other than its parameters.
+
+    A denied permission (``UnauthorizedOperation``), throttling past the
+    adaptive retry budget, an internal error or a failed connection. These
+    used to be logged and answered with an empty list, so a search that never
+    ran read as "no offerings; try a wider date range".
+    """
+
+    def __init__(self, region: str, duration_hours: int, error_code: str, message: str) -> None:
+        super().__init__(
+            f"The Capacity Block search in {region} failed ({error_code}): {message}",
+            region,
+            duration_hours,
+            error_code,
+            message,
+        )
 
 
 def _classify_capacity_block_error(error: ClientError) -> str:
@@ -347,12 +395,21 @@ class CapacityChecker:
     def __init__(self, config: GCOConfig | None = None):
         self.config = config or get_config()
         self._session = boto3.Session()
+        # boto3.Session.client() is not thread-safe, and the capacity advisor
+        # calls this checker from several threads at once; the clients it
+        # returns are. Every client is created through _client() under this lock.
+        self._client_lock = threading.Lock()
         self._pricing_cache: dict[str, Any] = {}
         self._offerings_cache: dict[str, set[str]] = {}
         # Instance descriptions are now always resolved from EC2, and callers
         # like _enrich_reservation_pricing ask per row. Memoize per
         # (type, region) so listing 50 reservations of one type stays one call.
         self._instance_info_cache: dict[tuple[str, str], InstanceTypeInfo | None] = {}
+
+    def _client(self, service: str, **kwargs: Any) -> Any:
+        """A client for ``service`` from this checker's session, created under the lock."""
+        with self._client_lock:
+            return self._session.client(service, **kwargs)
 
     def get_instance_info(
         self, instance_type: str, region: str | None = None
@@ -386,7 +443,7 @@ class CapacityChecker:
         target_region = region or self.config.default_region
 
         try:
-            ec2 = self._session.client("ec2", region_name=target_region)
+            ec2 = self._client("ec2", region_name=target_region)
             response = ec2.describe_instance_types(InstanceTypes=[canonical])
         except ClientError as e:
             logger.debug(
@@ -466,7 +523,7 @@ class CapacityChecker:
         # this region does not offer it, so it must not be reported invalid.
         region = self.config.default_region
         try:
-            ec2 = self._session.client("ec2", region_name=region)
+            ec2 = self._client("ec2", region_name=region)
             response = ec2.describe_instance_types(InstanceTypes=[canonical])
             types = response.get("InstanceTypes", [])
             if not types:
@@ -506,7 +563,7 @@ class CapacityChecker:
         cache_key = f"{region}"
         if cache_key not in self._offerings_cache:
             try:
-                ec2 = self._session.client("ec2", region_name=region)
+                ec2 = self._client("ec2", region_name=region)
                 paginator = ec2.get_paginator("describe_instance_type_offerings")
                 offerings = set()
                 for page in paginator.paginate(LocationType="region"):
@@ -524,7 +581,7 @@ class CapacityChecker:
     def get_availability_zones(self, region: str) -> list[str]:
         """Get availability zones for a region."""
         try:
-            ec2 = self._session.client("ec2", region_name=region)
+            ec2 = self._client("ec2", region_name=region)
             response = ec2.describe_availability_zones(
                 Filters=[{"Name": "state", "Values": ["available"]}]
             )
@@ -544,7 +601,7 @@ class CapacityChecker:
         """
         zones = self.get_availability_zones(region)
         try:
-            ec2 = self._session.client("ec2", region_name=region)
+            ec2 = self._client("ec2", region_name=region)
             paginator = ec2.get_paginator("describe_instance_type_offerings")
             offered: set[str] = set()
             for page in paginator.paginate(
@@ -566,7 +623,7 @@ class CapacityChecker:
         Constrained instances are often available in fewer AZs.
         """
         try:
-            ec2 = self._session.client("ec2", region_name=region)
+            ec2 = self._client("ec2", region_name=region)
             total_azs = self.get_availability_zones(region)
             if not total_azs:
                 return None
@@ -647,7 +704,7 @@ class CapacityChecker:
             return {}
         pool_name, members = pool
         try:
-            ec2 = self._session.client("ec2", region_name=region)
+            ec2 = self._client("ec2", region_name=region)
 
             response = ec2.get_spot_placement_scores(
                 InstanceTypes=list(members),
@@ -713,7 +770,7 @@ class CapacityChecker:
         The per-zone series is what trend analysis (``compute_price_trend``)
         reads, so a caller that wants both makes one sweep of the window.
         """
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._client("ec2", region_name=region)
 
         end_time = datetime.now(UTC)
         start_time = end_time - timedelta(days=days)
@@ -774,7 +831,7 @@ class CapacityChecker:
             return float(cached_value) if cached_value is not None else None
 
         try:
-            pricing = self._session.client("pricing", region_name="us-east-1")
+            pricing = self._client("pricing", region_name="us-east-1")
 
             # Filter on the regionCode product attribute — the AWS region
             # identifier itself — never on the human-readable location name.
@@ -1373,7 +1430,7 @@ class CapacityChecker:
                 reported as "no reservations"; multi-Region callers record it
                 per Region.
         """
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._client("ec2", region_name=region)
 
         filters: list[dict[str, Any]] = []
         if state:
@@ -1560,8 +1617,11 @@ class CapacityChecker:
         Raises:
             CapacityBlockRequestError: EC2 refused the request's parameters (an
                 invalid duration or instance count, a window it cannot serve).
+            CapacityBlockLookupError: the call failed otherwise (a denied
+                permission, throttling past the retry budget, an internal error,
+                a failed connection); nothing was searched in the Region.
         """
-        ec2 = self._session.client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
+        ec2 = self._client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
         offerings: list[dict[str, Any]] = []
 
         if gpus_per_instance is None:
@@ -1609,12 +1669,17 @@ class CapacityChecker:
                     str(details.get("Message") or e),
                 ) from e
             if kind == "other":
-                logger.warning("Failed to list capacity block offerings in %s: %s", region, e)
+                details = e.response.get("Error", {})
+                raise CapacityBlockLookupError(
+                    region,
+                    duration_hours,
+                    str(details.get("Code") or "ClientError"),
+                    str(details.get("Message") or e),
+                ) from e
             # "unsupported": the type/Region has no Capacity Blocks — expected.
         except BotoCoreError as e:
-            # Endpoint resolution / connection errors surface here when the
-            # Capacity Block API isn't available in a region.
-            logger.warning("Capacity Block API unavailable in %s: %s", region, e)
+            # A connection or endpoint failure: the Region was not searched.
+            raise CapacityBlockLookupError(region, duration_hours, type(e).__name__, str(e)) from e
 
         return offerings
 
@@ -1643,7 +1708,7 @@ class CapacityChecker:
               = 0 = stable or no data
               < 0 = capacity shrinking (offerings decreasing day over day)
         """
-        ec2 = self._session.client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
+        ec2 = self._client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
 
         now = datetime.now(UTC)
         window_end = now + timedelta(days=blocks.MAX_DURATION_DAYS)
@@ -2119,7 +2184,7 @@ class CapacityChecker:
 
         probes = [(region, dur) for region in regions for dur in durations]
         collected: list[dict[str, Any]] = []
-        rejected: list[CapacityBlockRequestError] = []
+        rejected: list[CapacityBlockSearchError] = []
         workers = max(1, min(max_workers or _MAX_SEARCH_WORKERS, len(probes)))
 
         def _probe(region: str, dur: int) -> list[dict[str, Any]]:
@@ -2133,9 +2198,9 @@ class CapacityChecker:
                     latest_start=parsed_latest,
                     gpus_per_instance=gpus_per_instance,
                 )
-            except CapacityBlockRequestError as e:
-                # The caller's parameters, not a transient failure: kept for the
-                # report so the answer is never a bare "no offerings".
+            except CapacityBlockSearchError as e:
+                # Refused parameters or a failed lookup: kept for the report so
+                # a probe that searched nothing never reads as "no offerings".
                 rejected.append(e)
                 return []
             except Exception as e:
@@ -2146,6 +2211,7 @@ class CapacityChecker:
                     dur,
                     e,
                 )
+                rejected.append(CapacityBlockLookupError(region, dur, type(e).__name__, str(e)))
                 return []
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -2154,13 +2220,7 @@ class CapacityChecker:
                 collected.extend(future.result())
 
         rejected_probes = [
-            {
-                "region": e.region,
-                "duration_hours": e.duration_hours,
-                "error_code": e.error_code,
-                "error": e.message,
-            }
-            for e in sorted(rejected, key=lambda e: (e.region, e.duration_hours))
+            e.as_probe() for e in sorted(rejected, key=lambda e: (e.region, e.duration_hours))
         ]
         if rejected and len(rejected) == len(probes):
             raise CapacityCheckError(
@@ -2253,7 +2313,12 @@ class CapacityChecker:
 
         def _check_region(
             r: str,
-        ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str] | None]:
+        ) -> tuple[
+            list[dict[str, Any]],
+            list[dict[str, Any]],
+            dict[str, str] | None,
+            dict[str, Any] | None,
+        ]:
             reservations: list[dict[str, Any]] = []
             refused: dict[str, str] | None = None
             try:
@@ -2261,20 +2326,27 @@ class CapacityChecker:
             except (ClientError, BotoCoreError) as e:
                 refused = _region_error(r, e)
             region_blocks: list[dict[str, Any]] = []
+            block_error: dict[str, Any] | None = None
             if include_capacity_blocks:
-                region_blocks = self.list_capacity_block_offerings(
-                    r,
-                    instance_type=instance_type,
-                    instance_count=min_count,
-                    duration_hours=effective_duration,
-                    earliest_start=parsed_earliest,
-                    latest_start=parsed_latest,
-                )
-            return reservations, region_blocks, refused
+                try:
+                    region_blocks = self.list_capacity_block_offerings(
+                        r,
+                        instance_type=instance_type,
+                        instance_count=min_count,
+                        duration_hours=effective_duration,
+                        earliest_start=parsed_earliest,
+                        latest_start=parsed_latest,
+                    )
+                except CapacityBlockSearchError as e:
+                    # One Region refusing or failing the search used to escape
+                    # the fan-out and discard every other Region's results.
+                    block_error = e.as_probe()
+            return reservations, region_blocks, refused, block_error
 
         odcr_results: list[dict[str, Any]] = []
         odcr_errors: list[dict[str, str]] = []
         block_offerings: list[dict[str, Any]] = []
+        block_errors: list[dict[str, Any]] = []
         total_available = 0
         total_reserved = 0
         region_totals: list[dict[str, Any]] = []
@@ -2287,10 +2359,12 @@ class CapacityChecker:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 region_results = list(executor.map(_check_region, target_regions))
 
-        for region_name, (reservations, region_blocks, refused) in zip(
+        for region_name, (reservations, region_blocks, refused, block_error) in zip(
             target_regions, region_results, strict=True
         ):
             block_offerings.extend(region_blocks)
+            if block_error is not None:
+                block_errors.append(block_error)
             if refused is not None:
                 # EC2 refused the listing: the Region's ODCRs are unknown,
                 # which must not read as "none there".
@@ -2312,6 +2386,14 @@ class CapacityChecker:
             free_reservation_counts[region_name] = len(region_free)
             odcr_results.extend(region_free)
         _raise_if_every_region_failed("capacity reservation lookup", target_regions, odcr_errors)
+        if include_capacity_blocks and target_regions and len(block_errors) == len(target_regions):
+            # Nothing was searched anywhere (an instance count EC2 does not
+            # sell, say): fail with EC2's reasons, as find-blocks does.
+            raise CapacityCheckError(
+                "The Capacity Block search searched no Region ("
+                + "; ".join(f"{e['region']}: {e['error_code']}: {e['error']}" for e in block_errors)
+                + ")"
+            )
 
         block_offerings = blocks.sort_offerings(block_offerings)
         # The first Region with the most free reserved instances.
@@ -2341,6 +2423,12 @@ class CapacityChecker:
                 "Consider on-demand or spot, or request a Capacity Block "
                 "for a different duration/region."
             )
+        if block_errors:
+            recommendation += (
+                " The Capacity Block search failed in "
+                + ", ".join(e["region"] for e in block_errors)
+                + ", so offerings there are unknown."
+            )
 
         return {
             "instance_type": instance_type,
@@ -2363,6 +2451,7 @@ class CapacityChecker:
                     "latest_start": parsed_latest.isoformat() if parsed_latest else None,
                 },
                 "offerings": block_offerings,
+                "errors": block_errors,
             },
             "recommendation": recommendation,
         }
@@ -2387,7 +2476,7 @@ class CapacityChecker:
         Returns:
             Dictionary with the created capacity reservation details
         """
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._client("ec2", region_name=region)
 
         if dry_run:
             try:
@@ -2523,7 +2612,7 @@ class CapacityChecker:
                 ),
             }
 
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._client("ec2", region_name=region)
         parsed_end = blocks.parse_date_input(end_date)
         api_kwargs: dict[str, Any] = {
             "InstanceType": canonical,
@@ -2629,7 +2718,7 @@ class CapacityChecker:
         Returns:
             Dict describing the outcome.
         """
-        ec2 = self._session.client("ec2", region_name=region)
+        ec2 = self._client("ec2", region_name=region)
 
         if dry_run:
             try:

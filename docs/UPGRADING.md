@@ -39,6 +39,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [ECR replication rules of your own are kept](#ecr-replication-rules-of-your-own-are-kept)
   - [Default-deny ingress in `gco-inference`](#default-deny-ingress-in-gco-inference)
   - [Valkey and Aurora ConfigMaps only in `gco-jobs`](#valkey-and-aurora-configmaps-only-in-gco-jobs)
+  - [Valkey 9 for the optional cache](#valkey-9-for-the-optional-cache)
   - [Narrower platform service-account RBAC](#narrower-platform-service-account-rbac)
   - [Endpoint and project labels on the monitor's objects](#endpoint-and-project-labels-on-the-monitors-objects)
   - [Training job admission](#training-job-admission)
@@ -47,11 +48,15 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Job status filter and request paths](#job-status-filter-and-request-paths)
   - [Access-logs buckets use SSE-S3](#access-logs-buckets-use-sse-s3)
   - [Analytics roles act on their own domain](#analytics-roles-act-on-their-own-domain)
+  - [Studio login takes an access token](#studio-login-takes-an-access-token)
+  - [Studio users: first sign-in and removal](#studio-users-first-sign-in-and-removal)
+  - [Studio spaces can attach Studio_EFS](#studio-spaces-can-attach-studio_efs)
   - [`Project` tag on PCS instances](#project-tag-on-pcs-instances)
   - [Add-on replay input in parts](#add-on-replay-input-in-parts)
   - [Volcano Jobs get their pods](#volcano-jobs-get-their-pods)
   - [Kueue's controller is not preempted](#kueues-controller-is-not-preempted)
   - [The keep-warm GPU pool](#the-keep-warm-gpu-pool)
+  - [Log groups earlier upgrades left behind](#log-groups-earlier-upgrades-left-behind)
   - [CLI exit codes, output and prompts](#cli-exit-codes-output-and-prompts)
   - [MCP server tools](#mcp-server-tools)
   - [Pre-commit hook for contributors](#pre-commit-hook-for-contributors)
@@ -573,6 +578,7 @@ Warnings (the synth continues; the key is ignored, so remove it):
 | `fsx_lustre.node_group` (also in `fsx_lustre_regions`) | FSx workloads run on the EKS Auto Mode node pools; `gco stacks fsx enable` removes it |
 | `images.removal_policy`, `images.empty_on_delete`, `images.lifecycle` | No stack creates or deletes the `<project_name>/*` ECR repositories (the gco CLI creates them), so they survive a destroy whatever these say, and `gco images init` applies its own lifecycle policy. Delete a repository with `gco images delete-repo <name> --force -y`; change a policy with `gco images lifecycle set` |
 | `api_gateway.regional_api_enabled` | The API resource policies no longer admit the account as a whole, so callers reach the global API and the regional bridges with their own `execute-api:Invoke` permission whatever it says (see [API calls need an IAM permission](#api-calls-need-an-iam-permission)) |
+| `analytics_environment.studio.user_profile_name_prefix` (a value other than `null`) | It was never applied: each SageMaker Studio user profile is named after its Cognito username. Remove the `studio` block |
 | An `enabled` flag written as `"true"` | Write the JSON boolean `true` |
 | A top-level key in GCO's `snake_case` style that GCO does not read | Most likely a misspelt block, whose settings would not apply |
 | A `*_regions` overlay for a Region that is not in `deployment_regions.regional` | Nothing reads it until the Region is added |
@@ -843,6 +849,23 @@ ConfigMaps in `gco-system`, `gco-jobs` and `gco-inference`, but only
   it a NetworkPolicy that admits egress to the endpoint's port and a
   ConfigMap of your own.
 
+### Valkey 9 for the optional cache
+
+With `valkey.enabled`, the regional stacks now create their ElastiCache
+Serverless caches with Valkey 9 instead of Valkey 8.
+
+- **A running cache is upgraded in place on the next deploy.** ElastiCache
+  Serverless upgrades the major version without downtime, and the endpoint,
+  the `gco-valkey` ConfigMap and the cached data stay. A cache cannot go back
+  to Valkey 8 afterwards.
+- **Check your own clients first.** AWS lists the behavior that changes from
+  Valkey 8 in
+  [Major version behavior and compatibility differences for Valkey](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/VersionManagementConsiderations-valkey.html):
+  unauthenticated clients get an authentication error before an unknown-command
+  error, a few error messages are worded differently, and in 9.1
+  `CLUSTER SHARDS` and `CLUSTER SLOTS` answer with an availability-zone field
+  that strict parsers, such as older go-redis releases, may reject.
+
 ### Narrower platform service-account RBAC
 
 The health monitor's and the manifest processor's Kubernetes roles now grant
@@ -1038,6 +1061,114 @@ to what they use.
   scoped to the domain, `Studio_EFS`, the Region's access points and file
   systems, and security groups in the analytics VPC.
 
+### Studio login takes an access token
+
+With `analytics_environment.enabled`, `GET /studio/login` on
+`<project>-api-gateway` requires the Cognito scope
+`aws.cognito.signin.user.admin`. A Cognito authorizer reads the token as an
+access token when the method requires a scope, and an ID token carries no
+scope, so the route accepts only access tokens. API Gateway recommends
+requiring scopes because nothing else tells the two token types apart.
+`gco analytics studio login` sends the access token from this release on.
+
+- **BREAKING (narrow): an older CLI cannot sign in to an upgraded API.** It
+  sends the ID token and gets `HTTP 401`. Upgrade the CLI with the stacks;
+  `gco upgrade` does both.
+- **This release's CLI cannot sign in to an API that was not redeployed.**
+  An API deployed by an earlier release accepts only an ID token, so it
+  refuses the access token with `HTTP 401`, and the CLI says to run
+  `gco stacks deploy <project>-api-gateway`.
+- **Your own clients** that call `/studio/login` must send the
+  `AccessToken` from `AdminInitiateAuth` or `InitiateAuth` instead of the
+  `IdToken`. The Lambda reads the username from the access token's
+  `username` claim (an ID token names it `cognito:username`) and the
+  `sub` claim, which both tokens carry.
+- **The route documents its `403`.** `UserProfileOwnedByAnotherUser` (a
+  profile of that name belongs to another Cognito user) is now one of the
+  method's declared responses, so it is in
+  `docs/openapi/api-gateway-global.json`.
+
+### Studio users: first sign-in and removal
+
+- **A new user can sign in with the temporary password.**
+  `gco analytics users add` now generates the temporary password, prints
+  it once and, with `--email`, has Cognito email it in its invitation (the
+  invitation used to go by SMS, which these users have no number for, and
+  Cognito never returns a password it generates, so nobody received one).
+  `gco analytics studio login` answers the `NEW_PASSWORD_REQUIRED`
+  challenge with `--new-password` (or `$GCO_STUDIO_NEW_PASSWORD`, or a
+  prompt on a terminal), which needs
+  `cognito-idp:AdminRespondToAuthChallenge`; it used to fail with "no
+  AccessToken returned". With `--password` or `--generate-password`,
+  `users add` sends no invitation.
+- **`users add` JSON for a temporary password changed.** It now has
+  `password_state: "temporary"`, `password_generated: true`,
+  `password_source: "generated"`, `password_permanent: false`, the
+  `password` and `invitation_emailed`; the `not_returned` / `unavailable`
+  values are gone.
+- **BREAKING (narrow): `gco analytics users remove` also deletes the
+  Studio profile.** It deletes the user's SageMaker Studio profile, the
+  spaces it owns and their apps, then the Cognito user, and needs the
+  SageMaker permissions listed in
+  [CLI.md](CLI.md#gco-analytics-users-remove). A profile tagged for another
+  Cognito user is left in place. When the profile cannot be deleted the
+  command exits `1` and keeps the Cognito user; pass
+  `--keep-studio-profile` for the old behavior. The `<project>-analytics`
+  stack publishes the domain id as `StudioDomainId` (an older stack is
+  found by its domain name) and the EMR Serverless application id as
+  `EmrServerlessApplicationId`.
+- **`gco jobs logs` reads a finished job from Studio too.** The Studio
+  execution role may run the CloudWatch Logs Insights query the command
+  falls back to once a job's pods are gone (`logs:StartQuery` on each
+  workload Region's Container Insights application log group, and
+  `logs:GetQueryResults`).
+- **No more per-user EFS access points.** The presigned-URL Lambda no
+  longer creates an access point at `/home/<username>` at every login, and
+  its role loses `elasticfilesystem:DescribeAccessPoints`,
+  `CreateAccessPoint` and `TagResource`. Nothing mounted through them (a
+  profile's `EFSFileSystemConfig` takes no access point), so Studio behaves
+  the same. The ones already created stay until the stack is destroyed,
+  whose cleanup deletes them, or until you delete them with
+  `aws efs delete-access-point`.
+
+### Studio spaces can attach Studio_EFS
+
+In earlier releases the analytics environment's `Studio_EFS` could not be
+used, and new users could not sign in:
+
+- A user's first `gco analytics studio login` created a Studio profile that
+  went to `Failed` ("You don't have permission to describe the mount
+  targets for the following file system"): `CreateUserProfile` checks the
+  profile's custom file system with the caller's identity, and the
+  presigned-URL Lambda lacked `elasticfilesystem:DescribeMountTargets`. The
+  Lambda replaced the profile at every poll, and the command gave up with
+  `User profile did not become ready within 120s`.
+- A JupyterLab or Code Editor space with `Studio_EFS` attached failed to
+  start with "SageMaker is unable to mount the file system. Check your file
+  system policy": the file system policy granted the mount actions to the
+  execution role, and Studio mounts without IAM authorization.
+- With that fixed, the space would still fail ("Check your file system path
+  input to ensure that the path provided exists"): nothing created
+  `/home/<username>`.
+
+The redeploy of `<project>-analytics` fixes all three
+([ANALYTICS.md → Studio_EFS](ANALYTICS.md#k-studio_efs-and-the-studio-home-directory)):
+
+- **The presigned-URL Lambda moves into the analytics VPC** and mounts
+  `Studio_EFS`'s `/home` through a new access point, `StudioHomeAccessPoint`.
+  Its role gains `elasticfilesystem:DescribeMountTargets`,
+  `elasticfilesystem:ClientRootAccess` through that access point, and the
+  `AWSLambdaVPCAccessExecutionRole` managed policy. Its SageMaker calls go
+  through the VPC's SageMaker API endpoint.
+- **The file system policy lets any client mount `Studio_EFS`**, write and
+  act as root, only through a mount target in the analytics VPC.
+- **Each user's directory is created at the next `studio login`**, with
+  `/home/sagemaker-user` for profiles created outside the Lambda. A profile
+  an earlier release left `Failed` is replaced at that login too.
+- **Destroying `<project>-analytics` takes about 20 minutes longer**:
+  CloudFormation deletes a VPC-attached Lambda function only once Lambda
+  has released its network interfaces.
+
 ### `Project` tag on PCS instances
 
 The cost reports filter Cost Explorer on the `Project` tag that `cdk.json`
@@ -1132,6 +1263,37 @@ window so that short GPU Jobs run back to back reuse it
   selects `gco.aws/keep-warm` but could never run on the pool is refused on
   every submission path. Manifests that don't select it are judged as before.
 
+### Log groups earlier upgrades left behind
+
+Each `gco upgrade` and `gco stacks destroy-all --keep-control-plane` run with
+v9.2.0 or earlier left one CloudWatch log group in the monitoring Region when a
+workload Region was not the monitoring Region:
+`/aws/lambda/<project>-monitoring-CustomCrossRegionExportReaderCustom-<suffix>`.
+The monitoring stack reads the regional stacks' values through that Lambda
+function. The update that stops it referencing them deletes the function, but
+CloudFormation never owned the log group Lambda created for it, and the group
+never expires.
+
+- **This release's teardown deletes the group.** It lists the monitoring
+  stack's functions before the update and deletes the log groups of the ones
+  the update removed ([CLI.md → Keeping the control plane](CLI.md#keeping-the-control-plane---keep-control-plane)).
+  `gco upgrade` runs the teardown of the release it upgrades from, so an
+  upgrade from v9.2.0 or earlier still leaves one.
+- **Delete the groups already there.** Each run left a group with its own
+  suffix. List the monitoring stack's functions and the groups, then delete
+  every group that is not `/aws/lambda/<function>` for a function in the first
+  list (all of them, once the monitoring stack is deleted):
+
+  ```bash
+  aws cloudformation describe-stack-resources --region <monitoring-region> \
+    --stack-name <project>-monitoring \
+    --query "StackResources[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId"
+  aws logs describe-log-groups --region <monitoring-region> \
+    --log-group-name-prefix /aws/lambda/<project>-monitoring-CustomCrossRegionExportReaderCustom- \
+    --query 'logGroups[].logGroupName'
+  aws logs delete-log-group --region <monitoring-region> --log-group-name <group>
+  ```
+
 ### CLI exit codes, output and prompts
 
 Scripts that check `gco`'s exit status, parse its `-o json` or `-o yaml`
@@ -1151,6 +1313,7 @@ Exit status and options:
 | `gco inference deploy` | **BREAKING:** exits 2 for `-e`, `-l` or `--node-selector` without `KEY=VALUE`, an `--autoscale-metric` other than `TYPE[:TARGET]` (`cpu`, `memory`, `gpu` or `gpu_memory`, target a whole number of at least 1), `--min-replicas` or `--max-replicas` below 1 or a maximum below the minimum, and replica bounds without `--autoscale-metric`, which were ignored | Fix the value; use `--replicas` for a fixed count |
 | `gco capacity reserve`, `gco capacity create-reservation` | **BREAKING:** ask for confirmation before spending money; without a terminal on stdin, exit 2 unless `--yes` or `--dry-run` is given | Add `--yes` to unattended runs |
 | `gco capacity cancel-reservation` | **BREAKING:** without a terminal on stdin, exits 2 unless `--yes` or `--dry-run` is given; a piped answer no longer works | Add `--yes` |
+| `gco capacity ai-recommend` | **BREAKING (narrow):** exits 2 for an `-i` that is not an EC2 instance type once aliases are expanded (an `ml.` HyperPod type, `gb200`), an `-r` or `--bedrock-region` that is not a Region name, a `--max-cost` of 0 or less, and a negative `--min-gpus` or `--min-memory-gb`. `--min-memory-gb` is the workload's total GPU memory and `--min-gpus` and `--max-cost` are totals across its instances; the model used to get a bare "Minimum Memory" | Fix the value; give totals |
 | `gco capacity reserve`, `create-reservation`, `cancel-reservation` with `-o json` or `-o yaml` | Exit 1 when the request fails (they exited 0); the result document is still printed | Check the exit status |
 | `gco costs forecast` | **BREAKING:** exits 1 when Cost Explorer cannot forecast (it exited 0 with an `error` field) | Handle the failure |
 | `gco costs workloads` | **BREAKING:** exits 1 when a Region's cluster cannot be read; the workloads it read are still printed | Run it where each cluster's API endpoint is reachable |
@@ -1181,7 +1344,7 @@ data.
 | `gco stacks addons status` | A list of `{region, name, status, message}` rows |
 | `gco stacks access` | `cluster`, `region`, `principal_arn`, `api_server_reachable`, `node_count`, `kubectl_error`, `warning` |
 | `gco analytics doctor` | `{"passed": ..., "checks": [{"name", "ok", "remediation"}]}`, also when it exits 1 |
-| `gco capacity ai-recommend` | The recommendation's fields |
+| `gco capacity ai-recommend` | The recommendation's fields, now with `instance_count`, `reservation_advice`, `validation_warnings` (GCO's checks of the answer, a failed one lowering `confidence` to `low`), `model_id`, `bedrock_region`, `data_collected_at`, `regions_analyzed`, `instance_types_analyzed`, `data_gaps`, `usage`, `latency_ms` and `disclaimer`. `recommended_capacity_type` is `unknown` when the model names no type it recognizes; it read `spot` |
 | `gco capacity check --enrich-historical` | `{"estimates": [...], "historical": {...}}` |
 | `gco capacity spot-prices`, `gco files list`, `gco files access-points`, `gco images replication status` and `gco nodepools list` with nothing to list | `[]` |
 | `gco images replication get` with no replication rules | `{"registryId": ..., "policy": {"rules": []}}`, the document it prints when there are rules |
@@ -1367,6 +1530,19 @@ has the details.
   where ECR's `ImageNotFoundException` used to come back as an error.
 - **`deps_scan` is tagged `low-risk`** instead of `safe`: its full scan
   pip-installs into the server's environment.
+- **The analytics user tools follow the CLI.** `analytics_user_remove`
+  (gated) deletes the user's Studio profile too, waiting up to 20 minutes,
+  unless `keep_studio_profile=True`. `analytics_login_url` takes a
+  `new_password` for a user's first sign-in, handed to the CLI as
+  `$GCO_STUDIO_NEW_PASSWORD`. `analytics_user_add` returns the temporary
+  password once under `password`.
+- **`ai_recommend` runs asynchronously, for up to 10 minutes.** Cancelling
+  the call stops its CLI process; the two-minute limit used to cut the gather
+  and the model off. It takes a list (or a comma-separated string) of
+  instance types and Regions, `bedrock_region` and `data_only`, and
+  `workload` is optional. `fault_tolerance` now defaults to `medium` and is
+  always passed on; the old default `low` was never sent, so such calls ran at
+  `medium` anyway, and an explicit `low` now reaches the CLI.
 - **Audit records are written.** The server writes one JSON line per record
   to stderr, or appends them to the file `GCO_MCP_AUDIT_LOG` names;
   `GCO_MCP_AUDIT_LOG_LEVEL` filters them. Earlier releases wrote none.

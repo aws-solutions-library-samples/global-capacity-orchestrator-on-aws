@@ -860,7 +860,7 @@ When the MCP `mission_*` tools build the strategy-revision sampler they pass an 
 Three top-level keys:
 
 - `regions` — sorted list of deployed regions discovered through the same `MultiRegionCapacityChecker` used by `ai_recommend`.
-- `cluster_metrics` — per-region snapshot keyed by region. Each entry carries `queue_depth`, `running_jobs`, `pending_jobs`, `gpu_utilization`, `cpu_utilization`, `recommendation_score`. Mirrors the fields `RegionCapacity` exposes; matches the data shape `ai_recommend` already feeds into its own model prompts.
+- `cluster_metrics` — per-region snapshot keyed by region. Each entry carries `queue_depth`, `running_jobs`, `pending_jobs`, `gpu_utilization`, `cpu_utilization`, `recommendation_score`. Mirrors the fields `RegionCapacity` exposes.
 - `reservations` — `{"active_count": int, "by_region": {region: int}}`. Counts only — the full reservation list is reachable through `list_reservations` if the model wants the detail.
 
 The block is byte-capped at 4 KB. When a section overshoots (e.g. a probe returned an unusually large payload), the largest field is dropped first and the dropped key list is recorded under `_dropped_fields` so the operator can spot the gap. Top-level keys are sorted before emission so two callers with semantically-identical context produce a byte-identical prompt — the same property the determinism tests pin down for Observation summaries.

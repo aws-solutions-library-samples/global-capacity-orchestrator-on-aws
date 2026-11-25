@@ -121,6 +121,24 @@ part of the resume identity through `extra_cdk_context()`), the preflight
 checks HyperPod's AMI tree for that minor, and `topology` compares the
 deployed clusters against it (`context.effective_kubernetes_version`).
 
+The `analytics` action (`actions/analytics.py`, the probe in
+`checks/analytics.py`) proves the analytics environment every release run
+deploys through the `analytics_environment_overrides` CDK context
+(`analytics_overrides_json()`). It runs the real `gco analytics` commands
+from the checkout, as the other probes run `gco`, with passwords in the
+CLI's `GCO_STUDIO_PASSWORD` and `GCO_STUDIO_NEW_PASSWORD` variables, never
+argv, and records each command with every password and presigned token
+replaced. Names carry the project prefix and a run token, and the spaces,
+apps and lifecycle configuration it creates the `gco:project` tag, so the
+Tagging API scanner owns anything left over. It leaves the first user's
+profile, space and running app for the stack's cleanup custom resource. The
+lifecycle configuration is account-level and attached to that profile, so
+its name is checkpointed (`analytics_lifecycle_configs`) before it exists
+and `cleanup/analytics.py` deletes it in a phase of the retained-resource
+cleanup, which every teardown path runs once the stacks are absent. The
+same phase requires the domain's SageMaker-managed home EFS (no project
+tag, recorded as `analytics_domain`) to be gone.
+
 The `sandboxes` action (`actions/sandboxes.py`) runs
 `manifests/nitro-sandbox-smoke-job.yaml` through the same API-transport
 lifecycle: an `isolated-sandbox` Job queued to `gco-default`, whose pod prints

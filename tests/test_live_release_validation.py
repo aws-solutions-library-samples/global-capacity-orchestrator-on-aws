@@ -5116,8 +5116,8 @@ class TestLocalOnlyRuntime:
         assert settings.inference_enabled is True
         full_identity = settings.identity()
         # The release entry point always samples every request and deploys the
-        # AWS PCS backend, so both overrides ride every CDK invocation and the
-        # resume identity.
+        # AWS PCS backend, a HyperPod cluster and the analytics environment, so
+        # their overrides ride every CDK invocation and the resume identity.
         assert full_identity["extra_cdk_context"] == {
             "gco_live_validation_disable_efs_automatic_backups": "true",
             "tracing_overrides": '{"sample_ratio":1.0}',
@@ -5126,6 +5126,7 @@ class TestLocalOnlyRuntime:
                 '{"enabled":true,"instance_groups":[{"deep_health_checks":[],'
                 '"instance_count":1,"instance_type":"ml.g4dn.xlarge","name":"gco-hyperpod"}]}'
             ),
+            "analytics_environment_overrides": '{"enabled":true}',
         }
         identity = full_identity["inference"]
         assert identity["selected_region"] == "us-east-1"
@@ -7311,6 +7312,8 @@ class TestActionBaselineCheckpointPurity:
         assert "accepted_deleted_volumes" not in ctx.checkpoint.baseline
         assert result["accepted_deleted_hyperpod_clusters"] == []
         assert "accepted_deleted_hyperpod_clusters" not in ctx.checkpoint.baseline
+        assert result["accepted_deleted_analytics_resources"] == []
+        assert "accepted_deleted_analytics_resources" not in ctx.checkpoint.baseline
         # The persisted checkpoint is the pure capture — byte-for-byte what
         # compare_baseline will re-capture against after teardown.
         assert ctx.checkpoint.baseline == self._BASELINE

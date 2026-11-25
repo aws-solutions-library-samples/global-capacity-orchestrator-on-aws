@@ -260,7 +260,6 @@ def _synth(
                 "canvas": {"enabled": False},
                 "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
                 "efs": {"removal_policy": "destroy"},
-                "studio": {"user_profile_name_prefix": None},
             },
         }
         _TEMPLATE_CACHE[key] = synth_all_stacks(overlay)

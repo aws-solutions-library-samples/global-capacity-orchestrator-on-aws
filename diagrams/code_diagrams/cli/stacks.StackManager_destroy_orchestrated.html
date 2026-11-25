@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-23T10:50:39Z">
-        <meta name="gco-source-commit" content="cf45a5ae125b4562c0cb686ea4e8c6e5ec2bec4d">
-        <meta name="gco-flow-digest" content="b8ea50e875fde524">
+        <meta name="gco-generated-at" content="2026-11-24T19:46:24Z">
+        <meta name="gco-source-commit" content="a485a5d0ad8125308ec467e859e3214edc5594a4">
+        <meta name="gco-flow-digest" content="279eeed5b8509b46">
         <title>gco stacks destroy-all — orchestrated multi-stack destroy</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -230,38 +230,42 @@ cond610=>condition: for stack_name in expected_stack_ids
 cond615=>operation: stacks.append(stack_name) if  stack_name not in stacks
 op630=>operation: project_name = self.config.project_name
 op632=>operation: post_regional_stacks, regional_api_stacks, regional_stacks, pre_regional_stacks = _get_stack_destroy_phases(stacks, project_name=project_name)
-cond635=>condition: if keep_control_plane
-cond640=>condition: if not self.detach_monitoring_from_regions()
-io647=>inputoutput: output: (False, [], [f'{project_name}-monitoring'])
-e645=>end: end function return
-op653=>operation: workload_tier = set(regional_api_stacks) | set(regional_stacks)
-op655=>operation: post_regional_stacks = []
-op657=>operation: pre_regional_stacks = []
-op659=>operation: stacks = [stack for stack in stacks if stack in workload_tier]
-op664=>operation: strict_resources: dict[str, dict[str, str]] = {}
-cond667=>condition: if strict_identity
-op671=>operation: assert expected_stack_ids is not None
-op673=>operation: assert authorize_stack is not None
-op675=>operation: strict_resources = self._resolve_strict_teardown_resources(stacks=stacks, regional_stacks=regional_stacks, expected_stack_ids=expected_stack_ids, authorize_stack=authorize_stack)
-op680=>operation: destroy_safety: _StackOperationSafetyKwargs = {'expected_stack_ids': expected_stack_ids, 'prepared_change_sets': prepared_change_sets, 'authorize_stack': authorize_stack, 'allow_bootstrap': allow_bootstrap, 'bootstrap_stacks': bootstrap_stacks, 'strict_deployment_token': strict_deployment_token, 'on_change_set_prepared': on_change_set_prepared, 'on_ecr_repository_created': on_ecr_repository_created}
-st683=>start: start record_cleanup
-io685=>inputoutput: input: name, details
-cond689=>operation: on_cleanup_complete(name, details) if  on_cleanup_complete is not None
-e699=>end: end record_cleanup
-op702=>operation: bastion_targets = {name: details for name, details in strict_resources.items() if details.get('vpc_id')}
-op704=>operation: bastions = self.cleanup_orphaned_bastions(stacks, parallel=parallel, resource_targets=bastion_targets if strict_identity else None)
-sub706=>subroutine: record_cleanup('bastions', {'terminated_instances': bastions})
-cond709=>operation: record_cleanup('bastion-iam', self._cleanup_bastion_iam()) if  not keep_control_plane
-cond720=>operation: record_cleanup('role-instance-profiles', self._detach_stack_roles_from_instance_profiles(list(regional_stacks))) if  not strict_identity
-op730=>operation: global_stack_name = f'{project_name}-global'
-st733=>start: start sweep_backup_vault
-io735=>inputoutput: input: when
-op738=>operation: "Stop the global vault's backup jobs and delete its recovery points.\n\n            Strict teardowns fail closed on any error, before ``when``.\n            "
-op740=>operation: outcome = self._cleanup_backup_vault(expected_stack_id=(expected_stack_ids or {}).get(global_stack_name), authorize_stack=authorize_stack, require_expected_identity=strict_identity)
-sub742=>subroutine: record_cleanup('backup-vault', outcome)
-cond745=>operation: raise RuntimeError(f'Strict backup-vault cleanup failed {when}: ' + json.dumps(outcome['errors'], sort_keys=True)) if  strict_identity and outcome.get('errors')
-io758=>inputoutput: output: outcome
-e756=>end: end function return
+op634=>operation: removed_function_log_groups: dict[str, dict[str, Any]] = {}
+cond637=>condition: if keep_control_plane
+op641=>operation: monitoring_stack = f'{project_name}-monitoring'
+op643=>operation: monitoring_functions = None if strict_identity else self._collect_stack_functions(monitoring_stack)
+cond646=>condition: if not self.detach_monitoring_from_regions()
+io653=>inputoutput: output: (False, [], [monitoring_stack])
+e651=>end: end function return
+cond660=>operation: removed_function_log_groups = self._removed_function_log_groups(monitoring_stack, monitoring_functions) if  monitoring_functions is not None
+op670=>operation: workload_tier = set(regional_api_stacks) | set(regional_stacks)
+op672=>operation: post_regional_stacks = []
+op674=>operation: pre_regional_stacks = []
+op676=>operation: stacks = [stack for stack in stacks if stack in workload_tier]
+op681=>operation: strict_resources: dict[str, dict[str, str]] = {}
+cond684=>condition: if strict_identity
+op688=>operation: assert expected_stack_ids is not None
+op690=>operation: assert authorize_stack is not None
+op692=>operation: strict_resources = self._resolve_strict_teardown_resources(stacks=stacks, regional_stacks=regional_stacks, expected_stack_ids=expected_stack_ids, authorize_stack=authorize_stack)
+op697=>operation: destroy_safety: _StackOperationSafetyKwargs = {'expected_stack_ids': expected_stack_ids, 'prepared_change_sets': prepared_change_sets, 'authorize_stack': authorize_stack, 'allow_bootstrap': allow_bootstrap, 'bootstrap_stacks': bootstrap_stacks, 'strict_deployment_token': strict_deployment_token, 'on_change_set_prepared': on_change_set_prepared, 'on_ecr_repository_created': on_ecr_repository_created}
+st700=>start: start record_cleanup
+io702=>inputoutput: input: name, details
+cond706=>operation: on_cleanup_complete(name, details) if  on_cleanup_complete is not None
+e716=>end: end record_cleanup
+op719=>operation: bastion_targets = {name: details for name, details in strict_resources.items() if details.get('vpc_id')}
+op721=>operation: bastions = self.cleanup_orphaned_bastions(stacks, parallel=parallel, resource_targets=bastion_targets if strict_identity else None)
+sub723=>subroutine: record_cleanup('bastions', {'terminated_instances': bastions})
+cond726=>operation: record_cleanup('bastion-iam', self._cleanup_bastion_iam()) if  not keep_control_plane
+cond737=>operation: record_cleanup('role-instance-profiles', self._detach_stack_roles_from_instance_profiles(list(regional_stacks))) if  not strict_identity
+op747=>operation: global_stack_name = f'{project_name}-global'
+st750=>start: start sweep_backup_vault
+io752=>inputoutput: input: when
+op755=>operation: "Stop the global vault's backup jobs and delete its recovery points.\n\n            Strict teardowns fail closed on any error, before ``when``.\n            "
+op757=>operation: outcome = self._cleanup_backup_vault(expected_stack_id=(expected_stack_ids or {}).get(global_stack_name), authorize_stack=authorize_stack, require_expected_identity=strict_identity)
+sub759=>subroutine: record_cleanup('backup-vault', outcome)
+cond762=>operation: raise RuntimeError(f'Strict backup-vault cleanup failed {when}: ' + json.dumps(outcome['errors'], sort_keys=True)) if  strict_identity and outcome.get('errors')
+io775=>inputoutput: output: outcome
+e773=>end: end function return
 
 op504->op506
 op506->op508
@@ -285,40 +289,44 @@ cond610(yes)->cond615
 cond615->cond610
 cond610(no)->op630
 op630->op632
-op632->cond635
-cond635(yes)->cond640
-cond640(yes)->io647
-io647->e645
-cond640(no)->op653
-op653->op655
-op655->op657
-op657->op659
-op659->op664
-op664->cond667
-cond667(yes)->op671
-op671->op673
-op673->op675
-op675->op680
-op680->st683
-st683->io685
-io685->cond689
-cond689->e699
-e699->op702
-op702->op704
-op704->sub706
-sub706->cond709
-cond709->cond720
-cond720->op730
-op730->st733
-st733->io735
-io735->op738
-op738->op740
-op740->sub742
-sub742->cond745
-cond745->io758
-io758->e756
-cond667(no)->op680
-cond635(no)->op664
+op632->op634
+op634->cond637
+cond637(yes)->op641
+op641->op643
+op643->cond646
+cond646(yes)->io653
+io653->e651
+cond646(no)->cond660
+cond660->op670
+op670->op672
+op672->op674
+op674->op676
+op676->op681
+op681->cond684
+cond684(yes)->op688
+op688->op690
+op690->op692
+op692->op697
+op697->st700
+st700->io702
+io702->cond706
+cond706->e716
+e716->op719
+op719->op721
+op721->sub723
+sub723->cond726
+cond726->cond737
+cond737->op747
+op747->st750
+st750->io752
+io752->op755
+op755->op757
+op757->sub759
+sub759->cond762
+cond762->io775
+io775->e773
+cond684(no)->op697
+cond637(no)->op681
 cond605(no)->op630
 cond560(no)->op602
 cond511(no)->op557
@@ -331,17 +339,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-23T10:50:39Z -->
-        <!-- Generated from Git commit: cf45a5ae125b4562c0cb686ea4e8c6e5ec2bec4d -->
+        <!-- Generated at (UTC): 2026-11-24T19:46:24Z -->
+        <!-- Generated from Git commit: a485a5d0ad8125308ec467e859e3214edc5594a4 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-23T10:50:39Z">2026-11-23T10:50:39Z</time>
+            Generated at (UTC): <time datetime="2026-11-24T19:46:24Z">2026-11-24T19:46:24Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>cf45a5ae125b4562c0cb686ea4e8c6e5ec2bec4d</code>
+            Source commit: <code>a485a5d0ad8125308ec467e859e3214edc5594a4</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>b8ea50e875fde524</code>
+            Flow content SHA-256: <code>279eeed5b8509b46</code>
           </p>
           <div id="canvas"></div>
         </div>

@@ -186,11 +186,12 @@ class TestAnalyticsApiConfigPresent:
     def test_studio_login_declares_every_status_the_lambda_returns(
         self, present_template: assertions.Template
     ) -> None:
-        """``/studio/login`` documents the presigned-URL Lambda's 202 and 409.
+        """``/studio/login`` documents the presigned-URL Lambda's 202, 403 and 409.
 
-        The Lambda answers 202 while the caller's Studio profile provisions
-        and 409 for a profile it cannot recover; the method's responses (and
-        so docs/openapi/api-gateway-global.json) listed neither.
+        The Lambda answers 202 while the caller's Studio profile provisions,
+        403 for a profile that belongs to another Cognito user and 409 for a
+        profile it cannot recover; the method's responses are what
+        docs/openapi/api-gateway-global.json lists.
         """
         (login,) = [
             method["Properties"]
@@ -198,7 +199,29 @@ class TestAnalyticsApiConfigPresent:
             if method["Properties"].get("AuthorizationType") == "COGNITO_USER_POOLS"
         ]
         statuses = [response["StatusCode"] for response in login["MethodResponses"]]
-        assert statuses == ["200", "202", "400", "401", "404", "409", "500"]
+        assert statuses == ["200", "202", "400", "401", "403", "404", "409", "500"]
+
+    def test_studio_login_requires_an_access_token(
+        self, present_template: assertions.Template
+    ) -> None:
+        """``/studio/login`` requires a scope, so its authorizer takes only access tokens.
+
+        A Cognito authorizer reads the header as an ID token when the method
+        lists no scopes. The scope is the one Cognito puts in every
+        ``AdminInitiateAuth`` access token; no other method requires one.
+        """
+        from gco.stacks.constants import STUDIO_LOGIN_AUTHORIZATION_SCOPE
+
+        assert STUDIO_LOGIN_AUTHORIZATION_SCOPE == "aws.cognito.signin.user.admin"
+        scoped = {
+            name: method["Properties"]["AuthorizationScopes"]
+            for name, method in present_template.find_resources("AWS::ApiGateway::Method").items()
+            if "AuthorizationScopes" in method["Properties"]
+        }
+        assert list(scoped.values()) == [[STUDIO_LOGIN_AUTHORIZATION_SCOPE]]
+        (name,) = scoped
+        methods = present_template.find_resources("AWS::ApiGateway::Method")
+        assert methods[name]["Properties"]["AuthorizationType"] == "COGNITO_USER_POOLS"
 
     def test_cognito_authorizer_created(self, present_template: assertions.Template) -> None:
         """An authorizer of type ``COGNITO_USER_POOLS`` exists on the REST API."""

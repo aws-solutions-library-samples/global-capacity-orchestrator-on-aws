@@ -90,7 +90,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `reservation_check` | Check ODCR and Capacity Block availability (multi-region, date-window, duration in hours or days). |
 | `reserve_capacity` | Purchase a Capacity Block offering by its ID. |
 | `runai_capacity` | Read GPU capacity from the NVIDIA Run:ai control plane configured on the MCP host (read-only, outside the AWS Region ranking; gated by `GCO_ENABLE_RUNAI_CAPACITY`, no URL or credential argument). |
-| `spot_prices` | Get current spot prices for an instance type. |
+| `spot_prices` | Get current spot prices and their history for an instance type, per zone. |
 
 ### `cluster.py`
 
@@ -447,7 +447,8 @@ checked.
 A secret never goes on the CLI's command line, which every local user can read
 through `ps`. Pass it with `cli_runner._run_cli(*args, env={...})` in a variable
 the CLI option also reads (Click's `envvar=`): `GCO_STUDIO_PASSWORD`,
-`GCO_GRAFANA_USER_PASSWORD`, `GCO_WEBHOOK_URL`, `GCO_WEBHOOK_SECRET`. The
+`GCO_STUDIO_NEW_PASSWORD`, `GCO_GRAFANA_USER_PASSWORD`, `GCO_WEBHOOK_URL`,
+`GCO_WEBHOOK_SECRET`. The
 variables reach the child only and are never logged. `@audit_logged` redacts
 arguments whose names contain `password`, `secret`, `token` or `key`, and logs a
 `url` / `*_url` argument as its scheme and host only.

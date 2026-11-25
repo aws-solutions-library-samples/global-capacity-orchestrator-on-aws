@@ -25,6 +25,12 @@ _DIAGNOSTICS_RING_SIZE = 8
 _DIAGNOSTICS_LOG_TAIL_LINES = 40
 _DIAGNOSTICS_LOG_TAIL_BYTES = 6 * 1024
 _DIAGNOSTICS_EVENT_LIMIT = 20
+# The restart audit fails closed when it cannot list the pods, so one slow or
+# failed read must not decide the leg (a kubectl that ran out its 30-second
+# timeout once ended a release run): the listing is tried this many times,
+# this far apart.
+_RESTART_AUDIT_POD_LIST_ATTEMPTS = 3
+_RESTART_AUDIT_POD_LIST_PAUSE_SECONDS = 10.0
 _DIAGNOSTICS_NODE_LABELS = (
     "node.kubernetes.io/instance-type",
     "eks.amazonaws.com/instance-family",
@@ -384,15 +390,19 @@ class InferenceRuntimeMixin:
         record: dict[str, Any],
         *,
         reason: str,
+        pod_list_attempts: int = 1,
     ) -> dict[str, Any]:
         """Snapshot the endpoint's pods, crash output, events and nodes into the record.
 
         Best-effort and bounded: every read has its own short timeout and a
-        failed read is recorded in place of the data. The snapshot ring keeps
-        the last ``_DIAGNOSTICS_RING_SIZE`` entries so periodic captures during
-        a long wait show the progression (pulling -> running -> crash-looping)
-        without growing the checkpoint unboundedly. Returns the snapshot; its
-        ``summary`` is what the caller appends to a timeout error.
+        failed read is recorded in place of the data. The pod listing is tried
+        up to ``pod_list_attempts`` times, ``_RESTART_AUDIT_POD_LIST_PAUSE_SECONDS``
+        apart, and the failed attempts are kept under ``pods_read_errors``.
+        The snapshot ring keeps the last ``_DIAGNOSTICS_RING_SIZE`` entries so
+        periodic captures during a long wait show the progression (pulling ->
+        running -> crash-looping) without growing the checkpoint unboundedly.
+        Returns the snapshot; its ``summary`` is what the caller appends to a
+        timeout error.
         """
         snapshot: dict[str, Any] = {
             "reason": reason,
@@ -400,7 +410,7 @@ class InferenceRuntimeMixin:
             "pods": [],
             "nodes": {},
         }
-        payload, error = self._diagnostics_read(
+        listing = (
             "get",
             "pods",
             "--namespace",
@@ -410,6 +420,16 @@ class InferenceRuntimeMixin:
             "--output",
             "json",
         )
+        payload, error = self._diagnostics_read(*listing)
+        read_errors: list[str] = []
+        for _attempt in range(1, max(1, pod_list_attempts)):
+            if error is None:
+                break
+            read_errors.append(error)
+            time.sleep(_RESTART_AUDIT_POD_LIST_PAUSE_SECONDS)
+            payload, error = self._diagnostics_read(*listing)
+        if read_errors:
+            snapshot["pods_read_errors"] = read_errors
         if error is not None:
             snapshot["pods_error"] = error
         else:
@@ -673,9 +693,15 @@ class InferenceRuntimeMixin:
         container of every pod must report ``restartCount`` 0. The snapshot
         already holds the previous attempt's log tail and the pod events
         (``Liveness probe failed``, ``Killing``), so the failure names its
-        cause. A snapshot that could not list the pods fails closed.
+        cause. A snapshot that could not list the pods fails closed, after
+        ``_RESTART_AUDIT_POD_LIST_ATTEMPTS`` tries.
         """
-        snapshot = self.capture_workload_diagnostics(plan, record, reason="restart-audit")
+        snapshot = self.capture_workload_diagnostics(
+            plan,
+            record,
+            reason="restart-audit",
+            pod_list_attempts=_RESTART_AUDIT_POD_LIST_ATTEMPTS,
+        )
         if "pods_error" in snapshot:
             raise ManagedInferenceValidationError(
                 "managed inference restart audit could not list the endpoint's pods "

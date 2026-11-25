@@ -17,9 +17,9 @@
       "source_commit": "e192bb01bb7807a52e11e262c0cb44173133f894"
     },
     "cli/analytics_user_mgmt.py": {
-      "digest": "da0ae2133da4fd39413a9c5c3df7d003a8e2b97b450b262a2b778253c27d0202",
-      "generated_at": "2026-11-23T16:48:27Z",
-      "source_commit": "1fcc830f8bfc0e870b022382a1506c682882515c"
+      "digest": "3ae7cf1de18df54311d0d49219908e2c5bba300f6ed7836d493d7c1f32ba6dba",
+      "generated_at": "2026-11-24T19:00:27Z",
+      "source_commit": "21c18ee43b7d5814a559de944c67a84889dff8d5"
     },
     "cli/commands/autopilot_cmd.py": {
       "digest": "d7d53e45018c903a9a6905592f76bd3ecbe80f0dd0103091684a03898b4f5033",
@@ -42,9 +42,9 @@
       "source_commit": "db3de8225c3e025f659096135ffaa4ea72d25097"
     },
     "cli/stacks.py": {
-      "digest": "d09206e5200a9cfacf692944d40510071c3c3619c5544603dec505c4af3d390a",
-      "generated_at": "2026-11-23T10:50:39Z",
-      "source_commit": "cf45a5ae125b4562c0cb686ea4e8c6e5ec2bec4d"
+      "digest": "b67bf5bb3ea106718e3a2924e6fc7586a0aa318b068dcca8bba9a88a51e0aee7",
+      "generated_at": "2026-11-24T19:46:24Z",
+      "source_commit": "a485a5d0ad8125308ec467e859e3214edc5594a4"
     },
     "cli/upgrade.py": {
       "digest": "99b3e9d70f26d76bb03fcd7490046147bc370a0ea6a132adc86c683b11be94be",
@@ -117,14 +117,14 @@
       "source_commit": "db3de8225c3e025f659096135ffaa4ea72d25097"
     },
     "gco/stacks/analytics_stack.py": {
-      "digest": "12cb2eb0ea689173c96bdae1579001cb733fdce30bd9b4a894735797679e8fcb",
-      "generated_at": "2026-11-23T16:48:27Z",
-      "source_commit": "1fcc830f8bfc0e870b022382a1506c682882515c"
+      "digest": "9a27d75fdca2d6ee2a906172848717f5ae9b745ded8b89589698781c566f10c1",
+      "generated_at": "2026-11-24T22:25:50Z",
+      "source_commit": "afbf93e626d691e7aa49495693b396b7ec7188ac"
     },
     "gco/stacks/api_gateway_global_stack.py": {
-      "digest": "4d8515853b126e83a41da582e8a8e43054d8d6fa498b88cd838df70cea09dcf5",
-      "generated_at": "2026-11-22T20:50:27Z",
-      "source_commit": "c904dd4dd0b819014ff781aa5d888d6c579a8868"
+      "digest": "ec5b4ea90a3c36d957bcca90076204fa3623e4040abf031cb7b495b9346e2770",
+      "generated_at": "2026-11-24T14:05:08Z",
+      "source_commit": "9d3160a1b68d2fdc13355b73df0e30f2af4bc047"
     },
     "gco/stacks/global_stack.py": {
       "digest": "c101314ce3526d066f171ee71fae88d71177a486e6a8a30f032d9af04ed306e3",
@@ -142,9 +142,9 @@
       "source_commit": "c904dd4dd0b819014ff781aa5d888d6c579a8868"
     },
     "gco/stacks/regional_stack.py": {
-      "digest": "f112a1d74a7899a0053d1514884729c69c261eb1d5ca4056a493e1c6abbfe0bf",
-      "generated_at": "2026-11-23T02:28:23Z",
-      "source_commit": "1bf0ef9a749386c6fa50ac7edddbe6eb1b7a9fe0"
+      "digest": "5fcd4cb714ce9abe66f9f309dbcfbdc84fa5382e0d98f788a27b1f7384b8434a",
+      "generated_at": "2026-11-24T22:25:50Z",
+      "source_commit": "afbf93e626d691e7aa49495693b396b7ec7188ac"
     },
     "gco_mcp/audit.py": {
       "digest": "1f59f38629f4afb688d78240715f616049e222beaae38d5644da14b196e00af5",
@@ -197,14 +197,14 @@
       "source_commit": "b6581899649d40769798e294f2ea42237f493c03"
     },
     "lambda/analytics-cleanup/handler.py": {
-      "digest": "8d8c9369bf58a544c1114318c0a24d3c0fb7ef79d9143b0e2a9bd37b21b3a1a2",
-      "generated_at": "2026-11-18T16:59:04Z",
-      "source_commit": "3d3ba1381c5c16d0c44942f3b542591f571c3f1f"
+      "digest": "c50c37b3444ed039cc29c0697f066eb74e4782fc41d151e1044756a3e690b566",
+      "generated_at": "2026-11-24T22:25:50Z",
+      "source_commit": "afbf93e626d691e7aa49495693b396b7ec7188ac"
     },
     "lambda/analytics-presigned-url/handler.py": {
-      "digest": "106fd08da64cae263556b8718e1c36bf41683d1eb7527ccc14730394b0e30ec5",
-      "generated_at": "2026-11-23T16:48:27Z",
-      "source_commit": "1fcc830f8bfc0e870b022382a1506c682882515c"
+      "digest": "46289ad4d013817f48a24025803c972e460e89d58a3791a1d3dd0629743513de",
+      "generated_at": "2026-11-24T22:25:50Z",
+      "source_commit": "afbf93e626d691e7aa49495693b396b7ec7188ac"
     },
     "lambda/api-gateway-proxy/handler.py": {
       "digest": "ea050c7f0fd20212940b536648e0723316a975f063d2e327a47a28a6251a8a9a",

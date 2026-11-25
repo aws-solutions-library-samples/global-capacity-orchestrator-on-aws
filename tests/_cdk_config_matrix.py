@@ -1049,6 +1049,14 @@ MATRIX_COVERAGE_ALLOWLIST: dict[str, str] = {
         "it reaches the same loader path the hyperpod-* entries above vary; the "
         "parse and merge order are pinned in tests/test_hyperpod_config.py."
     ),
+    "analytics_environment_overrides": (
+        "Run-scoped sibling of the analytics_environment block, like "
+        "tracing_overrides: a JSON object the live-validation harness deep-merges "
+        "over analytics_environment for one deploy (enabled: true), so every "
+        "release run deploys the analytics stack. The loader merges it before reading "
+        "the block, so it reaches the same path the analytics-* entries above vary; "
+        "the parse and merge are pinned in tests/test_config_loader.py."
+    ),
 }
 
 

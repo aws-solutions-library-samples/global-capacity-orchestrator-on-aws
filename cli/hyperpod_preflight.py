@@ -10,11 +10,15 @@ Checks, per Region:
 
 - ``agent-image``: SageMaker HyperPod publishes a health-monitoring agent
   image for the Region (the regional stack refuses to synthesize otherwise).
-- ``kubernetes-version``: SageMaker HyperPod publishes a node AMI for the EKS
-  minor the cluster will run at ``CreateCluster``. HyperPod picks the AMI from
-  the cluster's version then; a minor without one (the newest EKS minor, until
-  HyperPod catches up) fails the deploy an hour in. Read from the public SSM
-  tree ``/aws/service/sagemaker-hyperpod/ami/x86_64/eks-<minor>-...``. Before
+- ``kubernetes-version``: SageMaker HyperPod's ``CreateCluster`` accepts the
+  EKS minor the cluster will run, and HyperPod publishes a node AMI for it.
+  HyperPod picks the AMI from the cluster's version then; a minor without one
+  (the newest EKS minor, until HyperPod catches up) fails the deploy an hour
+  in. The AMI is read from the public SSM tree
+  ``/aws/service/sagemaker-hyperpod/ami/x86_64/eks-<minor>-...``. The tree is
+  not the whole answer: it can list a minor before ``CreateCluster`` accepts
+  it, and no API lists the minors ``CreateCluster`` accepts, so a minor above
+  :data:`HYPERPOD_CREATE_CLUSTER_NEWEST_K8S` fails without reading it. Before
   the first deploy that minor is cdk.json ``kubernetes_version``; once the
   cluster exists it is the version the cluster reports, because a cluster
   upgraded outside the deploy no longer matches cdk.json. A cdk.json minor
@@ -76,6 +80,7 @@ from .pcs_preflight import (
 __all__ = [
     "FAIL",
     "HYPERPOD_AMI_PARAMETER_ROOT",
+    "HYPERPOD_CREATE_CLUSTER_NEWEST_K8S",
     "PASS",
     "SKIP",
     "WARN",
@@ -101,6 +106,17 @@ _HYPERPOD_TARGET = "hyperpod-cluster"
 #: appear is what HyperPod supports; the docs page lags the tree.
 HYPERPOD_AMI_PARAMETER_ROOT = "/aws/service/sagemaker-hyperpod/ami/x86_64"
 _HYPERPOD_AMI_MINOR = re.compile(r"/eks-(\d+\.\d+)-amazon-linux-(?:2|2023)/latest/ami-id$")
+
+#: The newest EKS minor SageMaker HyperPod's ``CreateCluster`` is known to
+#: accept. The AMI tree above can run ahead of it: on 2026-11-23 the tree carried
+#: ``eks-1.37`` while ``CreateCluster`` refused 1.37 an hour into a deploy
+#: ("Specified EKS cluster version is not supported. Supported versions are
+#: 1.29, ... 1.36"). ``CreateCluster`` has no dry run and no API lists the
+#: minors it accepts, so the preflight fails a minor above this one. Raise it
+#: once a release run (``gco release validate --kubernetes-version <minor>``)
+#: has created a HyperPod cluster at the next minor; the monthly dependency
+#: scan reports when the AMI tree reaches past it.
+HYPERPOD_CREATE_CLUSTER_NEWEST_K8S = "1.36"
 
 
 class HyperpodPreflightError(RuntimeError):
@@ -296,12 +312,44 @@ def _effective_minor(
     return configured, f"the deploy upgrades {eks_cluster_name} from {running} before HyperPod"
 
 
+def _above_create_cluster_ceiling(minor: str) -> bool:
+    """Whether ``minor`` is newer than :data:`HYPERPOD_CREATE_CLUSTER_NEWEST_K8S`.
+
+    A minor that does not parse is left to the AMI-tree check, which reports
+    it as a minor without an AMI.
+    """
+    try:
+        return _minor_key(minor) > _minor_key(HYPERPOD_CREATE_CLUSTER_NEWEST_K8S)
+    except ValueError:
+        return False
+
+
 def _check_kubernetes_version(
     checker: _Checker, kubernetes_version: str, lookup: _ClusterLookup, eks_cluster_name: str
 ) -> None:
     minor, source = _effective_minor(checker, kubernetes_version, lookup.version, eks_cluster_name)
     if minor is None:
         return  # the failure is already recorded
+    if _above_create_cluster_ceiling(minor):
+        ceiling = HYPERPOD_CREATE_CLUSTER_NEWEST_K8S
+        refused = (
+            f"EKS {minor} ({source}): SageMaker HyperPod's CreateCluster accepts EKS minors up "
+            f"to {ceiling} (HYPERPOD_CREATE_CLUSTER_NEWEST_K8S; its node AMI tree can list a "
+            "newer minor first), so CreateCluster would fail; "
+        )
+        if lookup.version is not None and minor == lookup.version:
+            remedy = (
+                "EKS cannot downgrade a running cluster, so HyperPod can join this one only "
+                f"once CreateCluster accepts {minor}"
+            )
+        else:
+            remedy = (
+                f"deploy the cluster at {ceiling} (cdk.json kubernetes_version, or "
+                "--kubernetes-version on gco release validate) — EKS cannot downgrade a running "
+                "cluster"
+            )
+        checker.add("kubernetes-version", FAIL, refused + remedy)
+        return
     minors = _hyperpod_eks_minors(checker)
     if minors is None:
         return  # the warning is already recorded

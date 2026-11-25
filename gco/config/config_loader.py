@@ -164,6 +164,11 @@ DEPRECATED_BLOCK_KEYS: dict[str, str] = {
         "own execute-api:Invoke permission, whatever this says (docs/UPGRADING.md, API calls "
         "need an IAM permission). Remove it from cdk.json."
     ),
+    "analytics_environment.studio.user_profile_name_prefix": (
+        "it was never applied: the presigned-URL Lambda names each SageMaker Studio user "
+        "profile after the Cognito username. Remove it (and the then empty studio block) "
+        "from cdk.json."
+    ),
 }
 
 #: The charts of the ``helm`` block that take nothing but ``enabled``.
@@ -341,6 +346,7 @@ BLOCK_KEYS: dict[str, frozenset[str]] = {
     "analytics_environment.canvas": frozenset({"enabled"}),
     "analytics_environment.cognito": frozenset({"domain_prefix", "removal_policy"}),
     "analytics_environment.efs": frozenset({"removal_policy"}),
+    # Deprecated (DEPRECATED_BLOCK_KEYS): warned about and ignored.
     "analytics_environment.studio": frozenset({"user_profile_name_prefix"}),
     "cluster_observability": frozenset(
         {"enabled", "grafana", "prometheus", "alertmanager", "mlflow"}
@@ -405,6 +411,7 @@ OTHER_CONTEXT_KEYS = frozenset(
         "hyperpod",
         "hyperpod_regions",
         "hyperpod_overrides",
+        "analytics_environment_overrides",
         "resource_quota",
         "feature_enabled_overrides",
         "helm_enabled_overrides",
@@ -544,8 +551,8 @@ def _deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str
     return merged
 
 
-def parse_tracing_overrides(raw: object) -> dict[str, Any]:
-    """Parse the ``tracing_overrides`` context value into a mapping.
+def _parse_json_object_context(key: str, raw: object) -> dict[str, Any]:
+    """Parse a run-scoped context value that carries a JSON object.
 
     Accepts a JSON object string (the only shape ``cdk --context`` can carry)
     or a mapping (cdk.json-style); ``None`` and blank strings mean no
@@ -563,18 +570,53 @@ def parse_tracing_overrides(raw: object) -> dict[str, Any]:
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ConfigValidationError(
-                f"{TRACING_OVERRIDES_CONTEXT_KEY} must be a JSON object: {exc}"
-            ) from exc
+            raise ConfigValidationError(f"{key} must be a JSON object: {exc}") from exc
         if not isinstance(parsed, dict):
-            raise ConfigValidationError(
-                f"{TRACING_OVERRIDES_CONTEXT_KEY} must be a JSON object, got {type(parsed).__name__}"
-            )
+            raise ConfigValidationError(f"{key} must be a JSON object, got {type(parsed).__name__}")
         return parsed
     raise ConfigValidationError(
-        f"{TRACING_OVERRIDES_CONTEXT_KEY} must be a JSON object string or an object, "
-        f"got {type(raw).__name__}"
+        f"{key} must be a JSON object string or an object, got {type(raw).__name__}"
     )
+
+
+def parse_tracing_overrides(raw: object) -> dict[str, Any]:
+    """Parse the ``tracing_overrides`` context value into a mapping.
+
+    See :func:`_parse_json_object_context` for the accepted shapes.
+    """
+    return _parse_json_object_context(TRACING_OVERRIDES_CONTEXT_KEY, raw)
+
+
+#: Run-scoped CDK context key carrying a JSON object deep-merged over the
+#: ``analytics_environment`` block for one deploy (``cdk deploy --context
+#: analytics_environment_overrides='{"enabled": true}'``), the analytics
+#: sibling of ``tracing_overrides``. The live release harness, whose preflight
+#: requires a clean worktree, deploys the analytics environment this way.
+#: Unlike the other overrides it can add a whole stack, ``<project>-analytics``,
+#: so every CDK command of the run must carry it: ``cdk list`` and a destroy
+#: without it do not see that stack.
+ANALYTICS_OVERRIDES_CONTEXT_KEY = "analytics_environment_overrides"
+
+
+def parse_analytics_environment_overrides(raw: object) -> dict[str, Any]:
+    """Parse the ``analytics_environment_overrides`` context value into a mapping.
+
+    See :func:`_parse_json_object_context` for the accepted shapes.
+    """
+    return _parse_json_object_context(ANALYTICS_OVERRIDES_CONTEXT_KEY, raw)
+
+
+def apply_analytics_environment_overrides(raw: object, overrides: object) -> object:
+    """``raw`` (the ``analytics_environment`` block, possibly ``None``) with the overrides merged in.
+
+    Only an object block, or an absent one, takes them; any other value is
+    returned as it is, and the configuration loader then treats it like an
+    absent block.
+    """
+    parsed = parse_analytics_environment_overrides(overrides)
+    if not parsed or (raw is not None and not isinstance(raw, dict)):
+        return raw
+    return _deep_merge(raw or {}, parsed)
 
 
 def resolve_tracing_config(raw: object, overrides: object = None) -> dict[str, Any]:
@@ -2107,7 +2149,7 @@ class ConfigLoader:
           are passed verbatim to CDK's ``RemovalPolicy`` lookup by the
           consumer).
         """
-        analytics_ctx = self.app.node.try_get_context("analytics_environment")
+        analytics_ctx = self._analytics_environment_context()
         if not isinstance(analytics_ctx, dict):
             # Block is absent or malformed — defaults apply, nothing to validate.
             return
@@ -3430,10 +3472,10 @@ class ConfigLoader:
             - efs: Studio_EFS sub-block
               - removal_policy: "destroy" (default) or "retain" — controls
                 the Studio EFS file system's CloudFormation DeletionPolicy
-            - studio: SageMaker Studio sub-block
-              - user_profile_name_prefix: accepted but not applied; the
-                presigned-URL Lambda names every profile after the Cognito
-                username (default: None)
+
+        A ``studio`` block (``user_profile_name_prefix``) is deprecated and
+        ignored: the presigned-URL Lambda names every profile after the Cognito
+        username. It is passed through as written.
         """
         default_config: dict[str, Any] = {
             "enabled": False,
@@ -3441,21 +3483,32 @@ class ConfigLoader:
             "canvas": {"enabled": False},
             "cognito": {"domain_prefix": None, "removal_policy": "destroy"},
             "efs": {"removal_policy": "destroy"},
-            "studio": {"user_profile_name_prefix": None},
         }
-        analytics_ctx = self.app.node.try_get_context("analytics_environment")
+        analytics_ctx = self._analytics_environment_context()
         analytics_config: dict[str, Any] = analytics_ctx if isinstance(analytics_ctx, dict) else {}
         merged_config: dict[str, Any] = {**default_config, **analytics_config}
 
         # Deep-merge each nested sub-block so a partial override does not
         # drop the other defaults in the same sub-block.
-        for sub_block in ("hyperpod", "canvas", "cognito", "efs", "studio"):
+        for sub_block in ("hyperpod", "canvas", "cognito", "efs"):
             override = analytics_config.get(sub_block)
             if isinstance(override, dict):
                 default_sub = cast(dict[str, Any], default_config[sub_block])
                 merged_config[sub_block] = {**default_sub, **override}
 
         return merged_config
+
+    def _analytics_environment_context(self) -> object:
+        """The ``analytics_environment`` block with the run-scoped overrides merged in.
+
+        ``analytics_environment_overrides`` (a JSON object) is deep-merged over
+        the cdk.json block, so a validation harness can deploy the analytics
+        environment without editing cdk.json.
+        """
+        return apply_analytics_environment_overrides(
+            self.app.node.try_get_context("analytics_environment"),
+            self.app.node.try_get_context(ANALYTICS_OVERRIDES_CONTEXT_KEY),
+        )
 
     def get_analytics_enabled(self) -> bool:
         """Return whether the analytics environment stack is enabled.

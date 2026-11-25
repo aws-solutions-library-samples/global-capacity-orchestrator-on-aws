@@ -191,6 +191,13 @@ class RunSettings:
     #: GPU instance group (``checks/hyperpod.py``) so the ``hyperpod`` action
     #: proves the node joins and runs work; part of the resume identity.
     hyperpod_overrides_json: str = ""
+    #: Canonical JSON of the ``analytics_environment_overrides`` CDK context
+    #: (deep-merged over cdk.json ``analytics_environment``), or ``""`` for
+    #: none. The release entry point always turns the analytics environment
+    #: on (``checks/analytics.py``) so the ``analytics`` action proves it; the
+    #: override adds the ``<project>-analytics`` stack to ``cdk list``, so the
+    #: run's teardown must carry it too. Part of the resume identity.
+    analytics_overrides_json: str = ""
     #: The EKS minor this run deploys the regional clusters at
     #: (``--kubernetes-version``), threaded to CDK as the ``kubernetes_version``
     #: context in place of cdk.json's, or ``""`` to deploy cdk.json's minor. A
@@ -304,6 +311,8 @@ class RunSettings:
             context["pcs_overrides"] = self.pcs_overrides_json
         if self.hyperpod_overrides_json:
             context["hyperpod_overrides"] = self.hyperpod_overrides_json
+        if self.analytics_overrides_json:
+            context["analytics_environment_overrides"] = self.analytics_overrides_json
         if self.kubernetes_version_override:
             context["kubernetes_version"] = self.kubernetes_version_override
         return context

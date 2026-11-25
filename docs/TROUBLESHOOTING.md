@@ -11,8 +11,10 @@ Common issues and their solutions.
   - [Stack Creation Fails](#stack-creation-fails)
   - [Deploy Fails on Image Mirror or linux/amd64 Asset Build (Apple Silicon)](#deploy-fails-on-image-mirror-or-linuxamd64-asset-build-apple-silicon)
   - [Dev Container Shares No Runtime Socket](#dev-container-shares-no-runtime-socket)
+  - [Image Builds Run Out of Space or Memory in the Finch VM](#image-builds-run-out-of-space-or-memory-in-the-finch-vm)
   - [Deploy Refuses Owner-Only Sources (Restrictive umask)](#deploy-refuses-owner-only-sources-restrictive-umask)
   - [Deploy Asks for a Different npm (Inference Streaming Lambda)](#deploy-asks-for-a-different-npm-inference-streaming-lambda)
+  - [CDK CLI Not Compatible with the CDK Library](#cdk-cli-not-compatible-with-the-cdk-library)
   - [Stack Stuck in REVIEW_IN_PROGRESS](#stack-stuck-in-review_in_progress)
   - [Stack Stuck in DELETE_FAILED](#stack-stuck-in-delete_failed)
   - [Lambda or State-Machine Custom Resource Timeout](#lambda-or-state-machine-custom-resource-timeout)
@@ -231,6 +233,40 @@ found: no answering API at the paths it tried, a Finch VM without finch-daemon,
 `--socket PATH` takes the path as the runtime's containers see it, which for a
 VM-based runtime is a path inside its VM.
 
+### Image Builds Run Out of Space or Memory in the Finch VM
+
+**Symptom**: under [Finch](https://runfinch.com/), an asset image build in
+`gco stacks deploy-all` (or in a `gco release validate` deploy) fails with
+`no space left on device`, or it is killed or slows to a crawl while macOS swaps.
+
+**Cause**: Finch builds inside a Lima VM. The images and the BuildKit build cache
+live on the VM's data disk, a sparse file under `~/.finch/.disks/` whose size
+`datadisk` in `~/.finch/finch.yaml` sets. That disk can fill while the home volume
+still has space, and removing images inside the VM does not shrink the file until
+the guest trims it. The VM also keeps the `memory` the same file sets for as long
+as it runs.
+
+**Solution**:
+
+```bash
+# How full the VM's data disk is
+LIMA_HOME=/Applications/Finch/lima/data /Applications/Finch/lima/bin/limactl shell finch df -h /mnt/lima-finch
+
+# Remove dangling images and the unused build cache (the next build rebuilds its layers)
+finch image prune -f
+finch builder prune -a -f
+
+# Hand the freed blocks back to macOS; until then the file keeps its size
+LIMA_HOME=/Applications/Finch/lima/data /Applications/Finch/lima/bin/limactl shell finch sudo fstrim -av
+```
+
+The paths are the Finch macOS installer's. `gco release validate` removes the CDK
+asset images each `deploy` publishes and prunes dangling layers, but leaves the
+build cache. For more build memory or CPUs, change `memory` or `cpus` in
+`~/.finch/finch.yaml`, then run `finch vm stop` and `finch vm start`. Leave the
+host enough memory for the CLI and CDK synthesis, and stop the VM with
+`finch vm stop` when nothing is building.
+
 ### Deploy Refuses Owner-Only Sources (Restrictive umask)
 
 **Symptom**: `gco stacks deploy` or `deploy-all` stops before synthesis with `N deployable path(s) in the checkout are not readable by every user: ...`. `gco upgrade` stops with the same message after its checkout and before its teardown, and adds `No stack was changed`.
@@ -269,6 +305,21 @@ With Finch, run the same check with `finch` in place of `docker`. Podman stores 
 The rebuild also brings the Python dependencies, CDK CLI and kubectl up to what the checkout expects. If the image reports the right version but the error persists, an npm installed into the `gco-dev-tools` volume, which comes first on the container's `PATH`, is shadowing it. `docker volume rm gco-dev-tools` (or the same with `finch` or `podman`) clears it, and `gco autopilot` reinstalls its engines on next use.
 
 On a host install, install the pinned version with `npm install --global npm@X`.
+
+### CDK CLI Not Compatible with the CDK Library
+
+**Symptom**: `gco stacks deploy`, `deploy-all`, `destroy`, `destroy-all`, `synth`, `diff` or `gco upgrade` stops with `This CDK CLI is not compatible with the CDK library used by your application. Please upgrade the CLI to the latest version.`, followed by `(Cloud assembly schema version mismatch: Maximum schema version supported is X, but found Y. ...)`. It typically follows a `git pull` or `pip install` that brought a newer `aws-cdk-lib`. `gco` adds a `Likely cause:` line that names the `cdk` it ran, that CLI's version and the version the library needs.
+
+**Cause**: The CDK library (`aws-cdk-lib`, pinned in `pyproject.toml`) writes a cloud assembly that only a CDK CLI of at least a given version can read, and the two are released separately. `gco` runs `node_modules/.bin/cdk` at the repository root when `npm ci` has installed it, which is the version `package-lock.json` pins in step with the library, and the first `cdk` on `PATH` otherwise. A `node_modules` from before the pull, or an older global `cdk`, cannot read the new assembly. The CLI reads the assembly before it calls CloudFormation, so no stack has changed.
+
+**Solution**: From the repository root, install the pinned CLI and rerun the command:
+
+```bash
+npm ci --ignore-scripts --no-audit --no-fund
+node_modules/.bin/cdk --version   # prints the version package.json pins
+```
+
+To keep using a global CLI instead, upgrade it to at least the version the message names with `npm install --global aws-cdk@<version>`. In the dev container, the CLI comes from the `gco-dev` image unless the checkout has its own `node_modules`; run `./scripts/setup-dev-alias.sh` on the host to rebuild the image with the CLI its `Dockerfile.dev` pins.
 
 ### Stack Stuck in REVIEW_IN_PROGRESS
 

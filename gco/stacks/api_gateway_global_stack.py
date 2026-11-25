@@ -72,6 +72,7 @@ from gco.stacks.constants import (
     DEFAULT_MAX_REQUEST_BODY_BYTES,
     LAMBDA_NODEJS_RUNTIME,
     LAMBDA_PYTHON_RUNTIME,
+    STUDIO_LOGIN_AUTHORIZATION_SCOPE,
     api_gateway_auth_secret_name,
     backend_tls_certificate_parameter_prefix,
     backend_tls_root_ca_parameter_name,
@@ -84,8 +85,8 @@ from gco.stacks.control_plane_alarms import add_api_alarms, create_alert_topic
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-22T20:50:27Z
-# Generated from Git commit: c904dd4dd0b819014ff781aa5d888d6c579a8868
+# Generated at (UTC): 2026-11-24T14:05:08Z
+# Generated from Git commit: 9d3160a1b68d2fdc13355b73df0e30f2af4bc047
 # Flowchart(s) generated from this file:
 #   * ``GCOApiGatewayGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.png``)
@@ -1423,7 +1424,9 @@ class GCOApiGatewayGlobalStack(Stack):
           ``request_validator_options``.
         * ``/studio`` + ``/studio/login`` + ``/studio/callback``
           resources.
-        * ``GET /studio/login`` — Cognito-authorized,
+        * ``GET /studio/login`` — Cognito-authorized with a required
+          ``STUDIO_LOGIN_AUTHORIZATION_SCOPE``, so only an access token is
+          accepted,
           ``LambdaIntegration(presigned_url_lambda, proxy=True,
           timeout=Duration.seconds(29))``.
         * ``GET /studio/callback`` — unauthenticated stub MOCK
@@ -1461,7 +1464,7 @@ class GCOApiGatewayGlobalStack(Stack):
         # public one for ``CognitoUserPoolsAuthorizer``).
 
         # Request validator — validates query/path parameters are
-        # present before the Lambda is invoked (the Cognito ID token
+        # present before the Lambda is invoked (the Cognito access token
         # itself is validated by the authorizer, not this validator).
         studio_request_validator = apigateway.RequestValidator(
             self,
@@ -1490,15 +1493,24 @@ class GCOApiGatewayGlobalStack(Stack):
             login_integration,
             authorization_type=apigateway.AuthorizationType.COGNITO,
             authorizer=authorizer,
+            # A scope makes the authorizer read the header as an access token,
+            # so an ID token (which has no scope claim) is refused with a 401.
+            # API Gateway's guidance for JWT authorization is to require
+            # scopes for this reason: nothing else tells the two token types
+            # apart. See STUDIO_LOGIN_AUTHORIZATION_SCOPE for why the scope is
+            # Cognito's reserved one.
+            authorization_scopes=[STUDIO_LOGIN_AUTHORIZATION_SCOPE],
             request_validator=studio_request_validator,
             # Every status the presigned-URL Lambda returns (202 while the
-            # caller's Studio profile is provisioning, 409 for a profile it
-            # cannot recover), plus the request validator's 400.
+            # caller's Studio profile is provisioning, 403 for a profile that
+            # belongs to another Cognito user, 409 for a profile it cannot
+            # recover), plus the request validator's 400.
             method_responses=[
                 apigateway.MethodResponse(status_code="200"),
                 apigateway.MethodResponse(status_code="202"),
                 apigateway.MethodResponse(status_code="400"),
                 apigateway.MethodResponse(status_code="401"),
+                apigateway.MethodResponse(status_code="403"),
                 apigateway.MethodResponse(status_code="404"),
                 apigateway.MethodResponse(status_code="409"),
                 apigateway.MethodResponse(status_code="500"),

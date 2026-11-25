@@ -1462,6 +1462,212 @@ class TestStackManagerOperations:
             assert result is True
 
 
+class TestCdkCliMismatchHint:
+    """A CDK CLI older than the CDK library fails every command that synthesizes.
+
+    The CLI's own message ends at "Please upgrade the CLI to the latest
+    version"; the hint names the CLI gco ran, the version the library needs,
+    and how to get the one package-lock.json pins.
+    """
+
+    _MISMATCH = (
+        "This CDK CLI is not compatible with the CDK library used by your application. "
+        "Please upgrade the CLI to the latest version.\n(Cloud assembly schema version "
+        "mismatch: Maximum schema version supported is 54.x.x, but found 55.0.0. You need "
+        "at least CLI version 2.1147.0 to read this manifest.)\n"
+    )
+
+    def _run(self, command, *, process, cdk_path="/usr/local/bin/cdk", capture_output=True):
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        manager._cdk_path = cdk_path
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build"),
+            patch("cli.stacks.subprocess.Popen", return_value=process),
+        ):
+            result = manager._run_cdk(command, capture_output=capture_output)
+        return manager, result
+
+    def test_a_captured_schema_mismatch_names_the_cli_and_the_pinned_one(self):
+        process = _FakePopenProcess(returncode=1, stdout="", stderr=self._MISMATCH)
+        with (
+            patch("cli.stacks.StackManager._cdk_cli_version", return_value="2.1130.0") as version,
+            patch("cli.stacks._cdk_library_minimum_cli_version", return_value="2.1147.0"),
+        ):
+            _manager, result = self._run(["list"], process=process)
+
+        assert result.returncode == 1
+        assert result.stderr.startswith(self._MISMATCH.rstrip())
+        assert (
+            "\n\nLikely cause: the CDK CLI is older than the CDK library app.py synthesizes "
+            "with: gco ran /usr/local/bin/cdk (2.1130.0), and the CDK library needs CLI "
+            "2.1147.0 or later."
+        ) in result.stderr
+        assert "Run 'npm ci --ignore-scripts --no-audit --no-fund' at the project root" in (
+            result.stderr
+        )
+        # A CLI from PATH: the locked one would win once installed.
+        assert "'npm install --global aws-cdk@2.1147.0' upgrades the one on PATH" in (result.stderr)
+        assert "./scripts/setup-dev-alias.sh" in result.stderr
+        assert version.call_args.args[0] == "/usr/local/bin/cdk"
+        assert version.call_args.args[1]["PYTHONPATH"]
+
+    def test_a_captured_mismatch_is_explained_without_versions(self):
+        process = _FakePopenProcess(returncode=1, stdout=self._MISMATCH, stderr="")
+        with (
+            patch("cli.stacks.StackManager._cdk_cli_version", return_value=None),
+            patch("cli.stacks._cdk_library_minimum_cli_version", return_value=None),
+        ):
+            _manager, result = self._run(["synth"], process=process)
+
+        assert "gco ran /usr/local/bin/cdk. Run 'npm ci" in result.stderr
+        assert "aws-cdk@latest" in result.stderr
+
+    def test_another_captured_failure_is_left_alone(self):
+        process = _FakePopenProcess(returncode=1, stdout="", stderr="ImportError: no module")
+        with patch("cli.stacks.StackManager._cdk_cli_version") as version:
+            _manager, result = self._run(["list"], process=process)
+
+        assert result.stderr == "ImportError: no module"
+        version.assert_not_called()
+
+    def test_a_streamed_failure_from_an_older_locked_cli_prints_the_hint(self, capsys):
+        from cli.stacks import StackManager
+
+        local_cli = str(StackManager(MagicMock()).project_root / "node_modules" / ".bin" / "cdk")
+        with (
+            patch("cli.stacks.StackManager._cdk_cli_version", return_value="2.1130.0"),
+            patch("cli.stacks._cdk_library_minimum_cli_version", return_value="2.1147.0"),
+        ):
+            _manager, result = self._run(
+                ["deploy", "gco-us-east-1"],
+                process=_FakePopenProcess(returncode=1),
+                cdk_path=local_cli,
+                capture_output=False,
+            )
+
+        out = capsys.readouterr().out
+        assert result.returncode == 1
+        assert "  Likely cause: the CDK CLI is older than the CDK library app.py " in out
+        assert f"gco ran {local_cli} (2.1130.0)" in out
+        assert "npm install --global" not in out
+
+    @pytest.mark.parametrize(
+        ("cli_version", "minimum"),
+        [
+            ("2.1147.0", "2.1147.0"),
+            ("2.1149.0", "2.1147.0"),
+            ("2.1130.0", None),
+            ("2.1130.0", "unparseable"),
+        ],
+    )
+    def test_a_streamed_failure_without_an_older_cli_prints_nothing(
+        self, capsys, cli_version, minimum
+    ):
+        with (
+            patch("cli.stacks.StackManager._cdk_cli_version", return_value=cli_version),
+            patch("cli.stacks._cdk_library_minimum_cli_version", return_value=minimum),
+        ):
+            self._run(
+                ["destroy", "gco-us-east-1"],
+                process=_FakePopenProcess(returncode=1),
+                capture_output=False,
+            )
+
+        assert "Likely cause" not in capsys.readouterr().out
+
+    def test_a_streamed_failure_whose_cli_version_is_unknown_skips_the_library(self, capsys):
+        with (
+            patch("cli.stacks.StackManager._cdk_cli_version", return_value=None),
+            patch("cli.stacks._cdk_library_minimum_cli_version") as minimum,
+        ):
+            self._run(
+                ["deploy", "gco-us-east-1"],
+                process=_FakePopenProcess(returncode=1),
+                capture_output=False,
+            )
+
+        minimum.assert_not_called()
+        assert "Likely cause" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("command", "returncode"), [(["deploy", "gco-us-east-1"], 0), (["bootstrap"], 1)]
+    )
+    def test_a_success_or_a_command_that_does_not_synthesize_is_not_checked(
+        self, command, returncode
+    ):
+        with patch("cli.stacks.StackManager._cdk_cli_mismatch_hint") as hint:
+            self._run(command, process=_FakePopenProcess(returncode=returncode, stderr=""))
+
+        hint.assert_not_called()
+
+    # -- the version readers --------------------------------------------
+
+    def test_reads_the_cli_version_from_cdk_version(self):
+        from cli.stacks import StackManager
+
+        completed = subprocess.CompletedProcess([], 0, stdout="2.1130.0 (build a7a40e0)\n")
+        with patch("cli.stacks.subprocess.run", return_value=completed) as run:
+            assert StackManager._cdk_cli_version("/bin/cdk", {"PATH": "/bin"}) == "2.1130.0"
+
+        assert run.call_args.args[0] == ["/bin/cdk", "--version"]
+        assert run.call_args.kwargs == {
+            "capture_output": True,
+            "text": True,
+            "env": {"PATH": "/bin"},
+            "timeout": 60,
+            "check": False,
+        }
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            subprocess.CompletedProcess([], 1, stdout="2.1130.0 (build a7a40e0)\n"),
+            subprocess.CompletedProcess([], 0, stdout=""),
+            subprocess.CompletedProcess([], 0, stdout="cdk version unknown\n"),
+            OSError("exec format error"),
+            subprocess.TimeoutExpired(["cdk"], 60),
+        ],
+    )
+    def test_an_unreadable_cli_version_is_none(self, outcome):
+        from cli.stacks import StackManager
+
+        kwargs = {"side_effect": outcome} if isinstance(outcome, Exception) else {}
+        with patch("cli.stacks.subprocess.run", return_value=outcome, **kwargs):
+            assert StackManager._cdk_cli_version("/bin/cdk", {}) is None
+
+    def test_reads_the_minimum_cli_version_from_the_library(self):
+        from aws_cdk.cloud_assembly_schema import Manifest
+
+        from cli.stacks import _cdk_library_minimum_cli_version
+
+        with patch.object(Manifest, "cli_version", return_value="2.1147.0"):
+            assert _cdk_library_minimum_cli_version() == "2.1147.0"
+        with patch.object(Manifest, "cli_version", return_value=None):
+            assert _cdk_library_minimum_cli_version() is None
+        with patch.object(Manifest, "cli_version", side_effect=RuntimeError("jsii")):
+            assert _cdk_library_minimum_cli_version() is None
+        with patch.dict(sys.modules, {"aws_cdk.cloud_assembly_schema": None}):
+            assert _cdk_library_minimum_cli_version() is None
+
+    @pytest.mark.parametrize(
+        ("version", "key"),
+        [
+            ("2.1147.0", (2, 1147, 0)),
+            ("2.1147", None),
+            ("v2.1147.0", None),
+            ("2.x.0", None),
+            ("", None),
+        ],
+    )
+    def test_version_keys(self, version, key):
+        from cli.stacks import _cdk_version_key
+
+        assert _cdk_version_key(version) == key
+
+
 class TestGetStackManager:
     """Tests for get_stack_manager factory function."""
 

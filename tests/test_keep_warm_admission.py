@@ -588,7 +588,11 @@ class TestMcpTools:
     def test_keep_warm_reaches_the_cli(
         self, tool: str, kwargs: dict[str, Any], argv: list[str]
     ) -> None:
-        from gco_mcp.tools import jobs as tools
+        # Through the gco_mcp sys.path entry, as run_mcp imports it: the package
+        # path ``gco_mcp.tools.jobs`` would load a second copy of the module whose
+        # ``@mcp.tool`` decorators replace the server's registrations, failing
+        # a later ``test_tools_are_importable`` on the same worker.
+        from tools import jobs as tools
 
         function = getattr(tools, tool)
         function = getattr(function, "fn", function)

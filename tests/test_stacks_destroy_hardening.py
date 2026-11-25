@@ -1235,6 +1235,156 @@ class TestRegeneratedLogGroupCleanup:
         assert "Deleted" not in capsys.readouterr().out
 
 
+class TestRemovedFunctionLogGroups:
+    """The log groups of the functions an in-place update removed from a stack.
+
+    A keep-control-plane teardown updates the monitoring stack so it stops
+    referencing the regional stacks, which removes its cross-region export
+    reader. CloudFormation deleted the reader's Lambda function, but a
+    ``gco upgrade`` left the function's ``/aws/lambda/<function>`` group behind.
+    """
+
+    _STACK_ID = "arn:aws:cloudformation:us-east-2:111111111111:stack/gco-monitoring/x"
+    _READER = "gco-monitoring-CustomCrossRegionExportReaderCustom-abc123"
+    _AUTO_DELETE = "gco-monitoring-CustomS3AutoDeleteObjectsCustomReso-def456"
+
+    def _manager(self):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        return StackManager(config)
+
+    @staticmethod
+    def _cloudformation(*pages, error=None):
+        cloudformation = MagicMock()
+        paginator = cloudformation.get_paginator.return_value
+        if error is not None:
+            paginator.paginate.side_effect = error
+        else:
+            paginator.paginate.return_value = [
+                {"StackResourceSummaries": list(page)} for page in pages
+            ]
+        return cloudformation
+
+    @staticmethod
+    def _resource(physical_id, resource_type="AWS::Lambda::Function"):
+        return {"ResourceType": resource_type, "PhysicalResourceId": physical_id}
+
+    def _before(self):
+        return {
+            "region": "us-east-2",
+            "stack_id": self._STACK_ID,
+            "functions": [self._READER, self._AUTO_DELETE],
+        }
+
+    # -- listing -------------------------------------------------------
+
+    def test_lists_the_function_names_of_a_live_stack_across_pages(self):
+        """Other resource types and a blank physical ID are not functions."""
+        manager = self._manager()
+        cloudformation = self._cloudformation(
+            [self._resource(self._READER), self._resource("gco-cost-reports", "AWS::S3::Bucket")],
+            [self._resource(self._AUTO_DELETE), self._resource("")],
+        )
+        target = ("us-east-2", cloudformation, {"StackId": self._STACK_ID})
+
+        with patch.object(manager, "_describe_stack_target", return_value=target):
+            functions = manager._collect_stack_functions("gco-monitoring")
+
+        assert functions == {
+            "region": "us-east-2",
+            "stack_id": self._STACK_ID,
+            "functions": [self._READER, self._AUTO_DELETE],
+        }
+        cloudformation.get_paginator.assert_called_once_with("list_stack_resources")
+        cloudformation.get_paginator.return_value.paginate.assert_called_once_with(
+            StackName=self._STACK_ID
+        )
+
+    def test_an_absent_stack_has_no_function_list(self):
+        manager = self._manager()
+        with patch.object(manager, "_describe_stack_target", return_value=None):
+            assert manager._collect_stack_functions("gco-monitoring") is None
+
+    def test_an_unreadable_stack_is_skipped_with_a_warning(self, caplog):
+        manager = self._manager()
+        with patch.object(
+            manager, "_describe_stack_target", side_effect=RuntimeError("Throttling")
+        ):
+            assert manager._collect_stack_functions("gco-monitoring") is None
+        assert "Could not list the Lambda functions of gco-monitoring: Throttling" in caplog.text
+
+    # -- comparison ----------------------------------------------------
+
+    def test_names_the_log_groups_of_the_functions_the_update_removed(self):
+        manager = self._manager()
+        cloudformation = self._cloudformation([self._resource(self._AUTO_DELETE)])
+
+        with patch("boto3.client", return_value=cloudformation) as client:
+            removed = manager._removed_function_log_groups("gco-monitoring", self._before())
+
+        # The stack is read again by its ID, in its own Region.
+        client.assert_called_once_with("cloudformation", region_name="us-east-2")
+        cloudformation.get_paginator.return_value.paginate.assert_called_once_with(
+            StackName=self._STACK_ID
+        )
+        assert removed == {
+            "gco-monitoring": {
+                "region": "us-east-2",
+                "log_groups": [f"/aws/lambda/{self._READER}"],
+            }
+        }
+
+    def test_an_update_that_kept_every_function_names_nothing(self):
+        manager = self._manager()
+        cloudformation = self._cloudformation(
+            [self._resource(self._READER), self._resource(self._AUTO_DELETE)]
+        )
+
+        with patch("boto3.client", return_value=cloudformation):
+            assert manager._removed_function_log_groups("gco-monitoring", self._before()) == {}
+
+    def test_a_stack_that_cannot_be_read_again_names_nothing(self, caplog):
+        manager = self._manager()
+        cloudformation = self._cloudformation(error=RuntimeError("ExpiredToken"))
+
+        with patch("boto3.client", return_value=cloudformation):
+            assert manager._removed_function_log_groups("gco-monitoring", self._before()) == {}
+        assert "Could not list the Lambda functions of gco-monitoring: ExpiredToken" in caplog.text
+
+    def test_the_teardown_deletes_the_reader_group_by_its_exact_name(self, capsys):
+        """The three steps chained the way ``destroy_orchestrated`` chains them."""
+        manager = self._manager()
+        before = self._cloudformation(
+            [self._resource(self._READER), self._resource(self._AUTO_DELETE)]
+        )
+        after = self._cloudformation([self._resource(self._AUTO_DELETE)])
+        logs = MagicMock()
+        clients = {("cloudformation", "us-east-2"): after, ("logs", "us-east-2"): logs}
+
+        with patch.object(
+            manager,
+            "_describe_stack_target",
+            return_value=("us-east-2", before, {"StackId": self._STACK_ID}),
+        ):
+            functions = manager._collect_stack_functions("gco-monitoring")
+        assert functions is not None
+        with patch(
+            "boto3.client", side_effect=lambda service, region_name: clients[(service, region_name)]
+        ):
+            removed = manager._removed_function_log_groups("gco-monitoring", functions)
+            outcome = manager._cleanup_implicit_log_groups(removed, removed)
+
+        logs.delete_log_group.assert_called_once_with(logGroupName=f"/aws/lambda/{self._READER}")
+        assert outcome == {
+            "deleted": [f"us-east-2:/aws/lambda/{self._READER}"],
+            "missing": [],
+            "errors": [],
+        }
+        assert "Deleted 1 implicit CloudWatch log group(s)" in capsys.readouterr().out
+
+
 class TestBastionIamCleanup:
     """destroy-all retires the ephemeral-bastion IAM role + profile.
 
@@ -2011,7 +2161,26 @@ class TestKeepControlPlaneTeardown:
         "gco-monitoring",
     ]
 
-    def _run(self, *, detach_result: bool = True, destroy_result: bool = True):
+    # The monitoring stack's functions before the detach, and the log group of
+    # the export reader the detach removed.
+    _READER = "gco-monitoring-CustomCrossRegionExportReaderCustom-abc123"
+    _FUNCTIONS = {
+        "region": "us-east-2",
+        "stack_id": "arn:aws:cloudformation:us-east-2:111111111111:stack/gco-monitoring/x",
+        "functions": [_READER, "gco-monitoring-CustomS3AutoDeleteObjectsCustomReso-def456"],
+    }
+    _REMOVED = {"gco-monitoring": {"region": "us-east-2", "log_groups": [f"/aws/lambda/{_READER}"]}}
+    _SWEPT = {"deleted": [f"us-east-2:/aws/lambda/{_READER}"], "missing": [], "errors": []}
+
+    def _run(
+        self,
+        *,
+        detach_result: bool = True,
+        destroy_result: bool | Exception = True,
+        functions: dict | None = None,
+        removed: dict | None = None,
+        strict: bool = False,
+    ):
         from contextlib import ExitStack
 
         from cli.stacks import StackManager
@@ -2021,18 +2190,44 @@ class TestKeepControlPlaneTeardown:
         config.global_region = "us-east-2"
         cleanups: list[tuple[str, dict]] = []
         destroyed: list[str] = []
+        events: list[str] = []
 
         def fake_destroy(stack_name, **_kwargs):
             destroyed.append(stack_name)
+            events.append(f"destroy {stack_name}")
+            if isinstance(destroy_result, Exception):
+                raise destroy_result
             return destroy_result
 
+        def fake_detach():
+            events.append("detach")
+            return detach_result
+
+        def fake_list_functions(stack_name):
+            events.append(f"list functions of {stack_name}")
+            return functions
+
+        def fake_compare(stack_name, _before):
+            events.append(f"compare functions of {stack_name}")
+            return removed or {}
+
+        def fake_sweep(_collected, _stacks):
+            events.append("delete removed-function log groups")
+            return dict(self._SWEPT)
+
+        strict_kwargs = {}
+        if strict:
+            strict_kwargs = {
+                "expected_stack_ids": {name: f"arn:{name}" for name in self._ALL_STACKS},
+                "authorize_stack": MagicMock(),
+            }
         with ExitStack() as stack:
             stack.enter_context(
                 patch.object(StackManager, "list_stacks", return_value=list(self._ALL_STACKS))
             )
             detach = stack.enter_context(
                 patch.object(
-                    StackManager, "detach_monitoring_from_regions", return_value=detach_result
+                    StackManager, "detach_monitoring_from_regions", side_effect=fake_detach
                 )
             )
             bastions = stack.enter_context(
@@ -2043,6 +2238,9 @@ class TestKeepControlPlaneTeardown:
             )
             bastion_iam = stack.enter_context(
                 patch.object(StackManager, "_cleanup_bastion_iam", return_value={"errors": []})
+            )
+            stack.enter_context(
+                patch.object(StackManager, "_resolve_strict_teardown_resources", return_value={})
             )
             stack.enter_context(
                 patch.object(StackManager, "_start_eks_sg_watchdog", return_value=MagicMock())
@@ -2061,6 +2259,17 @@ class TestKeepControlPlaneTeardown:
             collect = stack.enter_context(
                 patch.object(StackManager, "_collect_implicit_log_groups", return_value={})
             )
+            list_functions = stack.enter_context(
+                patch.object(
+                    StackManager, "_collect_stack_functions", side_effect=fake_list_functions
+                )
+            )
+            compare = stack.enter_context(
+                patch.object(StackManager, "_removed_function_log_groups", side_effect=fake_compare)
+            )
+            sweep = stack.enter_context(
+                patch.object(StackManager, "_cleanup_implicit_log_groups", side_effect=fake_sweep)
+            )
             dial = stack.enter_context(
                 patch.object(
                     StackManager,
@@ -2075,19 +2284,27 @@ class TestKeepControlPlaneTeardown:
                     return_value={"deleted": [], "surviving": [], "errors": []},
                 )
             )
-            result = StackManager(config).destroy_orchestrated(
-                force=True,
-                keep_control_plane=True,
-                on_cleanup_complete=lambda name, details: cleanups.append((name, details)),
-            )
+            try:
+                result = StackManager(config).destroy_orchestrated(
+                    force=True,
+                    keep_control_plane=True,
+                    on_cleanup_complete=lambda name, details: cleanups.append((name, details)),
+                    **strict_kwargs,
+                )
+            except Exception as exc:
+                result = exc
         mocks = {
             "detach": detach,
             "bastions": bastions,
             "vault": vault,
             "bastion_iam": bastion_iam,
             "collect": collect,
+            "list_functions": list_functions,
+            "compare": compare,
+            "sweep": sweep,
             "dial": dial,
             "volumes": volumes,
+            "events": events,
         }
         return result, destroyed, cleanups, mocks
 
@@ -2132,6 +2349,86 @@ class TestKeepControlPlaneTeardown:
         assert "gco-regional-api-us-east-1" in failed
         assert destroyed == ["gco-regional-api-us-east-1"]
         mocks["dial"].assert_not_called()
+
+    def test_the_log_groups_of_functions_the_detach_removed_go_after_the_regional_stacks(self):
+        """The detach deletes the export reader's function, never its log group."""
+        (ok, _successful, failed), _destroyed, cleanups, mocks = self._run(
+            functions=self._FUNCTIONS, removed=self._REMOVED
+        )
+
+        assert ok is True and failed == []
+        assert mocks["events"] == [
+            "list functions of gco-monitoring",
+            "detach",
+            "compare functions of gco-monitoring",
+            "destroy gco-regional-api-us-east-1",
+            "destroy gco-us-east-1",
+            "delete removed-function log groups",
+        ]
+        mocks["compare"].assert_called_once_with("gco-monitoring", self._FUNCTIONS)
+        mocks["sweep"].assert_called_once_with(self._REMOVED, self._REMOVED)
+        assert ("removed-function-log-groups", self._SWEPT) in cleanups
+
+    def test_a_failed_regional_delete_still_deletes_them(self):
+        (ok, _successful, failed), _destroyed, cleanups, mocks = self._run(
+            destroy_result=False, functions=self._FUNCTIONS, removed=self._REMOVED
+        )
+
+        assert ok is False and failed == ["gco-regional-api-us-east-1"]
+        mocks["sweep"].assert_called_once_with(self._REMOVED, self._REMOVED)
+        assert ("removed-function-log-groups", self._SWEPT) in cleanups
+
+    def test_an_error_that_ends_the_teardown_still_deletes_them(self):
+        result, _destroyed, cleanups, mocks = self._run(
+            destroy_result=RuntimeError("ExpiredToken"),
+            functions=self._FUNCTIONS,
+            removed=self._REMOVED,
+        )
+
+        assert isinstance(result, RuntimeError) and str(result) == "ExpiredToken"
+        mocks["sweep"].assert_called_once_with(self._REMOVED, self._REMOVED)
+        assert ("removed-function-log-groups", self._SWEPT) in cleanups
+
+    def test_a_failed_detach_deletes_no_log_group(self):
+        (ok, _successful, _failed), _destroyed, cleanups, mocks = self._run(
+            detach_result=False, functions=self._FUNCTIONS, removed=self._REMOVED
+        )
+
+        assert ok is False
+        mocks["compare"].assert_not_called()
+        mocks["sweep"].assert_not_called()
+        assert cleanups == []
+
+    def test_an_update_that_removed_no_function_records_no_sweep(self):
+        (ok, _successful, _failed), _destroyed, cleanups, mocks = self._run(
+            functions=self._FUNCTIONS, removed={}
+        )
+
+        assert ok is True
+        mocks["compare"].assert_called_once_with("gco-monitoring", self._FUNCTIONS)
+        mocks["sweep"].assert_not_called()
+        assert "removed-function-log-groups" not in {name for name, _ in cleanups}
+
+    def test_an_absent_or_unreadable_monitoring_stack_is_not_compared(self):
+        (ok, _successful, _failed), _destroyed, _cleanups, mocks = self._run(functions=None)
+
+        assert ok is True
+        mocks["list_functions"].assert_called_once_with("gco-monitoring")
+        mocks["compare"].assert_not_called()
+        mocks["sweep"].assert_not_called()
+
+    def test_strict_teardowns_list_no_monitoring_functions(self):
+        """The live-validation harness owns log-group deletion in strict teardowns."""
+        (ok, _successful, _failed), _destroyed, cleanups, mocks = self._run(
+            strict=True, functions=self._FUNCTIONS, removed=self._REMOVED
+        )
+
+        assert ok is True
+        mocks["detach"].assert_called_once_with()
+        mocks["list_functions"].assert_not_called()
+        mocks["compare"].assert_not_called()
+        mocks["sweep"].assert_not_called()
+        assert "removed-function-log-groups" not in {name for name, _ in cleanups}
 
 
 class TestGlobalStackBackupVaultRace:

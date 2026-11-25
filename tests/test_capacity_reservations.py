@@ -214,8 +214,10 @@ class TestListCapacityBlockOfferings:
         )
         checker._session.client = MagicMock(return_value=mock_ec2)
 
-        result = checker.list_capacity_block_offerings("us-east-1", "p5.48xlarge")
-        assert result == []
+        from cli.capacity import CapacityBlockLookupError
+
+        with pytest.raises(CapacityBlockLookupError, match=r"failed \(InternalError\): oops"):
+            checker.list_capacity_block_offerings("us-east-1", "p5.48xlarge")
 
 
 class TestListAllReservations:
@@ -1393,3 +1395,77 @@ def test_reservation_tables_name_the_regions_that_refused(method, arguments, rep
     assert result.exit_code == 0, result.output
     assert "EC2 refused the reservation lookup in 1 Region(s)" in result.output
     assert "us-west-2: UnauthorizedOperation: not authorized" in result.output
+
+
+def _blocks_by_region(outcomes: dict[str, object]):
+    """A list_capacity_block_offerings stand-in: a Region's offerings, or its error."""
+
+    def listing(region, **_kwargs):
+        result = outcomes[region]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    return MagicMock(side_effect=listing)
+
+
+def test_reservation_check_keeps_other_regions_when_one_block_search_fails():
+    """One Region's refused or failed block search used to discard every Region."""
+    from cli.capacity import CapacityBlockLookupError
+
+    checker = _checker_with_reservations({"us-east-1": [], "eu-west-1": []})
+    offering = {
+        "region": "us-east-1",
+        "availability_zone": "us-east-1a",
+        "start_date": "2026-12-01T11:30:00+00:00",
+        "upfront_fee": "100.00",
+        "upfront_fee_usd": 100.0,
+        "duration_hours": 24,
+        "instance_count": 1,
+    }
+    checker.list_capacity_block_offerings = _blocks_by_region(
+        {
+            "us-east-1": [offering],
+            "eu-west-1": CapacityBlockLookupError(
+                "eu-west-1", 24, "UnauthorizedOperation", "not authorized"
+            ),
+        }
+    )
+    report = checker.check_reservation_availability(
+        "p5.48xlarge", regions=["us-east-1", "eu-west-1"]
+    )
+    assert report["capacity_blocks"]["offerings"] == [offering]
+    assert report["capacity_blocks"]["errors"] == [
+        {
+            "region": "eu-west-1",
+            "duration_hours": 24,
+            "error_code": "UnauthorizedOperation",
+            "error": "not authorized",
+        }
+    ]
+    assert report["recommendation"].endswith(
+        "The Capacity Block search failed in eu-west-1, so offerings there are unknown."
+    )
+
+
+def test_reservation_check_fails_when_the_block_search_ran_nowhere():
+    from cli.capacity import CapacityBlockRequestError, CapacityCheckError
+
+    checker = _checker_with_reservations({"us-east-1": [], "us-west-2": []})
+    checker.list_capacity_block_offerings = _blocks_by_region(
+        {
+            region: CapacityBlockRequestError(
+                region, 24, "InvalidParameterValue", "The instance count is not valid."
+            )
+            for region in ("us-east-1", "us-west-2")
+        }
+    )
+    with pytest.raises(CapacityCheckError) as excinfo:
+        checker.check_reservation_availability(
+            "p5.48xlarge", min_count=999, regions=["us-east-1", "us-west-2"]
+        )
+    assert str(excinfo.value) == (
+        "The Capacity Block search searched no Region ("
+        "us-east-1: InvalidParameterValue: The instance count is not valid.; "
+        "us-west-2: InvalidParameterValue: The instance count is not valid.)"
+    )

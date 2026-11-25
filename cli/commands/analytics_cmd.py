@@ -5,10 +5,13 @@ Provides the ``gco analytics`` sub-commands:
 * ``enable`` / ``disable`` / ``status`` — flip the
   ``analytics_environment.enabled`` toggle in ``cdk.json``.
 * ``users add`` / ``users list`` / ``users remove`` — manage Cognito
-  users against the auto-discovered pool id from ``gco-analytics``.
+  users against the auto-discovered pool id from ``gco-analytics``;
+  ``remove`` also deletes the user's SageMaker Studio profile.
 * ``studio login`` — sign in to Cognito (``AdminInitiateAuth`` with
-  ``ADMIN_USER_PASSWORD_AUTH``) and fetch a SageMaker Studio presigned
-  URL from ``/studio/login`` on the existing ``gco-api-gateway``.
+  ``ADMIN_USER_PASSWORD_AUTH``, answering ``NEW_PASSWORD_REQUIRED`` for
+  an account that still has a temporary password) and fetch a SageMaker
+  Studio presigned URL from ``/studio/login`` on the existing
+  ``gco-api-gateway``.
 * ``doctor`` — pre-flight checks before ``gco stacks deploy
   gco-analytics``.
 
@@ -47,6 +50,32 @@ _STUDIO_USERNAME_RULE = (
     "only letters, digits and hyphens there, starting and ending with a letter "
     "or digit, 63 characters at most"
 )
+
+#: What ``studio login`` prints when API Gateway itself refuses the request.
+_STUDIO_LOGIN_UNAUTHORIZED_HINT = (
+    "API Gateway refused the Cognito access token. This CLI sends an access token, "
+    "which /studio/login accepts from this release on; an API deployed with an "
+    "earlier release accepts only an ID token. Redeploy it with "
+    "`gco stacks deploy {project}-api-gateway`, then sign in again."
+)
+
+#: What ``studio login`` prints when Cognito wants a new password and cannot ask for one.
+_FIRST_SIGN_IN_HINT = (
+    "This account still has its temporary password, and Cognito wants a new one "
+    "before it signs the user in. Choose it with --new-password (or "
+    "$GCO_STUDIO_NEW_PASSWORD), run the command on a terminal to be prompted, or ask "
+    "an administrator to set one with `gco analytics users set-password`."
+)
+
+
+def _stdin_is_interactive() -> bool:
+    """Whether a person on a terminal can answer a prompt."""
+    return sys.stdin is not None and sys.stdin.isatty()
+
+
+def _error_code(exc: Any) -> str:
+    return str(exc.response.get("Error", {}).get("Code", "Unknown"))
+
 
 #: What ``studio login`` prints for the presigned-URL Lambda's error tokens.
 _STUDIO_LOGIN_ERROR_HINTS = {
@@ -261,8 +290,11 @@ def users_add(
 ) -> None:
     """Create a Cognito user and print the temporary password exactly once.
 
-    When ``--password`` or ``--generate-password`` is passed, the user is
-    created and then has a permanent password set via
+    The CLI generates the temporary password, and Cognito emails it to
+    --email in its invitation unless --no-email is given; the user chooses a
+    new password at the first ``gco analytics studio login``. When
+    ``--password`` or ``--generate-password`` is passed, the user is
+    created without an invitation and then has a permanent password set via
     ``admin_set_user_password`` — this skips the ``NEW_PASSWORD_REQUIRED``
     challenge on first login, so the resulting credentials work directly
     with ``gco analytics studio login``.
@@ -309,13 +341,21 @@ def users_add(
         )
         sys.exit(1)
 
+    permanent = bool(password or generate_password)
+    # Cognito never returns the temporary password it generates, so the CLI
+    # makes it, to print it; a permanent password replaces it at once.
+    temporary_password = generate_strong_password()
+    invitation_emailed = bool(email) and not no_email and not permanent
     try:
-        _, temporary_password = admin_create_user(
+        admin_create_user(
             pool_id=pool_id,
             region=region,
             username=username,
             email=email,
-            suppress_email=no_email,
+            # The invitation carries the temporary password, which a
+            # permanent one is about to replace.
+            suppress_email=no_email or permanent,
+            temporary_password=None if permanent else temporary_password,
         )
     except ClientError as exc:
         error_code = exc.response.get("Error", {}).get("Code", "Unknown")
@@ -328,7 +368,7 @@ def users_add(
     # Password path — explicit or generated — takes precedence over the
     # temporary-password path so the resulting credentials don't get
     # blocked by NEW_PASSWORD_REQUIRED on first sign-in.
-    if password or generate_password:
+    if permanent:
         final_password = password or generate_strong_password()
         try:
             admin_set_user_password(
@@ -363,6 +403,7 @@ def users_add(
                 "password_generated": generate_password,
                 "password_source": "generated" if generate_password else "provided",
                 "password_permanent": True,  # nosec B105  # boolean flag, not a credential
+                "invitation_emailed": False,
             }
             if generate_password:
                 result["password"] = final_password
@@ -370,15 +411,12 @@ def users_add(
         return
 
     if config.output_format == "table":
-        if temporary_password:
-            formatter.print_info(f"Temporary password (printed exactly once): {temporary_password}")
-        else:
-            formatter.print_info(
-                "Cognito did not return a temporary password. "
-                "If --no-email was passed, set one via "
-                "`aws cognito-idp admin-set-user-password` "
-                "or re-run `gco analytics users add` with --password or --generate-password."
-            )
+        formatter.print_info(f"Temporary password (printed exactly once): {temporary_password}")
+        if invitation_emailed:
+            formatter.print_info(f"Cognito also emailed it to {email} in its invitation.")
+        formatter.print_info(
+            "The user chooses a new password at the first `gco analytics studio login`."
+        )
     else:
         result = {
             "created": True,
@@ -386,13 +424,13 @@ def users_add(
             "email": email,
             "user_pool_id": pool_id,
             "region": region,
-            "password_state": "temporary" if temporary_password else "not_returned",
-            "password_generated": False,  # nosec B105  # boolean flag, not a credential
-            "password_source": "cognito" if temporary_password else "unavailable",
-            "password_permanent": False if temporary_password else None,
+            "password_state": "temporary",  # nosec B105  # state label, not a credential
+            "password_generated": True,  # nosec B105  # boolean flag, not a credential
+            "password_source": "generated",  # nosec B105  # source label, not a credential
+            "password_permanent": False,  # nosec B105  # boolean flag, not a credential
+            "invitation_emailed": invitation_emailed,
+            "password": temporary_password,
         }
-        if temporary_password:
-            result["password"] = temporary_password
         formatter.print(result)
 
 
@@ -425,21 +463,87 @@ def users_list(config: Any, as_json: bool) -> None:
     formatter.print(users)
 
 
+def _studio_removal_lines(username: str, studio: dict[str, Any]) -> list[str]:
+    """What ``users remove`` did to the user's Studio profile, for the table."""
+    if studio["profile"] == "absent":
+        return [f"No Studio profile named {username}"]
+    if studio["profile"] == "owned_by_another_user":
+        return [
+            f"Left the Studio profile {username} in place: its owner tag names another Cognito user"
+        ]
+    lines = [f"Deleted the Studio profile {username}"]
+    if studio["spaces"]:
+        lines.append(f"  spaces: {', '.join(studio['spaces'])}")
+    if studio["apps"]:
+        lines.append(f"  apps: {', '.join(studio['apps'])}")
+    return lines
+
+
 @users_cmd.command("remove")
 @click.option("--username", required=True, help="Cognito username to remove.")
+@click.option(
+    "--keep-studio-profile",
+    is_flag=True,
+    help="Delete only the Cognito user; leave the user's Studio profile, spaces and apps.",
+)
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 @pass_config
-def users_remove(config: Any, username: str, yes: bool) -> None:
-    """Delete a Cognito user from the analytics user pool."""
+def users_remove(config: Any, username: str, keep_studio_profile: bool, yes: bool) -> None:
+    """Delete a Cognito user and the user's SageMaker Studio profile.
+
+    The profile named after the user goes first, with the spaces it owns and
+    their apps, since SageMaker deletes a profile only after them; that can
+    take a few minutes. A profile whose owner tag names another Cognito user
+    (a name that matches this one ignoring case) is left in place. The files
+    under /home/<username> on the Studio EFS stay. When the profile cannot
+    be deleted the Cognito user is kept, so the command can be run again;
+    --keep-studio-profile deletes only the Cognito user.
+    """
     from botocore.exceptions import ClientError
 
-    from ..analytics_user_mgmt import admin_delete_user
+    from ..analytics_user_mgmt import (
+        StudioProfileRemovalError,
+        admin_delete_user,
+        admin_get_user_sub,
+        delete_studio_user_profile,
+        discover_studio_domain_id,
+    )
 
     formatter = get_output_formatter(config)
     pool_id, region = _require_cognito_pool_id(config)
 
     if not yes:
-        confirm(f"Delete Cognito user '{username}'?", abort=True)
+        target = "" if keep_studio_profile else " and their SageMaker Studio profile"
+        confirm(f"Delete Cognito user '{username}'{target}?", abort=True)
+
+    studio: dict[str, Any] | None = None
+    if not keep_studio_profile:
+        try:
+            owner_sub = admin_get_user_sub(pool_id, region, username)
+        except ClientError as exc:
+            formatter.print_error(f"Failed to delete user {username}: {_error_code(exc)}")
+            sys.exit(1)
+        domain_id = discover_studio_domain_id(region, config.project_name)
+        if domain_id is None:
+            formatter.print_error(
+                f"Could not find the Studio domain of {config.project_name}-analytics, so "
+                f"the Cognito user {username} was kept; pass --keep-studio-profile to "
+                "delete only the Cognito user."
+            )
+            sys.exit(1)
+        formatter.print_info(f"Deleting the Studio profile {username} with its spaces and apps...")
+        try:
+            studio = delete_studio_user_profile(region, domain_id, username, owner_sub)
+        except ClientError as exc:
+            formatter.print_error(
+                f"Failed to delete the Studio profile {username}: {_error_code(exc)}. The "
+                "Cognito user was kept; pass --keep-studio-profile to delete only the "
+                "Cognito user."
+            )
+            sys.exit(1)
+        except StudioProfileRemovalError as exc:
+            formatter.print_error(f"{exc}. The Cognito user {username} was kept.")
+            sys.exit(1)
 
     try:
         admin_delete_user(pool_id, region, username)
@@ -448,7 +552,14 @@ def users_remove(config: Any, username: str, yes: bool) -> None:
         formatter.print_error(f"Failed to delete user {username}: {error_code}")
         sys.exit(1)
 
+    if config.output_format != "table":
+        formatter.print(
+            {"username": username, "cognito_user_deleted": True, "studio_profile": studio}
+        )
+        return
     formatter.print_success(f"Deleted Cognito user: {username}")
+    for line in _studio_removal_lines(username, studio) if studio else []:
+        formatter.print_info(line)
 
 
 @users_cmd.command("set-password")
@@ -575,12 +686,84 @@ def studio_cmd(config: Any) -> None:
     """SageMaker Studio helpers (login, etc.)."""
 
 
+def _studio_tokens(
+    formatter: Any,
+    *,
+    pool_id: str,
+    client_id: str,
+    username: str,
+    password: str,
+    new_password: str | None,
+    region: str,
+) -> dict[str, str]:
+    """Sign ``username`` in, answering NEW_PASSWORD_REQUIRED; exit 1 when Cognito refuses."""
+    from botocore.exceptions import ClientError
+
+    from ..analytics_user_mgmt import (
+        NewPasswordRequiredError,
+        authenticate_with_password,
+        complete_new_password_challenge,
+    )
+
+    try:
+        return authenticate_with_password(
+            pool_id=pool_id,
+            client_id=client_id,
+            username=username,
+            password=password,
+            region=region,
+        )
+    except NewPasswordRequiredError as challenge:
+        session = challenge.session
+    except ClientError as exc:
+        formatter.print_error(f"Cognito authentication failed: {_error_code(exc)}")
+        sys.exit(1)
+    except ValueError as exc:
+        formatter.print_error(f"Cognito authentication failed: {exc}")
+        sys.exit(1)
+
+    if new_password is None:
+        if not _stdin_is_interactive():
+            formatter.print_error(_FIRST_SIGN_IN_HINT)
+            sys.exit(1)
+        click.echo("This account still has its temporary password; choose a new one.", err=True)
+        new_password = prompt("New password", hide_input=True, confirmation_prompt=True, err=True)
+    try:
+        return complete_new_password_challenge(
+            pool_id=pool_id,
+            client_id=client_id,
+            username=username,
+            new_password=new_password,
+            session=session,
+            region=region,
+        )
+    except ClientError as exc:
+        # Cognito's message names the unmet password rule; it holds no secret.
+        message = exc.response.get("Error", {}).get("Message")
+        formatter.print_error(
+            f"Cognito refused the new password: {_error_code(exc)}"
+            + (f" ({message})" if message else "")
+        )
+        sys.exit(1)
+    except ValueError as exc:
+        formatter.print_error(f"Cognito authentication failed: {exc}")
+        sys.exit(1)
+
+
 @studio_cmd.command("login")
 @click.option("--username", required=True, help="Cognito username to sign in with.")
 @click.option(
     "--password",
     envvar="GCO_STUDIO_PASSWORD",
     help="Password (also read from $GCO_STUDIO_PASSWORD; prompted otherwise).",
+)
+@click.option(
+    "--new-password",
+    envvar="GCO_STUDIO_NEW_PASSWORD",
+    help=(
+        "New password for an account that still has its temporary one (also read "
+        "from $GCO_STUDIO_NEW_PASSWORD; prompted on a terminal otherwise)."
+    ),
 )
 @click.option("--api-url", help="Override the API Gateway base URL (otherwise auto-discovered).")
 @click.option("--open", "open_browser", is_flag=True, help="Open the URL in the default browser.")
@@ -589,22 +772,24 @@ def studio_login(
     config: Any,
     username: str,
     password: str | None,
+    new_password: str | None,
     api_url: str | None,
     open_browser: bool,
 ) -> None:
     """Sign in to SageMaker Studio through Cognito and print the presigned URL.
 
     The sign-in is cognito-idp:AdminInitiateAuth (ADMIN_USER_PASSWORD_AUTH),
-    so it needs AWS credentials allowed to call it on the pool.
+    so it needs AWS credentials allowed to call it on the pool. An account
+    that still has its temporary password chooses a new one first:
+    --new-password, or a prompt on a terminal, answers Cognito's
+    NEW_PASSWORD_REQUIRED challenge (cognito-idp:AdminRespondToAuthChallenge),
+    and the new password becomes the account's password.
     """
-    from botocore.exceptions import ClientError
-
     from ..analytics_user_mgmt import (
         discover_api_endpoint,
         discover_cognito_client_id,
         discover_cognito_pool_id,
         fetch_studio_url,
-        srp_authenticate,
     )
 
     formatter = get_output_formatter(config)
@@ -629,24 +814,24 @@ def studio_login(
         sys.exit(1)
 
     if password is None:
-        password = prompt("Password", hide_input=True)
+        # stderr, like every other prompt here: stdout carries only the URL.
+        password = prompt("Password", hide_input=True, err=True)
 
-    try:
-        tokens = srp_authenticate(
-            pool_id=pool_id,
-            client_id=client_id,
-            username=username,
-            password=password,
-            region=region,
-        )
-    except ClientError as exc:
-        error_code = exc.response.get("Error", {}).get("Code", "Unknown")
-        formatter.print_error(f"Cognito authentication failed: {error_code}")
-        sys.exit(1)
+    tokens = _studio_tokens(
+        formatter,
+        pool_id=pool_id,
+        client_id=client_id,
+        username=username,
+        password=password,
+        new_password=new_password,
+        region=region,
+    )
 
-    id_token = tokens.get("IdToken")
-    if not id_token:
-        formatter.print_error("Cognito authentication failed: no IdToken returned")
+    # /studio/login requires a scope, so it takes the access token; the ID
+    # token, which has no scope claim, is refused there with a 401.
+    access_token = tokens.get("AccessToken")
+    if not access_token:
+        formatter.print_error("Cognito authentication failed: no AccessToken returned")
         sys.exit(1)
 
     try:
@@ -663,7 +848,7 @@ def studio_login(
         while elapsed < max_wait:
             # Only the URL matters here; the presigned expiry is reported by
             # `analytics studio-url`, not by this open-in-browser path.
-            url, _expires_in, _ = fetch_studio_url(api_base, id_token)
+            url, _expires_in, _ = fetch_studio_url(api_base, access_token)
             if url:
                 break
             # 202 -- profile still provisioning. Progress goes to stderr:
@@ -692,6 +877,11 @@ def studio_login(
         hint = _STUDIO_LOGIN_ERROR_HINTS.get(token or "")
         if hint:
             formatter.print_error(hint.format(username=username))
+        elif exc.code == 401 and token is None:
+            # API Gateway's own refusal, before the Lambda ran: the token was
+            # signed in a moment ago, so the likeliest cause is an API
+            # deployed before /studio/login required an access token.
+            formatter.print_error(_STUDIO_LOGIN_UNAUTHORIZED_HINT.format(project=project_name))
         sys.exit(2)
     except urllib.error.URLError as exc:
         formatter.print_error(f"login failed: network error: {exc.reason!r}")

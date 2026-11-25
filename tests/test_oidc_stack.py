@@ -410,6 +410,33 @@ class TestOIDCIAMPolicy:
             },
         )
 
+    def test_policy_has_elasticache_engine_versions(self):
+        """Policy should allow elasticache:DescribeCacheEngineVersions.
+
+        The monthly scan compares VALKEY_MAJOR_ENGINE_VERSION with the newest
+        Valkey major ElastiCache offers.
+        """
+        template = _synth_stack()
+        template.has_resource_properties(
+            "AWS::IAM::Policy",
+            {
+                "PolicyDocument": {
+                    "Statement": Match.array_with(
+                        [
+                            Match.object_like(
+                                {
+                                    "Action": Match.array_with(
+                                        ["elasticache:DescribeCacheEngineVersions"]
+                                    ),
+                                    "Effect": "Allow",
+                                }
+                            )
+                        ]
+                    )
+                }
+            },
+        )
+
     def test_policy_has_pcs_catalog_reads(self):
         """Policy should allow the PCS AMI-family lookups of the monthly scan.
 

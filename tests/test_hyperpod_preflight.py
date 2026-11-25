@@ -484,8 +484,12 @@ def test_region_without_an_agent_image_fails() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_kubernetes_version_without_a_hyperpod_ami_fails(clients: _Clients) -> None:
+def test_kubernetes_version_without_a_hyperpod_ami_fails(
+    clients: _Clients, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The newest EKS minor has no HyperPod AMI until the service catches up: CreateCluster would fail."""
+    # CreateCluster's ceiling raised past 1.37, so the AMI tree decides.
+    monkeypatch.setattr(pf, "HYPERPOD_CREATE_CLUSTER_NEWEST_K8S", "1.37")
     _expect_happy_path(clients, eks_status=None)
     report = _run(clients, _config(), kubernetes_version="1.37")
     [check] = _by_name(report, "kubernetes-version")
@@ -551,9 +555,10 @@ def test_kubernetes_version_denied_tree_warns(clients: _Clients) -> None:
 
 
 def test_kubernetes_version_judges_the_minor_the_running_cluster_reports(
-    clients: _Clients,
+    clients: _Clients, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A cluster upgraded past the newest HyperPod AMI fails, and says only HyperPod can fix it."""
+    monkeypatch.setattr(pf, "HYPERPOD_CREATE_CLUSTER_NEWEST_K8S", "1.37")
     _expect_happy_path(clients, eks_version="1.37")
     report = _run(clients, _config(), kubernetes_version="1.37")
     [check] = _by_name(report, "kubernetes-version")
@@ -598,14 +603,71 @@ def test_kubernetes_version_one_minor_above_checks_the_upgraded_minor(clients: _
 
 
 def test_kubernetes_version_one_minor_above_without_an_ami_says_keep_cdk_json(
-    clients: _Clients,
+    clients: _Clients, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(pf, "HYPERPOD_CREATE_CLUSTER_NEWEST_K8S", "1.37")
     _expect_happy_path(clients, eks_version="1.36")
     report = _run(clients, _config(), kubernetes_version="1.37")
     [check] = _by_name(report, "kubernetes-version")
     assert check.status == pf.FAIL
     assert check.detail.startswith(f"EKS 1.37 (the deploy upgrades {_EKS_NAME} from 1.36")
     assert "deploy the cluster at a supported minor (cdk.json kubernetes_version" in check.detail
+
+
+def test_create_cluster_ceiling_is_the_newest_minor_a_release_run_created_hyperpod_at() -> None:
+    """1.36: CreateCluster refused 1.37 on 2026-11-23 while the AMI tree already carried it."""
+    assert pf.HYPERPOD_CREATE_CLUSTER_NEWEST_K8S == "1.36"
+    assert pf._above_create_cluster_ceiling("1.37")
+    assert pf._above_create_cluster_ceiling("2.0")
+    assert not pf._above_create_cluster_ceiling("1.36")
+    assert not pf._above_create_cluster_ceiling("1.9")  # numeric, not lexical
+    # A minor that does not parse is the AMI-tree check's to report.
+    assert not pf._above_create_cluster_ceiling("latest")
+
+
+@pytest.mark.parametrize(
+    ("eks_status", "eks_version", "source"),
+    [
+        (None, None, "cdk.json kubernetes_version"),
+        ("ACTIVE", "1.36", f"the deploy upgrades {_EKS_NAME} from 1.36 before HyperPod"),
+    ],
+)
+def test_kubernetes_version_above_the_create_cluster_ceiling_fails_without_the_ami_tree(
+    clients: _Clients, eks_status: str | None, eks_version: str | None, source: str
+) -> None:
+    """The AMI tree listed 1.37 before CreateCluster accepted it: the ceiling decides first."""
+    _expect_happy_path(clients, eks_status=eks_status, eks_version=eks_version)
+    report = _run(clients, _config(), kubernetes_version="1.37", ami_tree=False)
+    assert _by_name(report, "kubernetes-version") == [
+        pf.Check(
+            "kubernetes-version",
+            pf.FAIL,
+            f"EKS 1.37 ({source}): SageMaker HyperPod's CreateCluster accepts EKS minors up to "
+            "1.36 (HYPERPOD_CREATE_CLUSTER_NEWEST_K8S; its node AMI tree can list a newer minor "
+            "first), so CreateCluster would fail; deploy the cluster at 1.36 (cdk.json "
+            "kubernetes_version, or --kubernetes-version on gco release validate) — EKS cannot "
+            "downgrade a running cluster",
+        )
+    ]
+    assert not report.ok
+    assert "ssm" not in clients.requested
+
+
+def test_kubernetes_version_above_the_ceiling_on_a_running_cluster_waits_for_hyperpod(
+    clients: _Clients,
+) -> None:
+    _expect_happy_path(clients, eks_version="1.37")
+    report = _run(clients, _config(), kubernetes_version="1.37", ami_tree=False)
+    [check] = _by_name(report, "kubernetes-version")
+    assert check.status == pf.FAIL
+    assert check.detail.startswith(
+        f"EKS 1.37 ({_EKS_NAME} runs it): SageMaker HyperPod's CreateCluster accepts EKS "
+        "minors up to 1.36"
+    )
+    assert check.detail.endswith(
+        "EKS cannot downgrade a running cluster, so HyperPod can join this one only once "
+        "CreateCluster accepts 1.37"
+    )
 
 
 def test_kubernetes_version_more_than_one_minor_above_fails(clients: _Clients) -> None:

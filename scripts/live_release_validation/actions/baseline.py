@@ -15,6 +15,7 @@ from ..inventory import (
     project_resources_are_absent,
 )
 from ..models import RunContext
+from ..ownership.analytics_resources import _strip_deleted_analytics_resources
 from ..ownership.dynamodb_streams import (
     _strip_expired_table_streams,
 )
@@ -103,6 +104,9 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
         ctx,
         disallowed_inventory,
     )
+    disallowed_inventory, accepted_deleted_analytics_resources = _strip_deleted_analytics_resources(
+        ctx, disallowed_inventory
+    )
     if not project_resources_are_absent(disallowed_inventory):
         raise RuntimeError(
             "Fresh baseline contains project resources not owned by this run: "
@@ -126,5 +130,6 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
         "accepted_deleted_vpc_endpoints": accepted_deleted_vpc_endpoints,
         "accepted_deleted_volumes": accepted_deleted_volumes,
         "accepted_deleted_hyperpod_clusters": accepted_deleted_hyperpod_clusters,
+        "accepted_deleted_analytics_resources": accepted_deleted_analytics_resources,
         "transaction_search": transaction_search,
     }

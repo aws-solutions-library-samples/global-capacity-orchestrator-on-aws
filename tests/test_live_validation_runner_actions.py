@@ -3829,6 +3829,10 @@ class TestActionFinalInventory:
                 "_strip_deleted_hyperpod_clusters",
                 return_value=(inventory, [{"arn": "hyperpod"}]),
             ),
+            patch_live_validation_helper(
+                "_strip_deleted_analytics_resources",
+                return_value=(inventory, [{"arn": "userpool"}]),
+            ),
             patch_live_validation_helper("summarize_project_resources", return_value={"total": 0}),
             patch_live_validation_helper("project_resources_are_absent", return_value=absent),
         ):
@@ -3862,6 +3866,7 @@ class TestActionFinalInventory:
         assert result["accepted_deleted_vpc_endpoints"] == [{"arn": "vpce"}]
         assert result["accepted_deleted_volumes"] == [{"arn": "vol"}]
         assert result["accepted_deleted_hyperpod_clusters"] == [{"arn": "hyperpod"}]
+        assert result["accepted_deleted_analytics_resources"] == [{"arn": "userpool"}]
         assert result["residual_project_resources"] == self._PROJECT_INVENTORY
         assert result["transaction_search"] == self._TRANSACTION_SEARCH
         assert ctx.report.final_inventory is result

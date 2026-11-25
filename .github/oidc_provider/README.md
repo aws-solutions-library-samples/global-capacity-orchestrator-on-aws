@@ -30,7 +30,7 @@ This stack is **standalone** — it does not depend on or affect the main GCO in
 
 1. **IAM OIDC Identity Provider** — trusts `token.actions.githubusercontent.com` (the GitHub OIDC issuer). An account can have only one provider for that issuer, and roles of other repositories may trust it, so the provider this stack creates is retained when the stack is deleted. If the account already has one, deploy with `github_oidc_provider_arn` and the stack creates none (see [Reusing an Existing OIDC Provider](#reusing-an-existing-oidc-provider)).
 2. **IAM Role** — assumable only by GitHub Actions workflows from your repository. The trust policy restricts access to a specific GitHub repository subject prefix and branch; repositories created or transferred after July 15, 2026 use immutable owner and repository IDs in that prefix.
-3. **IAM Policy** — attached to the role. By default grants only the read APIs used by the monthly dependency scan: [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) model/profile discovery, [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) Region and accelerator-catalog discovery, [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) add-on and cluster-version discovery, EMR release labels, RDS engine versions, the [AWS PCS](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) node lifecycle script and AMI catalogs (listing the public `aws-pcs-repo-*` buckets, the public `/aws/service/pcs/ami` SSM tree and Amazon's sample AMIs), and [STS](https://docs.aws.amazon.com/STS/latest/APIReference/) caller identity. You can expand this for your own needs.
+3. **IAM Policy** — attached to the role. By default grants only the read APIs used by the monthly dependency scan: [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) model/profile discovery, [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) Region and accelerator-catalog discovery, [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) add-on and cluster-version discovery, ElastiCache Valkey engine versions, EMR release labels, RDS engine versions, the [AWS PCS](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) node lifecycle script and AMI catalogs (listing the public `aws-pcs-repo-*` buckets, the public `/aws/service/pcs/ami` SSM tree and Amazon's sample AMIs), and [STS](https://docs.aws.amazon.com/STS/latest/APIReference/) caller identity. You can expand this for your own needs.
 
 ## Prerequisites
 
@@ -90,6 +90,7 @@ The default policy in `policy.json` grants minimal read-only permissions for the
         "ec2:DescribeRegions",
         "eks:DescribeAddonVersions",
         "eks:DescribeClusterVersions",
+        "elasticache:DescribeCacheEngineVersions",
         "elasticmapreduce:ListReleaseLabels",
         "rds:DescribeDBEngineVersions",
         "ssm:GetParametersByPath",

@@ -475,15 +475,21 @@ def _security_facts(security: Any) -> list[str]:
         return []
     if not security:
         return ["- **Security:** none (unauthenticated)"]
-    names = sorted(
-        {
-            str(name)
-            for requirement in security
-            if isinstance(requirement, dict)
-            for name in requirement
-        }
-    )
-    return [f"- **Security:** {', '.join(code(name) for name in names)}"]
+    scopes: dict[str, set[str]] = {}
+    for requirement in security:
+        if not isinstance(requirement, dict):
+            continue
+        for name, required in requirement.items():
+            listed = scopes.setdefault(str(name), set())
+            if isinstance(required, list):
+                listed.update(str(scope) for scope in required)
+    rendered = [
+        f"{code(name)} (scope {', '.join(code(scope) for scope in sorted(scopes[name]))})"
+        if scopes[name]
+        else code(name)
+        for name in sorted(scopes)
+    ]
+    return [f"- **Security:** {', '.join(rendered)}"]
 
 
 def _integration_facts(integration: Any) -> list[str]:

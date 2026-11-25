@@ -556,12 +556,21 @@ class SessionKubectl:
         stdout, stderr)`` — kubectl itself, or a ``gco`` command that shells
         out to it. ``safe_to_repeat`` is asked after the tunnel is back, for a
         call whose repetition could duplicate work the first attempt did.
+        A call that runs out its ``subprocess`` timeout is treated the same
+        way: a request sent into a stalled tunnel hangs until the timeout
+        instead of failing with a transport error, and used to be raised
+        without the keeper being asked.
         """
         keeper = self.keeper
         if keeper is None:
             return call()
         generation = keeper.generation
-        code, stdout, stderr = call()
+        try:
+            code, stdout, stderr = call()
+        except subprocess.TimeoutExpired:
+            if keeper.recover(generation) and (safe_to_repeat is None or safe_to_repeat()):
+                return call()
+            raise
         if (
             code != 0
             and is_tunnel_transport_error(f"{stderr}\n{stdout}")

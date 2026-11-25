@@ -1916,6 +1916,8 @@ See `examples/fsx-lustre-job.yaml` for a complete example.
 
 GCO can deploy an ElastiCache Serverless Valkey cache in each regional stack for low-latency key-value storage. Use cases include prompt caching for inference, session state, feature stores, and shared state across pods.
 
+The cache runs Valkey 9, the major version `VALKEY_MAJOR_ENGINE_VERSION` in `gco/stacks/constants.py` pins; ElastiCache Serverless applies minor and patch releases itself.
+
 Enable via CLI:
 
 ```bash
@@ -2285,7 +2287,7 @@ search` wraps the whole path.
 
 ## Infrastructure Version Constants
 
-All pinned infrastructure versions — EKS add-on versions, Lambda runtime, Aurora PostgreSQL engine version — are centralised in `gco/stacks/constants.py`. This is the single source of truth for version-pinned components.
+All pinned infrastructure versions — EKS add-on versions, Lambda runtime, Aurora PostgreSQL engine version, ElastiCache Valkey major engine version — are centralised in `gco/stacks/constants.py`. This is the single source of truth for version-pinned components.
 
 When updating a version:
 
@@ -2422,12 +2424,14 @@ gco mission run --directive "Find documentation about inference endpoints." \
   --tool-allowlist find_docs --bedrock-model-id us.meta.llama3-3-70b-instruct-v1:0
 ```
 
-The capacity advisor calls Bedrock in `AWS_REGION`, else `AWS_DEFAULT_REGION`,
-else the CLI's default Region (`gco -r`), not in the Region `-r` names after the
-subcommand, so a geography-scoped profile such as `eu.amazon.nova-pro-v1:0`
-needs an `AWS_REGION` in that geography.
+The capacity advisor calls Bedrock in `ai-recommend --bedrock-region`, else
+`AWS_REGION`, else `AWS_DEFAULT_REGION`, else the CLI's default Region (`gco -r`),
+not in the Region `-r` names after the subcommand, so a geography-scoped profile
+such as `eu.amazon.nova-pro-v1:0` needs a `--bedrock-region` (or, for `predict`,
+an `AWS_REGION`) in that geography.
 
-The `ai_recommend` MCP tool takes the same override as a `model="..."` argument; omit it to use the default.
+The `ai_recommend` MCP tool takes the same overrides as `model="..."` and
+`bedrock_region="..."` arguments; omit them to use the defaults.
 
 **2. Per environment (env vars)** — the first two apply to Mission; the
 remaining controls select an Autopilot engine/model for one environment:
@@ -2623,9 +2627,12 @@ instead of failing halfway through a deploy.
   `images.empty_on_delete` and `images.lifecycle` (no stack creates or
   deletes the `<project_name>/*` ECR repositories: the gco CLI creates them,
   they survive a destroy, and `gco images init` applies its own lifecycle
-  policy), and `api_gateway.regional_api_enabled` (callers reach the global
+  policy), `api_gateway.regional_api_enabled` (callers reach the global
   API and every regional bridge with their own `execute-api:Invoke`
-  permission).
+  permission), and `analytics_environment.studio.user_profile_name_prefix`
+  (never applied; each Studio user profile is named after its Cognito
+  username). A deprecated key set to `null` draws no warning, since CDK drops
+  `null` context values.
 - The per-Region overlays (`fsx_lustre_regions`, `pcs_regions`,
   `hyperpod_regions`) are keyed by Region name. A name that is not an AWS
   Region fails; a real Region that is not in `deployment_regions.regional`

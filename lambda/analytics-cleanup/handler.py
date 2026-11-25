@@ -30,8 +30,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-18T16:59:04Z
-# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
+# Generated at (UTC): 2026-11-24T22:25:50Z
+# Generated from Git commit: afbf93e626d691e7aa49495693b396b7ec7188ac
 # Flowchart(s) generated from this file:
 #   * ``handler`` -> ``diagrams/code_diagrams/lambda/analytics-cleanup/handler.handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/analytics-cleanup/handler.handler.png``)
@@ -155,7 +155,9 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         # (https://docs.aws.amazon.com/efs/latest/ug/delete-efs-fs.html), which
         # CloudFormation calls on the Studio EFS after this resource. Listing
         # them needs the resource policy removed first.
-        errors.extend(_delete_access_points(region, efs_id))
+        errors.extend(
+            _delete_access_points(region, efs_id, keep=os.environ.get("HOME_ACCESS_POINT_ID", ""))
+        )
     sm_efs_id = _get_sagemaker_home_efs_id(region, domain_id)
     if sm_efs_id:
         _delete_efs_resource_policy(region, sm_efs_id)
@@ -361,8 +363,12 @@ def _delete_user_profiles(region: str, domain_id: str) -> list[str]:
     return errors
 
 
-def _delete_access_points(region: str, efs_id: str) -> list[str]:
-    """Delete all access points on the file system. Returns a list of error messages."""
+def _delete_access_points(region: str, efs_id: str, keep: str = "") -> list[str]:
+    """Delete the file system's access points but ``keep``. Returns a list of error messages.
+
+    ``keep`` is the stack's own ``StudioHomeAccessPoint``, which CloudFormation
+    deletes once the presigned-URL function mounting it is gone.
+    """
     errors: list[str] = []
     efs = boto3.client("efs", region_name=region)
 
@@ -371,6 +377,8 @@ def _delete_access_points(region: str, efs_id: str) -> list[str]:
         for page in paginator.paginate(FileSystemId=efs_id):
             for ap in page.get("AccessPoints", []):
                 ap_id = ap["AccessPointId"]
+                if ap_id == keep:
+                    continue
                 try:
                     efs.delete_access_point(AccessPointId=ap_id)
                     logger.info("Deleted access point: %s", ap_id)

@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-23T16:48:27Z">
-        <meta name="gco-source-commit" content="1fcc830f8bfc0e870b022382a1506c682882515c">
-        <meta name="gco-flow-digest" content="07147939dcc2ecc0">
+        <meta name="gco-generated-at" content="2026-11-24T22:25:50Z">
+        <meta name="gco-source-commit" content="afbf93e626d691e7aa49495693b396b7ec7188ac">
+        <meta name="gco-flow-digest" content="0f4eb164a74bb2fc">
         <title>Analytics stack constructor (KMS, VPC, EFS, Studio, EMR, Cognito)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,48 +208,52 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub132=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op134=>operation: self.config = config
-op136=>operation: self.project_name = config.get_project_name()
-op138=>operation: self.api_gateway_secret_arn = api_gateway_secret_arn
-op140=>operation: cfg = config.get_analytics_config()
-op142=>operation: self.canvas_enabled: bool = bool(cfg['canvas']['enabled'])
-op144=>operation: self.efs_removal: RemovalPolicy = _parse_removal(cfg['efs']['removal_policy'])
-op146=>operation: self.cognito_removal: RemovalPolicy = _parse_removal(cfg['cognito']['removal_policy'])
-op148=>operation: self._cognito_domain_prefix_override: str | None = cfg['cognito'].get('domain_prefix')
-sub150=>subroutine: self._create_kms_key()
-sub152=>subroutine: self._create_vpc_and_endpoints()
-sub154=>subroutine: self._create_access_logs_bucket()
-sub156=>subroutine: self._create_studio_only_bucket()
-sub158=>subroutine: self._create_studio_efs()
-sub160=>subroutine: self._create_execution_role_and_grants()
-sub162=>subroutine: self._grant_sagemaker_role_on_cluster_shared_bucket()
-sub164=>subroutine: self._create_studio_domain()
-sub166=>subroutine: self._create_emr_app()
-sub168=>subroutine: self._create_cognito_pool()
-sub170=>subroutine: self._create_presigned_url_lambda()
-sub172=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub251=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op253=>operation: self.config = config
+op255=>operation: self.project_name = config.get_project_name()
+op257=>operation: self.api_gateway_secret_arn = api_gateway_secret_arn
+op259=>operation: cfg = config.get_analytics_config()
+op261=>operation: self.canvas_enabled: bool = bool(cfg['canvas']['enabled'])
+op263=>operation: self.efs_removal: RemovalPolicy = _parse_removal(cfg['efs']['removal_policy'])
+op265=>operation: self.cognito_removal: RemovalPolicy = _parse_removal(cfg['cognito']['removal_policy'])
+op267=>operation: self._cognito_domain_prefix_override: str | None = cfg['cognito'].get('domain_prefix')
+op269=>operation: raw_disable_backups = self.node.try_get_context(LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT)
+op271=>operation: self.disable_efs_automatic_backups: bool = raw_disable_backups is not None and parse_bool_flag(raw_disable_backups.strip() if isinstance(raw_disable_backups, str) else raw_disable_backups, LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT)
+sub273=>subroutine: self._create_kms_key()
+sub275=>subroutine: self._create_vpc_and_endpoints()
+sub277=>subroutine: self._create_access_logs_bucket()
+sub279=>subroutine: self._create_studio_only_bucket()
+sub281=>subroutine: self._create_studio_efs()
+sub283=>subroutine: self._create_execution_role_and_grants()
+sub285=>subroutine: self._grant_sagemaker_role_on_cluster_shared_bucket()
+sub287=>subroutine: self._create_studio_domain()
+sub289=>subroutine: self._create_emr_app()
+sub291=>subroutine: self._create_cognito_pool()
+sub293=>subroutine: self._create_presigned_url_lambda()
+sub295=>subroutine: self._apply_nag_suppressions()
 
-sub132->op134
-op134->op136
-op136->op138
-op138->op140
-op140->op142
-op142->op144
-op144->op146
-op146->op148
-op148->sub150
-sub150->sub152
-sub152->sub154
-sub154->sub156
-sub156->sub158
-sub158->sub160
-sub160->sub162
-sub162->sub164
-sub164->sub166
-sub166->sub168
-sub168->sub170
-sub170->sub172
+sub251->op253
+op253->op255
+op255->op257
+op257->op259
+op259->op261
+op261->op263
+op263->op265
+op265->op267
+op267->op269
+op269->op271
+op271->sub273
+sub273->sub275
+sub275->sub277
+sub277->sub279
+sub279->sub281
+sub281->sub283
+sub283->sub285
+sub285->sub287
+sub287->sub289
+sub289->sub291
+sub291->sub293
+sub293->sub295
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -259,17 +263,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-23T16:48:27Z -->
-        <!-- Generated from Git commit: 1fcc830f8bfc0e870b022382a1506c682882515c -->
+        <!-- Generated at (UTC): 2026-11-24T22:25:50Z -->
+        <!-- Generated from Git commit: afbf93e626d691e7aa49495693b396b7ec7188ac -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-23T16:48:27Z">2026-11-23T16:48:27Z</time>
+            Generated at (UTC): <time datetime="2026-11-24T22:25:50Z">2026-11-24T22:25:50Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>1fcc830f8bfc0e870b022382a1506c682882515c</code>
+            Source commit: <code>afbf93e626d691e7aa49495693b396b7ec7188ac</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>07147939dcc2ecc0</code>
+            Flow content SHA-256: <code>0f4eb164a74bb2fc</code>
           </p>
           <div id="canvas"></div>
         </div>

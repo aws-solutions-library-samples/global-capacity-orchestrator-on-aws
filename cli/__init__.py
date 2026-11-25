@@ -25,10 +25,10 @@ except ImportError:
     __version__ = "9.2.0"
 
 from .analytics_user_mgmt import (
+    authenticate_with_password,
     discover_api_endpoint,
     discover_cognito_client_id,
     discover_cognito_pool_id,
-    srp_authenticate,
 )
 from .aws_client import GCOAWSClient, get_aws_client
 from .capacity import CapacityChecker, CapacityEstimate, get_capacity_checker
@@ -54,6 +54,7 @@ __all__ = [
     "StackInfo",
     "StackManager",
     "__version__",
+    "authenticate_with_password",
     "discover_api_endpoint",
     "discover_cognito_client_id",
     "discover_cognito_pool_id",
@@ -65,6 +66,5 @@ __all__ = [
     "get_job_manager",
     "get_output_formatter",
     "get_stack_manager",
-    "srp_authenticate",
     "update_kubeconfig",
 ]

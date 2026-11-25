@@ -287,10 +287,14 @@ gco analytics status
 #### `gco analytics users add`
 
 Create a Cognito user in the analytics user pool. Calls
-`cognito-idp:AdminCreateUser` and prints the temporary password to
-stdout exactly once. Optionally sets a permanent password via
+`cognito-idp:AdminCreateUser` with a temporary password the CLI generates
+(Cognito never returns one it generates itself) and prints it to stdout
+exactly once. With `--email`, Cognito also emails it in its invitation
+unless `--no-email` is given; the user chooses a new password at the first
+`gco analytics studio login`. Optionally sets a permanent password via
 `cognito-idp:AdminSetUserPassword` so the user can sign in without the
-`NEW_PASSWORD_REQUIRED` challenge on first login.
+`NEW_PASSWORD_REQUIRED` challenge on first login; such a user gets no
+invitation, since it would carry a temporary password that no longer works.
 
 The username also names the user's SageMaker Studio user profile, so it
 must be a name SageMaker accepts there: letters, digits and hyphens,
@@ -309,7 +313,7 @@ gco analytics users add [OPTIONS]
 |--------|-------------|
 | `--username` | Cognito username to create (required): letters, digits and hyphens, starting and ending with a letter or digit, 63 characters at most. |
 | `--email` | Email address for the new user. |
-| `--no-email` | Suppress the Cognito welcome email (`MessageAction=SUPPRESS`). |
+| `--no-email` | Suppress the Cognito invitation email (`MessageAction=SUPPRESS`); hand the printed temporary password over yourself. |
 | `--password` | Set a permanent password on the new user (also read from `$GCO_STUDIO_PASSWORD`). Mutually exclusive with `--generate-password`. |
 | `--generate-password` | Generate a strong random password, set it permanent, and print it once. Mutually exclusive with `--password`. |
 
@@ -348,11 +352,29 @@ gco analytics users list --as-json
 
 #### `gco analytics users remove`
 
-Delete a Cognito user from the analytics user pool. Does not delete
-the user's Studio user profile or their directory on `Studio_EFS` — use
-`aws sagemaker delete-user-profile` for the profile. Until the profile
-is deleted, a new user given the same name is refused at
-`gco analytics studio login` (the profile belongs to the removed user).
+Delete a Cognito user from the analytics user pool, and with it the user's
+SageMaker Studio user profile, the spaces the profile owns and their apps.
+SageMaker deletes a profile only after its apps and spaces, so the command
+deletes them in that order and waits, up to 15 minutes in all. It deletes
+only a profile whose `gco:analytics:cognito-sub` tag holds the user's
+Cognito `sub` (or that has no such tag); a profile tagged for another user
+is left in place and named. The user's directory on `Studio_EFS` stays.
+
+When the profile cannot be deleted (a denied permission, a deletion that
+fails or does not finish), the command exits `1` and keeps the Cognito
+user, so it can be run again. `--keep-studio-profile` deletes only the
+Cognito user, as earlier releases did; a new user given the same name is
+then refused at `gco analytics studio login` until the profile is deleted.
+
+Besides `cognito-idp:AdminGetUser` and `AdminDeleteUser` and
+`cloudformation:DescribeStacks`, the profile deletion needs
+`sagemaker:DescribeUserProfile`, `ListTags`, `ListSpaces`, `ListApps`,
+`DeleteApp`, `DescribeSpace`, `DeleteSpace` and `DeleteUserProfile` (and
+`ListDomains` for a stack deployed before it published `StudioDomainId`).
+With `-o json` the command prints `{"username", "cognito_user_deleted",
+"studio_profile"}`, `studio_profile` holding `profile` (`deleted`, `absent`
+or `owned_by_another_user`), `spaces` and `apps`, or `null` with
+`--keep-studio-profile`.
 
 ```bash
 gco analytics users remove [OPTIONS]
@@ -363,6 +385,7 @@ gco analytics users remove [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--username` | Cognito username to remove (required). |
+| `--keep-studio-profile` | Delete only the Cognito user; leave the Studio profile, its spaces and apps. |
 | `--yes` | Skip the confirmation prompt. |
 
 **Example:**
@@ -418,14 +441,22 @@ Sign in to SageMaker Studio through Cognito and print a presigned
 Studio URL on its own line on stdout (pipe-friendly): the progress shown
 while a first login provisions the user profile (30-60 seconds) goes to
 stderr, so `URL=$(gco analytics studio login ...)` captures only the URL.
-The password, `IdToken`, and URL are never written to disk.
+The password, the Cognito tokens, and the URL are never written to disk.
+The command sends Cognito's access token to `/studio/login`, which requires
+the `aws.cognito.signin.user.admin` scope and so refuses an ID token.
 
 The sign-in is `cognito-idp:AdminInitiateAuth` with
 `ADMIN_USER_PASSWORD_AUTH`, an administrator API, so the command needs
 AWS credentials allowing it on the pool (and `cloudformation:DescribeStacks`
 for discovery) as well as the user's Cognito password. A user whose
-password is still temporary cannot sign in this way; set a permanent one
-with `gco analytics users set-password`.
+password is still temporary (a new user from `gco analytics users add`)
+must choose a new one first: Cognito answers with `NEW_PASSWORD_REQUIRED`,
+and the command answers it with `--new-password` (or
+`$GCO_STUDIO_NEW_PASSWORD`), or asks for the new password twice on a
+terminal, through `cognito-idp:AdminRespondToAuthChallenge`. The new password
+becomes the user's password and must meet the pool's policy (12 characters
+or more, with upper and lower case letters, a digit and a symbol). Without a
+terminal and without `--new-password` the command exits `1` and says so.
 
 A failed `/studio/login` call exits `2` and prints the HTTP status, the
 presigned-URL Lambda's error token and the correlation ID, for example
@@ -433,7 +464,10 @@ presigned-URL Lambda's error token and the correlation ID, for example
 `UnsupportedUsername` (HTTP 400: the username cannot name a SageMaker
 user profile) and `UserProfileOwnedByAnotherUser` (HTTP 403: the profile
 of that name belongs to another Cognito user) come with a line saying
-what an administrator has to do. See
+what an administrator has to do. A `401` without an error token is API
+Gateway refusing the token; the command then says to redeploy
+`<project>-api-gateway`, since an API deployed by an earlier release
+accepts only an ID token. See
 [ANALYTICS.md section (d)](ANALYTICS.md#d-logging-into-studio).
 
 ```bash
@@ -445,7 +479,8 @@ gco analytics studio login [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--username` | Cognito username (required). |
-| `--password` | Password. Defaults to prompt (`click.prompt(..., hide_input=True)`). Also read from `$GCO_STUDIO_PASSWORD` if set. |
+| `--password` | Password. Defaults to prompt (`click.prompt(..., hide_input=True)`, on stderr). Also read from `$GCO_STUDIO_PASSWORD` if set. |
+| `--new-password` | New password for a user whose password is still temporary (also read from `$GCO_STUDIO_NEW_PASSWORD`; prompted on a terminal otherwise). |
 | `--api-url` | Override the API Gateway base URL (otherwise auto-discovered from CloudFormation). |
 | `--open` | Launch the default browser on the presigned URL after printing it. |
 
@@ -461,6 +496,9 @@ gco analytics studio login --username alice
 
 # Open browser automatically
 gco analytics studio login --username alice --open
+
+# First sign-in with the temporary password from `users add`
+gco analytics studio login --username alice --new-password 'Chosen!Passw0rd'
 
 # Custom API endpoint
 gco analytics studio login \
@@ -582,7 +620,12 @@ If the selected `claude`, `codex`, or `opencode` binary is missing, Autopilot of
 
 ### Capacity Commands
 
-Check and manage cluster capacity.
+Check and manage cluster capacity. Every `-i/--instance-type` accepts the
+friendly aliases (`p5` → `p5.48xlarge`, `b200` → `p6-b200.48xlarge`); they
+are expanded before any AWS call. With `-o json` or `-o yaml`, a command with
+nothing to report still prints one document (an empty list, a summary with
+`sample_count: 0`, or `{"historical_enabled": false, "message": ...}` when the
+history table is not deployed) and puts the reason on stderr.
 
 <details>
 <summary>All <code>gco capacity</code> commands (24) — click to expand</summary>
@@ -661,6 +704,12 @@ metric has no recent datapoint the count is reported as unavailable (`jobs` in
 running jobs nor score it as idle. The same values feed
 [`recommend-region`](#gco-capacity-recommend-region), `gco status` and the capacity advisor.
 
+In the table, a signal that could not be read shows as `-` rather than `0`, and the
+`TELEMETRY` column says whether a Region's readings are `complete`, `partial` or
+`unavailable`. A Region whose check failed is named on stderr; when Region discovery
+fails, or every Region does, the command exits 1 instead of reporting that no stacks
+were found.
+
 ```bash
 gco capacity status [OPTIONS]
 ```
@@ -670,7 +719,7 @@ gco capacity status [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Check a single region |
-| `--all-regions` | `-a` | Check every configured region (the default) |
+| `--all-regions` | `-a` | Check every deployed region (the default; accepted for compatibility) |
 
 #### `gco capacity recommend`
 
@@ -700,7 +749,7 @@ gco capacity recommend-region [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--gpu` | | Recommend for GPU workloads |
+| `--gpu` | | Informational: the ranking reads the GPU need from `--gpu-count` and `--instance-type` |
 | `--instance-type` | `-i` | Specific instance type (enables weighted scoring; with `--backend hyperpod`, the instance group type a Region must have) |
 | `--gpu-count` | | Number of GPUs required |
 | `--min-gpus` | | Minimum GPUs required |
@@ -751,16 +800,36 @@ gco capacity ai-recommend [OPTIONS]
 This command gathers comprehensive capacity data including:
 
 - Spot placement scores, pricing, and 7-day per-AZ price trends across regions
-- On-demand availability and pricing
-- Capacity Reservations (ODCRs), Capacity Block offerings, and the near-term
-  block-availability trend over the window EC2 answers (about nine days)
-- Current cluster utilization (queue depth, GPU/CPU usage)
-- Running and pending job counts
-- The algorithmic multi-signal region ranking as advisory context
+- On-demand availability and pricing, and each type's GPUs, GPU memory, vCPUs and memory
+- Capacity Reservations (ODCRs), Capacity Block offerings sized for the workload,
+  and the near-term block-availability trend over the window EC2 answers (about
+  nine days)
+- The GCO cluster's queue depth, running jobs and GPU/CPU utilization in each
+  Region; a signal that could not be read reaches the model as unknown, not as zero
+- The algorithmic multi-signal region ranking for the first instance type, kept to
+  the analyzed Regions, as advisory context
+- Up to seven days of recorded capacity history, when the history table is deployed
+
+The (instance type, Region) pairs are read eight at a time, and each lookup stands
+alone: one that fails is listed under `data_gaps` with its AWS error code, and the
+model is told to treat it as unknown. Types EC2 does not sell as Capacity Blocks
+skip the two block searches.
 
 Without `--instance-type`, one representative type per current GPU generation
 is scanned (T4, L4, A10G, L40S, RTX PRO 4500/6000 Blackwell, A100, H100, H200,
 B200, B300).
+
+`--min-gpus`, `--min-memory-gb` and `--max-cost` are totals for the whole
+workload, and `--min-memory-gb` is GPU memory (compared with EC2's GiB figures),
+not host memory. Each type is sized in whole instances, rounded up: 16 GPUs on an
+8-GPU type is 2 instances, as `recommend-region --gpu-count` rounds. The Spot
+placement score and the Capacity Block search ask for that many instances.
+
+The workload description reaches the model between untrusted-data markers, as a
+description and never as instructions, and only its first 4000 characters are
+used. Instance types and Region names are checked first: a name that is not an EC2
+instance type once aliases are expanded (`p5` is `p5.48xlarge`; an `ml.` HyperPod
+type or `gb200` is refused) or not a Region name exits 2.
 
 The data is analyzed by the Bedrock model selected by `cdk.json`
 `context.bedrock.capacity_advisor_default_model_id` (Anthropic Claude Opus 5.5's
@@ -770,38 +839,73 @@ global inference profile in the stock configuration). The stock
 increase latency. Explicit model overrides do not inherit the default's
 thinking fields.
 
+**Checking the answer.** The model's answer is checked against the gathered data,
+and each failed check is listed under `validation_warnings` (CHECKS AGAINST THE
+GATHERED DATA in the table):
+
+- a Region or instance type that was not analyzed;
+- a type without GPUs for a workload that needs them, or an `instance_count` below
+  what the requirements need (without a count from the model, the computed one is
+  used);
+- a type EC2 does not offer in the Region;
+- an hourly cost over `--max-cost`: the cheapest zone's Spot price, or the
+  On-Demand price for `on-demand` and `odcr`, times the instance count;
+- `odcr` without a listed reservation that has free instances, or
+  `capacity-block` without a listed offering.
+
+A failed check lowers `confidence` to `low`. An alternative that names a Region or
+type outside the analysis is listed as well, without changing the confidence. A
+capacity type other than `spot`, `on-demand`, `odcr` and `capacity-block` (after
+spellings such as "On Demand" are normalized) is reported as `unknown`.
+
 **Requirements:**
 
 - AWS credentials with `bedrock:InvokeModel` permission
 - The specified Bedrock model must be enabled in your account
 
-Bedrock is called in `AWS_REGION`, else `AWS_DEFAULT_REGION`, else the CLI's default
-region (`gco --region`, `GCO_DEFAULT_REGION`, the config file, or the first regional
-Region in `cdk.json`), the same order `gco autopilot` uses. A geography-scoped
-inference profile (`eu.`, `apac.`, `jp.`, `au.`) only answers in its geography's
-Regions, so pick a Region there when passing one with `--model`. Bedrock errors name
-the Region that was called. [`gco capacity predict`](#gco-capacity-predict) uses the
-same Region.
+Bedrock is called in `--bedrock-region`, else `AWS_REGION`, else
+`AWS_DEFAULT_REGION`, else the CLI's default region (`gco --region`,
+`GCO_DEFAULT_REGION`, the config file, or the first regional Region in `cdk.json`),
+the order `gco autopilot` uses after the option. A geography-scoped inference
+profile (`eu.`, `apac.`, `jp.`, `au.`) only answers in its geography's Regions, so
+pick a Region there when passing one with `--model`. Bedrock errors name the Region
+that was called, and a refused request carries Bedrock's reason.
+[`gco capacity predict`](#gco-capacity-predict) uses the same Region order, without
+the option.
 
 **Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--workload` | `-w` | Description of your workload |
-| `--instance-type` | `-i` | Instance types to consider (can specify multiple) |
-| `--region` | `-r` | Regions to consider (can specify multiple) |
+| `--workload` | `-w` | What the workload does, in your own words (the first 4000 characters reach the model) |
+| `--instance-type` | `-i` | Instance type or alias to compare; repeat for more (default: one per current GPU generation) |
+| `--region` | `-r` | Region to compare; repeat for more (default: the deployed Regions) |
 | `--gpu` | | Workload requires GPUs |
-| `--min-gpus` | | Minimum GPUs required |
-| `--min-memory-gb` | | Minimum memory in GB |
-| `--fault-tolerance` | `-f` | Fault tolerance level: `high`, `medium`, `low` |
-| `--max-cost` | | Maximum cost per hour in USD |
+| `--min-gpus` | | GPUs the workload needs in total, across all its instances |
+| `--min-memory-gb` | | GPU memory the workload needs in total across all its instances, in GB |
+| `--fault-tolerance` | `-f` | How well the workload survives interruptions: `high` (it checkpoints, so Spot fits), `medium` (default), or `low` (it must not be interrupted) |
+| `--max-cost` | | Most the workload may cost per hour in USD, all its instances together (above 0) |
 | `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.capacity_advisor_default_model_id`) |
+| `--bedrock-region` | | Region to call Bedrock in (default: `AWS_REGION`, then `AWS_DEFAULT_REGION`, then the CLI's default region) |
+| `--data-only` | | Print the gathered capacity data as one JSON document and stop; Bedrock is not called |
 | `--raw` | | Show raw AI response |
 
 With `--output json` or `--output yaml`, the command prints one document with
 `recommended_region`, `recommended_instance_type`, `recommended_capacity_type`,
-`confidence`, `cost_estimate`, `reasoning`, `alternative_options` and `warnings`
-(plus `raw_response` with `--raw`); the disclaimer goes to stderr.
+`instance_count`, `confidence`, `cost_estimate`, `reasoning`,
+`reservation_advice`, `alternative_options`, `warnings` (the model's) and
+`validation_warnings` (GCO's checks); what the answer rests on (`model_id`,
+`bedrock_region`, `data_collected_at`, `regions_analyzed`,
+`instance_types_analyzed`, `data_gaps`, `usage` with Bedrock's token counts and
+`latency_ms`); and the `disclaimer`, plus `raw_response` with `--raw`. The
+disclaimer also goes to stderr. The table shows the same, with the data gaps
+summarized per lookup and error.
+
+`--data-only` prints the data the model would be given,
+`{"requirements", "capacity_data", "historical_context"}`, as JSON in every output
+mode and without the disclaimer; `--model`, `--bedrock-region` and `--raw` do
+nothing with it. An agent on the MCP server can call `ai_recommend` with
+`data_only=True` to reason over the data itself, without a Bedrock call.
 
 **Example:**
 
@@ -812,14 +916,20 @@ gco capacity ai-recommend --workload "Training a large language model"
 # GPU workload with specific requirements
 gco capacity ai-recommend -w "Inference workload" --gpu --min-gpus 4
 
+# A multi-node job: 16 GPUs in total that tolerate interruptions
+gco capacity ai-recommend -w "Fine-tune a 70B model" --gpu --min-gpus 16 -f high
+
 # Compare specific instance types and regions
 gco capacity ai-recommend -i g5.xlarge -i g5.2xlarge -r us-east-1 -r us-west-2
 
 # Cost-constrained recommendation
 gco capacity ai-recommend --fault-tolerance high --max-cost 5.00
 
-# Use a different model
-gco capacity ai-recommend -w "ML training" --model us.anthropic.claude-sonnet-4-6
+# Use a different model, called in another Region of its geography
+gco capacity ai-recommend -w "ML training" --model us.anthropic.claude-sonnet-4-6 --bedrock-region us-west-2
+
+# The gathered data alone, for your own analysis
+gco capacity ai-recommend -i p5 -i p6-b200 -r us-east-1 --min-gpus 16 --data-only
 ```
 
 #### `gco capacity reservations`
@@ -860,6 +970,8 @@ gco capacity reservations -r us-east-1
 Check reservation availability and Capacity Block offerings for ML workloads. Checks both existing ODCRs and purchasable Capacity Blocks (guaranteed GPU capacity for a fixed duration at a known price). Pass `--region` more than once to check several regions in parallel, and use `--earliest-start`/`--latest-start` to ask for blocks starting near a date. For a full duration-range sweep that returns one consolidated ranked report, use [`gco capacity find-blocks`](#gco-capacity-find-blocks).
 
 ODCR availability is judged per Region: `--count` is met only when one Region has that many free reserved instances, since a workload cannot use reservations in another Region. The table lists each Region's free and reserved instances when more than one Region is checked; the JSON report carries them under `odcr.by_region` (`region`, `reserved_instances`, `available_instances`, `has_availability`), next to the overall `total_available_instances`.
+
+A Region whose Capacity Block search EC2 refused or that failed (a denied permission, throttling past the retry budget) is listed under `capacity_blocks.errors` with EC2's reason, named in the table and the recommendation, and the other Regions' results stand. When the search ran in no Region, the command exits 1 with EC2's reasons.
 
 ```bash
 gco capacity reservation-check [OPTIONS]
@@ -916,7 +1028,7 @@ gco capacity find-blocks [OPTIONS]
 
 **Instance-type notes.** Friendly names are normalized (`p6-b200` → `p6-b200.48xlarge`, `p6-b300` → `p6-b300.48xlarge`). Both B200 and B300 (Blackwell Ultra) are standalone EC2 instance types and resolve normally. The Grace-Blackwell **GB200/GB300** NVL72 *superchips* ship only as **P6e-GB200 / P6e-GB300 UltraServers** (never as a standalone `InstanceType`), so those names are flagged with guidance toward the UltraServer flow rather than silently returning nothing. Unknown/typo'd types are reported as invalid (distinct from a valid type that simply has zero offerings).
 
-**Rejected probes.** Each (region, duration) pair is one `DescribeCapacityBlockOfferings` call. When EC2 refuses a call's parameters (an instance count it does not sell, a start window later than it currently serves) rather than answering with zero offerings, the refusal is reported as such: the table lists the rejected probes with EC2's reason, the JSON report carries them under `rejected_probes`, and when EC2 refuses every probe the command exits non-zero with that reason instead of suggesting a wider window. A Region or instance type that simply has no Capacity Blocks is still an ordinary empty result.
+**Rejected probes.** Each (region, duration) pair is one `DescribeCapacityBlockOfferings` call. When EC2 refuses a call's parameters (an instance count it does not sell, a start window later than it currently serves), or the call fails (a denied permission, throttling past the retry budget, a failed connection), rather than answering with zero offerings, the probe is reported as such: the table lists the rejected probes with EC2's reason, the JSON report carries them under `rejected_probes`, and when no probe searched anything the command exits non-zero with that reason instead of suggesting a wider window. A Region or instance type that simply has no Capacity Blocks is still an ordinary empty result.
 
 ```bash
 # Bound the motivating scenario in a single call:
@@ -1358,6 +1470,8 @@ controller re-converges it from the region's health signal on its next cycle.
 ```bash
 gco capacity traffic-dial clear REGION
 ```
+
+With `-o json` or `-o yaml` it prints `{"region": ..., "override_cleared": true|false}`.
 
 **Example:**
 
@@ -5641,6 +5755,18 @@ bastions, roles held in instance profiles, implicit and recreated log groups,
 dynamically provisioned EBS volumes, the Region's add-on SSM parameters) still
 run for the stacks that went away.
 
+The monitoring update also removes the stack's cross-region export reader, the
+Lambda function that read the regional stacks' values, once the stack
+references no stack in another Region. CloudFormation deletes the function but
+not the `/aws/lambda/<function>` log group Lambda created for it. The teardown
+therefore lists the monitoring stack's functions before the update and, at its
+end, deletes the log groups of the functions the update removed, also when a
+regional stack failed to delete. `gco upgrade` runs the teardown of the release
+it upgrades from, so an upgrade from v9.2.0 or earlier leaves that group
+behind;
+[UPGRADING.md → Log groups earlier upgrades left behind](UPGRADING.md#log-groups-earlier-upgrades-left-behind)
+shows how to delete it.
+
 Data inside the regional stacks (EFS and FSx file systems, Valkey, Aurora,
 in-cluster volumes) is deleted with them — back it up to the cluster-shared bucket
 first. The next `gco stacks deploy-all` recreates the regional stacks from
@@ -5716,8 +5842,9 @@ that Region writes them again.
 
 This cleanup is not an account-wide emptiness proof. ECR repositories or other
 resources configured for retention, and unexpected resources outside the known
-inventory, may remain. Only exact names taken from the destroyed stacks' own
-resources are considered, and only for stacks whose deletion succeeded. Sweep
+inventory, may remain. Only exact names taken from the stacks' own resources
+are considered, and only for stacks whose deletion succeeded or, in a
+`--keep-control-plane` teardown, for functions the monitoring update removed. Sweep
 failures are reported best-effort and do not fail the destroy command; log
 groups belonging to stacks that failed to delete are left untouched. When an
 error interrupts the teardown, the log-group sweep still runs, for every stack

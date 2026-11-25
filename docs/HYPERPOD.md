@@ -174,6 +174,16 @@ not support yet, so a deployment that enables HyperPod sets
 deploy*: EKS cannot downgrade a running cluster, and a cluster already on an
 unsupported minor has to wait for HyperPod to add it. The preflight's
 `kubernetes-version` check reads the tree and fails on a minor without an AMI.
+**The tree can list a minor before `CreateCluster` accepts it.** On
+2026-11-23 it carried `eks-1.37` while `CreateCluster` refused 1.37 an hour
+into a deploy ("Specified EKS cluster version is not supported. Supported
+versions are 1.29, ..., 1.36"). No API lists the minors `CreateCluster`
+accepts and it has no dry run, so the check also fails a minor above
+`HYPERPOD_CREATE_CLUSTER_NEWEST_K8S` in `cli/hyperpod_preflight.py` (1.36),
+the newest minor a release run has created a HyperPod cluster at. The monthly
+dependency scan reports when the tree reaches past it; the pin moves after a
+release run at the newer minor succeeds. A deploy that fails this way anyway
+prints the fix under `Likely cause:`.
 It judges the minor the cluster will run when HyperPod is created: cdk.json's
 before the first deploy, and once the cluster exists the version the cluster
 itself reports, so a cluster upgraded outside the deploy is caught. A cdk.json

@@ -1,7 +1,10 @@
 """Capacity checking commands."""
 
+import json
+import re
 import shlex
 import sys
+import textwrap
 from typing import Any
 
 import click
@@ -51,6 +54,41 @@ def _confirm_charges(question: str, *, yes: bool, dry_run: bool) -> None:
     _confirm_request(question, yes=yes, dry_run=dry_run, request="this request incurs charges")
 
 
+def _canonical_instance_types(_ctx: click.Context, _param: click.Parameter, value: Any) -> Any:
+    """Expand friendly instance-type aliases (``p5`` -> ``p5.48xlarge``) as ``-i`` is parsed.
+
+    find-blocks, find-reservations, instance-info, create-reservation,
+    recommend-region and the training-plan commands normalize on their own.
+    This gives the commands that hand ``-i`` straight to EC2, the Price List
+    API or the history table the same reading, so ``gco capacity check -i p5``
+    no longer reports that "p5" is not offered.
+    """
+    from ..capacity.blocks import normalize_instance_type
+
+    if value is None:
+        return None
+    if isinstance(value, tuple):
+        return tuple(normalize_instance_type(item)[0] for item in value)
+    return normalize_instance_type(value)[0]
+
+
+def _print_no_result(config: Any, formatter: Any, message: str, document: Any) -> None:
+    """Say there is nothing to report, keeping JSON/YAML stdout one document.
+
+    The warning goes to stderr. Printing only that left machine-readable
+    stdout empty, which the MCP server reports as a generic "empty stdout"
+    error that hides the reason.
+    """
+    formatter.print_warning(message)
+    if config.output_format != "table":
+        formatter.print(document)
+
+
+def _history_disabled_document() -> dict[str, Any]:
+    """The JSON/YAML answer of a history command when the history table is not deployed."""
+    return {"historical_enabled": False, "message": _history_disabled_hint()}
+
+
 @click.group()
 @pass_config
 def capacity(config: Any) -> None:
@@ -58,7 +96,13 @@ def capacity(config: Any) -> None:
 
 
 @capacity.command("check")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option(
     "--type",
@@ -116,7 +160,13 @@ def check_capacity(
 
 
 @capacity.command("recommend")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option(
     "--fault-tolerance",
@@ -153,7 +203,13 @@ def recommend_capacity(config: Any, instance_type: Any, region: Any, fault_toler
 
 
 @capacity.command("spot-prices")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option("--days", "-d", default=7, help="Days of history")
 @pass_config
@@ -311,14 +367,22 @@ def instance_info(config: Any, instance_type: Any, region: Any) -> None:
 
 @capacity.command("status")
 @click.option("--region", "-r", help="Specific region to check")
-@click.option("--all-regions", "-a", is_flag=True, default=True, help="Check all regions (default)")
+@click.option(
+    "--all-regions",
+    "-a",
+    is_flag=True,
+    default=True,
+    help="Check every deployed region (the default; accepted for compatibility)",
+)
 @pass_config
 def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
     """Show comprehensive resource utilization across regions.
 
     Displays the SQS job-queue depth, the running (active) Job count the
     health monitor publishes, and GPU/CPU utilization for one or all GCO
-    clusters.
+    clusters. A signal that could not be read shows as "-" and the region's
+    TELEMETRY column says so. A region whose check failed is named on stderr;
+    when region discovery or every region failed, the command exits 1.
 
     Examples:
         gco capacity status
@@ -337,21 +401,34 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
             formatter.print(capacity)
         else:
             capacities = checker.get_all_regions_capacity()
+            failures = checker.region_errors
 
             if not capacities:
+                if failures:
+                    # Discovery or every region failed: not "no stacks", and
+                    # exiting 0 here hid the failure from scripts and the MCP.
+                    formatter.print_error("Could not read capacity status: " + "; ".join(failures))
+                    sys.exit(1)
                 formatter.print_warning("No GCO stacks found")
                 if config.output_format != "table":
                     formatter.print(capacities)
                 return
 
+            for failure in failures:
+                formatter.print_warning(f"Capacity status check failed for {failure}")
+
             if config.output_format == "table":
-                print("\n  REGION          QUEUE  RUNNING  GPU%   CPU%   SCORE")
-                print("  " + "-" * 55)
+                print("\n  REGION          QUEUE  RUNNING  GPU%   CPU%   SCORE  TELEMETRY")
+                print("  " + "-" * 66)
                 for c in sorted(capacities, key=lambda x: x.recommendation_score):
+                    missing = set(c.unavailable_signals)
+                    queue = "-" if "queue" in missing else str(c.queue_depth)
+                    running = "-" if "jobs" in missing else str(c.running_jobs)
+                    gpu = "-" if "gpu" in missing else f"{c.gpu_utilization:.0f}%"
+                    cpu = "-" if "cpu" in missing else f"{c.cpu_utilization:.0f}%"
                     print(
-                        f"  {c.region:<15} {c.queue_depth:>5}  {c.running_jobs:>7}  "
-                        f"{c.gpu_utilization:>4.0f}%  {c.cpu_utilization:>4.0f}%  "
-                        f"{c.recommendation_score:>5.0f}"
+                        f"  {c.region:<15} {queue:>5}  {running:>7}  {gpu:>4}  {cpu:>5}  "
+                        f"{c.recommendation_score:>5.0f}  {c.telemetry_status}"
                     )
 
                 print()
@@ -389,7 +466,14 @@ def _ranked_region_line(backend: str, entry: dict[str, Any]) -> str:
 
 
 @capacity.command("recommend-region")
-@click.option("--gpu", is_flag=True, help="Job requires GPUs")
+@click.option(
+    "--gpu",
+    is_flag=True,
+    help=(
+        "Job requires GPUs (informational; name the GPUs with --gpu-count and "
+        "the type with --instance-type, which the ranking uses)"
+    ),
+)
 @click.option("--min-gpus", default=0, help="Minimum GPUs required")
 @click.option(
     "--instance-type", "-i", default=None, help="Specific instance type for workload-aware scoring"
@@ -485,48 +569,271 @@ _AI_DISCLAIMER_LINES = (
     "",
 )
 
+#: An AWS Region name (us-east-1, ap-southeast-5, us-gov-west-1).
+_AWS_REGION_NAME = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
+#: An EC2 instance type once aliases are expanded (g5.xlarge, p6-b200.48xlarge).
+_EC2_INSTANCE_TYPE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9-]+$")
+
+
+def _ai_instance_types(ctx: click.Context, param: click.Parameter, value: Any) -> tuple[str, ...]:
+    """Expand aliases, drop repeats and refuse names that are not EC2 instance types.
+
+    The names reach the model's prompt as well as the AWS APIs, so only
+    instance-type names are accepted.
+    """
+    from ..capacity.blocks import normalize_instance_type
+
+    names: list[str] = []
+    for item in value or ():
+        canonical, note = normalize_instance_type(item)
+        canonical = canonical.strip().lower()
+        if not _EC2_INSTANCE_TYPE.match(canonical):
+            raise click.BadParameter(
+                f"{item!r} is not an EC2 instance type" + (f" ({note})" if note else ""),
+                ctx=ctx,
+                param=param,
+            )
+        if canonical not in names:
+            names.append(canonical)
+    return tuple(names)
+
+
+def _aws_region_names(ctx: click.Context, param: click.Parameter, value: Any) -> Any:
+    """Refuse names that are not AWS Regions, in one value or a repeatable option's tuple."""
+    if value is None:
+        return None
+    regions: list[str] = []
+    for item in value if isinstance(value, tuple) else (value,):
+        name = item.strip().lower()
+        if not _AWS_REGION_NAME.match(name):
+            raise click.BadParameter(f"{item!r} is not an AWS Region name", ctx=ctx, param=param)
+        if name not in regions:
+            regions.append(name)
+    return tuple(regions) if isinstance(value, tuple) else regions[0]
+
 
 def _recommendation_to_dict(recommendation: Any, raw: bool) -> dict[str, Any]:
     """Serialize a BedrockCapacityRecommendation for JSON/YAML output.
 
-    The model's raw response is long and only for debugging, so it is
-    included only with --raw, as in table mode.
+    The document carries the disclaimer, so a caller that reads only stdout
+    (the MCP tool) has it too, along with GCO's checks of the answer against
+    the gathered data and what the answer rests on. The model's raw response
+    is long and only for debugging, so it is included only with --raw, as in
+    table mode.
     """
+    from ..capacity.advisor import AI_RECOMMENDATION_DISCLAIMER
+
     document: dict[str, Any] = {
         "recommended_region": recommendation.recommended_region,
         "recommended_instance_type": recommendation.recommended_instance_type,
         "recommended_capacity_type": recommendation.recommended_capacity_type,
+        "instance_count": recommendation.instance_count,
         "confidence": recommendation.confidence,
         "cost_estimate": recommendation.cost_estimate,
         "reasoning": recommendation.reasoning,
+        "reservation_advice": recommendation.reservation_advice,
         "alternative_options": recommendation.alternative_options,
         "warnings": recommendation.warnings,
+        "validation_warnings": recommendation.validation_warnings,
+        "model_id": recommendation.model_id,
+        "bedrock_region": recommendation.bedrock_region,
+        "data_collected_at": recommendation.data_collected_at,
+        "regions_analyzed": recommendation.regions_analyzed,
+        "instance_types_analyzed": recommendation.instance_types_analyzed,
+        "data_gaps": recommendation.data_gaps,
+        "usage": recommendation.usage,
+        "latency_ms": recommendation.latency_ms,
+        "disclaimer": AI_RECOMMENDATION_DISCLAIMER,
     }
     if raw:
         document["raw_response"] = recommendation.raw_response
     return document
 
 
+def _print_section(title: str, lines: list[str]) -> None:
+    """A titled block of the ai-recommend report; nothing when ``lines`` is empty."""
+    if not lines:
+        return
+    print(f"  {title}:")
+    print("  " + "-" * 68)
+    for line in lines:
+        print(f"  {line}")
+    print()
+
+
+def _wrapped(text: Any) -> list[str]:
+    """``text`` wrapped to the report's width, paragraph by paragraph."""
+    lines: list[str] = []
+    for paragraph in str(text or "").strip().splitlines():
+        lines.extend(textwrap.wrap(paragraph, width=68, break_on_hyphens=False) or [""])
+    return lines
+
+
+def _bullets(items: list[Any]) -> list[str]:
+    """Each item as a bullet wrapped to the report's width."""
+    lines: list[str] = []
+    for item in items:
+        lines.extend(
+            textwrap.wrap(
+                str(item),
+                width=68,
+                initial_indent="• ",
+                subsequent_indent="  ",
+                break_on_hyphens=False,
+            )
+        )
+    return lines
+
+
+def _data_gap_lines(gaps: list[dict[str, Any]]) -> list[str]:
+    """One entry per failed lookup source and error, naming the Regions."""
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for gap in gaps:
+        grouped.setdefault((str(gap.get("source")), str(gap.get("error"))), []).append(gap)
+    lines = []
+    for (source, error), rows in sorted(grouped.items()):
+        regions = ", ".join(sorted({str(row.get("region")) for row in rows}))
+        lookups = f"{len(rows)} lookup" + ("s" if len(rows) > 1 else "")
+        lines.append(f"{source}: {error} ({lookups} in {regions})")
+    return lines
+
+
+def _provenance_line(recommendation: Any) -> str:
+    """The model, Region, data time, tokens and latency behind a recommendation."""
+    parts = []
+    model_id = getattr(recommendation, "model_id", None)
+    if model_id:
+        region = getattr(recommendation, "bedrock_region", None)
+        parts.append(f"Model {model_id}" + (f" in {region}" if region else ""))
+    collected = getattr(recommendation, "data_collected_at", None)
+    if collected:
+        parts.append(f"data read {collected}")
+    usage = getattr(recommendation, "usage", None) or {}
+    if "inputTokens" in usage and "outputTokens" in usage:
+        parts.append(f"{usage['inputTokens']} input + {usage['outputTokens']} output tokens")
+    latency = getattr(recommendation, "latency_ms", None)
+    if latency is not None:
+        parts.append(f"{latency / 1000:.1f} s")
+    return "; ".join(parts)
+
+
+def _print_ai_recommendation(recommendation: Any, raw: bool) -> None:
+    """The table-mode report of a recommendation."""
+    print()
+    print("  " + "=" * 70)
+    print("  🤖 AI RECOMMENDATION")
+    print("  " + "=" * 70)
+    print()
+    print(f"  Region:        {recommendation.recommended_region}")
+    print(f"  Instance Type: {recommendation.recommended_instance_type}")
+    instance_count = getattr(recommendation, "instance_count", None)
+    if instance_count:
+        print(f"  Instances:     {instance_count}")
+    print(f"  Capacity Type: {str(recommendation.recommended_capacity_type or 'unknown').upper()}")
+    print(f"  Confidence:    {str(recommendation.confidence or 'low').upper()}")
+    if recommendation.cost_estimate:
+        print(f"  Est. Cost:     {recommendation.cost_estimate}")
+    print()
+    _print_section("REASONING", _wrapped(recommendation.reasoning))
+    _print_section("RESERVATIONS", _wrapped(getattr(recommendation, "reservation_advice", None)))
+
+    alternatives = []
+    for i, alt in enumerate(recommendation.alternative_options[:3], 1):
+        alternatives.append(
+            f"{i}. {alt.get('region') or 'N/A'} / "
+            f"{alt.get('instance_type') or 'N/A'} / "
+            f"{str(alt.get('capacity_type') or 'N/A').upper()}"
+        )
+        if alt.get("reason"):
+            alternatives.extend(
+                textwrap.wrap(
+                    str(alt["reason"]),
+                    width=68,
+                    initial_indent="   ",
+                    subsequent_indent="   ",
+                    break_on_hyphens=False,
+                )
+            )
+    _print_section("ALTERNATIVE OPTIONS", alternatives)
+    _print_section("⚠️  WARNINGS", _bullets(recommendation.warnings))
+    _print_section(
+        "⚠️  CHECKS AGAINST THE GATHERED DATA",
+        _bullets(getattr(recommendation, "validation_warnings", None) or []),
+    )
+    gaps = getattr(recommendation, "data_gaps", None) or []
+    _print_section(
+        f"DATA GAPS ({len(gaps)} failed lookup{'s' if len(gaps) > 1 else ''}, "
+        "given to the model as unknown)",
+        _bullets(_data_gap_lines(gaps)),
+    )
+    provenance = _provenance_line(recommendation)
+    if provenance:
+        print(f"  {provenance}")
+        print()
+
+    # Show raw response if requested
+    if raw:
+        print("  RAW AI RESPONSE:")
+        print("  " + "-" * 68)
+        print(recommendation.raw_response)
+        print()
+
+    print("  " + "=" * 70)
+    print()
+
+
 @capacity.command("ai-recommend")
-@click.option("--workload", "-w", help="Description of your workload")
+@click.option(
+    "--workload",
+    "-w",
+    help="What the workload does, in your own words (the first 4000 characters reach the model)",
+)
 @click.option(
     "--instance-type",
     "-i",
     multiple=True,
-    help="Instance types to consider (can specify multiple)",
+    callback=_ai_instance_types,
+    help=(
+        "Instance type or alias to compare; repeat for more "
+        "(default: one per current GPU generation)"
+    ),
 )
-@click.option("--region", "-r", multiple=True, help="Regions to consider (can specify multiple)")
+@click.option(
+    "--region",
+    "-r",
+    multiple=True,
+    callback=_aws_region_names,
+    help="Region to compare; repeat for more (default: the deployed Regions)",
+)
 @click.option("--gpu", is_flag=True, help="Workload requires GPUs")
-@click.option("--min-gpus", default=0, help="Minimum GPUs required")
-@click.option("--min-memory-gb", default=0, help="Minimum memory in GB")
+@click.option(
+    "--min-gpus",
+    type=click.IntRange(min=0),
+    default=0,
+    help="GPUs the workload needs in total, across all its instances",
+)
+@click.option(
+    "--min-memory-gb",
+    type=click.IntRange(min=0),
+    default=0,
+    help="GPU memory the workload needs in total across all its instances, in GB",
+)
 @click.option(
     "--fault-tolerance",
     "-f",
     type=click.Choice(["high", "medium", "low"]),
     default="medium",
-    help="Fault tolerance level",
+    show_default=True,
+    help=(
+        "How well the workload survives interruptions: high (it checkpoints, so Spot "
+        "fits), medium, or low (it must not be interrupted)"
+    ),
 )
-@click.option("--max-cost", type=float, help="Maximum cost per hour in USD")
+@click.option(
+    "--max-cost",
+    type=click.FloatRange(min=0, min_open=True),
+    help="Most the workload may cost per hour in USD, all its instances together",
+)
 @click.option(
     "--model",
     "-m",
@@ -535,6 +842,19 @@ def _recommendation_to_dict(recommendation: Any, raw: bool) -> dict[str, Any]:
         "Bedrock model ID to use "
         "(default: cdk.json context.bedrock.capacity_advisor_default_model_id)."
     ),
+)
+@click.option(
+    "--bedrock-region",
+    callback=_aws_region_names,
+    help=(
+        "Region to call Bedrock in (default: AWS_REGION, then AWS_DEFAULT_REGION, "
+        "then the CLI's default region)"
+    ),
+)
+@click.option(
+    "--data-only",
+    is_flag=True,
+    help="Print the gathered capacity data as one JSON document and stop; Bedrock is not called",
 )
 @click.option("--raw", is_flag=True, help="Show raw AI response")
 @pass_config
@@ -549,25 +869,36 @@ def ai_recommend(
     fault_tolerance: Any,
     max_cost: Any,
     model: Any,
+    bedrock_region: Any,
+    data_only: Any,
     raw: Any,
 ) -> None:
     """Get AI-powered capacity recommendation using Amazon Bedrock.
 
     This command gathers comprehensive capacity data including:
     - Spot placement scores, pricing, and 7-day per-AZ price trends across regions
-    - On-demand availability and pricing
-    - Capacity Reservations (ODCRs), Capacity Block offerings, and 26-week
-      block-availability trends
-    - Current cluster utilization (queue depth, GPU/CPU usage)
-    - Running and pending job counts
+    - On-demand availability and pricing, and each type's GPUs and memory
+    - Capacity Reservations (ODCRs), Capacity Block offerings, and the near-term
+      block-availability trend over the window EC2 answers (about nine days)
+    - The GCO cluster's queue depth, running jobs and GPU/CPU utilization in
+      each Region (a signal that could not be read is reported as unknown)
     - The algorithmic multi-signal region ranking as advisory context
+    - Up to seven days of recorded capacity history, when it is deployed
 
     Without --instance-type, one representative type per current GPU
     generation is scanned (T4, L4, A10G, L40S, RTX PRO 4500/6000 Blackwell,
     A100, H100, H200, B200, B300).
 
-    The data is analyzed by an LLM to provide intelligent recommendations
-    for where to place your workload.
+    --min-gpus, --min-memory-gb (GPU memory) and --max-cost are totals for
+    the whole workload: 16 GPUs on an 8-GPU type is two instances, and the
+    cost limit covers both. The answer is checked against the gathered data
+    (a Region or type that was not analyzed, too few GPUs, over the cost
+    limit, a type EC2 does not offer in the Region); each failed check is
+    listed and lowers the confidence to low.
+
+    --data-only prints the gathered data as one JSON document and stops, for
+    a caller that reasons over it itself; Bedrock is not called, so --model,
+    --bedrock-region and --raw do nothing.
 
     ⚠️  DISCLAIMER: Recommendations are AI-generated and should be validated
     before making production decisions. Capacity availability and pricing
@@ -586,98 +917,65 @@ def ai_recommend(
         gco capacity ai-recommend -i g5.xlarge -i g5.2xlarge -r us-east-1 -r us-west-2
 
         gco capacity ai-recommend --fault-tolerance high --max-cost 5.00
+
+        gco capacity ai-recommend -i p5 -r us-east-1 --min-gpus 16 --data-only
     """
     from ..capacity import get_bedrock_capacity_advisor
 
     formatter = get_output_formatter(config)
 
-    # The disclaimer is for the person reading; in JSON/YAML mode it goes to
-    # stderr so stdout stays one document.
-    for line in _AI_DISCLAIMER_LINES:
-        interactive_echo(line)
+    requirements = {
+        "gpu_required": gpu,
+        "min_gpus": min_gpus if min_gpus > 0 else None,
+        "min_memory_gb": min_memory_gb if min_memory_gb > 0 else None,
+        "fault_tolerance": fault_tolerance,
+        "max_cost_per_hour": max_cost,
+    }
+    # Remove None values
+    requirements = {k: v for k, v in requirements.items() if v is not None}
+    instance_types = list(instance_type) if instance_type else None
+    regions = list(region) if region else None
+
+    if not data_only:
+        # The disclaimer is for the person reading; in JSON/YAML mode it goes
+        # to stderr so stdout stays one document.
+        for line in _AI_DISCLAIMER_LINES:
+            interactive_echo(line)
 
     try:
+        advisor = get_bedrock_capacity_advisor(
+            config, model_id=model, bedrock_region=bedrock_region
+        )
+
+        if data_only:
+            # stdout carries only the document, in table mode too.
+            click.echo("ℹ Gathering capacity data across regions...", err=True)
+            document = {
+                "requirements": requirements,
+                **advisor.collect_context(
+                    instance_types=instance_types, regions=regions, requirements=requirements
+                ),
+            }
+            if config.output_format == "table":
+                click.echo(json.dumps(document, indent=2, default=str))
+            else:
+                formatter.print(document)
+            return
+
         formatter.print_info("Gathering capacity data across regions...")
-
-        advisor = get_bedrock_capacity_advisor(config, model_id=model)
-
-        # Build requirements dict
-        requirements = {
-            "gpu_required": gpu,
-            "min_gpus": min_gpus if min_gpus > 0 else None,
-            "min_memory_gb": min_memory_gb if min_memory_gb > 0 else None,
-            "fault_tolerance": fault_tolerance,
-            "max_cost_per_hour": max_cost,
-        }
-        # Remove None values
-        requirements = {k: v for k, v in requirements.items() if v is not None}
-
-        formatter.print_info(f"Analyzing with {advisor.model_id}...")
+        formatter.print_info(f"Analyzing with {advisor.model_id} in {advisor.bedrock_region()}...")
 
         recommendation = advisor.get_recommendation(
             workload_description=workload,
-            instance_types=list(instance_type) if instance_type else None,
-            regions=list(region) if region else None,
+            instance_types=instance_types,
+            regions=regions,
             requirements=requirements if requirements else None,
         )
 
         if config.output_format != "table":
             formatter.print(_recommendation_to_dict(recommendation, raw))
             return
-
-        # Display recommendation
-        print()
-        print("  " + "=" * 70)
-        print("  🤖 AI RECOMMENDATION")
-        print("  " + "=" * 70)
-        print()
-        print(f"  Region:        {recommendation.recommended_region}")
-        print(f"  Instance Type: {recommendation.recommended_instance_type}")
-        print(f"  Capacity Type: {recommendation.recommended_capacity_type.upper()}")
-        print(f"  Confidence:    {recommendation.confidence.upper()}")
-        if recommendation.cost_estimate:
-            print(f"  Est. Cost:     {recommendation.cost_estimate}")
-        print()
-        print("  REASONING:")
-        print("  " + "-" * 68)
-        # Word wrap the reasoning
-        reasoning_lines = recommendation.reasoning.split(". ")
-        for line in reasoning_lines:
-            if line.strip():
-                print(f"  {line.strip()}.")
-        print()
-
-        # Show alternatives
-        if recommendation.alternative_options:
-            print("  ALTERNATIVE OPTIONS:")
-            print("  " + "-" * 68)
-            for i, alt in enumerate(recommendation.alternative_options[:3], 1):
-                print(
-                    f"  {i}. {alt.get('region', 'N/A')} / "
-                    f"{alt.get('instance_type', 'N/A')} / "
-                    f"{alt.get('capacity_type', 'N/A').upper()}"
-                )
-                if alt.get("reason"):
-                    print(f"     {alt['reason']}")
-            print()
-
-        # Show warnings
-        if recommendation.warnings:
-            print("  ⚠️  WARNINGS:")
-            print("  " + "-" * 68)
-            for warning in recommendation.warnings:
-                print(f"  • {warning}")
-            print()
-
-        # Show raw response if requested
-        if raw:
-            print("  RAW AI RESPONSE:")
-            print("  " + "-" * 68)
-            print(recommendation.raw_response)
-            print()
-
-        print("  " + "=" * 70)
-        print()
+        _print_ai_recommendation(recommendation, raw)
 
     except Exception as e:
         if is_bedrock_ftu_form_error(e):
@@ -702,7 +1000,9 @@ def _print_reservation_errors(errors: list[dict[str, Any]]) -> None:
 
 
 @capacity.command("reservations")
-@click.option("--instance-type", "-i", help="Filter by instance type")
+@click.option(
+    "--instance-type", "-i", callback=_canonical_instance_types, help="Filter by instance type"
+)
 @click.option("--region", "-r", help="Specific region (default: all deployed regions)")
 @pass_config
 def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
@@ -771,7 +1071,13 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
 
 
 @capacity.command("reservation-check")
-@click.option("--instance-type", "-i", required=True, help="Instance type to check")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="Instance type or alias to check (e.g. p5)",
+)
 @click.option(
     "--region",
     "-r",
@@ -904,6 +1210,15 @@ def reservation_check(
                     )
             else:
                 print("  No Capacity Block offerings available")
+            block_errors = block_section.get("errors") or []
+            if block_errors:
+                print()
+                print(
+                    f"  ⚠  The Capacity Block search failed in {len(block_errors)} Region(s); "
+                    "their offerings are missing:"
+                )
+                for error in block_errors:
+                    print(f"     {error['region']}: {error['error_code']}: {error['error']}")
 
         # Recommendation
         print()
@@ -1998,7 +2313,13 @@ def history() -> None:
 
 
 @history.command("show")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option("--hours", "-H", default=168, help="Hours of history (default 168 = 7 days)")
 @pass_config
@@ -2010,8 +2331,11 @@ def history_show(config: Any, instance_type: Any, region: Any, hours: Any) -> No
     try:
         trend = get_capacity_history_store().get_trend(instance_type, region, hours)
         if not trend:
-            formatter.print_warning(
-                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes)."
+            _print_no_result(
+                config,
+                formatter,
+                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes).",
+                [],
             )
             return
         # Columns derive from the store's exported metric registry so a new
@@ -2020,14 +2344,22 @@ def history_show(config: Any, instance_type: Any, region: Any, hours: Any) -> No
         formatter.print(trend, columns=["timestamp", *METRIC_FIELDS])
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_history_disabled_hint())
+            _print_no_result(
+                config, formatter, _history_disabled_hint(), _history_disabled_document()
+            )
             return
         formatter.print_error(f"Failed to load capacity history: {e}")
         sys.exit(1)
 
 
 @history.command("stats")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option("--hours", "-H", default=168, help="Hours of history (default 168 = 7 days)")
 @pass_config
@@ -2039,8 +2371,11 @@ def history_stats(config: Any, instance_type: Any, region: Any, hours: Any) -> N
     try:
         stats = get_capacity_history_store().get_statistics(instance_type, region, hours)
         if stats["sample_count"] == 0:
-            formatter.print_warning(
-                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes)."
+            _print_no_result(
+                config,
+                formatter,
+                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes).",
+                stats,
             )
             return
         if config.output_format == "table":
@@ -2065,14 +2400,22 @@ def history_stats(config: Any, instance_type: Any, region: Any, hours: Any) -> N
             formatter.print(stats)
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_history_disabled_hint())
+            _print_no_result(
+                config, formatter, _history_disabled_hint(), _history_disabled_document()
+            )
             return
         formatter.print_error(f"Failed to compute capacity statistics: {e}")
         sys.exit(1)
 
 
 @history.command("patterns")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", required=True, help="AWS region")
 @click.option("--hours", "-H", default=168, help="Hours of history (default 168 = 7 days)")
 @click.option(
@@ -2097,8 +2440,11 @@ def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any, m
             instance_type, region, hours, metric=metric
         )
         if not patterns["patterns"]:
-            formatter.print_warning(
-                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes)."
+            _print_no_result(
+                config,
+                formatter,
+                f"No historical samples for {instance_type} in {region} in the last {hours}h yet (the poller records one about every 15 minutes).",
+                patterns,
             )
             return
         if config.output_format == "table":
@@ -2107,7 +2453,9 @@ def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any, m
             formatter.print(patterns)
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_history_disabled_hint())
+            _print_no_result(
+                config, formatter, _history_disabled_hint(), _history_disabled_document()
+            )
             return
         formatter.print_error(f"Failed to compute capacity patterns: {e}")
         sys.exit(1)
@@ -2161,7 +2509,13 @@ def _print_prediction(prediction: Any, raw: bool) -> None:
 
 
 @capacity.command("predict")
-@click.option("--instance-type", "-i", required=True, help="EC2 instance type")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    callback=_canonical_instance_types,
+    help="EC2 instance type or alias (e.g. p5)",
+)
 @click.option("--region", "-r", help="AWS region (omit when using --all-regions)")
 @click.option(
     "--all-regions",
@@ -2219,11 +2573,20 @@ def predict_capacity(
         else:
             predictions = [advisor.predict_capacity_window(instance_type, region, hours_back=hours)]
     except ValueError as e:
-        formatter.print_warning(str(e))
+        _print_no_result(
+            config,
+            formatter,
+            str(e),
+            []
+            if all_regions
+            else {"instance_type": instance_type, "region": region, "message": str(e)},
+        )
         return
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_history_disabled_hint())
+            _print_no_result(
+                config, formatter, _history_disabled_hint(), _history_disabled_document()
+            )
             return
         if is_bedrock_ftu_form_error(e):
             formatter.print_error(BEDROCK_FTU_REMEDIATION)
@@ -2232,8 +2595,11 @@ def predict_capacity(
         sys.exit(1)
 
     if not predictions:
-        formatter.print_warning(
-            f"No usable historical samples for {instance_type} in any region yet."
+        _print_no_result(
+            config,
+            formatter,
+            f"No usable historical samples for {instance_type} in any region yet.",
+            [],
         )
         return
 
@@ -2382,3 +2748,5 @@ def traffic_dial_clear(config: Any, region: Any) -> None:
         formatter.print_success(f"Cleared the {region} traffic-dial override.")
     else:
         formatter.print_info(f"No traffic-dial override was set for {region}.")
+    if config.output_format != "table":
+        formatter.print({"region": region, "override_cleared": existed})
