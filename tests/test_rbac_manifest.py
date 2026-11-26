@@ -452,6 +452,34 @@ class TestManifestProcessorRole:
             }
         ]
 
+    def test_manifest_processor_cluster_read_gets_only_the_gpu_cap_policy(self, rbac_docs):
+        """GET /api/v1/policy reads the per-container GPU cap from its admission policy.
+
+        A LimitRange cannot hold the cap (any GPU entry there gives every
+        gco-jobs pod a toleration of the GPU node taint), so a
+        ValidatingAdmissionPolicy enforces it and carries it in an
+        annotation. Without this rule the read is refused and gco-jobs reports
+        ``unavailable``. Policies are cluster-scoped, and ``resourceNames``
+        keeps the grant to that one policy: the others (the CA issuance and
+        tenant write fences) are not the service's to read.
+        """
+        from gco.resource_governance import CONTAINER_GPU_LIMIT_POLICY
+
+        role = _find_doc(rbac_docs, "ClusterRole", "gco-manifest-processor-cluster-read")
+        rules = [
+            rule
+            for rule in role.get("rules", [])
+            if "admissionregistration.k8s.io" in rule.get("apiGroups", [])
+        ]
+        assert rules == [
+            {
+                "apiGroups": ["admissionregistration.k8s.io"],
+                "resources": ["validatingadmissionpolicies"],
+                "resourceNames": [CONTAINER_GPU_LIMIT_POLICY],
+                "verbs": ["get"],
+            }
+        ]
+
 
 # ─── Submittable kinds ↔ RBAC lockstep ──────────────────────────────
 
@@ -1004,6 +1032,7 @@ HEALTH_MONITOR_CALL_GRANTS = {
 }
 
 _API_CLASSES = (
+    k8s_client.AdmissionregistrationV1Api,
     k8s_client.AppsV1Api,
     k8s_client.BatchV1Api,
     k8s_client.CoordinationV1Api,
@@ -1141,6 +1170,10 @@ MANIFEST_PROCESSOR_CALL_GRANTS = {
         ("cluster", "metrics.k8s.io", "pods", "get")
     },
     ("read_runtime_class", None, None): {("cluster", "node.k8s.io", "runtimeclasses", "get")},
+    # GET /api/v1/policy: the per-container GPU cap, from its admission policy.
+    ("read_validating_admission_policy", None, None): {
+        ("cluster", "admissionregistration.k8s.io", "validatingadmissionpolicies", "get")
+    },
     ("list_namespaced_job", None, None): {("gco-jobs", "batch", "jobs", "list")},
     ("read_namespaced_job", None, None): {("gco-jobs", "batch", "jobs", "get")},
     ("delete_namespaced_job", None, None): {("gco-jobs", "batch", "jobs", "delete")},

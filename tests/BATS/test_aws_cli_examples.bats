@@ -250,7 +250,7 @@ curl_records() {
 
     [ "$status" -eq 0 ]
     [ "$(wc -l < "$CURL_CALLS")" -eq 4 ]
-    ! curl_records | grep -q 'X-Amz-Security-Token'
+    [ "$(curl_records | grep -c 'X-Amz-Security-Token')" -eq 0 ]
     [ "$(curl_records | grep -c -- '--user EXAMPLEKEYID:EXAMPLESECRET ')" -eq 4 ]
 }
 

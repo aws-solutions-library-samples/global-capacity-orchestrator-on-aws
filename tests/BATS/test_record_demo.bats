@@ -398,8 +398,8 @@ FAKE_NOOP
         "$aws_calls_file")" = "2" ]
     grep -F -q "${isolated_kubeconfig}|-m cli.main stacks list" "$python_calls_file"
     grep -F -q "${isolated_kubeconfig}|version --client" "$kubectl_calls_file"
-    ! grep -q 'research-us-east-1' "$aws_calls_file"
-    ! grep -q '|delete jobs --all ' "$kubectl_calls_file"
+    [ "$(grep -c 'research-us-east-1' "$aws_calls_file")" = "0" ]
+    [ "$(grep -c '|delete jobs --all ' "$kubectl_calls_file")" = "0" ]
     [ -z "$(compgen -G "$fixture/demo/.live-demo-recording.*" || true)" ]
 }
 
@@ -595,12 +595,12 @@ run_recorder() {
     # render rewritten; the previous pair is gone.
     grep -q '000000000000' "$FIXTURE/demo/live_demo.cast"
     grep -q 'REDACTED_AWS_ACCESS_KEY_ID' "$FIXTURE/demo/live_demo.cast"
-    ! grep -q '123456789012' "$FIXTURE/demo/live_demo.cast"
+    [ "$(grep -c '123456789012' "$FIXTURE/demo/live_demo.cast")" = "0" ]
     grep -q $'\u2713' "$FIXTURE/demo/live_demo.cast"
     [ "$(cat "$FIXTURE/demo/live_demo.gif")" = "rendered gif" ]
     # The recorded demo ran against the isolated kubeconfig, never the operator's.
     grep -q '/.live-demo-recording.*/kubeconfig|get nodes' "$KUBECTL_CALLS"
-    ! grep -q '^<unset>|delete jobs' "$KUBECTL_CALLS"
+    [ "$(grep -c '^<unset>|delete jobs' "$KUBECTL_CALLS")" = "0" ]
     # Staging, the kubeconfig inside it, and the lock are all gone.
     [ -z "$(compgen -G "$FIXTURE/demo/.live-demo-recording.*" || true)" ]
     [ ! -e "$FIXTURE/.git/gco-legacy-recording.lock" ]

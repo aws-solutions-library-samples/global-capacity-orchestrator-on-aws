@@ -43,6 +43,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Narrower platform service-account RBAC](#narrower-platform-service-account-rbac)
   - [Endpoint and project labels on the monitor's objects](#endpoint-and-project-labels-on-the-monitors-objects)
   - [Training job admission](#training-job-admission)
+  - [The per-container GPU cap is an admission policy](#the-per-container-gpu-cap-is-an-admission-policy)
   - [Stopped inference endpoints stay stopped](#stopped-inference-endpoints-stay-stopped)
   - [Health readings and the `active_jobs` metric](#health-readings-and-the-active_jobs-metric)
   - [Job status filter and request paths](#job-status-filter-and-request-paths)
@@ -58,6 +59,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [The keep-warm GPU pool](#the-keep-warm-gpu-pool)
   - [Log groups earlier upgrades left behind](#log-groups-earlier-upgrades-left-behind)
   - [CLI exit codes, output and prompts](#cli-exit-codes-output-and-prompts)
+  - [Errors the CLI's Python modules raise](#errors-the-clis-python-modules-raise)
   - [MCP server tools](#mcp-server-tools)
   - [Pre-commit hook for contributors](#pre-commit-hook-for-contributors)
 
@@ -954,6 +956,44 @@ monitor checks before it deletes a stale object
   refuses a manifest nested deeper than the limit (default 50), as the REST
   path already did.
 
+### The per-container GPU cap is an admission policy
+
+The gco-jobs `LimitRange` capped each container's GPUs and wrote
+`nvidia.com/gpu: 0` into every container that asked for none. EKS runs the
+ExtendedResourceToleration admission plugin, which gives a pod that names an
+extended resource, at any quantity, a toleration of that resource's taint, so
+CPU-only Jobs in `gco-jobs` tolerated the GPU node taint, ran on GPU nodes,
+and EKS Auto Mode launched GPU instances for them. An in-place redeploy
+changes this:
+
+- **CPU-only pods in `gco-jobs` no longer tolerate the GPU taint.** The
+  `LimitRange` now names CPU and memory only, so a pod created after the
+  redeploy carries no GPU entry it did not ask for, and a CPU-only one
+  schedules on CPU nodes. Pods already running keep their nodes until they
+  finish.
+- **The cap is the `gco-jobs-container-gpu-limit` ValidatingAdmissionPolicy.**
+  Each container and init container of a pod created in `gco-jobs` may ask
+  for at most `resource_quota.container_max_gpu` GPUs (default 8) in its
+  limits and its requests, and a pod over the cap is refused with a message
+  naming the container, its count and the cap. The base pass creates the
+  policy and its binding, and the manifest processor's
+  `gco-manifest-processor-cluster-read` ClusterRole gains `get` on that one
+  policy.
+- **BREAKING (tooling that read the GPU cap from the `LimitRange`): read
+  `admission_policies`.** `GET /api/v1/policy` (and `gco jobs policy`) no
+  longer reports `nvidia.com/gpu` in `cluster_enforcement.gco-jobs.limit_ranges`.
+  The cap is
+  `cluster_enforcement.gco-jobs.admission_policies["gco-jobs-container-gpu-limit"].container_max["nvidia.com/gpu"]`,
+  a string such as `"8"` that the policy carries in its
+  `gco.io/container-max-gpu` annotation
+  ([API.md → Reading the deployed validation policy](API.md#reading-the-deployed-validation-policy)).
+  Other namespaces report an empty `admission_policies`, and a Region that
+  has not been redeployed yet still reports its `LimitRange` GPU maximum.
+- **BREAKING (only if you set it): `resource_quota.container_max_gpu` must be
+  a whole number from 0 to 999 in plain digits.** The policy's CEL compares
+  each container's GPU count with it as an integer, so synth refuses values
+  such as `1k` or `8.0`.
+
 ### Stopped inference endpoints stay stopped
 
 - **BREAKING: changing a stopped endpoint no longer starts it.**
@@ -1307,6 +1347,8 @@ Exit status and options:
 | `gco jobs submit --wait`, `gco jobs submit-direct --wait` | **BREAKING:** exit 3 when the job fails and 4 when `--timeout` expires; a failed job exited 0 and a timeout 1, which now means the job was not submitted or its status could not be read. `--wait` also follows a Kubeflow TrainJob, with the same codes ([CLI.md → `gco jobs submit`](CLI.md#gco-jobs-submit)) | Treat 3 as "ran and failed" and 4 as "still running"; do not resubmit on either |
 | `gco jobs list --region` | Exits 1 when the Region's API read fails (it printed no jobs); `--limit` is honoured across API pages and must be at least 1 | Handle the failure |
 | `gco jobs list --all-regions` | **BREAKING:** exits 1 when the global API reports a Region it could not read; it exited 0. The other Regions' jobs are still printed, and each unread Region is listed under `errors` as `{"region", "error"}` (named on stderr in table mode) | Check the exit status; `errors` names the Regions that are missing |
+| `gco jobs list --all-regions --limit` | A `--limit` above 1000, the global API's page size, is refused before any request (still exit 1) with a message saying so; the request used to reach the API, which refused it, and the command printed `400 Client Error: Bad Request`. Any listing the global API refuses now prints the API's reason | Keep `--limit` at 1000 or less, or list one Region with `--region`, which reads as many pages as `--limit` needs |
+| `gco jobs queue-status --all-regions` | **BREAKING:** exits 1 when a Region's queue cannot be read; it exited 0 and left the Region out. The other Regions are still printed (in `-o json` and `-o yaml` too), and each unread Region is named on stderr | Check the exit status |
 | `gco jobs delete` | **BREAKING:** exits 1 with the API's 404 for a name that is neither a Job nor a TrainJob (with the TrainJob CRD installed it printed "deleted"); a TrainJob delete the cluster refuses is reported instead of "not found" | Check the name |
 | `gco inference promote`, `gco inference rollback`, `gco capacity traffic-dial set` | **BREAKING:** a declined confirmation exits 1 (it exited 0 with "Cancelled") | Pass `-y` where the change is intended |
 | `gco inference configure-store` | **BREAKING:** with no option, exits 1 and changes nothing; with a store block it used to restart the rollout | Pass at least one setting |
@@ -1352,6 +1394,25 @@ data.
 | `gco -o yaml deps scan` | The same envelope as `-o json`; `--report` now writes its file in every mode |
 | `gco jobs submit --check-policy` | The submission document; the policy findings go to stderr |
 | Every command | Datetimes in ISO 8601 at any depth (`2026-01-15T10:30:00+00:00`); those inside job, stack and file records printed as `2026-01-15 10:30:00+00:00` |
+
+The fleet status document (`gco status`):
+
+- **BREAKING (scripts that read `stacks`): a stack `gco status` cannot read
+  is `unknown`.** A `DescribeStacks` call that was denied, throttled or failed
+  on the network read as `not-deployed`, the health of a stack CloudFormation
+  says does not exist. Such a stack is now listed with `health: unknown` and
+  `status: null` and named in the section's `errors`; the `stacks` section is
+  `partial`, or `error` when no stack could be read, so `degraded` names it.
+  The expected-stack finding says `<stack> could not be read in <region>`,
+  and `<stack> is not deployed in <region>` only for a stack that does not
+  exist; both used to say `absent or not readable`. Treat `unknown` as "no
+  answer", not "missing".
+- **New `addons` section.** Each Region's add-on convergence, read from the
+  same SSM records as `gco stacks addons status`: a failed phase or Helm
+  chart (for example `base-manifests failed in us-east-1: ...`) is now an
+  error finding, so `overall` is `degraded` and `--fail-on-findings` exits 1
+  where the report used to say nothing looks wrong. A finished gateway
+  teardown (`deleted`) counts as healthy, in `gco stacks addons status` too.
 
 Prompts, namespaces, Regions and permissions:
 
@@ -1476,6 +1537,31 @@ Prompts, namespaces, Regions and permissions:
 - **`gco upgrade` checks the preserved `cdk.json` before its teardown** from
   the next upgrade on, and stops when the check cannot run
   ([step 4](#how-an-upgrade-works)).
+
+### Errors the CLI's Python modules raise
+
+For code that imports the CLI's modules instead of running `gco`:
+
+- **`APIRequestError` is also a `requests.HTTPError`, and carries the API's
+  message.** Every `cli.aws_client.GCOAWSClient` method that reads a JSON
+  answer raises it for a non-2xx response. Apart from `call_api`, they raised
+  the `requests.HTTPError` of `raise_for_status()`, whose message
+  (`403 Client Error: Forbidden for url: ...`) ignored the body. The message
+  is now `API request failed: <message>`, the message being the body's
+  `error`, `message`, `detail` or API Gateway's `Message`, without the request
+  material API Gateway quotes. `response` and `request` are set, so
+  `except requests.HTTPError` and `e.response.status_code` keep working.
+  `ManifestSubmissionError` reads the same keys.
+- **BREAKING (narrow): an `except requests.HTTPError` clause now catches
+  `call_api`'s errors too**, as does `except OSError`, the base class of
+  `requests` exceptions. Where such a clause comes before
+  `except APIRequestError`, move the `APIRequestError` clause first.
+- **BREAKING: `StackManager.get_stack_status` raises unless the stack does not
+  exist.** It returned `None` for every failed read (access denied,
+  throttling, missing credentials, the network). `None` now means
+  CloudFormation reported that the stack does not exist; catch
+  `botocore.exceptions.ClientError` and `BotoCoreError` where you handled a
+  read that failed.
 
 ### MCP server tools
 

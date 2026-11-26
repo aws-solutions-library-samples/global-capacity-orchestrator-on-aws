@@ -2222,13 +2222,14 @@ def apply_manifests(
                                 raise
 
                     elif kind == "ValidatingAdmissionPolicy":
-                        # Built-in and cluster-scoped: the fence on who may
-                        # obtain a certificate from GCO's internal CA
-                        # (08-internal-ca-issuance.yaml) and the write fence on
-                        # GCO's objects in the tenant namespaces
-                        # (09-tenant-write-fence.yaml). Both are base-pass
-                        # objects, so they are enforced before the post-Helm
-                        # pass creates the CA and its leaves.
+                        # Built-in and cluster-scoped: the per-container GPU
+                        # cap on gco-jobs pods (04-resource-quotas.yaml), the
+                        # fence on who may obtain a certificate from GCO's
+                        # internal CA (08-internal-ca-issuance.yaml) and the
+                        # write fence on GCO's objects in the tenant namespaces
+                        # (09-tenant-write-fence.yaml). All are base-pass
+                        # objects, so the fences are enforced before the
+                        # post-Helm pass creates the CA and its leaves.
                         admission_v1 = client.AdmissionregistrationV1Api()
                         try:
                             admission_v1.create_validating_admission_policy(body=doc)

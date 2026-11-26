@@ -503,13 +503,33 @@ class TestResourceGovernanceFit:
             finding.detail for finding in findings if not finding.passed
         ]
 
-    def test_container_over_limit_range_fails(self) -> None:
+    def test_container_over_the_gpu_cap_fails_against_the_policy(self) -> None:
+        """The per-container GPU ceiling still applies; the admission policy enforces it.
+
+        It left the LimitRange, whose GPU entry gave every pod a toleration of
+        the GPU node taint (04-resource-quotas.yaml).
+        """
         findings = static_checks.check_resource_governance_fit(
             _parsed_job_example({"limits": {"nvidia.com/gpu": "16"}})
         )
         failures = [finding for finding in findings if not finding.passed]
         assert failures, "a 16-GPU container must fail the default 8-GPU ceiling"
-        assert "container_max_gpu" in failures[0].detail
+        assert failures[0].check == (
+            "GPU cap policy fit (Job/synthetic: main limits.nvidia.com/gpu)"
+        )
+        assert failures[0].detail == (
+            "16 exceeds the default per-container ceiling 8 (container_max_gpu)"
+        )
+
+    def test_container_over_the_limit_range_cpu_ceiling_fails_against_the_limit_range(
+        self,
+    ) -> None:
+        findings = static_checks.check_resource_governance_fit(
+            _parsed_job_example({"requests": {"cpu": "256"}})
+        )
+        failures = [finding for finding in findings if not finding.passed]
+        assert failures[0].check == "LimitRange fit (Job/synthetic: main requests.cpu)"
+        assert "container_max_cpu" in failures[0].detail
 
     def test_aggregate_over_namespace_quota_fails(self) -> None:
         findings = static_checks.check_resource_governance_fit(
@@ -540,12 +560,21 @@ class TestJobAdmissionFailFast:
 
         return kubectl
 
-    def test_forbidden_pods_fail_immediately_with_the_event_reason(self) -> None:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            'pods "synthetic-x" is forbidden: maximum cpu usage per Container is 192, '
+            "but limit is 256",
+            # The GPU cap is an admission policy, not a LimitRange entry.
+            'pods "synthetic-x" is forbidden: ValidatingAdmissionPolicy '
+            "'gco-jobs-container-gpu-limit' with binding 'gco-jobs-container-gpu-limit' denied "
+            "request: container main asks for 16 nvidia.com/gpu in resources.limits; a gco-jobs "
+            "container may ask for at most 8, set by resource_quota.container_max_gpu in cdk.json",
+        ],
+        ids=["limit-range", "gpu-cap-policy"],
+    )
+    def test_forbidden_pods_fail_immediately_with_the_event_reason(self, message: str) -> None:
         parsed = _parsed_job_example({"requests": {"cpu": "1"}})
-        message = (
-            'pods "synthetic-x" is forbidden: maximum nvidia.com/gpu usage per '
-            "Container is 8, but limit is 16"
-        )
         with pytest.raises(drivers.ExampleValidationError, match="rejected at admission"):
             drivers.wait_jobs_complete(parsed, self._kubectl(message), timeout=3600)
 
@@ -582,8 +611,8 @@ class TestJobAdmissionFailFast:
         events = (
             'pods "synthetic-x" is forbidden: exceeded quota: gco-jobs-quota, '
             "requested: requests.cpu=8, used: requests.cpu=396, limited: requests.cpu=400\n"
-            'pods "synthetic-x" is forbidden: maximum nvidia.com/gpu usage per '
-            "Container is 8, but limit is 16"
+            'pods "synthetic-x" is forbidden: maximum memory usage per '
+            "Container is 2Ti, but limit is 3Ti"
         )
         with pytest.raises(drivers.ExampleValidationError, match="rejected at admission"):
             drivers.wait_jobs_complete(parsed, self._kubectl(events), timeout=3600)

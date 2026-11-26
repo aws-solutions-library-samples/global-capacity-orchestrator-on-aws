@@ -12,9 +12,11 @@ and the one real subprocess (the stdlib import probe) only imports stdlib
 modules by name in an isolated interpreter. No Docker, no network, no root.
 
 The drift guards at the end tie each Dockerfile's smoke ``RUN`` to its
-``CMD``, and the Dockerfiles that pass the smoke's ``--tracing`` flag and the
-``image-*`` dependency groups to what ``gco/services/tracing.py`` actually
-imports. The smoke itself derives that import list from the module's source.
+``CMD``, the application trees each distroless Dockerfile stages to the ones
+its builder copies, and the Dockerfiles that pass the smoke's ``--tracing``
+flag and the ``image-*`` dependency groups to what ``gco/services/tracing.py``
+actually imports. The smoke itself derives that import list from the
+module's source.
 """
 
 from __future__ import annotations
@@ -1495,6 +1497,138 @@ class TestAssemblyAborts:
         assert not (builder.rootfs / "lib64").is_symlink()
 
 
+class TestApplicationTrees:
+    """Which application trees ``main`` stages: ``/app/gco`` alone, or the named ones."""
+
+    def test_no_arguments_stage_the_gco_tree(
+        self, builder: _FakeBuilder, rootfs_mod: ModuleType
+    ) -> None:
+        assert rootfs_mod.app_trees(()) == [Path("/app/gco")]
+
+    def test_named_trees_are_staged_in_the_order_given(
+        self, builder: _FakeBuilder, rootfs_mod: ModuleType
+    ) -> None:
+        builder.file("app/cli/__init__.py")
+        assert rootfs_mod.app_trees(["/app/cli", "/app/gco"]) == [
+            Path("/app/cli"),
+            Path("/app/gco"),
+        ]
+
+    @pytest.mark.parametrize(
+        "tree", ["app/cli", "/app/cli/dashboard", "/opt/cli", "/app", "/app/.."]
+    )
+    def test_a_tree_not_directly_under_app_is_refused(
+        self,
+        builder: _FakeBuilder,
+        rootfs_mod: ModuleType,
+        capsys: pytest.CaptureFixture[str],
+        tree: str,
+    ) -> None:
+        """``/app`` is the image's PYTHONPATH: a tree anywhere else would not import.
+
+        ``/app/..`` has ``/app`` as its parent on paper, but it is the root
+        that holds every other tree (and the rootfs itself).
+        """
+        builder.file("app/cli/dashboard/__init__.py")
+        builder.file("opt/cli/__init__.py")
+        _assert_aborts(
+            capsys,
+            lambda: rootfs_mod.app_trees(["/app/gco", tree]),
+            f"application tree {tree} must be a directory directly under /app",
+        )
+
+    @pytest.mark.parametrize("shape", ["absent", "a file"])
+    def test_a_tree_missing_from_the_builder_is_refused(
+        self,
+        builder: _FakeBuilder,
+        rootfs_mod: ModuleType,
+        capsys: pytest.CaptureFixture[str],
+        shape: str,
+    ) -> None:
+        if shape == "a file":
+            builder.file("app/cli", "not a package\n")
+        _assert_aborts(
+            capsys,
+            lambda: rootfs_mod.app_trees(["/app/gco", "/app/cli"]),
+            "application tree /app/cli is missing from the builder",
+        )
+
+    @pytest.mark.parametrize(
+        ("trees", "repeated"),
+        [
+            (["/app/gco", "/app/gco"], "/app/gco"),
+            (["/app/cli", "/app/gco", "/app/cli/"], "/app/cli"),
+        ],
+        ids=["same-spelling", "trailing-slash"],
+    )
+    def test_a_tree_named_more_than_once_is_refused(
+        self,
+        builder: _FakeBuilder,
+        rootfs_mod: ModuleType,
+        capsys: pytest.CaptureFixture[str],
+        trees: list[str],
+        repeated: str,
+    ) -> None:
+        """Staging a tree twice would copy it onto itself and crash half-way through."""
+        builder.file("app/cli/__init__.py")
+        _assert_aborts(
+            capsys,
+            lambda: rootfs_mod.app_trees(trees),
+            f"application tree {repeated} is named more than once",
+        )
+
+    def test_main_refuses_a_repeated_tree_before_staging_anything(
+        self, builder: _FakeBuilder, rootfs_mod: ModuleType, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _assert_aborts(
+            capsys,
+            lambda: rootfs_mod.main(["/app/gco", "/app/gco"]),
+            "application tree /app/gco is named more than once",
+        )
+        assert not builder.calls
+        assert not builder.rootfs.exists()
+
+    def test_the_default_tree_must_exist_too(
+        self, builder: _FakeBuilder, rootfs_mod: ModuleType, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        shutil.rmtree(builder.sysroot / "app/gco")
+        _assert_aborts(
+            capsys,
+            lambda: rootfs_mod.app_trees(()),
+            "application tree /app/gco is missing from the builder",
+        )
+
+    def test_main_refuses_a_bad_tree_before_staging_anything(
+        self, builder: _FakeBuilder, rootfs_mod: ModuleType, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _assert_aborts(
+            capsys,
+            lambda: rootfs_mod.main(["/app/gco", "/app/cli"]),
+            "application tree /app/cli is missing from the builder",
+        )
+        assert not builder.calls
+        assert not builder.rootfs.exists()
+
+    def test_main_stages_every_named_tree_beside_gco(
+        self, builder: _FakeBuilder, rootfs_mod: ModuleType, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The dashboard image's call: ``cli`` ships next to ``gco``, symlinks kept."""
+        builder.file("app/cli/__init__.py", '"""cli"""\n')
+        builder.file("app/cli/dashboard/__pycache__/app.cpython-314.pyc", b"\x00pyc")
+        builder.link("app/cli/dashboard/views.py", "../__init__.py")
+
+        rootfs_mod.main(["/app/gco", "/app/cli"])
+
+        app = builder.rootfs / "app"
+        assert sorted(entry.name for entry in app.iterdir()) == ["cli", "gco"]
+        assert (app / "gco/__init__.py").read_text(encoding="utf-8") == '"""gco"""\n'
+        assert (app / "gco/services/__pycache__/manifest_api.cpython-314.pyc").is_file()
+        assert (app / "cli/__init__.py").read_text(encoding="utf-8") == '"""cli"""\n'
+        assert (app / "cli/dashboard/__pycache__/app.cpython-314.pyc").is_file()
+        assert os.readlink(app / "cli/dashboard/views.py") == "../__init__.py"
+        assert "build_scratch_rootfs: staged" in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # Dockerfile drift guards: the smoke's one per-service datum must stay true
 # ---------------------------------------------------------------------------
@@ -1534,6 +1668,40 @@ class TestDockerfileSmokeWiring:
             f"{dockerfile.name}: builder must COPY build_scratch_rootfs.py and "
             "runtime_smoke.py together into /opt/build/"
         )
+
+
+_ROOTFS_RUN = re.compile(
+    r"^RUN python /opt/build/build_scratch_rootfs\.py(?P<trees>(?: /app/[a-z_]+)*)$", re.MULTILINE
+)
+_COPY_APP_TREE = re.compile(r"^COPY (?P<tree>[a-z_]+)/ \./(?P=tree)/$", re.MULTILINE)
+#: Every Dockerfile that assembles a scratch rootfs: the services and the root
+#: images that reuse the build (the dashboard).
+_ROOTFS_DOCKERFILES = [
+    path
+    for path in [*SERVICE_DOCKERFILES, *sorted(REPO_ROOT.glob("Dockerfile.*"))]
+    if _COPY_BUILD_SCRIPTS in path.read_text(encoding="utf-8")
+]
+
+
+class TestRootfsApplicationTreeWiring:
+    def test_the_dashboard_image_assembles_a_rootfs_like_the_services(self) -> None:
+        names = {path.name for path in _ROOTFS_DOCKERFILES}
+        assert names == {path.name for path in SERVICE_DOCKERFILES} | {"Dockerfile.dashboard"}
+
+    @pytest.mark.parametrize("dockerfile", _ROOTFS_DOCKERFILES, ids=lambda p: p.name)
+    def test_the_staged_trees_are_the_trees_the_builder_copies(
+        self, dockerfile: Path, rootfs_mod: ModuleType
+    ) -> None:
+        """A tree copied but not named would be missing from the runtime image."""
+        text = dockerfile.read_text(encoding="utf-8")
+        run = _ROOTFS_RUN.search(text)
+        assert run, f"{dockerfile.name}: build_scratch_rootfs.py RUN not found"
+        staged = run.group("trees").split() or [str(rootfs_mod.APP_TREE)]
+        # The builder stage's WORKDIR, which ``COPY <tree>/ ./<tree>/`` lands under.
+        workdir = re.search(r"^WORKDIR (\S+)$", text, re.MULTILINE)
+        assert workdir and workdir.group(1) == "/app", f"{dockerfile.name}: builder WORKDIR"
+        copied = [f"/app/{match.group('tree')}" for match in _COPY_APP_TREE.finditer(text)]
+        assert staged == copied, f"{dockerfile.name}: stages {staged} but copies {copied}"
 
 
 # ---------------------------------------------------------------------------

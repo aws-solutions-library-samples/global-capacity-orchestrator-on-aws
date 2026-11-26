@@ -54,6 +54,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+from collections.abc import Sequence
 from pathlib import Path
 
 ROOTFS = Path("/rootfs")
@@ -451,9 +452,31 @@ def write_identity_and_os_metadata() -> None:
         path.chmod(0o1777)
 
 
-def main() -> None:
+def app_trees(arguments: Sequence[str]) -> list[Path]:
+    """The application trees to stage: the arguments, or ``/app/gco`` without any.
+
+    Every service image ships the ``gco`` package alone and calls the script
+    with no arguments; the dashboard image (``Dockerfile.dashboard``) ships
+    ``cli`` beside it and names both. Each tree must be a directory directly
+    under ``/app``, the image's ``PYTHONPATH``, so no two trees can nest
+    (``/app/..`` names ``/app``'s parent, not a directory in it), and each is
+    named once: staging one twice would copy it onto itself.
+    """
+    trees = [Path(argument) for argument in arguments] or [APP_TREE]
+    for index, tree in enumerate(trees):
+        if not tree.is_absolute() or tree.parent != APP_TREE.parent or tree.name == "..":
+            fail(f"application tree {tree} must be a directory directly under {APP_TREE.parent}")
+        if tree in trees[:index]:
+            fail(f"application tree {tree} is named more than once")
+        if not host(tree).is_dir():
+            fail(f"application tree {tree} is missing from the builder")
+    return trees
+
+
+def main(arguments: Sequence[str] = ()) -> None:
     if ROOTFS.exists():
         fail("/rootfs already exists; refusing to assemble over prior state")
+    trees = app_trees(arguments)
 
     # The interpreter, stdlib, and site-packages, minus ensurepip: pip itself
     # is uninstalled by the Dockerfile, and dropping ensurepip's bundled pip
@@ -464,8 +487,9 @@ def main() -> None:
         symlinks=True,
         ignore=shutil.ignore_patterns("ensurepip"),
     )
-    # The precompiled application tree (sole content of /app besides cwd).
-    shutil.copytree(host(APP_TREE), stage_path(APP_TREE), symlinks=True)
+    # The precompiled application trees (the sole content of /app besides cwd).
+    for tree in trees:
+        shutil.copytree(host(tree), stage_path(tree), symlinks=True)
 
     closure = resolve_closure(seed_binaries())
     real_files: set[Path] = set()
@@ -497,4 +521,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

@@ -35,12 +35,26 @@ _MAX_RETRIES = 3
 _RETRY_BACKOFF_BASE = 1.0  # seconds
 
 
-class APIRequestError(RuntimeError):
-    """HTTP API failure that preserves status for policy-aware callers."""
+class APIRequestError(RuntimeError, requests.HTTPError):
+    """HTTP API failure that preserves status for policy-aware callers.
 
-    def __init__(self, status_code: int, message: str):
+    Every client method that reads a JSON answer raises it for a non-2xx
+    response, with the API's own message. It is also a
+    :class:`requests.HTTPError` with ``response`` set, as
+    ``response.raise_for_status()`` raised before, so callers that catch that
+    and read ``e.response.status_code`` (a 404 meaning "no such job") work
+    unchanged.
+    """
+
+    def __init__(
+        self, status_code: int, message: str, *, response: requests.Response | None = None
+    ):
         super().__init__(f"API request failed: {message}")
         self.status_code = status_code
+        # RuntimeError's initializer runs instead of requests', so these are
+        # set here.
+        self.response = response
+        self.request = response.request if response is not None else None
 
 
 class ManifestSubmissionError(RuntimeError):
@@ -185,6 +199,14 @@ def _validate_max_attempts(max_attempts: int | None) -> None:
         raise ValueError("max_attempts must be a positive integer")
 
 
+#: The keys a failed response's JSON body carries its message under, in the
+#: order they are read: the GCO API's ``error``, API Gateway's ``message``
+#: ("Missing Authentication Token", an expired token), API Gateway's
+#: ``Message`` when IAM authorization denies the caller ("User: ... is not
+#: authorized to perform: execute-api:Invoke ..."), and FastAPI's ``detail``.
+_API_MESSAGE_KEYS = ("error", "message", "Message", "detail")
+
+
 def _with_reported_errors(message: Any, body: Any) -> Any:
     """Append a failed response's ``errors`` list to *message*.
 
@@ -200,8 +222,59 @@ def _with_reported_errors(message: Any, body: Any) -> Any:
     details = "; ".join(str(error) for error in errors if str(error).strip())
     if not details:
         return message
-    has_own_message = any(key in body for key in ("error", "message", "detail"))
+    has_own_message = any(key in body for key in _API_MESSAGE_KEYS)
     return f"{message}: {details}" if has_own_message else details
+
+
+#: Where API Gateway's own messages go on to quote the signed request: the
+#: signature-mismatch message continues with the canonical request, session
+#: token included, and the malformed-signature message ends with the
+#: Authorization header.
+_REQUEST_ECHO_MARKERS = ("The Canonical String for this request", "Authorization=")
+
+
+def _without_request_echo(message: str) -> str:
+    """*message* up to where API Gateway starts quoting the signed request.
+
+    The CLI prints the message and the MCP server hands it to an agent, so
+    the credentials in that quote must not travel with it.
+    """
+    for marker in _REQUEST_ECHO_MARKERS:
+        message = message.split(marker, 1)[0]
+    return message.rstrip()
+
+
+def _api_error(response: requests.Response) -> APIRequestError:
+    """The :class:`APIRequestError` for a non-2xx response, with the API's message.
+
+    The message is the body's first :data:`_API_MESSAGE_KEYS` value plus any
+    ``errors`` list, without the request API Gateway quotes after it. A body
+    that is not JSON reads as its text, and JSON without a message as the
+    status line.
+    """
+    status_line = f"{response.status_code} {response.reason}"
+    try:
+        error_data = response.json()
+    except json.JSONDecodeError:
+        return APIRequestError(
+            response.status_code, response.text or status_line, response=response
+        )
+    error_msg: Any = status_line
+    if isinstance(error_data, dict):
+        key = next((key for key in _API_MESSAGE_KEYS if key in error_data), None)
+        if key is not None:
+            error_msg = error_data[key]
+        error_msg = _with_reported_errors(error_msg, error_data)
+    message = _without_request_echo(str(error_msg)) or status_line
+    return APIRequestError(response.status_code, message, response=response)
+
+
+def _response_json(response: requests.Response) -> dict[str, Any]:
+    """The JSON body of a 2xx response; any other status raises :func:`_api_error`."""
+    if not response.ok:
+        raise _api_error(response)
+    result: dict[str, Any] = response.json()
+    return result
 
 
 def _decode_log_payload(payload: Any) -> str:
@@ -677,7 +750,10 @@ class GCOAWSClient:
             JSON response as dictionary
 
         Raises:
-            RuntimeError: If the request fails with a descriptive error message
+            APIRequestError: The API answered with a non-2xx status; the
+                message is the API's own
+            RuntimeError: The request could not be sent (no endpoint, no
+                credentials)
             ValueError: If max_attempts is not a positive integer
         """
         _validate_max_attempts(max_attempts)
@@ -699,24 +775,7 @@ class GCOAWSClient:
             target_region=region,
             max_attempts=max_attempts,
         )
-
-        if not response.ok:
-            error_msg = f"{response.status_code} {response.reason}"
-            try:
-                error_data = response.json()
-                if "error" in error_data:
-                    error_msg = error_data["error"]
-                elif "message" in error_data:
-                    error_msg = error_data["message"]
-                elif "detail" in error_data:
-                    error_msg = error_data["detail"]
-                error_msg = _with_reported_errors(error_msg, error_data)
-            except json.JSONDecodeError, KeyError:
-                error_msg = response.text or error_msg
-            raise APIRequestError(response.status_code, str(error_msg))
-
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     def make_authenticated_request(
         self,
@@ -944,10 +1003,8 @@ class GCOAWSClient:
                             f"{r.get('name')}: {r.get('message', 'Unknown error')}" for r in failed
                         ]
                         error_msg = "; ".join(messages)
-                elif "error" in error_data:
-                    error_msg = error_data["error"]
-                elif "message" in error_data:
-                    error_msg = error_data["message"]
+                elif key := next((k for k in _API_MESSAGE_KEYS if k in error_data), None):
+                    error_msg = _without_request_echo(str(error_data[key])) or error_msg
             except json.JSONDecodeError, KeyError, TypeError:
                 error_msg = response.text or error_msg
             raise ManifestSubmissionError(response.status_code, str(error_msg), resources)
@@ -997,9 +1054,7 @@ class GCOAWSClient:
             method="GET", path=f"/api/v1/jobs{query_string}", target_region=region
         )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     def get_job_details(
         self, job_name: str, namespace: str, region: str | None = None
@@ -1019,9 +1074,7 @@ class GCOAWSClient:
             method="GET", path=_job_path(namespace, job_name), target_region=region
         )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     def get_job_logs(
         self,
@@ -1092,9 +1145,7 @@ class GCOAWSClient:
             target_region=region,
         )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     def get_regional_alb_endpoint(self, region: str) -> str | None:
         """
@@ -1141,6 +1192,10 @@ class GCOAWSClient:
 
         Returns:
             Aggregated job list with region information
+
+        Raises:
+            APIRequestError: The aggregator refused the request; the message
+                is its own (a ``limit`` above 1000 is a 400 that says so)
         """
         params = {"limit": str(limit)}
         if namespace:
@@ -1148,15 +1203,7 @@ class GCOAWSClient:
         if status:
             params["status"] = _server_job_status(status)
 
-        query_string = f"?{urlencode(params, quote_via=quote)}"
-
-        response = self.make_authenticated_request(
-            method="GET", path=f"/api/v1/global/jobs{query_string}"
-        )
-
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return self.call_api(method="GET", path="/api/v1/global/jobs", params=params)
 
     def get_global_health(self) -> dict[str, Any]:
         """
@@ -1167,9 +1214,7 @@ class GCOAWSClient:
         """
         response = self.make_authenticated_request(method="GET", path="/api/v1/global/health")
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     def get_global_status(self) -> dict[str, Any]:
         """
@@ -1180,9 +1225,7 @@ class GCOAWSClient:
         """
         response = self.make_authenticated_request(method="GET", path="/api/v1/global/status")
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     def bulk_delete_global(
         self,
@@ -1220,9 +1263,7 @@ class GCOAWSClient:
             method="DELETE", path="/api/v1/global/jobs", body=body
         )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     # =========================================================================
     # Regional Job Operations (New API Endpoints)
@@ -1246,9 +1287,7 @@ class GCOAWSClient:
             target_region=region,
         )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     def get_job_pods(self, job_name: str, namespace: str, region: str) -> dict[str, Any]:
         """
@@ -1268,9 +1307,7 @@ class GCOAWSClient:
             target_region=region,
         )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     def get_pod_logs(
         self,
@@ -1308,8 +1345,7 @@ class GCOAWSClient:
             target_region=region,
         )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
+        result = _response_json(response)
         if "logs" in result:
             result["logs"] = _decode_log_payload(result["logs"])
         return result
@@ -1332,9 +1368,7 @@ class GCOAWSClient:
             target_region=region,
         )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     def retry_job(self, job_name: str, namespace: str, region: str) -> dict[str, Any]:
         """
@@ -1401,9 +1435,7 @@ class GCOAWSClient:
             method="DELETE", path="/api/v1/jobs", body=body, target_region=region
         )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     def get_health(self, region: str) -> dict[str, Any]:
         """
@@ -1419,9 +1451,7 @@ class GCOAWSClient:
             method="GET", path="/api/v1/health", target_region=region
         )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
     def get_job_validation_policy(self, region: str) -> dict[str, Any]:
         """
@@ -1437,15 +1467,13 @@ class GCOAWSClient:
 
         Returns:
             The region's effective policy plus its live namespace
-            ResourceQuota / LimitRange ceilings
+            ResourceQuota / LimitRange ceilings and GPU cap
         """
         response = self.make_authenticated_request(
             method="GET", path="/api/v1/policy", target_region=region
         )
 
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
+        return _response_json(response)
 
 
 def get_aws_client(config: GCOConfig | None = None) -> GCOAWSClient:

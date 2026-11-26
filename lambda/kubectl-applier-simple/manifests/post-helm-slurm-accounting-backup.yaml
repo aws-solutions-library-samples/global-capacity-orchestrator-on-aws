@@ -71,8 +71,7 @@ spec:
           automountServiceAccountToken: false
           restartPolicy: Never
           # Same placement as the database (29-slurm-accounting-db.yaml): never
-          # an accelerator pool, which the gco-jobs LimitRange's nvidia.com/gpu
-          # default would otherwise make eligible.
+          # an accelerator pool, whatever the pod tolerates.
           nodeSelector:
             kubernetes.io/os: linux
             kubernetes.io/arch: amd64

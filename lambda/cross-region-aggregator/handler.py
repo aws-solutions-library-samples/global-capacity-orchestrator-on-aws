@@ -76,6 +76,16 @@ _RESPONSE_HEADROOM_SECONDS = 2.0
 _DEFAULT_REQUEST_BUDGET_SECONDS = 27.0
 #: The regional jobs API's own ``limit`` ceiling (gco/services/api_routes/jobs.py).
 _MAX_JOBS_LIMIT = 1000
+#: The longest regional error message an aggregate answer repeats.
+_MAX_REGION_ERROR_CHARS = 300
+#: Where a regional error body carries its message: the GCO API's ``error``
+#: and ``detail``, API Gateway's ``message``, and its ``Message`` when IAM
+#: authorization denies the request.
+_ERROR_MESSAGE_KEYS = ("error", "message", "Message", "detail")
+#: Names an error message may quote that the aggregate answer must not repeat:
+#: ARNs (accounts, roles, API IDs) and access key IDs.
+_ARN_RE = re.compile(r"\barn:aws[\w-]*:\S*")
+_ACCESS_KEY_ID_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 
 _cached_endpoints: dict[str, str] | None = None
 _endpoints_cache_time: float = 0
@@ -203,6 +213,38 @@ class _BadRequest(ValueError):
     """Client input the aggregator rejects with 400."""
 
 
+def _region_error(status: int, data: Any) -> str:
+    """``HTTP <status>``, followed by the regional API's message when it sent one.
+
+    The message is the first string under :data:`_ERROR_MESSAGE_KEYS` in a
+    JSON body, made safe to repeat. Only its first line is kept, because API
+    Gateway's signature-mismatch message goes on to quote the canonical
+    request, security token included. Anything from ``Authorization=`` on is
+    dropped, because its malformed-signature message ends with that header.
+    ARNs and access key IDs are masked, control characters become spaces, and
+    the text is cut to :data:`_MAX_REGION_ERROR_CHARS`.
+    """
+    summary = f"HTTP {status}"
+    if not isinstance(data, bytes):
+        return summary
+    try:
+        body = json.loads(data.decode("utf-8"))
+    except ValueError:  # not UTF-8 or not JSON: a load balancer's HTML page, say
+        return summary
+    if not isinstance(body, dict):
+        return summary
+    message = next((body[key] for key in _ERROR_MESSAGE_KEYS if isinstance(body.get(key), str)), "")
+    first_line = (message.strip().splitlines() or [""])[0]
+    first_line = first_line.split("Authorization=", 1)[0]
+    first_line = _ACCESS_KEY_ID_RE.sub("<access-key-id>", _ARN_RE.sub("<arn>", first_line))
+    text = " ".join("".join(char if char.isprintable() else " " for char in first_line).split())
+    if not text:
+        return summary
+    if len(text) > _MAX_REGION_ERROR_CHARS:
+        text = text[: _MAX_REGION_ERROR_CHARS - 3] + "..."
+    return f"{summary}: {text}"
+
+
 def _request_deadline(context: Any) -> float:
     """The ``time.monotonic()`` by which every regional request must finish."""
     get_remaining_time = getattr(context, "get_remaining_time_in_millis", None)
@@ -267,7 +309,7 @@ def query_region(
         return {
             "_region": region,
             "_status": "error",
-            "_error": f"HTTP {response.status}",
+            "_error": _region_error(response.status, response.data),
         }
     except Exception:
         # Never expose credentials, certificate state, API identifiers, or

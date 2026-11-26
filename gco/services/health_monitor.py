@@ -121,6 +121,13 @@ def _job_namespaces_from_env() -> frozenset[str]:
     return frozenset(ns.strip() for ns in raw.split(",") if ns.strip())
 
 
+def _gpu_percent(allocatable: int, requested: int) -> float:
+    """``requested`` GPUs as a percentage of ``allocatable`` ones; ``0.0`` when there are none."""
+    if allocatable > 0:
+        return (requested / allocatable) * 100
+    return 0.0
+
+
 class HealthMonitor:
     """
     Monitors Kubernetes cluster resource utilization and determines health status
@@ -279,10 +286,15 @@ class HealthMonitor:
         try:
             nodes = list(node_list.items)
             pods = list(pod_list.items)
+            # The counts travel with the percentage: it reads 0.0 both for a
+            # cluster without GPU nodes and for idle GPUs.
+            gpu_allocatable, gpu_requested = self._gpu_counts(nodes, pods)
             resource_utilization = ResourceUtilization(
                 cpu=self._calculate_cpu_utilization(node_metrics, nodes),
                 memory=self._calculate_memory_utilization(node_metrics, nodes),
-                gpu=self._calculate_gpu_utilization(nodes, pods),
+                gpu=_gpu_percent(gpu_allocatable, gpu_requested),
+                gpu_allocatable=gpu_allocatable,
+                gpu_requested=gpu_requested,
             )
             active_jobs, pending_pods = self._get_pod_counts(pods)
             pending_requested = self._calculate_pending_requested_resources(pods)
@@ -384,13 +396,8 @@ class HealthMonitor:
         """A memory quantity in bytes (any form the API server accepts); empty is 0."""
         return parse_memory_bytes(memory_str)
 
-    def _calculate_gpu_utilization(self, nodes: list[Any], pods: list[Any]) -> float:
-        """GPUs requested by running pods as a percentage of allocatable GPUs.
-
-        Can exceed 100, for example while a device plugin restarts and nodes
-        briefly report fewer allocatable GPUs than running pods hold. ``0.0``
-        when no node has GPUs.
-        """
+    def _gpu_counts(self, nodes: list[Any], pods: list[Any]) -> tuple[int, int]:
+        """``(allocatable, requested)``: GPUs the nodes offer and GPUs running pods request."""
         total_gpu_capacity = 0
         for node in nodes:
             allocatable = present(node.status, "node.status").allocatable or {}
@@ -405,9 +412,16 @@ class HealthMonitor:
                             container.resources.requests.get("nvidia.com/gpu")
                         )
 
-        if total_gpu_capacity > 0:
-            return (total_gpu_requested / total_gpu_capacity) * 100
-        return 0.0
+        return total_gpu_capacity, total_gpu_requested
+
+    def _calculate_gpu_utilization(self, nodes: list[Any], pods: list[Any]) -> float:
+        """GPUs requested by running pods as a percentage of allocatable GPUs.
+
+        Can exceed 100, for example while a device plugin restarts and nodes
+        briefly report fewer allocatable GPUs than running pods hold. ``0.0``
+        when no node has GPUs; :meth:`_gpu_counts` tells that apart from idle GPUs.
+        """
+        return _gpu_percent(*self._gpu_counts(nodes, pods))
 
     def _get_pod_counts(self, pods: list[Any]) -> tuple[int, int]:
         """``(active_jobs, pending_pods)`` from one pod list.

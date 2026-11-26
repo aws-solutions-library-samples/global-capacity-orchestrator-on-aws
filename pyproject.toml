@@ -29,6 +29,9 @@ namespaces = true
 # when the live EC2 lookup fails, so an installed gco answers the same way a
 # checkout does.
 "gco.config" = ["accelerator_catalog.json"]
+# The dashboard's offline world map (Natural Earth land outlines) and its
+# Streamlit theme, which Streamlit reads from beside the entrypoint (app.py).
+"cli.dashboard" = ["assets/*.json", ".streamlit/config.toml"]
 
 [tool.setuptools.dynamic]
 version = {attr = "gco._version.__version__"}
@@ -243,6 +246,19 @@ metrics = [
     # Umbrella: every optional metric-reader file format at once.
     "gco-cli[metrics-parquet,metrics-tfevents]",
 ]
+dashboard = [
+    # The local web dashboard (``gco dashboard``, cli/dashboard/). Streamlit
+    # serves it; the dashboard imports Altair (charts), pydeck (the map) and
+    # pandas (tables) itself, so they are pinned here too, at the versions
+    # Streamlit's own requirements resolve to. Optional because the CLI never
+    # needs them: ``gco dashboard start`` runs the dashboard in its own image
+    # (Dockerfile.dashboard installs this group), and ``gco dashboard serve``
+    # needs it installed.
+    "streamlit==1.67.0",
+    "altair==6.3.0",
+    "pydeck==0.9.3",
+    "pandas==3.1.0",
+]
 mcp = [
     # Kept as an alias of the base ``fastmcp[tasks,code-mode]`` dependency
     # so the documented ``pip install -e ".[mcp]"`` install path keeps
@@ -318,7 +334,7 @@ docs = [
     "zensical==0.0.74",
 ]
 dev = [
-    "gco-cli[cdk,diagrams,lint,typecheck,test,security,docs]",
+    "gco-cli[cdk,dashboard,diagrams,lint,typecheck,test,security,docs]",
     "pre-commit==4.7.0",
 ]
 

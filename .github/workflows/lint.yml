@@ -351,10 +351,11 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install typecheck dependencies
         run: |
-          # Install full project + mcp extras so mypy can resolve real types
-          # for boto3, kubernetes, fastapi, click, fastmcp. CDK is intentionally
+          # Install full project + mcp and dashboard extras so mypy can resolve
+          # real types for boto3, kubernetes, fastapi, click, fastmcp and
+          # Streamlit/pandas/Altair/pydeck (cli/dashboard/). CDK is intentionally
           # NOT installed here — gco/stacks/ is checked in lint-mypy-stacks.
-          pip install -c requirements-lock.txt -e ".[typecheck,mcp]"
+          pip install -c requirements-lock.txt -e ".[typecheck,mcp,dashboard]"
       - name: Cache mypy results
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:

@@ -874,6 +874,67 @@ def test_kind_cluster_e2e_dry_runs_the_inference_deployments_the_monitor_renders
     assert order.index(name) < order.index("Apply ResourceQuotas and LimitRanges")
 
 
+def test_kind_cluster_e2e_proves_the_gco_jobs_gpu_cap_with_extended_resource_toleration() -> None:
+    """04-resource-quotas.yaml in an API server that runs ExtendedResourceToleration.
+
+    Regression: the gco-jobs LimitRange defaulted every container to
+    ``nvidia.com/gpu: 0``, which ExtendedResourceToleration (on in EKS, off in a
+    stock kube-apiserver) turned into a toleration of the GPU node taint, so
+    CPU-only Jobs ran on GPU nodes. kind never showed it: the plugin was off and
+    the step expected the zero defaults. The kind config now enables the plugin,
+    and the step proves, once a dry run shows the policy enforced, that the GPU
+    cap policy refuses a pod over the substituted cap (4) with its own message
+    and admits one at it, which carries the toleration (so the plugin is on);
+    then that a defaulted CPU-only pod gets CPU and memory defaults and no GPU
+    toleration. tests/test_resource_quota_manifest.py evaluates the policy
+    offline; the message the step greps for is the one it renders.
+    """
+    from tests.test_resource_quota_manifest import _container, _pod, _review
+
+    kind_config = yaml.safe_load(_read(".github/kind/kind-calico.yaml"))
+    (patch,) = kind_config["kubeadmConfigPatches"]
+    cluster_configuration = yaml.safe_load(patch)
+    assert cluster_configuration["kind"] == "ClusterConfiguration"
+    assert cluster_configuration["apiServer"]["extraArgs"] == {
+        "enable-admission-plugins": "NodeRestriction,ExtendedResourceToleration"
+    }
+
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    steps = workflow["jobs"]["integration-kind-cluster-e2e"]["steps"]
+    kind_step = next(
+        step for step in steps if str(step.get("uses", "")).startswith("helm/kind-action")
+    )
+    assert kind_step["with"]["config"] == ".github/kind/kind-calico.yaml"
+    run = next(
+        step["run"] for step in steps if step.get("name") == "Apply ResourceQuotas and LimitRanges"
+    )
+
+    assert "-e 's|{{LIMIT_MAX_GPU}}|4|g'" in run
+    assert "policy=\"ValidatingAdmissionPolicy 'gco-jobs-container-gpu-limit'\"" in run
+    (denied,) = re.findall(r'denied="([^"]+)"', run)
+    (message,) = _review(_pod(_container(limits={"nvidia.com/gpu": "5"})), cap="4")
+    assert message.startswith(denied)
+    checks = [
+        "kubectl get validatingadmissionpolicy gco-jobs-container-gpu-limit",
+        "kubectl get validatingadmissionpolicybinding gco-jobs-container-gpu-limit",
+        "for gpus in 5 4; do",
+        'nvidia.com/gpu: "${gpus}"',
+        'kubectl create --dry-run=server -f "${work}/pod-5.yaml"',
+        'echo "::error::the API server never enforced gco-jobs-container-gpu-limit"',
+        'if ! grep -qF "${denied}" "${work}/over.err"; then',
+        'kubectl create --dry-run=server -o json -f "${work}/pod-4.yaml"',
+        'gpu = {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}',
+        "kubectl -n gco-jobs run limitrange-default-probe",
+        '"limits": {"cpu": "1", "memory": "4Gi"},',
+        '"requests": {"cpu": "100m", "memory": "256Mi"},',
+        'if t.get("key") == "nvidia.com/gpu"]',
+    ]
+    positions = [run.index(fragment) for fragment in checks]
+    assert positions == sorted(positions)
+    # The old defaults are gone from the expectation as well as the manifest.
+    assert '"nvidia.com/gpu": "0"' not in run
+
+
 def test_kind_cluster_e2e_runs_the_platform_on_internal_ca_tls() -> None:
     """cluster-e2e issues every platform leaf from one CA and proves the TLS-only posture.
 

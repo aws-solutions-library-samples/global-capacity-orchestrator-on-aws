@@ -885,6 +885,37 @@ def test_spot_price_average_is_weighted_by_the_time_each_price_held():
     kwargs = ec2.get_paginator.return_value.paginate.call_args.kwargs
     assert kwargs["InstanceTypes"] == ["g5.xlarge"]
     assert kwargs["EndTime"] - kwargs["StartTime"] == timedelta(days=7)
+    assert info.window_days == 7
+
+
+def test_spot_price_summary_records_the_window_it_covers():
+    """The ``*_7d`` fields hold whatever window was asked for; ``window_days`` says which."""
+    from dataclasses import asdict
+
+    checker = _make_checker()
+    now = datetime.now(UTC)
+    ec2 = MagicMock()
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"SpotPriceHistory": [_spot_record("us-east-1a", "0.40", now - timedelta(days=1))]},
+    ]
+    checker._session.client = MagicMock(return_value=ec2)
+
+    [info] = checker.get_spot_price_history("g5.xlarge", "us-east-1", days=3)
+
+    kwargs = ec2.get_paginator.return_value.paginate.call_args.kwargs
+    assert kwargs["EndTime"] - kwargs["StartTime"] == timedelta(days=3)
+    assert info.window_days == 3
+    # The JSON field names stay as they were; the window rides alongside them.
+    assert list(asdict(info)) == [
+        "instance_type",
+        "availability_zone",
+        "current_price",
+        "avg_price_7d",
+        "min_price_7d",
+        "max_price_7d",
+        "price_stability",
+        "window_days",
+    ]
 
 
 def test_spot_price_history_reads_every_page():

@@ -274,8 +274,9 @@ def _pod_diagnostics(kubectl: KubectlRunner, namespace: str, selector: str) -> s
 def _job_admission_rejection(kubectl: KubectlRunner, namespace: str, name: str) -> str | None:
     """Return the rejection message when the Job's pods are forbidden.
 
-    A LimitRange or ResourceQuota rejection never becomes a Job condition:
-    the controller retries pod creation forever, the Job stays podless, and
+    A LimitRange, admission-policy (the gco-jobs GPU cap) or ResourceQuota
+    rejection never becomes a Job condition: the controller retries pod
+    creation forever, the Job stays podless, and
     the only signal is ``FailedCreate ... forbidden`` namespace events.
     Waiting the full example timeout on such a job is pure burn (observed
     live: example-job validation run ex241-df723811, 40 minutes against the
@@ -285,7 +286,7 @@ def _job_admission_rejection(kubectl: KubectlRunner, namespace: str, name: str) 
     transiently full, the Job controller retries pod creation, and the pods
     land once peers finish. Never fail fast on those; each message is
     evaluated separately so a transient quota event cannot mask a permanent
-    LimitRange rejection emitted for the same Job.
+    LimitRange or admission-policy rejection emitted for the same Job.
     """
     code, out, _ = kubectl(
         "get",

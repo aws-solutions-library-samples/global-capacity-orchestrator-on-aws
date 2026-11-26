@@ -2,7 +2,7 @@
 Health monitoring data models for GCO (Global Capacity Orchestrator on AWS).
 
 This module defines dataclasses for health monitoring including:
-- ResourceUtilization: Current CPU/memory/GPU utilization percentages
+- ResourceUtilization: Current CPU/memory/GPU utilization percentages and GPU counts
 - HealthStatus: Complete health status report with utilization and thresholds
 
 These models are used by the health monitor service to track and report
@@ -57,15 +57,23 @@ class ResourceUtilization:
     over-commit is a real cluster state, so it is accepted and compared with
     the thresholds like any other value rather than rejected as invalid.
 
+    The GPU percentage is 0.0 both when no node has GPUs and when no GPU is
+    requested; the GPU counts tell the two apart.
+
     Attributes:
         cpu: CPU utilization percentage (0.0 or more)
         memory: Memory utilization percentage (0.0 or more)
         gpu: GPU utilization percentage (0.0 or more)
+        gpu_allocatable: GPUs the nodes report as allocatable, or None when
+            not measured (a status built without a cluster reading)
+        gpu_requested: GPUs requested by running pods, or None when not measured
     """
 
     cpu: float
     memory: float
     gpu: float
+    gpu_allocatable: int | None = None
+    gpu_requested: int | None = None
 
     def __post_init__(self) -> None:
         """Validate utilization values"""
@@ -73,6 +81,14 @@ class ResourceUtilization:
             if not isinstance(value, (int, float)) or not 0.0 <= value < math.inf:
                 raise ValueError(
                     f"{field_name} must be a finite, non-negative percentage, got {value}"
+                )
+        for field_name, count in [
+            ("gpu_allocatable", self.gpu_allocatable),
+            ("gpu_requested", self.gpu_requested),
+        ]:
+            if count is not None and (not isinstance(count, int) or count < 0):
+                raise ValueError(
+                    f"{field_name} must be a non-negative integer or None, got {count}"
                 )
 
 

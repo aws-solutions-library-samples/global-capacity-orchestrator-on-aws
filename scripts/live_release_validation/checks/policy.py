@@ -3,7 +3,9 @@
 ``GET /api/v1/policy`` exists so a caller can ask "will this cluster admit the
 job I am about to pay to run" before submitting. It answers in three layers: the
 front-door per-manifest caps the manifest processor applies itself, the
-per-container ``LimitRange``, and the namespace aggregate ``ResourceQuota``.
+per-container ceilings (the ``LimitRange`` for CPU and memory, the
+``gco-jobs-container-gpu-limit`` admission policy for GPUs), and the namespace
+aggregate ``ResourceQuota``.
 
 The two cluster-read layers are deliberately fail-soft -- a Kubernetes read
 failure degrades that namespace to ``{"status": "unavailable", "reason": ...}``
@@ -26,6 +28,8 @@ from __future__ import annotations
 
 import re
 from typing import Any
+
+from gco.resource_governance import CONTAINER_GPU_LIMIT_POLICY, GOVERNED_NAMESPACE
 
 from ..checks.jobs import _response_json
 from ..context import _job_transport_region
@@ -151,6 +155,15 @@ def _validate_synth_time_ecr_augmentation(
     return sorted(augmentation)
 
 
+def _container_gpu_cap(layer: dict[str, Any]) -> str | None:
+    """The GPU cap the namespace's GPU cap policy reports, or None when it reports none."""
+    try:
+        policy = layer["admission_policies"][CONTAINER_GPU_LIMIT_POLICY]
+        return str(policy["container_max"]["nvidia.com/gpu"])
+    except KeyError, TypeError:
+        return None
+
+
 def _validate_cluster_enforcement(
     region: str, enforcement: Any, allowed_namespaces: list[str]
 ) -> dict[str, Any]:
@@ -158,12 +171,14 @@ def _validate_cluster_enforcement(
 
     This is the assertion the 2026-08-26 regression needed. The endpoint returns
     200 with a per-namespace ``status`` field, so the failure is only visible
-    here -- in the body, per namespace.
+    here -- in the body, per namespace. gco-jobs must also report the
+    per-container GPU cap, which an admission policy holds because a LimitRange
+    GPU entry would let every pod onto GPU nodes.
     """
     if not isinstance(enforcement, dict) or not enforcement:
         raise RuntimeError(
             f"Policy readback for {region} carried no cluster_enforcement object; "
-            "layers 2 and 3 (LimitRange, ResourceQuota) would be unreportable"
+            "layers 2 and 3 (LimitRange, GPU cap, ResourceQuota) would be unreportable"
         )
 
     missing = sorted(set(allowed_namespaces) - set(enforcement))
@@ -199,6 +214,14 @@ def _validate_cluster_enforcement(
                 f"Policy readback for {region} namespace {namespace} reports status ok "
                 "but no LimitRange; the per-container ceiling is unenforced"
             )
+        gpu_cap = _container_gpu_cap(layer)
+        if namespace == GOVERNED_NAMESPACE and gpu_cap is None:
+            raise RuntimeError(
+                f"Policy readback for {region} namespace {namespace} reports status ok "
+                f"but no cap from the {CONTAINER_GPU_LIMIT_POLICY} admission policy; "
+                "04-resource-quotas.yaml is expected to deploy it, so the per-container "
+                "GPU ceiling is unenforced"
+            )
         for name, hard in quotas.items():
             if not isinstance(hard, dict) or not any(
                 any(hint in str(key) for hint in _EXPECTED_QUOTA_HINTS) for key in hard
@@ -211,15 +234,17 @@ def _validate_cluster_enforcement(
             "status": status,
             "resource_quotas": sorted(quotas),
             "limit_ranges": sorted(limits),
+            "container_max_gpu": gpu_cap,
         }
 
     if degraded:
         raise RuntimeError(
             f"Policy readback for {region} could not read the live ResourceQuota / "
-            f"LimitRange: {'; '.join(degraded)}. The response degrades to HTTP 200, so "
-            "this is invisible to a transport-level check — a caller is told a manifest "
-            "is admissible that pod creation may still reject. Check the "
-            "gco-manifest-processor-role grant on resourcequotas and limitranges."
+            f"LimitRange / GPU cap: {'; '.join(degraded)}. The response degrades to HTTP "
+            "200, so this is invisible to a transport-level check — a caller is told a "
+            "manifest is admissible that pod creation may still reject. Check the "
+            "gco-manifest-processor-role grant on resourcequotas and limitranges and the "
+            "gco-manifest-processor-cluster-read grant on validatingadmissionpolicies."
         )
     return summary
 

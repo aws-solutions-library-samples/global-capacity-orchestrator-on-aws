@@ -169,7 +169,12 @@ from gco.models import (
     ManifestSubmissionResponse,
     ResourceStatus,
 )
-from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
+from gco.resource_governance import (
+    CONTAINER_GPU_LIMIT_POLICY,
+    CONTAINER_MAX_GPU_ANNOTATION,
+    DEFAULT_MANIFEST_RESOURCE_CAPS,
+    GOVERNED_NAMESPACE,
+)
 from gco.services.k8s_client import BoundedApiClient, k8s_api_timeout_from_env
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
 
@@ -468,6 +473,8 @@ class ManifestProcessor:
         self.batch_v1 = client.BatchV1Api(self.api_client)
         self.networking_v1 = client.NetworkingV1Api(self.api_client)
         self.custom_objects = client.CustomObjectsApi(self.api_client)
+        # The GPU cap policy cluster_resource_governance reports.
+        self.admission_v1 = client.AdmissionregistrationV1Api(self.api_client)
 
         # Dynamic client for CRDs - lazy initialized to avoid cluster connection
         # during init, and built once under a lock because requests reach it
@@ -484,7 +491,7 @@ class ManifestProcessor:
         # Resource quotas and limits. Defaults come from the shared source of
         # truth (gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS): two
         # full accelerator-node slices, validated at synth against the
-        # LimitRange / namespace-quota layering invariant.
+        # per-container / namespace-quota layering invariant.
         self.max_cpu_per_manifest = self._parse_cpu_string(
             config_dict.get(
                 "max_cpu_per_manifest",
@@ -646,15 +653,16 @@ class ManifestProcessor:
         }
 
     def cluster_resource_governance(self) -> dict[str, Any]:
-        """Return the live ResourceQuota / LimitRange ceilings per namespace.
+        """Return the live per-container and namespace ceilings per namespace.
 
         The per-manifest caps in
         :meth:`effective_job_validation_policy` are only the **first** of three
         layers. A manifest that clears the front door can still be rejected by
-        the namespace's LimitRange (per-container ceiling) or its ResourceQuota
-        (aggregate ceiling). Reporting only the first layer would let a caller
-        conclude a job is admissible when it is not, so this reads the other
-        two straight from the Kubernetes API.
+        a per-container ceiling (the namespace's LimitRange for CPU and
+        memory, GCO's GPU cap admission policy for GPUs) or by the namespace's
+        ResourceQuota (aggregate ceiling). Reporting only the first layer would
+        let a caller conclude a job is admissible when it is not, so this reads
+        the other two straight from the Kubernetes API.
 
         Fail-soft by design: a Kubernetes read failure yields
         ``status="unavailable"`` with the reason attached rather than raising,
@@ -694,6 +702,7 @@ class ManifestProcessor:
                     ]
                     for item in limit_ranges.items
                 }
+                entry["admission_policies"] = self._container_admission_policies(namespace)
                 entry["status"] = "ok"
             except ApiException as e:
                 logger.warning(
@@ -711,6 +720,35 @@ class ManifestProcessor:
                 entry = {"status": "unavailable", "reason": str(e)}
             namespaces[namespace] = entry
         return namespaces
+
+    def _container_admission_policies(self, namespace: str) -> dict[str, Any]:
+        """The per-container caps GCO's admission policies enforce in ``namespace``.
+
+        One policy so far: the cluster-scoped GPU cap on gco-jobs
+        (04-resource-quotas.yaml), which carries its cap in an annotation. A
+        GPU cap cannot be a LimitRange entry, which would make every pod
+        tolerate the GPU node taint. An absent policy caps nothing, as an
+        absent LimitRange does; any other read failure is raised for
+        :meth:`cluster_resource_governance` to report the namespace
+        unavailable.
+        """
+        if namespace != GOVERNED_NAMESPACE:
+            return {}
+        try:
+            policy = self.admission_v1.read_validating_admission_policy(
+                CONTAINER_GPU_LIMIT_POLICY, _request_timeout=self._k8s_timeout
+            )
+        except ApiException as e:
+            if e.status == 404:
+                return {}
+            raise
+        metadata = present(policy.metadata, "validatingadmissionpolicy.metadata")
+        cap = (metadata.annotations or {}).get(CONTAINER_MAX_GPU_ANNOTATION)
+        return {
+            CONTAINER_GPU_LIMIT_POLICY: {
+                "container_max": {} if cap is None else {"nvidia.com/gpu": cap},
+            }
+        }
 
     def _resource_access_error(self, api_version: str, kind: str, namespace: str) -> str | None:
         """Return an authorization error for a CRUD resource identifier."""
@@ -1622,6 +1660,7 @@ class ManifestProcessor:
         metadata = present(job.metadata, "job.metadata")
         status = present(job.status, "job.status")
         spec = present(job.spec, "job.spec")
+        verdict = self._get_job_status(job)
 
         return {
             "metadata": {
@@ -1646,16 +1685,27 @@ class ManifestProcessor:
                 "completionTime": (
                     status.completion_time.isoformat() if status.completion_time else None
                 ),
+                # lastTransitionTime is when a Job failed: Kubernetes sets
+                # completionTime only for Jobs that succeed. The detail route
+                # (api_shared._parse_job_to_dict) reports it the same way.
                 "conditions": [
                     {
                         "type": c.type,
                         "status": c.status,
                         "reason": c.reason,
                         "message": c.message,
+                        "lastTransitionTime": (
+                            c.last_transition_time.isoformat() if c.last_transition_time else None
+                        ),
                     }
                     for c in (status.conditions or [])
                 ],
             },
+            # The same verdict GET /api/v1/jobs/{namespace}/{name} reports, in
+            # the job responses' vocabulary (a finished Job "succeeded"), so
+            # list and detail records read alike and the cross-Region
+            # aggregator can pass the field through.
+            "computed_status": "succeeded" if verdict == "completed" else verdict,
         }
 
     def _get_job_status(self, job: V1Job) -> str:

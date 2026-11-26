@@ -102,7 +102,7 @@ class RegionPolicy:
 
     @property
     def enforcement_gaps(self) -> list[str]:
-        """Namespaces whose live ResourceQuota / LimitRange could not be read.
+        """Namespaces whose live ResourceQuota, LimitRange or GPU cap could not be read.
 
         A gap here means the answer covers only the front-door caps: the
         manifest can clear those and still be rejected at pod creation. Callers

@@ -15,9 +15,10 @@ These tests pin the read-back surface:
 * the reported values are the *instance* values, so a policy that differs from
   the defaults is reported as it is enforced;
 * ``ManifestProcessor.cluster_resource_governance`` reads the second and third
-  admission layers (LimitRange, ResourceQuota) from the Kubernetes API and
-  fails soft, because a partial answer marked ``unavailable`` is honest whereas
-  a 500 or a silently absent key is not;
+  admission layers (the LimitRange and the GPU cap admission policy,
+  ResourceQuota) from the Kubernetes API and fails soft, because a partial
+  answer marked ``unavailable`` is honest whereas a 500 or a silently absent
+  key is not;
 * ``GET /api/v1/policy`` composes both and is JSON-serializable.
 """
 
@@ -50,11 +51,24 @@ def _make_processor(**overrides: Any) -> ManifestProcessor:
     }
     config_dict.update(overrides)
     with patch("gco.services.manifest_processor.config"):
-        return ManifestProcessor(
+        processor = ManifestProcessor(
             cluster_id="test-cluster",
             region="us-east-1",
             config_dict=config_dict,
         )
+    # The GPU cap policy as 04-resource-quotas.yaml deploys it; no test reaches
+    # an API server.
+    processor.admission_v1 = MagicMock()
+    processor.admission_v1.read_validating_admission_policy.return_value = _gpu_cap_policy("8")
+    return processor
+
+
+def _gpu_cap_policy(cap: str | None) -> SimpleNamespace:
+    """The gco-jobs-container-gpu-limit policy as the API returns it."""
+    annotations = None if cap is None else {"gco.io/container-max-gpu": cap}
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name="gco-jobs-container-gpu-limit", annotations=annotations)
+    )
 
 
 def _quota_list(name: str, hard: dict[str, str]) -> SimpleNamespace:
@@ -252,6 +266,107 @@ class TestClusterResourceGovernance:
 
         assert governance["good"]["status"] == "ok"
         assert governance["bad"]["status"] == "unavailable"
+
+
+class TestContainerGpuCapReadback:
+    """The per-container GPU cap comes from its admission policy, not the LimitRange.
+
+    Regression: the cap lived in the gco-jobs LimitRange, whose GPU entries
+    gave every pod a toleration of the GPU node taint. It moved to the
+    gco-jobs-container-gpu-limit ValidatingAdmissionPolicy, and this read keeps
+    it visible to ``GET /api/v1/policy``, ``gco jobs policy`` and the dashboard.
+    """
+
+    @staticmethod
+    def _processor(**overrides: Any) -> ManifestProcessor:
+        processor = _make_processor(**overrides)
+        processor.core_v1 = MagicMock()
+        processor.core_v1.list_namespaced_resource_quota.return_value = _quota_list(
+            "gco-jobs-quota", {"requests.nvidia.com/gpu": "32"}
+        )
+        processor.core_v1.list_namespaced_limit_range.return_value = _limit_range_list(
+            "gco-jobs-limits", [{"type": "Container", "max": {"cpu": "192", "memory": "2048Gi"}}]
+        )
+        return processor
+
+    def test_reports_the_cap_from_the_policys_annotation(self) -> None:
+        processor = self._processor()
+
+        entry = processor.cluster_resource_governance()["gco-jobs"]
+
+        assert entry["status"] == "ok"
+        assert entry["admission_policies"] == {
+            "gco-jobs-container-gpu-limit": {"container_max": {"nvidia.com/gpu": "8"}}
+        }
+        assert entry["limit_ranges"]["gco-jobs-limits"][0]["max"] == {
+            "cpu": "192",
+            "memory": "2048Gi",
+        }
+        processor.admission_v1.read_validating_admission_policy.assert_called_once_with(
+            "gco-jobs-container-gpu-limit", _request_timeout=processor._k8s_timeout
+        )
+
+    def test_another_namespace_reads_no_policy(self) -> None:
+        """The policy covers gco-jobs only, so another allowed namespace reports none."""
+        processor = self._processor(allowed_namespaces=["gco-jobs", "team-b"])
+
+        governance = processor.cluster_resource_governance()
+
+        assert governance["team-b"]["status"] == "ok"
+        assert governance["team-b"]["admission_policies"] == {}
+        assert governance["gco-jobs"]["admission_policies"]
+        processor.admission_v1.read_validating_admission_policy.assert_called_once()
+
+    def test_an_absent_policy_caps_nothing_like_an_absent_limit_range(self) -> None:
+        processor = self._processor()
+        processor.admission_v1.read_validating_admission_policy.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+
+        entry = processor.cluster_resource_governance()["gco-jobs"]
+
+        assert entry["status"] == "ok"
+        assert entry["admission_policies"] == {}
+
+    def test_a_refused_read_reports_the_namespace_unavailable(self) -> None:
+        """A 403 (a missing cluster-read grant) must not read as "no GPU cap"."""
+        processor = self._processor()
+        processor.admission_v1.read_validating_admission_policy.side_effect = ApiException(
+            status=403, reason="Forbidden"
+        )
+
+        entry = processor.cluster_resource_governance()["gco-jobs"]
+
+        assert entry == {"status": "unavailable", "reason": "403 Forbidden"}
+
+    def test_a_policy_without_the_annotation_reports_no_cap(self) -> None:
+        processor = self._processor()
+        processor.admission_v1.read_validating_admission_policy.return_value = _gpu_cap_policy(None)
+
+        entry = processor.cluster_resource_governance()["gco-jobs"]
+
+        assert entry["admission_policies"] == {
+            "gco-jobs-container-gpu-limit": {"container_max": {}}
+        }
+
+    def test_the_policy_endpoint_serves_the_cap(self) -> None:
+        """End to end through GET /api/v1/policy, JSON-serializable."""
+        processor = self._processor()
+        with patch(
+            "gco.services.manifest_api.create_manifest_processor_from_env",
+            return_value=processor,
+        ):
+            from fastapi.testclient import TestClient
+
+            from gco.services.manifest_api import app
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.get("/api/v1/policy", headers={})
+
+        assert response.status_code == 200
+        assert response.json()["cluster_enforcement"]["gco-jobs"]["admission_policies"] == {
+            "gco-jobs-container-gpu-limit": {"container_max": {"nvidia.com/gpu": "8"}}
+        }
 
 
 class TestPolicyEndpoint:

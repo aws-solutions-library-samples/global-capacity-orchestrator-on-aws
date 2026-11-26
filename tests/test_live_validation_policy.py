@@ -53,11 +53,16 @@ def _payload(**overrides: Any) -> dict[str, Any]:
                 "status": "ok",
                 "resource_quotas": {"gco-jobs-quota": {"cpu": "384", "memory": "4096Gi"}},
                 "limit_ranges": {"gco-jobs-limits": [{"type": "Container", "max": {"cpu": "192"}}]},
+                "admission_policies": GPU_CAP_POLICY,
             }
         },
     }
     payload.update(overrides)
     return payload
+
+
+#: What the gco-jobs-container-gpu-limit admission policy reports for gco-jobs.
+GPU_CAP_POLICY = {"gco-jobs-container-gpu-limit": {"container_max": {"nvidia.com/gpu": "8"}}}
 
 
 def _ctx(payload: dict[str, Any] | None = None, *, status_code: int = 200) -> SimpleNamespace:
@@ -101,6 +106,7 @@ class TestTheRegressionItCatches:
         # The message must point at the fix, not just report the symptom.
         assert "resourcequotas" in message
         assert "limitranges" in message
+        assert "gco-manifest-processor-cluster-read grant on validatingadmissionpolicies" in message
 
     def test_missing_namespace_entry_fails(self) -> None:
         ctx = _ctx(_payload(cluster_enforcement={"other-ns": {"status": "ok"}}))
@@ -147,12 +153,51 @@ class TestTheRegressionItCatches:
                         "status": "ok",
                         "resource_quotas": {"q": {"pods": "10"}},
                         "limit_ranges": {"l": [{"type": "Container"}]},
+                        "admission_policies": GPU_CAP_POLICY,
                     }
                 }
             )
         )
         with pytest.raises(RuntimeError, match="no cpu/memory ceiling"):
             _validate_region_policy(ctx, "us-east-1")  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        "admission_policies",
+        [
+            None,
+            {},
+            {"gco-jobs-container-gpu-limit": {"container_max": {}}},
+            {"gco-jobs-container-gpu-limit": "not an object"},
+            {"another-policy": {"container_max": {"nvidia.com/gpu": "8"}}},
+        ],
+        ids=["absent", "empty", "no-cap", "malformed", "another-policy"],
+    )
+    def test_gco_jobs_without_the_gpu_cap_fails(self, admission_policies: Any) -> None:
+        """The cap left the LimitRange (its GPU entry let every pod onto GPU nodes)."""
+        layer: dict[str, Any] = {
+            "status": "ok",
+            "resource_quotas": {"q": {"cpu": "1"}},
+            "limit_ranges": {"l": [{"type": "Container", "max": {"cpu": "192"}}]},
+        }
+        if admission_policies is not None:
+            layer["admission_policies"] = admission_policies
+        ctx = _ctx(_payload(cluster_enforcement={"gco-jobs": layer}))
+        with pytest.raises(RuntimeError, match="no cap from the gco-jobs-container-gpu-limit"):
+            _validate_region_policy(ctx, "us-east-1")  # type: ignore[arg-type]
+
+    def test_another_allowed_namespace_needs_no_gpu_cap(self) -> None:
+        """The policy covers gco-jobs only; another namespace reports none."""
+        payload = _payload()
+        payload["policy"]["allowed_namespaces"] = ["gco-jobs", "team-b"]
+        payload["cluster_enforcement"]["team-b"] = {
+            "status": "ok",
+            "resource_quotas": {"q": {"cpu": "1"}},
+            "limit_ranges": {"l": [{"type": "Container", "max": {"cpu": "4"}}]},
+            "admission_policies": {},
+        }
+        result = _validate_region_policy(_ctx(payload), "us-east-1")  # type: ignore[arg-type]
+        assert result["cluster_enforcement"]["team-b"]["container_max_gpu"] is None
+        assert result["cluster_enforcement"]["gco-jobs"]["container_max_gpu"] == "8"
 
 
 class TestSynthTimeEcrAugmentation:
@@ -223,7 +268,12 @@ class TestHappyPath:
     def test_valid_payload_returns_structured_evidence(self) -> None:
         result = _validate_region_policy(_ctx(), "us-east-1")  # type: ignore[arg-type]
         assert result["region"] == "us-east-1"
-        assert result["cluster_enforcement"]["gco-jobs"]["status"] == "ok"
+        assert result["cluster_enforcement"]["gco-jobs"] == {
+            "status": "ok",
+            "resource_quotas": ["gco-jobs-quota"],
+            "limit_ranges": ["gco-jobs-limits"],
+            "container_max_gpu": "8",
+        }
         assert result["policy"]["max_gpu_count"] == 16
 
     def test_action_uses_the_regional_transport(self) -> None:

@@ -260,7 +260,9 @@ rules:
   #
   # Three layers govern admission and a caller needs all three to answer "will
   # this job be admitted": the front-door per-manifest caps this service
-  # enforces itself, the LimitRange per-container ceiling, and the namespace
+  # enforces itself, the per-container ceilings (the LimitRange for CPU and
+  # memory; the GPU cap policy, read through
+  # gco-manifest-processor-cluster-read below), and the namespace
   # ResourceQuota aggregate ceiling. A manifest can clear the front door and
   # still be rejected at pod creation by either of the other two, so reporting
   # only the caps would tell a caller a job is admissible when it is not — and
@@ -374,6 +376,15 @@ rules:
   - apiGroups: ["node.k8s.io"]
     resources: ["runtimeclasses"]
     resourceNames: ["confidential-sandbox", "isolated-sandbox"]
+    verbs: ["get"]
+
+  # ValidatingAdmissionPolicy read — GET /api/v1/policy reports the
+  # per-container GPU cap from the annotation on the policy that enforces it
+  # (04-resource-quotas.yaml; a LimitRange GPU entry would make every gco-jobs
+  # pod tolerate the GPU node taint). Cluster-scoped; get on that one policy.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies"]
+    resourceNames: ["gco-jobs-container-gpu-limit"]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

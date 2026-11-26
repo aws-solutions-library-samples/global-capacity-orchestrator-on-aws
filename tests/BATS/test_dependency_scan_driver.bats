@@ -1186,9 +1186,9 @@ findings_path() {
     [[ "$output" != *"INCOMPLETE:"* ]]
     grep -qx 'has_drift=false' "$GITHUB_OUTPUT"
     grep -qx 'scan_complete=true' "$GITHUB_OUTPUT"
-    ! grep -q 'report_path=' "$GITHUB_OUTPUT"
+    [ "$(grep -c 'report_path=' "$GITHUB_OUTPUT")" = "0" ]
     grep -q '^All dependencies are up to date.$' "$GITHUB_STEP_SUMMARY"
-    ! grep -q 'Incomplete or skipped' "$GITHUB_STEP_SUMMARY"
+    [ "$(grep -c 'Incomplete or skipped' "$GITHUB_STEP_SUMMARY")" = "0" ]
     # The findings document is written even with nothing to report, so a
     # consumer can say so from the same source.
     local findings
@@ -1213,7 +1213,7 @@ findings_path() {
     # package stays out of the image sweep: its release drift is the GitHub
     # release check's, and the sweep would report the same release twice.
     grep -q '^skopeo inspect --retry-times 3 --raw docker://xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5' "$CALLS"
-    ! grep -q '^skopeo list-tags .*function-go-templating' "$CALLS"
+    [ "$(grep -c '^skopeo list-tags .*function-go-templating' "$CALLS")" = "0" ]
     # The kind node image likewise: its digest is bound to its tag, the tag's
     # patch drift is the CI tooling check's own list-tags call, and it stays
     # out of the generic image sweep (which would list the tag a second time).
@@ -1375,7 +1375,7 @@ findings_path() {
     grep -qF -- "| DLAMI_SSM_PARAMETER (lambda/pcs-lookup/handler.py) | dlami-base-ubuntu2404 | dlami-base-ubuntu2405 (newer PCS-ready DLAMI base) |" "$report"
     grep -qF -- "| \`.\` | aws-cdk | 2.1140.0 | 3.1140.0 | [npm](https://www.npmjs.com/package/aws-cdk) |" "$report"
     grep -qF -- "#### Retire p2 from the GPU pool" "$report"
-    ! grep -q "Skipped checks" "$report"
+    [ "$(grep -c "Skipped checks" "$report")" = "0" ]
     [[ "$output" == *"Wrote report to ${report}"* ]]
     # The report is mirrored into the job summary.
     grep -q '^# Dependency Update Report' "$GITHUB_STEP_SUMMARY"
@@ -1441,9 +1441,9 @@ findings_path() {
     grep -qx 'has_drift=false' "$GITHUB_OUTPUT"
     grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
     grep -q '_Incomplete or skipped checks: EKS add-ons skipped: No AWS credentials' "$GITHUB_STEP_SUMMARY"
-    ! grep -q '^aws eks' "$CALLS"
-    ! grep -q '^aws elasticache' "$CALLS"
-    ! grep -q '^aws s3api' "$CALLS"
+    [ "$(grep -c '^aws eks' "$CALLS")" = "0" ]
+    [ "$(grep -c '^aws elasticache' "$CALLS")" = "0" ]
+    [ "$(grep -c '^aws s3api' "$CALLS")" = "0" ]
     grep -q '^curl https://docs.aws.amazon.com/pcs/latest/userguide/slurm-versions.html$' "$CALLS"
 }
 
@@ -1581,7 +1581,7 @@ STUB
     [[ "$output" == *"Incomplete lookups:       17"* ]]
     grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
     # No token was offered, so no request carried one.
-    ! grep -q '\[bearer\]' "$CALLS"
+    [ "$(grep -c '\[bearer\]' "$CALLS")" = "0" ]
     # A clean-but-incomplete scan writes no drift report; the cause still has
     # to reach the operator through the job summary's incomplete-checks line.
     grep -qx 'has_drift=false' "$GITHUB_OUTPUT"
@@ -1603,8 +1603,8 @@ STUB
     grep -q '^curl https://api.github.com/repos/aws/aws-cli/tags?per_page=20 \[bearer\]$' "$CALLS"
     # Every api.github.com call was authenticated, and the token never left
     # GitHub: the registry, PyPI, endoflife.date and k8s lookups stay anonymous.
-    ! grep '^curl https://api.github.com/' "$CALLS" | grep -qv '\[bearer\]$'
-    ! grep -v '^curl https://api.github.com/' "$CALLS" | grep -q '\[bearer\]'
+    [ "$(grep '^curl https://api.github.com/' "$CALLS" | grep -cv '\[bearer\]$')" = "0" ]
+    [ "$(grep -v '^curl https://api.github.com/' "$CALLS" | grep -c '\[bearer\]')" = "0" ]
 
     # A rate limit hit *with* a token is reported as the token's own bucket, so
     # nobody is told to set a variable that is already set.
@@ -1776,7 +1776,7 @@ YAML
     [[ "$output" == *"  - kind node image (kindest/node): v1.37.0 -> v1.37.1"* ]]
     [[ "$output" != *"INCOMPLETE: Container registry lookup failed for kindest/node"* ]]
     # No digest to bind, so no manifest lookup, and no false digest row.
-    ! grep -q '^skopeo inspect --retry-times 3 --raw docker://kindest/node' "$CALLS"
+    [ "$(grep -c '^skopeo inspect --retry-times 3 --raw docker://kindest/node' "$CALLS")" = "0" ]
     [[ "$output" != *"kindest/node:v1.37.0: committed digest does not match"* ]]
     # The missing digest is the finding.
     [[ "$output" == *"  - kind node image (integration-tests.yml): kindest/node:v1.37.0 is not pinned by digest"* ]]
@@ -1788,6 +1788,7 @@ YAML
     local root="$BATS_TEST_TMPDIR/checkout"
     make_consistent_checkout "$root"
     sed -i.bak 's/^ARG APT_SECURITY_EPOCH=.*/ARG APT_SECURITY_EPOCH=2020-01-01/' "$root/Dockerfile.dev"
+    printf 'FROM python:3.14.9-slim AS builder\nARG APT_SECURITY_EPOCH=2020-01-02\n' > "$root/Dockerfile.dashboard"
     printf 'CVE-2026-0002 exp:%s justification\n' "$(date +%Y-%m-%d)" > "$root/.github/config/.trivyignore"
     printf 'boto3==1.39.0\nruff==0.16.5\n' > "$root/requirements-lock.txt"
     rm -f "$root"/*.bak
@@ -1796,6 +1797,7 @@ YAML
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"  - Dockerfile.dev (APT_SECURITY_EPOCH): 2020-01-01 ("*" days old)"* ]]
+    [[ "$output" == *"  - Dockerfile.dashboard (APT_SECURITY_EPOCH): 2020-01-02 ("*" days old)"* ]]
     [[ "$output" == *"  - .trivyignore: CVE-2026-0002 expires "*" (0 days)"* ]]
     [[ "$output" == *"  - direct dep version mismatch: boto3==1.40.0 (lock has 1.39.0)"* ]]
     local report
@@ -2211,9 +2213,11 @@ PY
 
     # HyperPod at (or ahead of) cdk.json's minor: the cluster runs cdk.json's
     # minor, whose pins the add-on check covers, so nothing is asked twice.
+    # The call log is emptied first: the three scans above each asked twice.
+    : > "$CALLS"
     run_scan "$root"
     [ "$status" -eq 0 ]
-    ! grep -q -- 'addonVersions\[\].addonVersion' "$CALLS"
+    [ "$(grep -c -- 'addonVersions\[\].addonVersion' "$CALLS")" = "0" ]
 
     # Two minors short, at a minor the tree pins no kube-proxy build for: the
     # EKS version section names the build to add and that minor's support
@@ -2284,7 +2288,7 @@ PY
     [[ "$output" == *"  - kube-proxy@1.34: v1.34.0-eksbuild.1 is pinned for a minor outside EKS standard support; retire the entry"* ]]
     [[ "$output" == *"EKS Kubernetes version:   1"* ]]
     [[ "$output" != *"INCOMPLETE:"* ]]
-    ! grep -q -- '--addon-name kube-proxy --kubernetes-version 1.34' "$CALLS"
+    [ "$(grep -c -- '--addon-name kube-proxy --kubernetes-version 1.34' "$CALLS")" = "0" ]
     grep -qF -- "| \`kube-proxy@1.34\` | v1.34.0-eksbuild.1 | retire (EKS 1.34 is out of standard support) | ended |" "$(report_path)"
 }
 

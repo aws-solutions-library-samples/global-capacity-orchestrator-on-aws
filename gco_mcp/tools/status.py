@@ -16,13 +16,15 @@ async def fleet_status(
 ) -> str:
     """`gco status` — whole-fleet deployment status as one document.
 
-    Aggregates stacks, queue depth, central job-queue counts, capacity
-    telemetry, and inference endpoints across every configured region. The
-    jobs section counts only `gco queue submit` records (its data says
-    ``source: central job queue``); `list_jobs` lists jobs submitted any
-    other way. Each section carries its own status
-    (ok/empty/partial/unavailable/error/skipped) plus a findings list of
-    what looks wrong, so one call answers what would otherwise take eight.
+    Aggregates stacks, add-on convergence (the records `addons_status`
+    reads; a failed phase or chart is an error finding), queue depth,
+    central job-queue counts, capacity telemetry, and inference endpoints
+    across every configured region. The jobs section counts only
+    `gco queue submit` records (its data says ``source: central job
+    queue``); `list_jobs` lists jobs submitted any other way. Each section
+    carries its own status (ok/empty/partial/unavailable/error/skipped)
+    plus a findings list of what looks wrong, so one call answers what
+    would otherwise take nine.
 
     Args:
         region: Restrict the gather to a single region (default: every

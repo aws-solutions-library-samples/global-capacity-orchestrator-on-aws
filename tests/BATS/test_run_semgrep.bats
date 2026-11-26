@@ -86,7 +86,7 @@ STUB
     SEMGREP_EXCLUDE_RULES_FILE="$BATS_TEST_TMPDIR/does-not-exist.txt" run bash "$SCRIPT"
     [ "$status" -eq 0 ]
     [[ "$output" == *"no suppression file"* ]]
-    ! grep -qe '--exclude-rule' "$SEMGREP_ARGS_OUT"
+    [ "$(grep -c -e '--exclude-rule' "$SEMGREP_ARGS_OUT")" -eq 0 ]
     grep -qx 'scan' "$SEMGREP_ARGS_OUT"
 }
 

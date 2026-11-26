@@ -1161,7 +1161,7 @@ This policy is enforced on **both** submission paths:
 
 CDK wires the same configuration values into both services at deploy time, so a single policy change applies uniformly. An attacker holding `sqs:SendMessage` on the job queue cannot use the SQS path to bypass the checks enforced by the REST path.
 
-> **To read what a region actually enforces, don't read this file — ask the cluster.** `gco jobs policy --region <region>` (or `GET /api/v1/policy`) returns the deployed policy, plus the namespace `LimitRange` and `ResourceQuota` ceilings that form the second and third admission layers. `cdk.json` is the *input* to a deploy: it drifts the moment a stack is deployed from a different checkout, and CDK adds the project's own ECR registries to `trusted_registries` at synth time, so the effective allowlist is always larger than what you see here. See [Reading the deployed validation policy](API.md#reading-the-deployed-validation-policy).
+> **To read what a region actually enforces, don't read this file — ask the cluster.** `gco jobs policy --region <region>` (or `GET /api/v1/policy`) returns the deployed policy, plus the per-container ceilings (the namespace `LimitRange` for CPU and memory, the GPU cap admission policy for GPUs) and the namespace `ResourceQuota` that form the second and third admission layers. `cdk.json` is the *input* to a deploy: it drifts the moment a stack is deployed from a different checkout, and CDK adds the project's own ECR registries to `trusted_registries` at synth time, so the effective allowlist is always larger than what you see here. See [Reading the deployed validation policy](API.md#reading-the-deployed-validation-policy).
 
 Policy values in `cdk.json` must be literal JSON booleans (`true` or `false`). Nulls, strings, numbers, unknown policy fields, and malformed `require_accelerator_toleration` values are rejected before synthesis rather than being converted by truthiness. At runtime, the generated `BLOCK_*`, `REQUIRE_ACCELERATOR_TOLERATION`, and `VALIDATION_ENABLED` variables accept explicit `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off` spellings (case-insensitive); unset or blank variables retain their documented defaults. Any other non-empty value, including a typo or unresolved placeholder, fails service startup instead of disabling a control.
 
@@ -3104,9 +3104,10 @@ The caps limit what a single submitted manifest may request in total (summed
 across all containers). They sit between two other enforcement layers, and
 synth validates the ordering so the three always tell one story:
 
-- `resource_quota.container_max_*` (the gco-jobs `LimitRange`) caps each
-  container; a manifest cap below it would reject manifests whose single
-  container the cluster admits.
+- `resource_quota.container_max_*` caps each container: CPU and memory
+  through the gco-jobs `LimitRange`, GPUs through the
+  `gco-jobs-container-gpu-limit` admission policy. A manifest cap below it
+  would reject manifests whose single container the cluster admits.
 - `resource_quota.max_*` (the gco-jobs `ResourceQuota`) caps the namespace
   aggregate; a manifest cap above it would accept manifests whose pods can
   never all run.
@@ -3116,9 +3117,9 @@ The defaults size a per-manifest budget of two full accelerator nodes
 examples pass the front door unchanged.
 
 The per-container and namespace layers live under the top-level
-`resource_quota` context (substituted into the gco-jobs `ResourceQuota` and
-`LimitRange` manifests at deploy time), with defaults sized for one full
-accelerator node per container and two nodes plus headroom per namespace:
+`resource_quota` context (substituted into the gco-jobs `ResourceQuota`,
+`LimitRange` and GPU cap policy at deploy time), with defaults sized for one
+full accelerator node per container and two nodes plus headroom per namespace:
 
 ```json
 "resource_quota": {
@@ -3133,9 +3134,21 @@ accelerator node per container and two nodes plus headroom per namespace:
 ```
 
 Overrides are validated at synth: unknown keys, unparseable quantities, a
-container ceiling above its namespace ceiling, or a manifest cap outside the
+`container_max_gpu` that is not a whole number from 0 to 999, a container
+ceiling above its namespace ceiling, or a manifest cap outside the
 `container_max_* <= *_per_manifest <= max_*` ordering all fail the deploy
-with a message naming the offending pair.
+with a message naming the offending value.
+
+The GPU cap is an admission policy, not a `LimitRange` entry, because any
+`nvidia.com/gpu` entry in a `LimitRange`, even `0`, is written into every
+container that sets no GPU, and EKS's ExtendedResourceToleration admission
+plugin then gives each such pod a toleration of the GPU node taint: CPU-only
+jobs would land on GPU nodes, and EKS Auto Mode would provision GPU instances
+for them. The policy refuses a pod whose container or init
+container asks for more GPUs than `container_max_gpu`, in its limits or its
+requests, and names the container in the error. It reads each count as the
+API server stores it, which is plain digits for any count below 1000, and
+refuses any other form (such as `1k`).
 
 With Kueue enabled, the same values size the default `gco-cluster-queue`:
 `max_cpu`, `max_memory` and `max_gpu` are its CPU, memory and GPU quotas,

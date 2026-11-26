@@ -65,6 +65,7 @@ OVERALL_DEGRADED = "degraded"
 # Section names. The tuple fixes the rendering and JSON key order.
 SECTION_REGIONS = "regions"
 SECTION_STACKS = "stacks"
+SECTION_ADDONS = "addons"
 SECTION_QUEUE = "queue"
 SECTION_JOBS = "jobs"
 SECTION_CAPACITY = "capacity"
@@ -76,6 +77,7 @@ SECTION_POLICY = "policy"
 SECTION_ORDER: tuple[str, ...] = (
     SECTION_REGIONS,
     SECTION_STACKS,
+    SECTION_ADDONS,
     SECTION_QUEUE,
     SECTION_JOBS,
     SECTION_CAPACITY,
@@ -87,7 +89,7 @@ SECTION_ORDER: tuple[str, ...] = (
 
 # Sections that fan out over the resolved workload region list and therefore
 # cannot be gathered at all when region resolution fails.
-_PER_REGION_SECTIONS = frozenset({SECTION_STACKS, SECTION_QUEUE, SECTION_CAPACITY})
+_PER_REGION_SECTIONS = frozenset({SECTION_STACKS, SECTION_ADDONS, SECTION_QUEUE, SECTION_CAPACITY})
 
 # Section statuses that degrade the overall document. ``skipped`` is absent
 # on purpose: skipping is what the operator asked for.
@@ -120,6 +122,10 @@ HEALTH_HEALTHY = "healthy"
 HEALTH_IN_PROGRESS = "in-progress"
 HEALTH_NOT_DEPLOYED = "not-deployed"
 HEALTH_UNHEALTHY = "unhealthy"
+#: The stack's status could not be read (access denied, throttling, the
+#: network), so nothing is known about it; ``not-deployed`` means CloudFormation
+#: reported that the stack does not exist.
+HEALTH_UNKNOWN = "unknown"
 
 #: Wall-clock budget for one section's gather; a section that exceeds it
 #: reports ``error`` instead of holding the whole document.
@@ -324,18 +330,23 @@ def _fanout_workers(count: int) -> int:
 def _probe_regional_stacks(config: GCOConfig, workload: list[str]) -> dict[str, StackInfo | None]:
     """Describe each workload region's regional stack directly.
 
-    This single probe round feeds the ``stacks`` section and gates the
-    ``queue`` and ``capacity`` gathers: both delegate to managers that fall
-    back to scanning every AWS region when stack discovery comes up empty,
-    and this command must never trigger that scan. ``None`` means the stack
-    is absent or not readable — CloudFormation reads here never raise.
+    This single probe round gates the ``queue`` and ``capacity`` gathers: both
+    delegate to managers that fall back to scanning every AWS region when
+    stack discovery comes up empty, and this command must never trigger that
+    scan. ``None`` means the stack is absent or could not be read; a failed
+    read is not raised here because the ``stacks`` section reads the stack
+    again and reports the error.
     """
     from cli.stacks import get_stack_manager
 
     manager = get_stack_manager(config)
 
     def probe(region: str) -> StackInfo | None:
-        return manager.get_stack_status(f"{config.regional_stack_prefix}-{region}", region)
+        try:
+            return manager.get_stack_status(f"{config.regional_stack_prefix}-{region}", region)
+        except Exception as e:
+            logger.debug("Regional stack probe failed for %s: %s", region, e)
+            return None
 
     with ThreadPoolExecutor(max_workers=_fanout_workers(len(workload))) as pool:
         return dict(zip(workload, pool.map(probe, workload), strict=True))
@@ -357,8 +368,16 @@ def _classify_stack_health(status: str | None) -> str:
     return HEALTH_UNHEALTHY
 
 
-def _stack_entry(name: str, region: str, info: StackInfo | None) -> dict[str, Any]:
-    """One stack's document entry; ``info`` is None when absent or unreadable."""
+def _stack_entry(name: str, region: str, info: StackInfo | Exception | None) -> dict[str, Any]:
+    """One stack's document entry; ``info`` is None when absent, the error when unreadable."""
+    if isinstance(info, Exception):
+        return {
+            "name": name,
+            "region": region,
+            "status": None,
+            "health": HEALTH_UNKNOWN,
+            "updated_time": None,
+        }
     status = info.status if info else None
     updated = info.updated_time.isoformat() if info and info.updated_time else None
     return {
@@ -380,8 +399,10 @@ def _gather_stacks(
     Expected stacks are the global, API-gateway, and monitoring stacks plus
     one regional stack per workload region. The per-region API bridges and
     the analytics stack are optional — not deploying them is a valid
-    configuration — so they are listed only when present and their absence
-    never produces a finding.
+    configuration — so they are listed only when present (or unreadable) and
+    their absence never produces a finding. A stack whose read fails is
+    listed with health ``unknown`` and named in ``errors``; it never reads
+    as absent.
     """
     from cli.stacks import get_stack_manager
 
@@ -405,8 +426,12 @@ def _gather_stacks(
     manager = get_stack_manager(config)
     everything = expected + optional
 
-    def describe(spec: tuple[str, str]) -> StackInfo | None:
-        return manager.get_stack_status(spec[0], spec[1])
+    def describe(spec: tuple[str, str]) -> StackInfo | Exception | None:
+        # One unreadable stack must not cost the section every other stack.
+        try:
+            return manager.get_stack_status(spec[0], spec[1])
+        except Exception as e:
+            return e
 
     with ThreadPoolExecutor(max_workers=_fanout_workers(len(everything))) as pool:
         described = dict(
@@ -421,12 +446,119 @@ def _gather_stacks(
         for name, region in optional
         if described.get(name) is not None
     ]
+    errors = [
+        f"{name} in {region}: {type(outcome).__name__}: {outcome}"
+        for name, region in everything
+        if isinstance(outcome := described[name], Exception)
+    ]
+    data = {"expected": expected_entries, "optional": optional_entries}
 
+    if not errors:
+        return Section(name=SECTION_STACKS, status=STATUS_OK, data=data)
+    if len(errors) < len(everything):
+        return Section(
+            name=SECTION_STACKS,
+            status=STATUS_PARTIAL,
+            data=data,
+            reason=f"{len(errors)} of {len(everything)} stacks could not be read",
+            errors=errors,
+        )
     return Section(
         name=SECTION_STACKS,
-        status=STATUS_OK,
-        data={"expected": expected_entries, "optional": optional_entries},
+        status=STATUS_ERROR,
+        data=data,
+        reason="no stack could be read",
+        errors=errors,
     )
+
+
+# ---------------------------------------------------------------------------
+# addons
+# ---------------------------------------------------------------------------
+
+#: How much of an add-on's message a finding quotes; ``gco stacks addons
+#: status`` prints all of it.
+ADDON_FINDING_MESSAGE_CHARS = 160
+
+
+def _gather_addons(config: GCOConfig, workload: list[str]) -> Section:
+    """Read each workload Region's add-on convergence records.
+
+    After a regional deploy the cluster's add-ons converge in the background:
+    the kubectl applier's base pass, the Helm charts, the post-Helm pass and
+    the validators each record their outcome in SSM. A failed convergence
+    never fails the regional stack, so the stacks section reads healthy
+    through it. The records are read with the reader ``gco stacks addons
+    status`` uses, one listing per Region. The section's status says whether
+    they could be read; what they say becomes findings. Each record's
+    ``health`` is ``healthy``, ``unhealthy`` (it failed), ``in-progress``
+    (an add-on teardown) or ``unknown`` (any other status).
+    """
+    from cli.stacks import (
+        ADDON_FAILED_STATUS,
+        ADDON_HEALTHY_STATUSES,
+        ADDON_TEARDOWN_STATUS,
+        AddonRecord,
+        read_addon_status,
+    )
+
+    def health(status: str) -> str:
+        if status in ADDON_HEALTHY_STATUSES:
+            return HEALTH_HEALTHY
+        if status == ADDON_FAILED_STATUS:
+            return HEALTH_UNHEALTHY
+        if status == ADDON_TEARDOWN_STATUS:
+            return HEALTH_IN_PROGRESS
+        return HEALTH_UNKNOWN
+
+    def entry(record: AddonRecord) -> dict[str, Any]:
+        return {
+            "name": record.name,
+            "status": record.status,
+            "health": health(record.status),
+            "message": record.message,
+            "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+        }
+
+    def read(region: str) -> list[AddonRecord] | Exception:
+        # One unreadable Region must not cost the section every other Region.
+        try:
+            return read_addon_status(config.project_name, region)
+        except Exception as e:
+            return e
+
+    with ThreadPoolExecutor(max_workers=_fanout_workers(len(workload))) as pool:
+        outcomes = dict(zip(workload, pool.map(read, workload), strict=True))
+
+    by_region: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    for region, outcome in outcomes.items():
+        if isinstance(outcome, Exception):
+            errors.append(f"{region}: {type(outcome).__name__}: {outcome}")
+            by_region[region] = {"readable": False, "addons": []}
+        else:
+            by_region[region] = {"readable": True, "addons": [entry(r) for r in outcome]}
+    data = {"by_region": by_region}
+
+    if len(errors) == len(workload):
+        return Section(
+            name=SECTION_ADDONS,
+            status=STATUS_ERROR,
+            data=data,
+            reason="add-on status could not be read in any region",
+            errors=errors,
+        )
+    if errors:
+        return Section(
+            name=SECTION_ADDONS,
+            status=STATUS_PARTIAL,
+            data=data,
+            reason=f"add-on status could not be read in {len(errors)} of {len(workload)} regions",
+            errors=errors,
+        )
+    if not any(item["addons"] for item in by_region.values()):
+        return Section(name=SECTION_ADDONS, status=STATUS_EMPTY, data=data)
+    return Section(name=SECTION_ADDONS, status=STATUS_OK, data=data)
 
 
 # ---------------------------------------------------------------------------
@@ -545,17 +677,36 @@ def _gather_jobs(config: GCOConfig, region: str | None) -> Section:
     ``gco queue submit`` / ``gco jobs submit-queue`` queued and nothing else;
     ``data["source"]`` says so, so ``empty`` is never read as "no jobs".
     """
-    from cli.aws_client import get_aws_client
+    from cli.aws_client import _RETRYABLE_STATUS_CODES, APIRequestError, get_aws_client
 
     aws_client = get_aws_client(config)
     query_region = region or (config.default_region if config.use_regional_api else None)
-    try:
-        # A status snapshot reports a failing route honestly instead of
-        # retrying through it; the next gather re-reads anyway, and retries
-        # here can outlive the section timeout.
-        result = aws_client.call_api(
+
+    def read() -> dict[str, Any]:
+        result: dict[str, Any] = aws_client.call_api(
             method="GET", path="/api/v1/queue/stats", region=query_region, max_attempts=1
         )
+        return result
+
+    try:
+        # Each read is a single attempt, so the retry is decided here against
+        # the section budget: an answer the API client itself would retry (a
+        # throttle, or a 502/503/504 while a cold Lambda behind API Gateway
+        # starts) gets one more attempt when the first took at most half the
+        # budget, so a second attempt as slow still fits. A slower failure is
+        # reported as it is; the client's own retries could outlive the budget.
+        started = time.monotonic()
+        try:
+            result = read()
+        except APIRequestError as e:
+            elapsed = time.monotonic() - started
+            if (
+                e.status_code not in _RETRYABLE_STATUS_CODES
+                or 2 * elapsed > SECTION_TIMEOUT_SECONDS
+            ):
+                raise
+            logger.debug("Queue statistics answered HTTP %d; retrying once", e.status_code)
+            result = read()
     except RuntimeError as e:
         if "API endpoint" not in str(e):
             raise
@@ -603,14 +754,19 @@ def _capacity_entry_from(cap: RegionCapacity) -> dict[str, Any]:
 
 
 def _capacity_unavailable_entry() -> dict[str, Any]:
-    """Entry for a region whose capacity telemetry could not be attempted."""
+    """Entry for a region whose capacity telemetry could not be attempted.
+
+    Every signal the checker reads is named unavailable, as the checker names
+    them for a region without a regional stack, so no reader takes the zero
+    counts (``running_jobs`` is the ``jobs`` signal) for readings.
+    """
     return {
         "queue_depth": 0,
         "running_jobs": 0,
         "gpu_utilization": 0.0,
         "cpu_utilization": 0.0,
         "telemetry_status": STATUS_UNAVAILABLE,
-        "unavailable_signals": ["queue", "gpu", "cpu"],
+        "unavailable_signals": ["queue", "gpu", "cpu", "jobs"],
     }
 
 
@@ -734,8 +890,8 @@ def _gather_inference(config: GCOConfig) -> Section:
         for endpoint in endpoints
     ]
     totals = Counter(str(endpoint.get("desired_state")) for endpoint in endpoints)
-    # The registry read is a single unpaginated scan; the count makes any
-    # truncation attributable.
+    # The registry read follows every page of the table scan, so the count is
+    # the whole registry.
     data = {"totals": dict(totals), "count": len(listed), "endpoints": listed}
     status = STATUS_OK if listed else STATUS_EMPTY
     return Section(name=SECTION_INFERENCE, status=status, data=data)
@@ -981,6 +1137,12 @@ def _gather_policy(config: GCOConfig, requested: bool, workload: list[str]) -> S
     return Section(name=SECTION_POLICY, status=STATUS_OK, data=data)
 
 
+def one_line(text: str, limit: int) -> str:
+    """``text`` with its whitespace collapsed, cut to ``limit`` characters with an ellipsis."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else f"{flat[: limit - 1].rstrip()}…"
+
+
 def derive_findings(sections: dict[str, Section]) -> list[Finding]:
     """Derive the findings list from an already-gathered document.
 
@@ -1009,13 +1171,21 @@ def derive_findings(sections: dict[str, Section]) -> list[Finding]:
                     )
                 )
             elif health == HEALTH_NOT_DEPLOYED:
-                # get_stack_status cannot distinguish a missing stack from
-                # denied access, so the wording must not assert absence.
+                # get_stack_status returns None only when CloudFormation says
+                # the stack does not exist; a failed read is ``unknown``.
                 warns.append(
                     Finding(
                         severity=SEVERITY_WARN,
                         section=SECTION_STACKS,
-                        message=f"{name} is absent or not readable in {region}",
+                        message=f"{name} is not deployed in {region}",
+                    )
+                )
+            elif health == HEALTH_UNKNOWN:
+                warns.append(
+                    Finding(
+                        severity=SEVERITY_WARN,
+                        section=SECTION_STACKS,
+                        message=f"{name} could not be read in {region}",
                     )
                 )
             elif health == HEALTH_IN_PROGRESS:
@@ -1026,6 +1196,37 @@ def derive_findings(sections: dict[str, Section]) -> list[Finding]:
                         message=f"{name} is {entry.get('status')} in {region}",
                     )
                 )
+
+    addons = sections.get(SECTION_ADDONS)
+    if addons is not None:
+        # A failed phase or chart is an error, like an unhealthy stack; any
+        # other status ``gco stacks addons status`` counts as not healthy (a
+        # teardown, a record it cannot read) is a warning.
+        for region, entry in addons.data.get("by_region", {}).items():
+            for record in entry.get("addons", []):
+                health = record.get("health")
+                if health == HEALTH_HEALTHY:
+                    continue
+                detail = one_line(str(record.get("message") or ""), ADDON_FINDING_MESSAGE_CHARS)
+                suffix = f": {detail}" if detail else ""
+                if health == HEALTH_UNHEALTHY:
+                    errors.append(
+                        Finding(
+                            severity=SEVERITY_ERROR,
+                            section=SECTION_ADDONS,
+                            message=f"{record.get('name')} failed in {region}{suffix}",
+                        )
+                    )
+                else:
+                    warns.append(
+                        Finding(
+                            severity=SEVERITY_WARN,
+                            section=SECTION_ADDONS,
+                            message=(
+                                f"{record.get('name')} is {record.get('status')} in {region}{suffix}"
+                            ),
+                        )
+                    )
 
     queue = sections.get(SECTION_QUEUE)
     if queue is not None:
@@ -1100,9 +1301,9 @@ def derive_findings(sections: dict[str, Section]) -> list[Finding]:
                     severity=SEVERITY_WARN,
                     section=SECTION_POLICY,
                     message=(
-                        f"{region} cannot read the live ResourceQuota/LimitRange for "
-                        f"{', '.join(namespaces)}, so only its front-door caps are "
-                        f"reportable (check the manifest-processor Role)"
+                        f"{region} cannot read the live ResourceQuota/LimitRange/GPU cap "
+                        f"policy for {', '.join(namespaces)}, so only its front-door caps "
+                        f"are reportable (check the manifest-processor Role and ClusterRole)"
                     ),
                 )
             )
@@ -1176,6 +1377,7 @@ def gather_fleet_status(
     gatherers: dict[str, Callable[[], Section]] = {}
     if workload:
         gatherers[SECTION_STACKS] = lambda: _gather_stacks(config, regions_section.data, workload)
+        gatherers[SECTION_ADDONS] = lambda: _gather_addons(config, workload)
         gatherers[SECTION_QUEUE] = lambda: _gather_queue(
             config, workload, regional_probe, bool(configured)
         )

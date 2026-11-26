@@ -4179,7 +4179,7 @@ class TestStackManagerGetStackStatus:
             assert status is None
 
     def test_get_stack_status_error(self):
-        """Test stack status with API error."""
+        """A failure that is not "does not exist" reaches the caller."""
         from cli.stacks import StackManager
 
         config = MagicMock()
@@ -4190,9 +4190,47 @@ class TestStackManagerGetStackStatus:
             mock_cf.describe_stacks.side_effect = Exception("API error")
 
             manager = StackManager(config)
-            status = manager.get_stack_status("test-stack", "us-east-1")
+            with pytest.raises(Exception, match="API error"):
+                manager.get_stack_status("test-stack", "us-east-1")
 
-            assert status is None
+    def test_get_stack_status_reports_a_missing_stack_as_none(self):
+        """CloudFormation's "does not exist" answer is the only None."""
+        from cli.stacks import StackManager
+
+        missing = ClientError(
+            {
+                "Error": {
+                    "Code": "ValidationError",
+                    "Message": "Stack with id test-stack does not exist",
+                }
+            },
+            "DescribeStacks",
+        )
+        with patch("boto3.client") as mock_boto:
+            mock_boto.return_value.describe_stacks.side_effect = missing
+
+            assert StackManager(MagicMock()).get_stack_status("test-stack", "us-east-1") is None
+
+    @pytest.mark.parametrize(
+        ("code", "message"),
+        [
+            ("AccessDenied", "User is not authorized to perform cloudformation:DescribeStacks"),
+            ("Throttling", "Rate exceeded"),
+            ("ValidationError", "1 validation error detected: StackName failed to satisfy"),
+        ],
+    )
+    def test_get_stack_status_raises_every_other_client_error(self, code, message):
+        """Denied, throttled or malformed reads are never mistaken for an absent stack."""
+        from cli.stacks import StackManager
+
+        failure = ClientError({"Error": {"Code": code, "Message": message}}, "DescribeStacks")
+        with patch("boto3.client") as mock_boto:
+            mock_boto.return_value.describe_stacks.side_effect = failure
+
+            with pytest.raises(ClientError) as excinfo:
+                StackManager(MagicMock()).get_stack_status("test-stack", "us-east-1")
+
+        assert excinfo.value is failure
 
 
 class TestStackManagerGetOutputs:

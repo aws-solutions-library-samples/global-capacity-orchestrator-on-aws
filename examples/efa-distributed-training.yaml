@@ -21,8 +21,8 @@
 #   - EKS Auto Mode uses EKS-optimized AMIs with host-level EFA components
 #     already present.
 #   - This example intentionally exercises the platform's resource-governance
-#     ceilings: 8 GPUs per container (the gco-jobs LimitRange maximum) and
-#     16 GPUs total (the per-manifest cap), sized for one p5.48xlarge node
+#     ceilings: 8 GPUs per container (the gco-jobs GPU cap admission policy)
+#     and 16 GPUs total (the per-manifest cap), sized for one p5.48xlarge node
 #     slice per worker. If you lower the `resource_quota` context in
 #     cdk.json, admission will reject these pods — the harness's static
 #     checks verify the fit before any live run.

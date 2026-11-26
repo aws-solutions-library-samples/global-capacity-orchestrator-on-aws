@@ -555,7 +555,7 @@ class TestClusterMetrics:
         health_monitor._get_node_metrics = AsyncMock(return_value={"items": []})
         health_monitor._calculate_cpu_utilization = MagicMock(return_value=50.0)
         health_monitor._calculate_memory_utilization = MagicMock(return_value=60.0)
-        health_monitor._calculate_gpu_utilization = MagicMock(return_value=30.0)
+        health_monitor._gpu_counts = MagicMock(return_value=(10, 3))
         health_monitor._get_pod_counts = MagicMock(return_value=(10, 2))
         health_monitor._calculate_pending_requested_resources = MagicMock(
             return_value=RequestedResources(cpu_vcpus=5.0, memory_gb=10.0)
@@ -570,7 +570,10 @@ class TestClusterMetrics:
 
         assert utilization.cpu == 50.0
         assert utilization.memory == 60.0
+        # 3 of 10 GPUs, counted once and carried with the percentage.
         assert utilization.gpu == 30.0
+        assert (utilization.gpu_allocatable, utilization.gpu_requested) == (10, 3)
+        health_monitor._gpu_counts.assert_called_once()
         assert active_jobs == 10
         assert pending_pods == 2
         assert pending_requested.cpu_vcpus == 5.0

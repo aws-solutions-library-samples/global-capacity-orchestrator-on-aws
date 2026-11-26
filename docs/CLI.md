@@ -15,6 +15,7 @@ Complete command-line interface documentation for Global Capacity Orchestrator (
   - [costs](#costs-commands)
   - [crossplane](#crossplane-commands)
   - [dag](#dag-commands)
+  - [dashboard](#dashboard-commands)
   - [deps](#deps-commands)
   - [examples](#examples-commands)
   - [files](#files-commands)
@@ -1290,8 +1291,10 @@ Zone with the current price (the newest price change), the average, minimum and
 maximum over the window, and a stability score (1 minus the coefficient of
 variation). The average and the stability are weighted by how long each price was in
 effect, so a price that held all week counts for more than a short spike. Every page
-of `DescribeSpotPriceHistory` is read. The `*_7d` field names are kept for any
-`--days` value.
+of `DescribeSpotPriceHistory` is read. The table's headers name the window
+(`AVG_PRICE_30D`, `MIN_PRICE_30D` and `MAX_PRICE_30D` with `-d 30`). JSON and YAML
+keep the `avg_price_7d`, `min_price_7d` and `max_price_7d` field names for any
+`--days` value and give the window in `window_days`.
 
 ```bash
 gco capacity spot-prices [OPTIONS]
@@ -1303,7 +1306,7 @@ gco capacity spot-prices [OPTIONS]
 |--------|-------|-------------|
 | `--instance-type` | `-i` | EC2 instance type (required) |
 | `--region` | `-r` | AWS region (required) |
-| `--days` | `-d` | Days of history to retrieve |
+| `--days` | `-d` | Days of history to retrieve (default: 7) |
 
 **Example:**
 
@@ -2367,6 +2370,116 @@ Steps without `depends_on` run first. Steps with dependencies wait until all dep
 Use shared EFS storage (`/mnt/shared`) to pass data between steps.
 
 ---
+
+### Dashboard Commands
+
+Run the GCO dashboard, a local web UI for the whole fleet: a map of every Region with its health and load, Jobs, the central queue and inference endpoints (with a chat playground), capacity and prices across Regions, costs, the platform's stacks and policies, and a read-only API console. It runs on this machine and calls AWS with your credentials, exactly as the matching `gco` commands do. See [DASHBOARD.md](DASHBOARD.md) for the pages, the security model and the AWS charges.
+
+<details>
+<summary>All <code>gco dashboard</code> commands (6) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco dashboard start`](#gco-dashboard-start) | Start the dashboard in its own container and open it. |
+| [`gco dashboard serve`](#gco-dashboard-serve) | Run the dashboard in this process until Ctrl-C. |
+| [`gco dashboard status`](#gco-dashboard-status) | Show whether the dashboard runs, where, and its link. |
+| [`gco dashboard open`](#gco-dashboard-open) | Open the running dashboard in a browser. |
+| [`gco dashboard logs`](#gco-dashboard-logs) | Print the dashboard container's logs. |
+| [`gco dashboard stop`](#gco-dashboard-stop) | Stop the dashboard container. |
+
+</details>
+
+#### `gco dashboard start`
+
+Start the dashboard in its own container (Docker, Finch or Podman) and open it in the browser. The image is built from `Dockerfile.dashboard` in this checkout the first time, and again only when its sources change. The container publishes its port on `127.0.0.1` only, runs as your user with a read-only root filesystem and no Linux capabilities, mounts `~/.aws` and the checkout read-only, and keeps running until `gco dashboard stop`. The link it opens carries a fresh access token.
+
+In the gco-dev container ([`scripts/setup-dev-alias.sh`](../scripts/setup-dev-alias.sh)), the dashboard is served in the foreground instead, on the port the `gco` function publishes on the host's `127.0.0.1` (`GCO_DASHBOARD_PORT`, default 8501); press Ctrl-C to stop it. It always needs its access token there.
+
+```bash
+gco dashboard start [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--port` | `-p` | Port on this machine's loopback address (default: 8501) |
+| `--no-token` | | Admit any browser session without the link's access token (not recommended; refused in the dev container) |
+| `--no-open` | | Do not open a browser |
+| `--project-dir` | | GCO checkout whose `cdk.json` names the deployment (default: this directory) |
+| `--rebuild` | | Rebuild the image even if its sources are unchanged |
+
+**Examples:**
+
+```bash
+gco dashboard start
+gco dashboard start --port 8502 --no-open
+gco dashboard start --project-dir ~/src/global-capacity-orchestrator-on-aws
+```
+
+#### `gco dashboard serve`
+
+Run the dashboard in this process until Ctrl-C. Needs the `dashboard` extra (`pip install -e '.[dashboard]'`; the dev image has it). In the gco-dev container it serves as `gco dashboard start` does there.
+
+```bash
+gco dashboard serve [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--port` | `-p` | Port to listen on (default: 8501) |
+| `--address` | | Address to listen on (default: `127.0.0.1`; every interface in the gco-dev container). Anything but loopback exposes the dashboard to the network |
+| `--no-token` | | Admit any browser session without the link's access token; refused for any address but loopback |
+| `--no-open` | | Do not open a browser |
+| `--project-dir` | | GCO checkout whose `cdk.json` names the deployment (default: this directory) |
+
+**Example:**
+
+```bash
+gco dashboard serve --port 8502
+```
+
+#### `gco dashboard status`
+
+Show whether the dashboard runs, how (`container` or `serve`), since when, for which checkout, and its link. With `-o json` or `-o yaml` it prints one document with `running`, `mode`, `url`, `port`, `container` (the container's state, or null), `started_at` and `project_dir`. Run from another gco-dev container, `running` is null: each `gco` command runs in a dev container of its own and cannot see a dashboard served from another.
+
+```bash
+gco dashboard status
+gco -o json dashboard status
+```
+
+#### `gco dashboard open`
+
+Open the running dashboard in a browser, with its access token. It exits 1 when no dashboard answers.
+
+```bash
+gco dashboard open
+```
+
+#### `gco dashboard logs`
+
+Print the dashboard container's log.
+
+```bash
+gco dashboard logs [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--follow` | `-f` | Keep printing new lines |
+| `--tail` | `-n` | Lines to print from the end (default: 200) |
+
+#### `gco dashboard stop`
+
+Stop and remove the dashboard container. A dashboard started with `gco dashboard serve` (or in the dev container) stops with Ctrl-C in its terminal; `stop` says so, and forgets one whose process is gone.
+
+```bash
+gco dashboard stop
+```
 
 ### Deps Commands
 
@@ -3840,16 +3953,19 @@ gco jobs list [OPTIONS]
 | `--all-regions` | `-a` | Query all regions via global API |
 | `--namespace` | `-n` | Filter by namespace |
 | `--status` | `-s` | Filter by status: `pending`, `running`, `succeeded` or `failed` (the status `gco jobs get` reports) |
-| `--limit` | `-l` | Maximum jobs to return (default: 50, at least 1). With `--region` the CLI reads as many API pages (up to 1000 jobs each) as that takes, newest first |
+| `--limit` | `-l` | Maximum jobs to return (default: 50, at least 1, at most 1000 with `--all-regions`). With `--region` the CLI reads as many API pages (up to 1000 jobs each) as that takes, newest first |
 
 With `--region`, a read that fails (an HTTP error from the regional API, a Region
 without the regional API bridge, missing credentials) prints the error on stderr and
 exits 1 in every output mode; it is never reported as an empty job list.
 
-With `--all-regions`, the global API reads every Region. Each Region it cannot read
-is listed under `errors` (`{"region", "error"}`) in the JSON output and named on
-stderr in table mode; the jobs of the other Regions are still printed, and the
-command exits 1.
+With `--all-regions`, the CLI reads one page from the global API, which reads every
+Region, so `--limit` can be at most 1000; the CLI refuses a larger value before
+sending anything (use `--region` to read more jobs from one cluster). Each Region the
+global API cannot read is listed under `errors` (`{"region", "error"}`, where `error`
+is the HTTP status followed by the regional API's message when it sent one) in the
+JSON output and named on stderr in table mode; the jobs of the other Regions are
+still printed, and the command exits 1.
 
 **Example:**
 
@@ -4303,8 +4419,10 @@ a warn-severity finding.
 
 Show the job validation policy a region actually enforces — the per-manifest
 cpu/memory/gpu caps, `allowed_namespaces`, `allowed_kinds`, `trusted_registries`,
-the pod-security `block_*` flags, and the namespace's live `LimitRange` /
-`ResourceQuota` ceilings.
+the pod-security `block_*` flags, the namespace's live `LimitRange` /
+`ResourceQuota` ceilings, and the per-container GPU cap, which the
+`gco-jobs-container-gpu-limit` admission policy enforces (a `LimitRange` GPU
+entry would let every pod onto GPU nodes).
 
 Use it before submitting to check whether a manifest will be admitted, rather
 than discovering a policy conflict after a region has been provisioned.
@@ -4316,8 +4434,8 @@ effective allowlist is always larger than the configured one (a policy without
 `trusted_registries` starts from the services' default list).
 `gco jobs submit --dry-run` checks a manifest against this policy in the
 region that receives it and applies nothing, but it never reaches the
-Kubernetes API server, so the `LimitRange` and `ResourceQuota` this command
-also reports are not evaluated. `gco jobs submit-direct --dry-run` is a
+Kubernetes API server, so the `LimitRange`, GPU cap and `ResourceQuota` this
+command also reports are not evaluated. `gco jobs submit-direct --dry-run` is a
 client-side `kubectl --dry-run=client` parse that consults neither.
 
 ```bash
@@ -4358,6 +4476,10 @@ gco jobs queue-status [OPTIONS]
 With `-o json` or `-o yaml`, `--all-regions` prints one list with each answering
 region's status document (an empty list when no region could be read); a single
 region prints its status document.
+
+With `--all-regions`, a region whose queue cannot be read is not shown as an empty
+queue: the other regions are still printed, each unreadable region is named on
+stderr with its error, and the command exits 1.
 
 **Example:**
 
@@ -6311,13 +6433,14 @@ gco stacks outputs gco-global -r us-east-2
 
 One read-only command that answers "what is my deployment doing right now?" across every
 configured region — the aggregate view that otherwise takes `gco stacks status`,
-`gco jobs queue-status --all-regions`, `gco queue stats`, `gco capacity status`, and
-`gco inference list` run separately and joined by hand. The same document backs the
-`fleet_status` MCP tool, so an agent learns the whole fleet state in one call.
+`gco stacks addons status --all-regions`, `gco jobs queue-status --all-regions`,
+`gco queue stats`, `gco capacity status`, and `gco inference list` run separately and
+joined by hand. The same document backs the `fleet_status` MCP tool, so an agent learns
+the whole fleet state in one call.
 
 | Command | Description |
 |---------|-------------|
-| `gco status` | Aggregate fleet status document: stacks, queue, jobs, capacity, inference |
+| `gco status` | Aggregate fleet status document: stacks, add-ons, queue, jobs, capacity, inference |
 
 ```bash
 # Whole-fleet summary across the configured deployment regions
@@ -6362,7 +6485,8 @@ Kubernetes API, so both are opt-in flags.
 | Section | Tier | Source |
 |---------|------|--------|
 | `regions` | 1 | `cdk.json` deployment topology (no AWS call) |
-| `stacks` | 1 | CloudFormation status per expected stack, plus deployed optional stacks |
+| `stacks` | 1 | CloudFormation status per expected stack, plus deployed optional stacks. Each stack's `health` is `healthy`, `in-progress`, `unhealthy`, `not-deployed` (CloudFormation reports no such stack) or `unknown` (its status could not be read: access denied, throttling, the network). An `unknown` stack is named in `errors` and makes the section `partial`, or `error` when no stack could be read |
+| `addons` | 1 | Add-on convergence per region: the record each convergence phase (the kubectl applier's base and post-Helm passes, the validators) and Helm chart writes to SSM under `/<project>/addons/<region>/`, read with one `GetParametersByPath` listing per region, as [`gco stacks addons status`](#gco-stacks-addons) reads them. A failed convergence never fails the regional stack, so the `stacks` section reads healthy through it. `data.by_region.<region>` is `{readable, addons}`, and each record is `{name, status, health, message, updated_at}` with `health` `healthy` (a status `addons status` counts as healthy), `unhealthy` (`failed`), `in-progress` (`teardown-active`, an add-on teardown) or `unknown` (any other status). A region whose records cannot be read is `readable: false` and named in `errors`, which makes the section `partial`, or `error` when no region can be read; `empty` means no region has recorded anything yet. Table output lists each record that is not healthy, failures first, then one `<healthy> of <total> healthy` line per region |
 | `queue` | 1 | SQS job-queue and dead-letter-queue depth per region, as `gco jobs queue-status --all-regions` shows it |
 | `jobs` | 1 | Central job-queue records by region and status from the queue-statistics API, as `gco queue stats` shows them (`source: central job queue`). Only `gco queue submit` and `gco jobs submit-queue` create these records, so jobs sent with `gco jobs submit`, `submit-sqs` or `submit-direct` are not counted; list those with `gco jobs list --all-regions` |
 | `capacity` | 1 | Queue depth and GPU/CPU utilization per region, with telemetry provenance |
@@ -6381,15 +6505,18 @@ to opposite decisions.
 |--------|---------|
 | `ok` | Read succeeded, data present |
 | `empty` | Read succeeded, genuinely nothing there — a success, not a degradation |
-| `partial` | Some regions or signals worked, others did not |
+| `partial` | Some regions, stacks or signals worked, others did not. Table output shows what was read, then the reason and errors for the rest |
 | `unavailable` | Could not be attempted, for a known reason (stack absent, private endpoint, no `cdk.json`) |
 | `error` | Attempted and failed unexpectedly, or exceeded the section timeout |
 | `skipped` | Not requested (an opt-in section without its flag) |
 
 **Findings.** The document carries a `findings` list of what looks wrong, each
 entry shaped `{severity, section, message}` with severity `error` or `warn` —
-for example a stack in a rollback state, a non-empty dead-letter queue, a
-region with unavailable telemetry, or a truncated job-count scan. Findings are
+for example a stack in a rollback state, a failed add-on phase or chart
+(`base-manifests failed in us-east-1: <the first 160 characters of its
+message>`; an add-on that is not healthy for another reason is a `warn`), a
+non-empty dead-letter queue, a region with unavailable telemetry, or a
+truncated job-count scan. Findings are
 derived from the gathered data only (no extra AWS calls), ordered `error`
 before `warn`, and rendered first in table mode. The top-level `overall` field
 is `ok` or `degraded`, with a `degraded` list naming the responsible sections;
@@ -7421,6 +7548,7 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_REGIONAL_API` | Use regional API endpoints (`true`/`false`) |
 | `K8S_API_TIMEOUT` | Seconds one Kubernetes API request attempt from `gco costs workloads` may take (default `30`) |
 | `CDK_DOCKER` | Docker command (`docker` or `finch`) |
+| `GCO_DASHBOARD_PORT` | Host port the gco-dev `gco` function publishes the dashboard on, on `127.0.0.1` (default `8501`); see [`gco dashboard start`](#gco-dashboard-start) |
 | `GCO_AUTOPILOT_ENGINE` | Select `claude-code` (default), `codex`, or `opencode`; top-level `--engine` wins. |
 | `GCO_AUTOPILOT_MODEL` | Shared Bedrock model override: Claude uses it directly, Codex uses it after `GCO_AUTOPILOT_CODEX_MODEL`, and OpenCode after `GCO_AUTOPILOT_OPENCODE_MODEL`; top-level `--model` wins. See [Autopilot](AUTOPILOT.md). |
 | `GCO_AUTOPILOT_CODEX_MODEL` | Codex-specific Bedrock model override, ahead of the shared model variable. |

@@ -1468,6 +1468,98 @@ class StackInfo:
         }
 
 
+#: Statuses an add-on status record carries when its phase or chart succeeded:
+#: the Helm installer's ``installed`` and ``uninstalled``, the kubectl
+#: applier's ``applied`` and ``deleted`` (its gateway-teardown phase), and
+#: ``validated``, which both validators write.
+ADDON_HEALTHY_STATUSES = frozenset(
+    {"installed", "uninstalled", "absent", "applied", "deleted", "validated"}
+)
+#: The status a convergence phase or a Helm chart records when it failed.
+ADDON_FAILED_STATUS = "failed"
+#: The status :func:`read_addon_status` gives an active teardown fence.
+ADDON_TEARDOWN_STATUS = "teardown-active"
+# SSM parameters under /<project>/addons/<region>/ that are not status records.
+_ADDON_BOOKKEEPING_PARAMS = frozenset({"_input", "_execution"})
+# Parts of a replay input too large for one parameter (_input.<digest>.<k>).
+_ADDON_INPUT_PART_PREFIX = "_input."
+# The teardown provider's fence: its value is the teardown execution name.
+_ADDON_TEARDOWN_FENCE = "_teardown"
+
+
+@dataclass(frozen=True)
+class AddonRecord:
+    """The recorded outcome of one convergence phase or Helm chart in a Region."""
+
+    name: str
+    status: str
+    message: str
+    updated_at: datetime | None = None
+
+    @property
+    def healthy(self) -> bool:
+        return self.status in ADDON_HEALTHY_STATUSES
+
+
+def _addon_updated_at(value: object) -> datetime | None:
+    """A record's ``updated_at`` (Unix seconds) as an aware UTC datetime, else None."""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        with suppress(ValueError, OverflowError, OSError):
+            return datetime.fromtimestamp(value, tz=UTC)
+    return None
+
+
+def read_addon_status(project: str, region: str) -> list[AddonRecord]:
+    """Read one Region's add-on status records from SSM, sorted by name.
+
+    After a regional deploy, the kubectl applier's passes, the Helm charts and
+    the validators each record their outcome as JSON under
+    ``/<project>/addons/<region>/<name>``. Both ``gco stacks addons status``
+    and the ``addons`` section of ``gco status`` read them here, with one
+    (paginated) ``GetParametersByPath`` listing. The replay input and the
+    execution record are skipped, an active teardown fence reads as
+    ``teardown-active``, and a value that is not a JSON object reads as
+    ``unknown``. A healthy record keeps the first 80 characters of its message;
+    any other keeps all of it, since for a failed phase that is the list of
+    resources that did not apply. A failed read raises.
+    """
+    import boto3
+
+    paginator = boto3.client("ssm", region_name=region).get_paginator("get_parameters_by_path")
+    parameters = [
+        parameter
+        for page in paginator.paginate(Path=f"/{project}/addons/{region}/", Recursive=False)
+        for parameter in page.get("Parameters", [])
+    ]
+    records: list[AddonRecord] = []
+    for parameter in parameters:
+        name = str(parameter["Name"]).rsplit("/", 1)[-1]
+        value = str(parameter.get("Value", ""))
+        if name in _ADDON_BOOKKEEPING_PARAMS or name.startswith(_ADDON_INPUT_PART_PREFIX):
+            continue
+        if name == _ADDON_TEARDOWN_FENCE:
+            # Not JSON, so it used to read as an "unknown" chart; an active
+            # fence means the add-ons are being (or were) torn down.
+            records.append(AddonRecord(name, ADDON_TEARDOWN_STATUS, f"execution {value}"))
+            continue
+        try:
+            data = json.loads(value)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            data = {"status": "unknown", "message": value}
+        status = str(data.get("status", "unknown"))
+        message = str(data.get("message", ""))
+        # Healthy rows stay one line; a failure keeps its full message, since
+        # the list of failed resources is the part needed to debug it.
+        if status in ADDON_HEALTHY_STATUSES:
+            message = message[:80]
+        records.append(
+            AddonRecord(name, status, message, _addon_updated_at(data.get("updated_at")))
+        )
+    return sorted(records, key=lambda record: record.name)
+
+
 def _safe_rmtree(path: Path) -> None:
     """Remove a directory tree, handling broken symlinks on macOS.
 
@@ -4917,25 +5009,33 @@ class StackManager:
         return {}
 
     def get_stack_status(self, stack_name: str, region: str) -> StackInfo | None:
-        """Get detailed stack status from CloudFormation."""
+        """Get detailed stack status from CloudFormation.
+
+        Returns None only when CloudFormation reports that the stack does not
+        exist. Every other failure (access denied, throttling, missing
+        credentials, the network) raises, so a caller never mistakes a read
+        it could not make for an absent stack.
+        """
         import boto3
 
         cf = boto3.client("cloudformation", region_name=region)
         try:
             response = cf.describe_stacks(StackName=stack_name)
-            if response["Stacks"]:
-                stack = response["Stacks"][0]
-                return StackInfo(
-                    name=stack["StackName"],
-                    status=stack["StackStatus"],
-                    region=region,
-                    created_time=stack.get("CreationTime"),
-                    updated_time=stack.get("LastUpdatedTime"),
-                    outputs={o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])},
-                    tags={t["Key"]: t["Value"] for t in stack.get("Tags", [])},
-                )
-        except Exception as e:
-            logger.debug("Failed to get stack status for %s in %s: %s", stack_name, region, e)
+        except ClientError as e:
+            if self._stack_missing(e):
+                return None
+            raise
+        if response["Stacks"]:
+            stack = response["Stacks"][0]
+            return StackInfo(
+                name=stack["StackName"],
+                status=stack["StackStatus"],
+                region=region,
+                created_time=stack.get("CreationTime"),
+                updated_time=stack.get("LastUpdatedTime"),
+                outputs={o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])},
+                tags={t["Key"]: t["Value"] for t in stack.get("Tags", [])},
+            )
         return None
 
     def deploy_orchestrated(

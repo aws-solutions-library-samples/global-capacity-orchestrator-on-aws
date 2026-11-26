@@ -618,7 +618,8 @@ def _validate_quota_fit(
     """Fail when the declared partitions can never fit the gco-jobs quota.
 
     Slurm worker pods live in ``gco-jobs`` and count against its
-    ``ResourceQuota`` and ``LimitRange`` (04-resource-quotas.yaml). A partition
+    ``ResourceQuota``, its ``LimitRange`` (CPU, memory) and the GPU cap
+    admission policy (04-resource-quotas.yaml). A partition
     whose node is larger than the per-container ceiling, or whose
     ``max_nodes`` worth of nodes exceeds the namespace ceiling on its own,
     would deploy fine and then sit PENDING forever with the reason visible only
@@ -648,8 +649,8 @@ def _validate_quota_fit(
         if container_gpu is not None and spec["gpus"] > container_gpu:
             raise SlurmConfigError(
                 f"{path}.gpus={spec['gpus']} exceeds resource_quota.container_max_gpu="
-                f"{resource_quota['container_max_gpu']!r}: the LimitRange would reject every "
-                "worker pod"
+                f"{resource_quota['container_max_gpu']!r}: the GPU cap admission policy would "
+                "reject every worker pod"
             )
     totals = {
         "max_cpu": sum(p["_cpu_cores"] * p["max_nodes"] for p in enabled.values()),
@@ -993,13 +994,17 @@ def _conf_map(*layers: Mapping[str, list[str]]) -> dict[str, list[str]]:
 #: slurmdbd, slurmrestd, the login pod (chart values) and the MariaDB /
 #: backup pods (post-Helm manifests mirror it verbatim). On-demand only (a
 #: Spot reclaim of the controller is a cluster outage), amd64 (the Slinky
-#: images are built for it), and never on an accelerator pool: the gco-jobs
-#: LimitRange defaults every container to ``nvidia.com/gpu: 0``, which the
-#: ExtendedResourceToleration admission plugin turns into a toleration of the
-#: ``nvidia.com/gpu`` taint, and Karpenter then provisioned a g4dn for the
-#: controller (observed live, 2026-10-27) and ``do-not-disrupt`` pinned it
-#: there. Every GCO accelerator and job pool labels its nodes with
-#: ``workload-type``; the Auto Mode general-purpose pool does not.
+#: images are built for it), and never on an accelerator pool, whatever the
+#: pod tolerates. A pod that tolerates the ``nvidia.com/gpu`` taint can land
+#: on a GPU node and make Karpenter provision one: the gco-jobs LimitRange once
+#: defaulted every container to ``nvidia.com/gpu: 0``, which the
+#: ExtendedResourceToleration admission plugin turned into that toleration,
+#: and Karpenter provisioned a g4dn for the controller (observed live,
+#: 2026-10-27) and ``do-not-disrupt`` pinned it there. The LimitRange no longer
+#: names GPUs (04-resource-quotas.yaml); this rule keeps these pods off the
+#: accelerator pools should anything else give them such a toleration. Every
+#: GCO accelerator and job pool labels its nodes with ``workload-type``; the
+#: Auto Mode general-purpose pool does not.
 PLATFORM_POD_NODE_SELECTOR: dict[str, str] = {
     "kubernetes.io/os": "linux",
     "kubernetes.io/arch": "amd64",

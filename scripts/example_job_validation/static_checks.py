@@ -447,12 +447,15 @@ def check_embedded_workloads(repo_root: Path, parsed: ParsedExample) -> list[Sta
     return findings
 
 
-#: Container resource dimensions governed by the gco-jobs LimitRange, mapped
-#: to their per-container default ceiling key in DEFAULT_RESOURCE_QUOTA.
-_LIMIT_RANGE_DIMENSIONS = {
-    "cpu": "container_max_cpu",
-    "memory": "container_max_memory",
-    "nvidia.com/gpu": "container_max_gpu",
+#: Container resource dimensions with a per-container ceiling in gco-jobs,
+#: mapped to their default ceiling key in DEFAULT_RESOURCE_QUOTA and the object
+#: that enforces it: the LimitRange caps CPU and memory, and the GPU cap
+#: ValidatingAdmissionPolicy caps GPUs (a LimitRange GPU entry would make
+#: every pod tolerate the GPU node taint; 04-resource-quotas.yaml).
+_CONTAINER_CEILINGS = {
+    "cpu": ("container_max_cpu", "LimitRange"),
+    "memory": ("container_max_memory", "LimitRange"),
+    "nvidia.com/gpu": ("container_max_gpu", "GPU cap policy"),
 }
 
 #: Aggregate request dimensions governed by the gco-jobs ResourceQuota.
@@ -466,13 +469,14 @@ _QUOTA_DIMENSIONS = {
 def check_resource_governance_fit(parsed: ParsedExample) -> list[StaticFinding]:
     """Every example must be admissible under the default gco-jobs governance.
 
-    A container exceeding the LimitRange maxima is rejected at pod creation
-    with only namespace events explaining why, and the Job sits podless until
-    the caller gives up — the previous defaults rejected the platform's own
-    EFA training example exactly that way (live run ex241-df723811). Proving
-    the fit offline keeps the shipped examples and the shipped guardrails
-    from contradicting each other again. Only gco-jobs-namespaced pod specs
-    are checked: the LimitRange and ResourceQuota bind that namespace.
+    A container over a per-container ceiling (the LimitRange's CPU and memory
+    maxima, the GPU cap policy) is rejected at pod creation with only
+    namespace events explaining why, and the Job sits podless until the
+    caller gives up — the previous defaults rejected the platform's own EFA
+    training example exactly that way (live run ex241-df723811). Proving the
+    fit offline keeps the shipped examples and the shipped guardrails from
+    contradicting each other again. Only gco-jobs-namespaced pod specs are
+    checked: the ceilings and the ResourceQuota bind that namespace.
     """
     return _governance_findings(parsed, parsed.documents)
 
@@ -480,7 +484,7 @@ def check_resource_governance_fit(parsed: ParsedExample) -> list[StaticFinding]:
 def _governance_findings(
     parsed: ParsedExample, documents: list[dict[str, Any]]
 ) -> list[StaticFinding]:
-    """LimitRange / ResourceQuota (and front-door cap) fit for ``documents``."""
+    """Per-container ceiling / ResourceQuota (and front-door cap) fit for ``documents``."""
     from gco.stacks.constants import DEFAULT_RESOURCE_QUOTA, parse_k8s_quantity
 
     findings: list[StaticFinding] = []
@@ -500,7 +504,7 @@ def _governance_findings(
             resources = container.get("resources") or {}
             requests = resources.get("requests") or {}
             limits = resources.get("limits") or {}
-            for dimension, ceiling_key in _LIMIT_RANGE_DIMENSIONS.items():
+            for dimension, (ceiling_key, enforcer) in _CONTAINER_CEILINGS.items():
                 ceiling = parse_k8s_quantity(DEFAULT_RESOURCE_QUOTA[ceiling_key])
                 for source_name, source in (("requests", requests), ("limits", limits)):
                     if dimension not in source:
@@ -510,7 +514,7 @@ def _governance_findings(
                         StaticFinding(
                             example=parsed.name,
                             check=(
-                                f"LimitRange fit ({kind}/{metadata.get('name')}: "
+                                f"{enforcer} fit ({kind}/{metadata.get('name')}: "
                                 f"{container.get('name')} {source_name}.{dimension})"
                             ),
                             passed=value <= ceiling,

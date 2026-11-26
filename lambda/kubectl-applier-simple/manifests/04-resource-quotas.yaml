@@ -4,17 +4,20 @@
 # pods in the namespace, giving a hard upper bound on the cluster capacity that
 # user-submitted jobs can consume in a single namespace.
 #
-# LimitRange provides per-container defaults (so users don't have to specify
-# requests on every container) and caps the maximum size a single container
-# can request, preventing a single mis-configured pod from consuming the
-# entire namespace quota. The default per-container maxima are one full
-# accelerator-node slice (p5.48xlarge / trn2.48xlarge: 192 vCPU, 2 TiB,
-# 8 GPUs) so full-node distributed-training pods — e.g.
-# examples/efa-distributed-training.yaml — are admissible out of the box;
-# a LimitRange rejection surfaces only as FailedCreate namespace events
-# while the Job sits podless, which is why the ceilings are validated at
-# synth against gco/stacks/constants.py:DEFAULT_RESOURCE_QUOTA (values must
-# parse, and container_max_* must fit inside max_*).
+# LimitRange provides per-container CPU and memory defaults (so users don't
+# have to specify requests on every container) and caps the CPU and memory a
+# single container can request, preventing a single mis-configured pod from
+# consuming the entire namespace quota. The gco-jobs-container-gpu-limit
+# ValidatingAdmissionPolicy below caps each container's GPUs, which a
+# LimitRange cannot do (see the comment in the LimitRange). The default
+# per-container maxima are one full accelerator-node slice (p5.48xlarge /
+# trn2.48xlarge: 192 vCPU, 2 TiB, 8 GPUs) so full-node distributed-training
+# pods — e.g. examples/efa-distributed-training.yaml — are admissible out of
+# the box; a rejection at pod creation surfaces only as FailedCreate namespace
+# events while the Job sits podless, which is why the ceilings are validated
+# at synth against gco/stacks/constants.py:DEFAULT_RESOURCE_QUOTA (values must
+# parse, container_max_* must fit inside max_*, and container_max_gpu must be
+# a whole number from 0 to 999).
 #
 # All values are configurable via the `resource_quota` context in cdk.json
 # and substituted by the kubectl-applier Lambda at deploy time.
@@ -43,25 +46,105 @@ metadata:
 spec:
   limits:
     - type: Container
-      # ``default`` / ``defaultRequest`` apply to containers that do not set
-      # requests/limits. We explicitly set ``nvidia.com/gpu: "0"`` in both
-      # because Kubernetes auto-propagates ``max`` to ``default`` when
-      # ``default`` is unspecified for the same resource. Without the
-      # explicit zero, a multi-container control-plane pod (e.g. the Slinky
-      # Slurm controller with slurmctld + log sidecar + OTel sidecar) picks
-      # up the max as an implicit request on every container and demands a
-      # single node with N × max GPUs — unsatisfiable on any g4dn/g5/g6/p3/
-      # p4/p5 instance. Pods that actually need GPUs must request them
-      # explicitly; ``max`` still caps each container.
+      # CPU and memory only. An nvidia.com/gpu entry here, even "0", lets
+      # CPU-only pods onto GPU nodes: the LimitRanger plugin writes it into
+      # every container that does not set it, and the ExtendedResourceToleration
+      # admission plugin (enabled on EKS) gives every pod that names an
+      # extended resource, at any quantity, a toleration of that resource's
+      # taint. CPU-only Jobs in gco-jobs then ran on GPU nodes, and EKS Auto
+      # Mode provisioned GPU instances for them. Keeping only the max is no
+      # fix: the API server copies max into default, so every container would
+      # request the cap, and a max for type Pod would refuse every pod that
+      # sets no GPU limit. The policy below caps GPUs instead.
       default:
         cpu: "1"
         memory: "4Gi"
-        nvidia.com/gpu: "0"
       defaultRequest:
         cpu: "100m"
         memory: "256Mi"
-        nvidia.com/gpu: "0"
       max:
         cpu: "{{LIMIT_MAX_CPU}}"
         memory: "{{LIMIT_MAX_MEMORY}}"
-        nvidia.com/gpu: "{{LIMIT_MAX_GPU}}"
+---
+# The per-container GPU cap. Every container and init container of a pod
+# created in gco-jobs may ask for at most resource_quota.container_max_gpu
+# nvidia.com/gpu, in its limits and in its requests. The API server takes only
+# whole numbers for an extended resource and writes each in canonical form,
+# which is plain digits for any count below 1000. Synth keeps the cap below
+# 1000, so a count is admitted only as plain digits no greater than the cap,
+# and anything else (1k, 2e3, 1Ki) is refused. Standard CEL only, so
+# tests/test_resource_quota_manifest.py runs these expressions as written. The
+# annotation carries the cap for GET /api/v1/policy
+# (ManifestProcessor.cluster_resource_governance, allowed to get this one
+# policy by 02-rbac.yaml).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gco-jobs-container-gpu-limit
+  labels:
+    app: gco
+    project: gco
+  annotations:
+    gco.io/container-max-gpu: "{{LIMIT_MAX_GPU}}"
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: ["gco-jobs"]
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  variables:
+    # resource_quota.container_max_gpu, a whole number from 0 to 999
+    # (gco.resource_governance.validated_resource_quota), so an int literal.
+    - name: cap
+      expression: "{{LIMIT_MAX_GPU}}"
+    - name: containers
+      expression: >-
+        object.spec.containers
+        + (has(object.spec.initContainers) ? object.spec.initContainers : [])
+    # Every GPU count a container asks for: all the limits, then all the
+    # requests. Each map value is a string: the API server's CEL accepts a
+    # map literal only when its values share one type, and a container taken
+    # from the list above is dyn, so its name is converted too.
+    - name: asks
+      expression: >-
+        variables.containers.filter(c, has(c.resources) && has(c.resources.limits)
+        && 'nvidia.com/gpu' in c.resources.limits).map(c, {'container': string(c.name),
+        'field': 'limits', 'value': string(c.resources.limits['nvidia.com/gpu'])})
+        + variables.containers.filter(c, has(c.resources) && has(c.resources.requests)
+        && 'nvidia.com/gpu' in c.resources.requests).map(c, {'container': string(c.name),
+        'field': 'requests', 'value': string(c.resources.requests['nvidia.com/gpu'])})
+    # At most 18 digits, so int() cannot overflow; a longer count is far over
+    # any cap.
+    - name: refused
+      expression: >-
+        variables.asks.filter(ask, !ask.value.matches('^[0-9]{1,18}$')
+        || int(ask.value) > variables.cap)
+  validations:
+    - expression: "size(variables.refused) == 0"
+      message: >-
+        a gco-jobs container asks for more nvidia.com/gpu than resource_quota.container_max_gpu
+        in cdk.json allows
+      messageExpression: >-
+        'container ' + variables.refused[0].container + ' asks for '
+        + variables.refused[0].value + ' nvidia.com/gpu in resources.'
+        + variables.refused[0].field + '; a gco-jobs container may ask for at most '
+        + string(variables.cap) + ', set by resource_quota.container_max_gpu in cdk.json'
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gco-jobs-container-gpu-limit
+  labels:
+    app: gco
+    project: gco
+spec:
+  policyName: gco-jobs-container-gpu-limit
+  validationActions: [Deny]

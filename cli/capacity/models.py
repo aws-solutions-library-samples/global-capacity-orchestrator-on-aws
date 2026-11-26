@@ -158,7 +158,12 @@ class InstanceTypeInfo:
 
 @dataclass
 class SpotPriceInfo:
-    """Spot price information for an instance type."""
+    """Spot price information for an instance type.
+
+    The ``*_7d`` names are kept for the JSON output they appear in; the
+    figures cover the last ``window_days`` days, which is 7 unless the caller
+    asked for another window.
+    """
 
     instance_type: str
     availability_zone: str
@@ -167,6 +172,7 @@ class SpotPriceInfo:
     min_price_7d: float
     max_price_7d: float
     price_stability: float  # 0-1, higher is more stable
+    window_days: int = 7
 
 
 @dataclass

@@ -1599,6 +1599,7 @@ class TestBoundedKubernetesClient:
             processor.networking_v1,
             processor.custom_objects,
             processor.node_v1,
+            processor.admission_v1,
         ):
             assert api.api_client is processor.api_client
         # The removed no-op: Configuration has no such setting and nothing read it.

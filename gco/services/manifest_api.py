@@ -454,7 +454,9 @@ async def get_job_validation_policy() -> dict[str, Any]:
     1. ``policy`` — the front-door checks the manifest processor and the SQS
        queue processor both apply (they read the same env vars, so neither
        submission path is a bypass).
-    2. ``cluster_enforcement.limit_ranges`` — per-container ceilings.
+    2. ``cluster_enforcement.limit_ranges`` (CPU, memory) and
+       ``cluster_enforcement.admission_policies`` (GPUs) — per-container
+       ceilings.
     3. ``cluster_enforcement.resource_quotas`` — namespace aggregate ceilings.
 
     A manifest must clear all three. Layers 2 and 3 are read live from the

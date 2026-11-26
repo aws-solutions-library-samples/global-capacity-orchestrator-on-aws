@@ -68,6 +68,7 @@ FORWARDED_ENV_VARS=(
     GCO_AUTOPILOT_OPENCODE_MODEL
     GCO_AUTOPILOT_SMALL_FAST_MODEL
     GCO_AUTOPILOT_CONFIG_DIR
+    GCO_DASHBOARD_PORT
 )
 
 # The dev image is built from Dockerfile.dev at the repository root. Resolve it
@@ -152,6 +153,15 @@ Autopilot controls are also forwarded by name: GCO_AUTOPILOT_ENGINE,
 GCO_AUTOPILOT_MODEL, GCO_AUTOPILOT_CODEX_MODEL, GCO_AUTOPILOT_OPENCODE_MODEL,
 GCO_AUTOPILOT_SMALL_FAST_MODEL, and GCO_AUTOPILOT_CONFIG_DIR. Config-directory
 values must name a writable path as seen inside the container.
+
+Dashboard: `gco dashboard start` and `gco dashboard serve` serve the web
+dashboard from the container in the foreground, so for those two commands (and
+only then, global options such as `gco -v dashboard start` included) the
+function publishes the container's port 8501 on
+127.0.0.1:${GCO_DASHBOARD_PORT:-8501}. Every other command runs in a container
+of its own, which cannot reach the dashboard: `gco dashboard status` and `open`
+print its link instead of checking it, and Ctrl-C in the terminal it was
+started from stops it.
 EOF
 }
 
@@ -453,12 +463,37 @@ $MARKER_BEGIN
 # get a valid mount source instead of the runtime materialising a root-owned
 # directory on the host. Forwarded host variables use bare \`-e NAME\`, so
 # each is passed only when the calling shell actually has it set.
+# \`gco dashboard start\` and \`gco dashboard serve\` serve the web dashboard from
+# the container, so for those two alone its port is published on the host's
+# loopback address; \`gco dashboard stop\` and the rest run beside it without
+# claiming the port. The loop finds the command after gco's global options:
+# --config, --region and --output (-c, -r, -o, alone or after -v as in
+# \`-vo json\`) take the next word as their value, and every other word that
+# starts with - is a flag or carries its own value (--output=json, -ojson).
 gco() {
     mkdir -p "\$HOME/.aws" "\$HOME/.claude" "\$HOME/.gco"
+    local _gco_publish="" _gco_word _gco_value="" _gco_dashboard=""
+    for _gco_word in "\$@"; do
+        if [ -n "\$_gco_value" ]; then
+            _gco_value=""
+        elif [ -n "\$_gco_dashboard" ]; then
+            case "\$_gco_word" in start|serve) _gco_publish="127.0.0.1:\${GCO_DASHBOARD_PORT:-8501}:8501" ;; esac
+            break
+        else
+            case "\$_gco_word" in
+                --config|--region|--output) _gco_value=1 ;;
+                --*) ;;
+                -*[cro]) case "\${_gco_word%?}" in *[!v-]*) ;; *) _gco_value=1 ;; esac ;;
+                -*) ;;
+                dashboard) _gco_dashboard=1 ;;
+                *) break ;;
+            esac
+        fi
+    done
     if [ -t 0 ] && [ -t 1 ]; then
-        $rt_word run --rm -it -v "\$HOME/.aws:/root/.aws:${mount_opts}" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -v gco-dev-opencode:/root/.local/share/opencode -e CLAUDE_CONFIG_DIR=/root/.claude ${forwarded_env}-v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
+        $rt_word run --rm -it -v "\$HOME/.aws:/root/.aws:${mount_opts}" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -v gco-dev-opencode:/root/.local/share/opencode -e CLAUDE_CONFIG_DIR=/root/.claude ${forwarded_env}\${_gco_publish:+-p} \${_gco_publish:+"\$_gco_publish"} -v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
     else
-        $rt_word run --rm -i -v "\$HOME/.aws:/root/.aws:${mount_opts}" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -v gco-dev-opencode:/root/.local/share/opencode -e CLAUDE_CONFIG_DIR=/root/.claude ${forwarded_env}-v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
+        $rt_word run --rm -i -v "\$HOME/.aws:/root/.aws:${mount_opts}" -v "\$HOME/.claude:/root/.claude" -v "\$HOME/.gco:/root/.gco" -v gco-dev-tools:/root/.npm-global -v gco-dev-opencode:/root/.local/share/opencode -e CLAUDE_CONFIG_DIR=/root/.claude ${forwarded_env}\${_gco_publish:+-p} \${_gco_publish:+"\$_gco_publish"} -v "\$PWD:/workspace" ${socket}-w /workspace $image_word gco "\$@"
     fi
 }
 $MARKER_END

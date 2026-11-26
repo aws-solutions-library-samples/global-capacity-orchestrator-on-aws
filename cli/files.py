@@ -499,14 +499,13 @@ class FileSystemClient:
 
         # Create helper pod manifest.
         #
-        # We set an explicit ``resources`` block with CPU + memory but no GPU
-        # so the gco-jobs LimitRange admission plugin does not substitute its
-        # ``max`` value as an implicit request. Without this, a namespace
-        # that already has all 32 GPUs in use (typical during a demo or
-        # heavy workload burst) would reject the helper pod — even though
-        # listing files doesn't need a GPU — because K8s quota admission
-        # would attribute the LimitRange's ``max.nvidia.com/gpu`` to the
-        # pod's request.
+        # An explicit ``resources`` block with CPU + memory and no GPU keeps
+        # the helper small whatever the gco-jobs LimitRange defaults are. The
+        # LimitRange names no GPU (04-resource-quotas.yaml), so the pod asks
+        # for none: it is admitted even when every GPU in the namespace quota
+        # is in use (typical during a demo or heavy workload burst), and it
+        # gets no GPU toleration, so it never lands on, or provisions, a GPU
+        # node.
         pod_manifest = _helper_pod_manifest(
             pod_name=helper_pod_name,
             namespace=namespace,
@@ -705,9 +704,8 @@ class FileSystemClient:
 
         # Create helper pod manifest.
         #
-        # Explicit ``resources`` block avoids the LimitRange admission plugin
-        # substituting ``max.nvidia.com/gpu`` as an implicit request — see the
-        # ``ls`` helper above for the full rationale.
+        # Explicit CPU + memory and no GPU, like the ``ls`` helper above (see
+        # it for why).
         pod_manifest = _helper_pod_manifest(
             pod_name=helper_pod_name,
             namespace=namespace,

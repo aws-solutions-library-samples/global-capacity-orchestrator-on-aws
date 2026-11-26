@@ -33,6 +33,7 @@ _CONFIG_FILES = {
     "cdk.json": PROJECT_ROOT / "cdk.json",
     "app.py": PROJECT_ROOT / "app.py",
     "Dockerfile.dev": PROJECT_ROOT / "Dockerfile.dev",
+    "Dockerfile.dashboard": PROJECT_ROOT / "Dockerfile.dashboard",
     ".pre-commit-config.yaml": PROJECT_ROOT / ".pre-commit-config.yaml",
     ".dockerignore": PROJECT_ROOT / ".dockerignore",
     ".gitignore": PROJECT_ROOT / ".gitignore",

@@ -5,7 +5,8 @@ Deeper coverage of validation paths not covered by test_models.py:
 RequestedResources (rejects negative cpu_vcpus/memory_gb/gpus and
 non-numeric types, accepts zero), ResourceUtilization negative-gpu
 and over-100 rejection plus integer acceptance, and additional
-KubernetesManifest and ResourceStatus edge cases.
+KubernetesManifest and ResourceStatus edge cases, and ResourceUtilization's
+optional GPU counts (None when not measured, else non-negative integers).
 Pins the exact error strings so downstream callers can assert on them.
 """
 
@@ -92,6 +93,31 @@ class TestResourceUtilizationExtended:
         """Test that integer values are accepted."""
         util = ResourceUtilization(cpu=50, memory=60, gpu=0)
         assert util.cpu == 50
+
+    def test_gpu_counts_default_to_not_measured(self):
+        """Positional and keyword construction without counts keep working."""
+        for util in (
+            ResourceUtilization(1.0, 2.0, 3.0),
+            ResourceUtilization(cpu=1, memory=2, gpu=3),
+        ):
+            assert (util.gpu_allocatable, util.gpu_requested) == (None, None)
+
+    def test_gpu_counts_tell_no_gpus_from_idle_gpus(self):
+        """Both read 0%; only the counts differ."""
+        no_gpus = ResourceUtilization(
+            cpu=1.0, memory=1.0, gpu=0.0, gpu_allocatable=0, gpu_requested=0
+        )
+        idle = ResourceUtilization(cpu=1.0, memory=1.0, gpu=0.0, gpu_allocatable=4, gpu_requested=0)
+        assert no_gpus.gpu == idle.gpu == 0.0
+        assert (no_gpus.gpu_allocatable, idle.gpu_allocatable) == (0, 4)
+
+    @pytest.mark.parametrize("field", ["gpu_allocatable", "gpu_requested"])
+    @pytest.mark.parametrize("count", [-1, 1.5, "2"], ids=["negative", "fraction", "text"])
+    def test_invalid_gpu_counts_raise_errors(self, field, count):
+        with pytest.raises(
+            ValueError, match=rf"^{field} must be a non-negative integer or None, got {count}$"
+        ):
+            ResourceUtilization(cpu=1.0, memory=1.0, gpu=0.0, **{field: count})
 
 
 class TestHealthStatusExtended:

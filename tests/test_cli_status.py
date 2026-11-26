@@ -365,6 +365,96 @@ def test_status_drill_downs_read_the_same_source_as_their_section(runner: CliRun
     assert headings["jobs"].endswith("·  gco queue stats")
 
 
+def _failed_base_pass_document() -> FleetStatus:
+    """The live failure: every stack healthy, the base pass failed in us-east-1."""
+    failure = "04-resource-quotas.yaml:ValidatingAdmissionPolicy/gco-jobs-container-gpu-limit"
+    records = [
+        {
+            "name": "base-manifests",
+            "status": "failed",
+            "health": "unhealthy",
+            "message": failure,
+            "updated_at": "2026-08-13T18:02:11+00:00",
+        },
+        {
+            "name": "keda",
+            "status": "installed",
+            "health": "healthy",
+            "message": "keda installed",
+            "updated_at": "2026-08-13T18:05:40+00:00",
+        },
+    ]
+    return _document(
+        overall=OVERALL_DEGRADED,
+        degraded=["addons"],
+        findings=[
+            Finding(
+                severity="error",
+                section="addons",
+                message=f"base-manifests failed in us-east-1: {failure}",
+            )
+        ],
+        section_overrides={
+            "addons": Section(
+                name="addons",
+                status=STATUS_OK,
+                data={
+                    "by_region": {
+                        "us-east-1": {"readable": True, "addons": records},
+                        "us-west-2": {"readable": True, "addons": records[1:]},
+                    }
+                },
+            )
+        },
+    )
+
+
+def test_status_table_shows_a_failed_add_on_after_the_stacks(runner: CliRunner) -> None:
+    result, _ = _invoke(
+        runner, [], config=_config(output_format="table"), document=_failed_base_pass_document()
+    )
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert "  [error] addons: base-manifests failed in us-east-1: 04-resource-quotas.yaml:" in (
+        "\n".join(lines)
+    )
+    heading = lines.index("addons [ok]  ·  gco stacks addons status --all-regions")
+    assert lines[heading + 1 : heading + 4] == [
+        "  us-east-1        failed           base-manifests  "
+        "04-resource-quotas.yaml:ValidatingAdmissionPolicy/gco-jobs-container-gpu-limit",
+        "  us-east-1        1 of 2 healthy",
+        "  us-west-2        1 of 1 healthy",
+    ]
+    stacks = next(i for i, line in enumerate(lines) if line.startswith("stacks ["))
+    queue = next(i for i, line in enumerate(lines) if line.startswith("queue ["))
+    assert stacks < heading < queue
+
+
+def test_status_fail_on_findings_exits_one_for_a_failed_add_on(runner: CliRunner) -> None:
+    result, _ = _invoke(
+        runner,
+        ["--fail-on-findings"],
+        config=_config(output_format="json"),
+        document=_failed_base_pass_document(),
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert list(payload["sections"])[:3] == ["regions", "stacks", "addons"]
+    addons = payload["sections"]["addons"]
+    assert addons["status"] == "ok"
+    assert addons["data"]["by_region"]["us-east-1"]["addons"][0] == {
+        "name": "base-manifests",
+        "status": "failed",
+        "health": "unhealthy",
+        "message": "04-resource-quotas.yaml:ValidatingAdmissionPolicy/gco-jobs-container-gpu-limit",
+        "updated_at": "2026-08-13T18:02:11+00:00",
+    }
+    assert payload["degraded"] == ["addons"]
+    assert payload["findings"][0]["section"] == "addons"
+
+
 def test_status_jobs_block_says_it_counts_the_central_job_queue(runner: CliRunner) -> None:
     """Jobs sent with ``jobs submit``/``submit-sqs``/``submit-direct`` are not counted."""
     result, _ = _invoke(

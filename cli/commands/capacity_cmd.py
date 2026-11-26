@@ -227,16 +227,25 @@ def spot_prices(config: Any, instance_type: Any, region: Any, days: Any) -> None
                 return
             # JSON/YAML keep the list shape: an empty result is `[]`.
 
+        if config.output_format != "table":
+            # The `*_7d` field names stay for JSON/YAML readers; `window_days`
+            # says what they cover.
+            formatter.print(prices)
+            return
+        # The table's headers name the window the figures cover.
+        window = prices[0].window_days
         formatter.print(
-            prices,
-            columns=[
-                "availability_zone",
-                "current_price",
-                "avg_price_7d",
-                "min_price_7d",
-                "max_price_7d",
-                "price_stability",
-            ],
+            [
+                {
+                    "availability_zone": price.availability_zone,
+                    "current_price": price.current_price,
+                    f"avg_price_{window}d": price.avg_price_7d,
+                    f"min_price_{window}d": price.min_price_7d,
+                    f"max_price_{window}d": price.max_price_7d,
+                    "price_stability": price.price_stability,
+                }
+                for price in prices
+            ]
         )
 
     except Exception as e:

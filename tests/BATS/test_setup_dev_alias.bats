@@ -149,9 +149,9 @@ teardown() {
     [ "$status" -eq 0 ]
     grep -q '^run --rm --mount type=bind,source=/run/finch.sock,target=/var/run/docker.sock my-dev sh -c docker version' "$GCO_SHIM_LOG"
     grep -q '^run --rm --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock my-dev sh -c docker version' "$GCO_SHIM_LOG"
-    ! grep -q -- '-v /var/run/docker.sock' "$GCO_SHIM_LOG"
+    [ "$(grep -c -- '-v /var/run/docker.sock' "$GCO_SHIM_LOG")" -eq 0 ]
     # finch (nerdctl) has no SELinux labels, so it is never retried without them.
-    ! grep -q 'label=disable' "$GCO_SHIM_LOG"
+    [ "$(grep -c 'label=disable' "$GCO_SHIM_LOG")" -eq 0 ]
 }
 
 @test "Docker Engine keeps BuildKit; Podman and finch-daemon get the classic builder" {
@@ -212,7 +212,10 @@ teardown() {
     bash "$SCRIPT" --print --runtime "$malicious" > "$SHIMDIR/runtime-block.sh" 2>/dev/null
     bash -n "$SHIMDIR/runtime-block.sh"
     source "$SHIMDIR/runtime-block.sh"
-    ! gco --version >/dev/null 2>&1
+    # The whole quoted value is one command name, which does not exist.
+    local code=0
+    gco --version >/dev/null 2>&1 || code=$?
+    [ "$code" -eq 127 ]
     [ ! -e "$marker" ]
 }
 
@@ -367,7 +370,7 @@ teardown() {
     bash "$SCRIPT" --runtime docker --no-build --image old/img --rc "$RCFILE" >/dev/null
     bash "$SCRIPT" --runtime docker --no-build --image new/img --rc "$RCFILE" >/dev/null
     grep -q 'new/img gco' "$RCFILE"
-    ! grep -q 'old/img gco' "$RCFILE"
+    [ "$(grep -c 'old/img gco' "$RCFILE")" -eq 0 ]
     [ "$(grep -c '# >>> gco >>>' "$RCFILE")" -eq 1 ]
 }
 
@@ -397,7 +400,7 @@ teardown() {
     : > "$GCO_SHIM_LOG"
     PATH="$SHIMDIR:$PATH" run bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
     [ "$status" -eq 0 ]
-    ! grep -q '^build ' "$GCO_SHIM_LOG"
+    [ "$(grep -c '^build ' "$GCO_SHIM_LOG")" -eq 0 ]
     [ "$(grep -c '# >>> gco >>>' "$RCFILE")" -eq 1 ]
 }
 
@@ -483,6 +486,118 @@ SHIM
     grep -q 'run --rm -i' "$GCO_SHIM_LOG"
     grep -q -- '-w /workspace' "$GCO_SHIM_LOG"
     grep -q 'gco --version' "$GCO_SHIM_LOG"
+}
+
+# -- Dashboard port --------------------------------------------------------------
+#
+# `gco dashboard start` and `gco dashboard serve` serve the web dashboard from
+# the dev container (on every interface of it), so the function publishes its
+# port on the host's loopback address for those two commands, and for no other.
+# Every `gco` runs in a container of its own: a port published for `gco
+# dashboard stop`, `status`, `logs` or `open` too would collide with the one
+# the serving container holds, and the runtime would refuse to start them.
+
+# Source the printed function with a logging docker shim and HOME in scratch.
+source_dashboard_block() {
+    make_shim "$SHIMDIR" docker 0
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    bash "$SCRIPT" --print --runtime docker --no-socket > "$SHIMDIR/block.sh"
+    HOME="$SHIMDIR/home"
+    mkdir -p "$HOME"
+    PATH="$SHIMDIR:$PATH"
+    source "$SHIMDIR/block.sh"
+}
+
+# assert_publishes yes|no WORD...: run `gco WORD...` and check the runtime got
+# (or did not get) the dashboard publish, and the arguments unchanged.
+assert_publishes() {
+    local expected="$1"
+    shift
+    : > "$GCO_SHIM_LOG"
+    run gco "$@"
+    [ "$status" -eq 0 ]
+    grep -q -- "-w /workspace gco-dev gco $*\$" "$GCO_SHIM_LOG"
+    if [ "$expected" = yes ]; then
+        [ "$(grep -c -- ' -p 127.0.0.1:8501:8501 -v ' "$GCO_SHIM_LOG")" -eq 1 ]
+    else
+        [[ "$(cat "$GCO_SHIM_LOG")" != *" -p "* ]]
+    fi
+}
+
+@test "emitted function publishes the dashboard port for gco dashboard start and serve only" {
+    unset GCO_DASHBOARD_PORT
+    source_dashboard_block
+    assert_publishes yes dashboard start --no-token
+    assert_publishes yes dashboard serve
+    assert_publishes yes dashboard serve --address 0.0.0.0
+    local command
+    for command in "dashboard status" "dashboard stop" "dashboard logs -f" "dashboard open" \
+        "dashboard" "dashboard --help" "jobs list" "jobs start"; do
+        # shellcheck disable=SC2086  # each entry is a gco command line
+        assert_publishes no $command
+    done
+}
+
+@test "the dashboard command is found after gco's global options, and their values skipped" {
+    unset GCO_DASHBOARD_PORT
+    source_dashboard_block
+    local command
+    # Flags, values in the next word (long, short, and short after -v) and
+    # values carried in the same word: the root group's options in cli/main.py.
+    for command in "-v dashboard start" "--verbose dashboard serve" \
+        "--output json dashboard start" "--output=json dashboard serve" "-o yaml dashboard start" \
+        "-ojson dashboard start" "-vo json dashboard serve" "-vvo json dashboard start" \
+        "-r us-east-1 dashboard start" "--region us-east-1 -v dashboard serve" \
+        "-c gco.yaml dashboard start" "--config gco.yaml dashboard start" \
+        "-vcgco.yaml dashboard start" "--debug-aws --regional-api dashboard start" \
+        "--global-api dashboard serve" "-- dashboard start" \
+        "--config dashboard dashboard start"; do
+        # shellcheck disable=SC2086  # each entry is a gco command line
+        assert_publishes yes $command
+    done
+    # An option's value is never taken for the command, nor a later word for it.
+    for command in "-c dashboard start" "--region dashboard serve" "-vo dashboard start" \
+        "-o json jobs list" "-v dashboard stop" "--output json dashboard status" \
+        "status dashboard start" "jobs dashboard serve"; do
+        # shellcheck disable=SC2086  # each entry is a gco command line
+        assert_publishes no $command
+    done
+}
+
+@test "GCO_DASHBOARD_PORT picks the host port and is forwarded into the container" {
+    make_shim "$SHIMDIR" docker 0
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    bash "$SCRIPT" --print --runtime docker --no-socket > "$SHIMDIR/block.sh"
+    grep -q -- '-e GCO_DASHBOARD_PORT ' "$SHIMDIR/block.sh"
+    PATH="$SHIMDIR:$PATH"
+    source "$SHIMDIR/block.sh"
+    : > "$GCO_SHIM_LOG"
+    GCO_DASHBOARD_PORT=9000 run gco dashboard start
+    [ "$status" -eq 0 ]
+    grep -q -- '-p 127.0.0.1:9000:8501 ' "$GCO_SHIM_LOG"
+    : > "$GCO_SHIM_LOG"
+    GCO_DASHBOARD_PORT=9000 run gco dashboard stop
+    [ "$status" -eq 0 ]
+    [[ "$(cat "$GCO_SHIM_LOG")" != *"9000"* ]]
+}
+
+@test "--help says only gco dashboard start and serve publish the port, and how to stop it" {
+    run bash "$SCRIPT" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'`gco dashboard start` and `gco dashboard serve` serve the web'* ]]
+    [[ "$output" == *'for those two commands (and'* ]]
+    [[ "$output" == *'global options such as `gco -v dashboard start` included) the'* ]]
+    [[ "$output" == *'Ctrl-C in the terminal it was'*'started from stops it.'* ]]
+}
+
+@test "both run branches carry the dashboard publish expansion" {
+    run bash "$SCRIPT" --print --runtime docker
+    [ "$status" -eq 0 ]
+    tty_line="$(printf '%s\n' "$output" | grep -- 'run --rm -it')"
+    notty_line="$(printf '%s\n' "$output" | grep -- 'run --rm -i ')"
+    for line in "$tty_line" "$notty_line"; do
+        [[ "$line" == *'${_gco_publish:+-p} ${_gco_publish:+"$_gco_publish"} -v "$PWD:/workspace"'* ]]
+    done
 }
 
 # -- Autopilot persistence mounts ----------------------------------------------
@@ -687,8 +802,8 @@ SHIM
     grep -qF '# >>> gco >>>' "$RCFILE"
     run bash "$SCRIPT" --uninstall --rc "$RCFILE"
     [ "$status" -eq 0 ]
-    ! grep -qF '# >>> gco >>>' "$RCFILE"
-    ! grep -qF 'gco()' "$RCFILE"
+    [ "$(grep -cF '# >>> gco >>>' "$RCFILE")" -eq 0 ]
+    [ "$(grep -cF 'gco()' "$RCFILE")" -eq 0 ]
     grep -qF 'export KEEP_ME=1' "$RCFILE"
 }
 
@@ -705,12 +820,18 @@ SHIM
     # broken, so uninstall runs before any detection or build.
     printf 'export KEEP_ME=1\n' > "$RCFILE"
     bash "$SCRIPT" --runtime docker --no-build --rc "$RCFILE"
-    # Keep the base system dirs (bash, awk, grep, mktemp) but drop the dirs
-    # container runtimes install into, so no runtime is discoverable.
-    run env PATH="$SHIMDIR:/usr/bin:/bin" bash "$SCRIPT" --uninstall --rc "$RCFILE"
+    # Every runtime on PATH now fails whatever it is asked, and logs the asking.
+    local rt
+    for rt in docker finch podman; do
+        make_shim "$SHIMDIR" "$rt" 1 1 1
+    done
+    export GCO_SHIM_LOG="$SHIMDIR/calls.log"
+    : > "$GCO_SHIM_LOG"
+    run bash "$SCRIPT" --uninstall --rc "$RCFILE"
     [ "$status" -eq 0 ]
-    ! command -v docker >/dev/null 2>&1 || true
-    ! grep -qF '# >>> gco >>>' "$RCFILE"
+    [ ! -s "$GCO_SHIM_LOG" ]
+    [ "$(grep -cF '# >>> gco >>>' "$RCFILE")" -eq 0 ]
+    grep -qF 'export KEEP_ME=1' "$RCFILE"
 }
 
 # -- Shell profile selection ---------------------------------------------------
@@ -969,8 +1090,8 @@ SHIM
     [[ "$output" == *"Socket mount      : none (--no-socket)"* ]]
     [[ "$output" == *"Note: the function shares no runtime socket with the container, so it cannot"* ]]
     [[ "$output" == *"CDK_DOCKER=podman gco stacks deploy-all -y"* ]]
-    ! grep -q 'target=/var/run/docker.sock' "$GCO_SHIM_LOG"
-    ! grep -q '/var/run/docker.sock' "$RCFILE"
+    [ "$(grep -c 'target=/var/run/docker.sock' "$GCO_SHIM_LOG")" -eq 0 ]
+    [ "$(grep -c '/var/run/docker.sock' "$RCFILE")" -eq 0 ]
 }
 
 @test "--print before the image is built shares no socket and says why" {

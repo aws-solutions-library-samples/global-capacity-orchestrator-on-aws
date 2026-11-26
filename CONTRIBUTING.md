@@ -119,7 +119,8 @@ GCO uses exact-pinned Python dependencies in `pyproject.toml` with a committed t
 |-------|----------------------------|------------------|
 | Core | `pip install -e .` | CLI and service runtime deps (boto3, click, requests, httpx2, the OpenTelemetry roots, etc.) |
 | CDK | `pip install -e ".[cdk]"` | AWS CDK, cdk-nag, constructs (for stack synthesis) |
-| Dev | `pip install -e ".[dev]"` | Everything: CDK + lint + typecheck + test + security |
+| Dev | `pip install -e ".[dev]"` | Everything: CDK + dashboard + diagrams + lint + typecheck + test + security + docs |
+| Dashboard | `pip install -e ".[dashboard]"` | Streamlit, Altair, pydeck and pandas for the local web dashboard (`gco dashboard serve`; `gco dashboard start` installs them in its own image, `Dockerfile.dashboard`) |
 | MCP | `pip install -e ".[mcp]"` | FastMCP server |
 | Image: health monitor | Docker reads `[image-health-monitor]` | Direct runtime roots for `gco.services.health_api` and its TLS sidecar, including uvloop + httptools for uvicorn, httpx2, and the OpenTelemetry tracing roots |
 | Image: manifest processor | Docker reads `[image-manifest-processor]` | Direct runtime roots for the manifest API, its TLS sidecar, and the Grafana rotator, including uvloop + httptools for uvicorn, httpx2, and the OpenTelemetry tracing roots |

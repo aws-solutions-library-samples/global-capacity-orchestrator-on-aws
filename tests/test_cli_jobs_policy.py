@@ -15,6 +15,7 @@ from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+import requests
 import yaml
 from click.testing import CliRunner
 
@@ -674,7 +675,7 @@ class TestPolicyHelpers:
         assert "[REJECT] b" in output
         assert "Job/trainer [images] registry is not trusted" in output
         assert "[caps] GPU cap exceeded" in output
-        assert "live quota/LimitRange unreadable for ml, gco-jobs" in output
+        assert "live quota/LimitRange/GPU cap unreadable for ml, gco-jobs" in output
         assert "policy unreadable: regional bridge unavailable" in output
 
     def test_cdk_policy_loader_requires_checkout_and_extracts_only_policy(
@@ -900,6 +901,10 @@ class TestDeployedPolicyCommand:
                             {"type": "Pod"},
                         ]
                     },
+                    "admission_policies": {
+                        "gco-jobs-container-gpu-limit": {"container_max": {"nvidia.com/gpu": "8"}},
+                        "gco-jobs-unannotated": {"container_max": {}},
+                    },
                 },
             },
         }
@@ -919,6 +924,15 @@ class TestDeployedPolicyCommand:
             "Container max: {'cpu': '4'}",
         ):
             assert fragment in result.output
+        # The per-container GPU cap lives in an admission policy, since a
+        # LimitRange GPU entry gives every pod the GPU node toleration.
+        lines = result.output.splitlines()
+        policy = lines.index("    gco-jobs ValidatingAdmissionPolicy/gco-jobs-container-gpu-limit:")
+        assert lines[policy + 1] == "      Container max: {'nvidia.com/gpu': '8'}"
+        # A policy that reports no cap is named, with nothing under it.
+        unannotated = lines.index("    gco-jobs ValidatingAdmissionPolicy/gco-jobs-unannotated:")
+        assert unannotated == policy + 2
+        assert lines[unannotated + 1] == ""
 
     def test_structured_policy_is_forwarded_unchanged(self) -> None:
         manager = MagicMock()
@@ -1293,6 +1307,59 @@ class TestRenderingAndConfirmations:
         formatter.print.assert_called_once_with(payload)
         formatter.print_warning.assert_not_called()
 
+    def test_global_list_refuses_a_limit_above_the_global_api_page(self) -> None:
+        manager = MagicMock()
+
+        result, _, formatter = _invoke(
+            ["jobs", "list", "--all-regions", "--limit", "1001"], manager
+        )
+
+        # The aggregator answers one page of at most 1000 jobs and rejects a
+        # larger limit with HTTP 400, so the CLI refuses it before the call.
+        assert result.exit_code == 1
+        formatter.print_error.assert_called_once_with(
+            "--limit can be at most 1000 with --all-regions"
+        )
+        manager.list_jobs_global.assert_not_called()
+
+    def test_limit_bound_applies_to_all_regions_only(self) -> None:
+        manager = MagicMock()
+        manager.list_jobs_global.return_value = {"total": 0, "jobs": [], "errors": None}
+        manager.list_jobs.return_value = []
+
+        at_ceiling, _, _ = _invoke(["jobs", "list", "--all-regions", "--limit", "1000"], manager)
+        one_region, _, _ = _invoke(["jobs", "list", "-r", "us-east-1", "--limit", "5000"], manager)
+
+        assert at_ceiling.exit_code == 0, at_ceiling.output
+        manager.list_jobs_global.assert_called_once_with(namespace=None, status=None, limit=1000)
+        # One Region reads as many 1000-job pages as --limit takes.
+        assert one_region.exit_code == 0, one_region.output
+        assert manager.list_jobs.call_args.kwargs["limit"] == 5000
+
+    def test_global_list_failure_names_the_aggregator_reason(self) -> None:
+        from cli.aws_client import GCOAWSClient
+        from cli.config import GCOConfig
+        from cli.jobs import JobManager
+
+        refused = requests.Response()
+        refused.status_code = 503
+        refused.reason = "Service Unavailable"
+        refused._content = b'{"error": "Regional aggregation is temporarily unavailable"}'
+        with patch("cli.aws_client.boto3.Session"):
+            client = GCOAWSClient(GCOConfig())
+        client.make_authenticated_request = MagicMock(return_value=refused)
+        with patch("cli.jobs.get_aws_client", return_value=client):
+            manager = JobManager(GCOConfig())
+
+        result, _, formatter = _invoke(["jobs", "list", "--all-regions"], manager)
+
+        # The operator reads the aggregator's own reason, not a bare status line.
+        assert result.exit_code == 1
+        formatter.print_error.assert_called_once_with(
+            "Failed to list jobs: API request failed: "
+            "Regional aggregation is temporarily unavailable"
+        )
+
     @pytest.mark.parametrize(
         ("subcommand", "manager_method", "payload", "message"),
         [
@@ -1538,16 +1605,21 @@ class TestRemainingJobsStateMatrix:
         aws = MagicMock()
         aws.discover_regional_stacks.return_value = ["us-east-1", "us-west-2"]
         with patch("cli.aws_client.get_aws_client", return_value=aws):
-            result, _, _ = _invoke(["jobs", "queue-status", "--all-regions"], manager)
-        assert result.exit_code == 0, result.output
+            result, _, formatter = _invoke(["jobs", "queue-status", "--all-regions"], manager)
+        # The readable region is still printed; the unreadable one is named
+        # and fails the command, as `gco jobs list --all-regions` does.
+        assert result.exit_code == 1, result.output
         assert "us-east-1" in result.output
         assert result.output.rstrip().endswith("0")
+        formatter.print_error.assert_called_once_with("us-west-2: bridge unavailable")
         assert manager.get_queue_status.call_args_list == [
             call("us-east-1"),
             call("us-west-2"),
         ]
 
-    @pytest.mark.parametrize("answering", [["us-east-1", "us-west-2"], []])
+    @pytest.mark.parametrize(
+        "answering", [["us-east-1", "us-west-2"], ["us-west-2"], []], ids=["all", "one", "none"]
+    )
     def test_queue_status_all_regions_json_is_one_list(self, answering: list[str]) -> None:
         from cli.main import cli
 
@@ -1573,10 +1645,15 @@ class TestRemainingJobsStateMatrix:
         ):
             result = CliRunner().invoke(cli, ["-o", "json", "jobs", "queue-status", "-a"])
 
-        assert result.exit_code == 0, result.output
+        # stdout stays one list of the answering regions; each other region is
+        # named on stderr and fails the command.
+        unread = [region for region in ("us-east-1", "us-west-2") if region not in answering]
+        assert result.exit_code == (1 if unread else 0), result.output
         document = json.loads(result.stdout)
         assert [entry["region"] for entry in document] == answering
         assert "REGION" not in result.stdout
+        for region in unread:
+            assert f"{region}: queue absent" in result.stderr
 
     def test_queue_status_discovery_failure_is_nonzero(self) -> None:
         aws = MagicMock()
@@ -1586,15 +1663,16 @@ class TestRemainingJobsStateMatrix:
         assert result.exit_code == 1
         assert "discovery denied" in formatter.print_error.call_args.args[0]
 
-    def test_queue_status_all_failed_is_available_but_empty(self) -> None:
+    def test_queue_status_all_failed_names_each_region_and_fails(self) -> None:
         manager = MagicMock()
         manager.get_queue_status.side_effect = RuntimeError("queue absent")
         aws = MagicMock()
         aws.discover_regional_stacks.return_value = ["us-east-1"]
         with patch("cli.aws_client.get_aws_client", return_value=aws):
             result, _, formatter = _invoke(["jobs", "queue-status", "--all-regions"], manager)
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         formatter.print_warning.assert_called_once_with("No queue status available")
+        formatter.print_error.assert_called_once_with("us-east-1: queue absent")
 
     def test_specific_list_table_structured_and_failure_paths(self) -> None:
         manager = MagicMock()

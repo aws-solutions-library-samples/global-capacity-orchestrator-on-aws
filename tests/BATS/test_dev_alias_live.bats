@@ -213,7 +213,7 @@ run_live() {
     [[ "$output" == *"using existing image: my-dev:latest (--skip-build); setup-dev-alias.sh --no-build"* ]]
     [[ "$output" == *"ALL CHECKS PASSED for docker"* ]]
     grep -q '^image inspect my-dev:latest$' "$RT_CALLS"
-    ! grep -q '^build ' "$RT_CALLS"
+    [ "$(grep -c '^build ' "$RT_CALLS")" -eq 0 ]
     grep -qE -- "^run .* my-dev:latest gco --version$" "$RT_CALLS"
 }
 

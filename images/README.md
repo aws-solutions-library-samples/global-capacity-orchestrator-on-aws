@@ -7,6 +7,7 @@ Screenshots and visual assets for Global Capacity Orchestrator (GCO) documentati
 - [Project Logo](#project-logo)
 - [Reference Architecture Diagrams](#reference-architecture-diagrams)
 - [MCP Server Screenshots](#mcp-server-screenshots)
+- [Dashboard Screenshots](#dashboard-screenshots)
 - [In-Cluster Monitoring Screenshots](#in-cluster-monitoring-screenshots)
 - [Platform Add-on Screenshots](#platform-add-on-screenshots)
 - [SageMaker Studio Screenshots](#sagemaker-studio-screenshots)
@@ -56,6 +57,14 @@ Screenshots demonstrating the GCO MCP server integration with Kiro. Tool counts 
 | [pi_calculation_manifest.png](pi_calculation_manifest.png) | The PI calculation Kubernetes Job manifest |
 | [gco_mcp_ai_recommend.png](gco_mcp_ai_recommend.png) | Using the MCP capacity recommendation tool |
 | [gco_mcp_cost_summary.png](gco_mcp_cost_summary.png) | Viewing a cost summary via natural language |
+
+## Dashboard Screenshots
+
+The local web dashboard `gco dashboard` runs ([`docs/DASHBOARD.md`](../docs/DASHBOARD.md)).
+
+| Image | Description |
+|-------|-------------|
+| [gco_dashboard_fleet.png](gco_dashboard_fleet.png) | The Fleet page in the dark theme: a three-Region deployment's world map with each Region's health and load, the headline numbers and per-Region utilization. Captured from a live deployment with every identifier hidden |
 
 ## In-Cluster Monitoring Screenshots
 

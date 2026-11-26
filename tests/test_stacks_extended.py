@@ -219,20 +219,21 @@ class TestStackManagerGetStackStatus:
             assert status is None
 
     def test_get_stack_status_exception(self):
-        """Test getting status when exception occurs."""
+        """A read that fails (here, the network) raises instead of reading as absent."""
         from cli.stacks import StackManager
 
         config = MagicMock()
 
         with patch("boto3.client") as mock_boto:
             mock_cf = MagicMock()
-            mock_cf.describe_stacks.side_effect = Exception("Access denied")
+            mock_cf.describe_stacks.side_effect = EndpointConnectionError(
+                endpoint_url="https://cloudformation.example.com"
+            )
             mock_boto.return_value = mock_cf
 
             manager = StackManager(config)
-            status = manager.get_stack_status("test-stack", "us-east-1")
-
-            assert status is None
+            with pytest.raises(EndpointConnectionError):
+                manager.get_stack_status("test-stack", "us-east-1")
 
 
 class TestStackManagerDeployOptions:

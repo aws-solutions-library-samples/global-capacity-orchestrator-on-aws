@@ -1910,7 +1910,7 @@ class ConfigLoader:
         """The ``resource_quota`` block merged over its defaults, validated.
 
         The same merge the regional stack renders into the ``gco-jobs``
-        ResourceQuota and LimitRange (see
+        ResourceQuota, LimitRange and GPU cap admission policy (see
         :func:`gco.resource_governance.validated_resource_quota`), so the
         Slurm partitions are checked against what deploys even when cdk.json
         leaves the block out.
@@ -1918,7 +1918,8 @@ class ConfigLoader:
         Raises:
             ConfigValidationError: If the block is not an object, names an
                 unknown key, holds a value that is not a Kubernetes quantity,
-                or a per-container ceiling exceeds its namespace ceiling.
+                a ``container_max_gpu`` that is not a whole number from 0 to
+                999, or a per-container ceiling exceeds its namespace ceiling.
         """
         raw = self.app.node.try_get_context("resource_quota")
         try:

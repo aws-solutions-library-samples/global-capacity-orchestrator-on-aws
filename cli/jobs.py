@@ -252,6 +252,87 @@ def _extract_scheduling(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def job_status(job_data: Mapping[str, Any]) -> str:
+    """A Job's verdict from its API record: pending, running, succeeded or failed.
+
+    The API's own ``computed_status`` wins when present. Otherwise the verdict
+    is derived the way the API derives it, from the terminal conditions and
+    the active pod count, so a record from a bridge that does not report the
+    field (the list route did not, before it was added) still reads correctly
+    instead of as "unknown".
+    """
+    computed = job_data.get("computed_status")
+    if isinstance(computed, str) and computed:
+        return computed
+    status_data = job_data.get("status")
+    if not isinstance(status_data, Mapping):
+        return "pending"
+    for condition in status_data.get("conditions") or []:
+        if not isinstance(condition, Mapping) or condition.get("status") != "True":
+            continue
+        if condition.get("type") == "Complete":
+            return "succeeded"
+        if condition.get("type") == "Failed":
+            return "failed"
+    active = status_data.get("active")
+    return "running" if isinstance(active, int) and active > 0 else "pending"
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    """An API timestamp (``Z`` or offset form) as an aware datetime, else None."""
+    if not isinstance(value, str) or not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _finished_at(status_data: Mapping[str, Any]) -> datetime | None:
+    """When a Job finished: ``completionTime``, else its ``Failed`` condition's transition.
+
+    Kubernetes sets ``completionTime`` only for a Job that succeeds, so a
+    failed Job's end is the moment its ``Failed`` condition turned true (the
+    TrainJob parser reads TrainJobs the same way). Without this a failed
+    Job's ``duration_seconds`` would count up to the present forever.
+    """
+    completed = _parse_timestamp(status_data.get("completionTime"))
+    if completed is not None:
+        return completed
+    for condition in status_data.get("conditions") or []:
+        if (
+            isinstance(condition, Mapping)
+            and condition.get("type") == "Failed"
+            and condition.get("status") == "True"
+        ):
+            return _parse_timestamp(condition.get("lastTransitionTime"))
+    return None
+
+
+def parse_job_info(job_data: Mapping[str, Any], region: str) -> JobInfo:
+    """A Job record from any jobs API route (one Region or the aggregator) as JobInfo."""
+    metadata = job_data.get("metadata") or {}
+    status_data = job_data.get("status") or {}
+    spec = job_data.get("spec") or {}
+    keep_warm = job_data.get("keep_warm")
+    return JobInfo(
+        name=metadata.get("name", ""),
+        namespace=metadata.get("namespace", "default"),
+        region=region,
+        status=job_status(job_data),
+        created_time=_parse_timestamp(metadata.get("creationTimestamp")),
+        start_time=_parse_timestamp(status_data.get("startTime")),
+        completion_time=_finished_at(status_data),
+        active_pods=status_data.get("active", 0) or 0,
+        succeeded_pods=status_data.get("succeeded", 0) or 0,
+        failed_pods=status_data.get("failed", 0) or 0,
+        parallelism=spec.get("parallelism", 1),
+        completions=spec.get("completions", 1),
+        labels=metadata.get("labels", {}) or {},
+        image_refs=_extract_image_refs(dict(spec)),
+        keep_warm=keep_warm if isinstance(keep_warm, dict) else None,
+        uid=metadata.get("uid") if isinstance(metadata.get("uid"), str) else None,
+        **_extract_scheduling(dict(job_data)),
+    )
+
+
 @dataclass
 class JobInfo:
     """Information about a Kubernetes job."""
@@ -312,6 +393,10 @@ class JobInfo:
     # (``{"idle": [...], "idle_seconds": int, "open": bool}``, gco.keep_warm),
     # or None when there are none or the regional bridge predates them.
     keep_warm: dict[str, Any] | None = None
+    # The Kubernetes UID of this incarnation of the Job. ``delete_job`` takes
+    # it as ``expected_uid`` so a delete aimed at a finished Job can never
+    # remove a newer Job that has since reused its name.
+    uid: str | None = None
 
     @property
     def is_complete(self) -> bool:
@@ -791,61 +876,7 @@ class JobManager:
 
     def _parse_job_info(self, job_data: dict[str, Any], region: str) -> JobInfo:
         """Parse job data into JobInfo object."""
-        metadata = job_data.get("metadata", {})
-        status_data = job_data.get("status", {})
-        spec = job_data.get("spec", {})
-
-        # Determine job status
-        conditions = status_data.get("conditions", [])
-        job_status = "pending"
-        for condition in conditions:
-            if condition.get("type") == "Complete" and condition.get("status") == "True":
-                job_status = "succeeded"
-                break
-            if condition.get("type") == "Failed" and condition.get("status") == "True":
-                job_status = "failed"
-                break
-
-        if job_status == "pending" and status_data.get("active", 0) > 0:
-            job_status = "running"
-
-        # Parse timestamps
-        created_time = None
-        if metadata.get("creationTimestamp"):
-            created_time = datetime.fromisoformat(
-                metadata["creationTimestamp"].replace("Z", "+00:00")
-            )
-
-        start_time = None
-        if status_data.get("startTime"):
-            start_time = datetime.fromisoformat(status_data["startTime"].replace("Z", "+00:00"))
-
-        completion_time = None
-        if status_data.get("completionTime"):
-            completion_time = datetime.fromisoformat(
-                status_data["completionTime"].replace("Z", "+00:00")
-            )
-
-        return JobInfo(
-            name=metadata.get("name", ""),
-            namespace=metadata.get("namespace", "default"),
-            region=region,
-            status=job_status,
-            created_time=created_time,
-            start_time=start_time,
-            completion_time=completion_time,
-            active_pods=status_data.get("active", 0),
-            succeeded_pods=status_data.get("succeeded", 0),
-            failed_pods=status_data.get("failed", 0),
-            parallelism=spec.get("parallelism", 1),
-            completions=spec.get("completions", 1),
-            labels=metadata.get("labels", {}),
-            image_refs=_extract_image_refs(spec),
-            keep_warm=(
-                job_data["keep_warm"] if isinstance(job_data.get("keep_warm"), dict) else None
-            ),
-            **_extract_scheduling(job_data),
-        )
+        return parse_job_info(job_data, region)
 
     def get_job(self, job_name: str, namespace: str, region: str | None = None) -> JobInfo | None:
         """

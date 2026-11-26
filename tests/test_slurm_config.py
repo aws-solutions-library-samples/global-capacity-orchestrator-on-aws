@@ -581,9 +581,12 @@ class TestDeploymentCoherence:
             _validate(_on(partitions={"cpu": {field: value}}))
 
     def test_more_gpus_than_the_container_ceiling(self) -> None:
+        # The GPU ceiling is the gco-jobs-container-gpu-limit admission policy,
+        # not the LimitRange, whose GPU entry let every pod onto GPU nodes.
         with pytest.raises(
             sc.SlurmConfigError,
-            match=r"partitions\.gpu\.gpus=9 exceeds resource_quota\.container_max_gpu",
+            match=r"partitions\.gpu\.gpus=9 exceeds resource_quota\.container_max_gpu='8': "
+            r"the GPU cap admission policy would reject every worker pod",
         ):
             _validate(_on(partitions={"gpu": {"gpus": 9}}))
 
@@ -677,8 +680,10 @@ class TestChartValues:
         assert controller["podSpec"]["affinity"] == sc.PLATFORM_POD_AFFINITY
 
     def test_every_non_worker_pod_stays_off_accelerator_pools(self, values: dict[str, Any]) -> None:
-        """Regression: the controller landed on a g4dn (LimitRange gpu:0 default +
-        ExtendedResourceToleration) and do-not-disrupt pinned it there."""
+        """Regression: the controller landed on a g4dn (the old LimitRange gpu:0
+        default + ExtendedResourceToleration) and do-not-disrupt pinned it there.
+        The LimitRange names no GPU now; the placement keeps these pods off the
+        accelerator pools whatever else gives them a GPU toleration."""
         pods = {
             "controller": values["controller"]["podSpec"],
             "restapi": values["restapi"]["podSpec"],

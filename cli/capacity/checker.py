@@ -13,7 +13,8 @@ weighted region scoring.
 
 Data Sources:
     - EC2 GetSpotPlacementScores: likelihood of getting spot capacity (1-10 score)
-    - EC2 DescribeSpotPriceHistory: current and historical spot prices (7-day window)
+    - EC2 DescribeSpotPriceHistory: current and historical spot prices (7-day
+      window unless a caller asks for another)
     - AWS Price List GetProducts: Linux on-demand prices (through us-east-1)
     - EC2 DescribeInstanceTypes: full compute characteristics — vCPU/cores/threads,
       memory, every accelerator class, EFA and network limits, local NVMe and EBS,
@@ -38,8 +39,8 @@ Key Classes:
 Output Models (defined in models.py):
     - CapacityEstimate: availability, confidence, wait estimate, hourly price,
       and a recommendation for one capacity type (spot or on-demand)
-    - SpotPriceInfo: one AZ's current spot price with its 7-day average, min,
-      max, and stability
+    - SpotPriceInfo: one AZ's current spot price with its average, min, max,
+      and stability over the window it records in ``window_days``
     - InstanceTypeInfo: every compute characteristic EC2 reports for a type
 
 Instance-type characteristics are always resolved live. A checked-in
@@ -813,6 +814,7 @@ class CapacityChecker:
                         min_price_7d=min_price,
                         max_price_7d=max_price,
                         price_stability=stability,
+                        window_days=days,
                     )
                 )
 

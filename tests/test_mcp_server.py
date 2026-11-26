@@ -867,6 +867,23 @@ class TestJobTools:
             assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-west-2"]
             assert "--all-regions" not in cmd
 
+    def test_queue_status_with_an_unreadable_region_fails_and_returns_the_others(self):
+        # `gco jobs queue-status --all-regions` prints the readable regions,
+        # names each unreadable one on stderr and exits 1; the tool's region
+        # description says so, as list_jobs' does.
+        answered = [{"region": "us-east-1", "messages_available": 2, "dlq_messages": 0}]
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(
+                returncode=1, stdout=json.dumps(answered), stderr="✗ us-west-2: queue absent"
+            )
+            result = json.loads(run_mcp.queue_status())
+
+        assert result == {"error": "✗ us-west-2: queue absent", "exit_code": 1, "output": answered}
+        tool = asyncio.run(run_mcp.mcp.get_tool("queue_status"))
+        described = " ".join(tool.parameters["properties"]["region"]["description"].split())
+        assert "a region that cannot be read is named in ``error`` and fails the call" in described
+        assert "statuses returned under ``output``" in described
+
     def test_get_job_validation_policy(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")

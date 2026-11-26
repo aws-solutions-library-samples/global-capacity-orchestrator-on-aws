@@ -36,6 +36,13 @@ success looks like, and points at the fixes when it does not.
 AI-powered IDE. `gco autopilot` sets this up for Claude Code, OpenAI Codex,
 or OpenCode in one command.*
 
+![The GCO dashboard's Fleet page: a world map of the workload Regions with their health and load, the fleet's headline numbers, and per-Region utilization](assets/images/gco_dashboard_fleet.png)
+
+*Or use a browser: `gco dashboard start` runs a local web UI over the same
+calls the CLI makes, with every Region on one map, Jobs, the queue, inference
+endpoints and costs
+([docs/DASHBOARD.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/DASHBOARD.md)).*
+
 ## Is GCO for you?
 
 GCO fits teams running accelerated workloads — LLM training and inference,

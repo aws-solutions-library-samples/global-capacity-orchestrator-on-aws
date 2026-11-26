@@ -691,9 +691,10 @@ resolved lockfile, so a clean checkout installs the same graph CI ran.
 
 ### What is pinned, and where
 
-- Direct Python deps and their extras (`cdk`, `diagrams`, `mcp`, `lint`,
-  `typecheck`, `test`, `security`, `dev`, and the six production `image-*`
-  groups) — exact `==` pins in `pyproject.toml`.
+- Direct Python deps and their extras (`cdk`, `dashboard`, `diagrams`,
+  `docs`, `mcp`, `metrics-parquet`, `metrics-tfevents`, `lint`, `typecheck`,
+  `test`, `security`, the `metrics` and `dev` umbrellas, and the six
+  production `image-*` groups) — exact `==` pins in `pyproject.toml`.
 - The Python build backend — an exact `==` pin in `pyproject.toml`
   `[build-system] requires` (setuptools). pip resolves it inside build
   isolation, so it never appears in the runtime environment or the lock;

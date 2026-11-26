@@ -47,6 +47,12 @@ _OLDEST_TIMESTAMP = datetime.min.replace(tzinfo=UTC)
 #: namespaces with a pending or running pod) every 30 seconds.
 _ACTIVE_JOBS_NAMESPACE = "GCO/HealthMonitor"
 _ACTIVE_JOBS_METRIC = "ActiveJobs"
+#: The same monitor's share of the cluster's allocatable GPUs that pods have
+#: requested. It is published for every cluster (0 when the cluster has no GPU
+#: nodes), so it stands in when Container Insights has no GPU utilization
+#: series: a cluster with no GPU nodes, or GPU nodes the CloudWatch add-on's
+#: DCGM exporter does not run on.
+_GPU_ALLOCATION_METRIC = "ClusterGpuUtilization"
 #: The regional API route the PCS ranking reads Slurm's queue from.
 _SLURM_STATUS_PATH = "/api/v1/slurm/status"
 
@@ -218,6 +224,11 @@ class MultiRegionCapacityChecker:
                         Statistics=["Average"],
                     )
                     datapoints = response.get("Datapoints", [])
+                    allocation = (
+                        None
+                        if datapoints or signal != "gpu"
+                        else self._gpu_allocation(cloudwatch, stack.cluster_name, region)
+                    )
                     if datapoints:
                         # CloudWatch returns datapoints unordered; read the
                         # newest, as the running-job reading below does.
@@ -226,6 +237,9 @@ class MultiRegionCapacityChecker:
                             key=lambda point: point.get("Timestamp") or _OLDEST_TIMESTAMP,
                         )
                         setattr(capacity, attribute, newest["Average"])
+                        available[signal] = True
+                    elif allocation is not None:
+                        capacity.gpu_utilization = allocation
                         available[signal] = True
                     else:
                         capacity.telemetry_errors.append(
@@ -305,6 +319,28 @@ class MultiRegionCapacityChecker:
                 ),
             )
         return capacity
+
+    @staticmethod
+    def _gpu_allocation(cloudwatch: Any, cluster_name: str, region: str) -> float | None:
+        """The health monitor's newest GPU allocation share for the cluster, or None."""
+        end = datetime.now(UTC)
+        response = cloudwatch.get_metric_statistics(
+            Namespace=_ACTIVE_JOBS_NAMESPACE,
+            MetricName=_GPU_ALLOCATION_METRIC,
+            Dimensions=[
+                {"Name": "ClusterName", "Value": cluster_name},
+                {"Name": "Region", "Value": region},
+            ],
+            StartTime=end - timedelta(minutes=5),
+            EndTime=end,
+            Period=60,
+            Statistics=["Average"],
+        )
+        datapoints = response.get("Datapoints", [])
+        if not datapoints:
+            return None
+        newest = max(datapoints, key=lambda point: point.get("Timestamp") or _OLDEST_TIMESTAMP)
+        return float(newest["Average"])
 
     def _ml_gpu_lookup(self, region: str) -> Callable[[str], int | None]:
         """GPUs per node of an ``ml.*`` type, from EC2's description of its EC2 twin.

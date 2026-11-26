@@ -311,6 +311,10 @@ async def get_metrics() -> dict[str, Any]:
                 "cpu_percent": round(current_health_status.resource_utilization.cpu, 2),
                 "memory_percent": round(current_health_status.resource_utilization.memory, 2),
                 "gpu_percent": round(current_health_status.resource_utilization.gpu, 2),
+                # gpu_percent is 0 with no GPU nodes and with idle GPUs alike;
+                # the counts (null when not measured) tell the two apart.
+                "gpu_allocatable": current_health_status.resource_utilization.gpu_allocatable,
+                "gpu_requested": current_health_status.resource_utilization.gpu_requested,
             },
             "thresholds": {
                 "cpu_threshold": current_health_status.thresholds.cpu_threshold,

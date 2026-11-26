@@ -97,10 +97,11 @@ It enforces, per example:
   Not a reimplementation of them: it calls the services' own
   `validate_resource_kind` and `validate_image_sources`, so the check cannot
   drift from what production accepts.
-- **Governance fit** — requests and limits fit the shipped ResourceQuota,
-  LimitRange, and per-manifest caps (read from `gco.stacks.constants`, again
-  the deployed values), so an example cannot be rejected at admission on a
-  stock deployment.
+- **Governance fit** — requests and limits fit the shipped ResourceQuota, the
+  per-container ceilings (the LimitRange for CPU and memory, the GPU cap
+  admission policy for GPUs), and the per-manifest caps (read from
+  `gco.stacks.constants`, again the deployed values), so an example cannot be
+  rejected at admission on a stock deployment.
 - **Embedded workloads** — what an Argo CD `Application` syncs (read from its
   path in this checkout), a kro ResourceGraphDefinition's templates and a
   go-templating Composition's rendered documents get the namespace, image and
