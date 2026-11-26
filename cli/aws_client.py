@@ -24,6 +24,8 @@ from botocore.exceptions import ClientError
 from botocore.regions import EndpointResolver
 from botocore.session import get_session as get_botocore_session
 
+from gco.services.structured_logging import sanitize_log_value
+
 from ._dual_stack_http import request as _http_request
 from .config import GCOConfig, get_config
 
@@ -914,7 +916,7 @@ class GCOAWSClient:
                 retried_auth = True
                 logger.warning(
                     "Request to %s returned 403, refreshing credentials and retrying",
-                    path,
+                    sanitize_log_value(path),
                 )
                 # Force a new session to pick up refreshed credentials
                 self._session = boto3.Session()
@@ -938,7 +940,7 @@ class GCOAWSClient:
             wait_time = _RETRY_BACKOFF_BASE * (2**attempt)
             logger.warning(
                 "Request to %s returned %d, retrying in %.1fs (attempt %d/%d)",
-                path,
+                sanitize_log_value(path),
                 response.status_code,
                 wait_time,
                 attempt + 1,

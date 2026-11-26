@@ -522,12 +522,13 @@ def deploy_dialog() -> None:
     )
     autoscale = c.toggle("Autoscale", key="deploy_autoscale")
     autoscaling = None
+    scaled_on = ""
     if autoscale:
         x, y, z = st.columns(3)
         low = int(x.number_input("Min replicas", 1, 64, 1, key="deploy_min"))
         high = int(y.number_input("Max replicas", 1, 128, 4, key="deploy_max"))
-        metric = z.selectbox("On", ["gpu:60", "cpu:70", "memory:80"], key="deploy_metric")
-        kind, target = str(metric).split(":")
+        scaled_on = str(z.selectbox("On", ["gpu:60", "cpu:70", "memory:80"], key="deploy_metric"))
+        kind, target = scaled_on.split(":")
         autoscaling = {
             "enabled": True,
             "min_replicas": low,
@@ -578,7 +579,7 @@ def deploy_dialog() -> None:
             "--max-replicas",
             str(autoscaling["max_replicas"]),
             "--autoscale-metric",
-            str(metric),
+            scaled_on,
         ]
     for arg in extra_args:
         words.append(f"--extra-args={arg}" if arg.startswith("-") else "--extra-args")

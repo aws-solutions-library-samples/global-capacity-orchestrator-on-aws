@@ -32,6 +32,8 @@ WHERE = ("data-validate", "gco-jobs", "us-east-1")
 FAILED = job_info("data-validate", "us-east-1", "failed")
 #: An older, finished Job listed below the one a test selects.
 FINISHED = job_info("feature-store-sync", "us-west-2", "succeeded", minutes_ago=240)
+#: A Job in a second namespace, so the cleanup form offers two.
+TEAM_JOB = dataclasses.replace(job_info("team-train", "us-west-2", "failed"), namespace="team-a")
 FAILED_CONDITION = "**Failed**: BackoffLimitExceeded. Job has reached the specified backoff limit"
 DETAIL_READS = ("job_detail", "job_pods", "job_events", "job_logs", "job_metrics")
 SELECT_ROW = ":material/touch_app: Select a row for its pods, events, logs and usage."
@@ -369,6 +371,7 @@ class TestJobsReads:
 
 class TestCleanup:
     def test_the_command_follows_the_form(self, fake_fleet: FakeFleet) -> None:
+        fake_fleet.overrides["jobs"] = snapshot(FAILED, TEAM_JOB)
         app = open_jobs()
 
         assert "**Delete finished Jobs in every Region**" in values(app.markdown)
@@ -376,7 +379,9 @@ class TestCleanup:
 
         app.segmented_control(key="cleanup_status").set_value("failed")
         app.number_input(key="cleanup_days").set_value(7)
-        app.text_input(key="cleanup_namespace").input("team-a").run()
+        picker = app.selectbox(key="cleanup_namespace")
+        assert picker.options == ["Every allowed namespace", "gco-jobs", "team-a"]
+        picker.select("team-a").run()
 
         assert "gco jobs bulk-delete --all-regions -s failed -d 7 -n team-a --execute -y" in values(
             app.code
@@ -472,11 +477,23 @@ class TestCleanup:
         ]
         assert "cleanup_go" not in keys(app.button)
 
+    @pytest.mark.parametrize("cause", ["unreadable", "no-namespace"])
+    def test_without_namespaces_to_name_the_form_offers_every_allowed_one(
+        self, fake_fleet: FakeFleet, cause: str
+    ) -> None:
+        if cause == "unreadable":
+            fake_fleet.fail["jobs"] = DashboardError("The aggregator timed out.")
+        else:
+            fake_fleet.overrides["jobs"] = snapshot(dataclasses.replace(FAILED, namespace=""))
+        app = open_jobs()
+        assert app.selectbox(key="cleanup_namespace").options == ["Every allowed namespace"]
+
     def test_the_preview_asks_with_the_forms_filters(self, fake_fleet: FakeFleet) -> None:
+        fake_fleet.overrides["jobs"] = snapshot(FAILED, TEAM_JOB)
         app = open_jobs()
         app.segmented_control(key="cleanup_status").set_value("failed")
         app.number_input(key="cleanup_days").set_value(30)
-        app.text_input(key="cleanup_namespace").input("team-a")
+        app.selectbox(key="cleanup_namespace").select("team-a")
         app.button(key="cleanup_preview").click().run()
 
         assert fake_fleet.called("cleanup_jobs") == [

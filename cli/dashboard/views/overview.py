@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -168,7 +169,7 @@ def _kpi_strip(kpis: dict[str, Any], history: list[dict[str, Any]]) -> None:
 
 
 def _gauge(where: Any, label: str, value: object) -> None:
-    if not isinstance(value, int | float) or value != value:
+    if not isinstance(value, int | float) or math.isnan(value):
         where.caption(f"{label} —")
         return
     where.progress(min(float(value), 100.0) / 100, text=f"{label} {float(value):.0f}%")
@@ -176,7 +177,7 @@ def _gauge(where: Any, label: str, value: object) -> None:
 
 def _count(value: object) -> int | None:
     """A GPU count from a Region row; None where the Region sent none (an empty cell)."""
-    return int(value) if isinstance(value, int | float) and value == value else None
+    return int(value) if isinstance(value, int | float) and not math.isnan(value) else None
 
 
 def _gpu_gauge(where: Any, row: dict[str, Any]) -> None:

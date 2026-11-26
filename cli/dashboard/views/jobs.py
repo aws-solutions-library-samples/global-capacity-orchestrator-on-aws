@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 import streamlit as st
@@ -96,6 +97,15 @@ def _kpis(shown: Any, total: int) -> None:
             )
 
 
+def _job_namespaces(topology: Topology) -> list[str]:
+    """The namespaces the fleet's Jobs run in, from the cached jobs list."""
+    snapshot = None
+    # The page reports a failed read below; the cleanup form only offers less.
+    with contextlib.suppress(Exception):
+        snapshot = ui.load_jobs(topology.workload_regions)
+    return sorted({job.namespace for job in snapshot.jobs if job.namespace}) if snapshot else []
+
+
 def _cleanup(topology: Topology) -> None:
     with st.popover("Clean up", icon=":material/cleaning_services:"):
         st.markdown("**Delete finished Jobs in every Region**")
@@ -116,8 +126,13 @@ def _cleanup(topology: Topology) -> None:
                 help="0 matches any age.",
             )
         )
-        namespace = st.text_input(
-            "Namespace", key="cleanup_namespace", placeholder="Every allowed namespace"
+        # A namespace the fleet's Jobs run in, not free text: one with no Jobs
+        # has nothing to delete, and a typed name would reach the API's URL.
+        namespace = st.selectbox(
+            "Namespace",
+            ["", *_job_namespaces(topology)],
+            format_func=lambda name: name or "Every allowed namespace",
+            key="cleanup_namespace",
         )
         params = (str(status), older or None, namespace or None)
         words = ["gco", "jobs", "bulk-delete", "--all-regions", "-s", str(status)]

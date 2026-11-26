@@ -15,6 +15,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from cli.config import GCOConfig, get_config
+from gco.services.structured_logging import sanitize_log_value
 
 from . import blocks
 from .backends import (
@@ -590,7 +591,10 @@ class MultiRegionCapacityChecker:
                     spot_score = placement_scores.get("regional", 0) / 10.0  # Normalize to 0-1
             except Exception as e:
                 logger.debug(
-                    "Failed to get spot placement score for %s in %s: %s", instance_type, region, e
+                    "Failed to get spot placement score for %s in %s: %s",
+                    sanitize_log_value(instance_type),
+                    region,
+                    e,
                 )
 
             try:
@@ -602,7 +606,10 @@ class MultiRegionCapacityChecker:
                     spot_price_ratio = avg_spot / on_demand_price
             except Exception as e:
                 logger.debug(
-                    "Failed to get spot pricing for %s in %s: %s", instance_type, region, e
+                    "Failed to get spot pricing for %s in %s: %s",
+                    sanitize_log_value(instance_type),
+                    region,
+                    e,
                 )
 
             # Capacity Block trend — compares near-term vs far-term offering
