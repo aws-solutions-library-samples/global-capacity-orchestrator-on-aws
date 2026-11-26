@@ -179,8 +179,8 @@ from gco.services.k8s_client import BoundedApiClient, k8s_api_timeout_from_env
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-21T20:42:53Z
-# Generated from Git commit: 1d908f3fa649c16f69e32c2af36f5992f62d94d7
+# Generated at (UTC): 2026-11-26T07:28:09Z
+# Generated from Git commit: 30e51b52aa66343af9e39715ecf06f6ef43d9100
 # Flowchart(s) generated from this file:
 #   * ``ManifestProcessor.apply_queued_job`` -> ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.png``)
