@@ -67,9 +67,9 @@
       "source_commit": "3c21b4eec4ebed24c6ca9e80a33302966592d8db"
     },
     "gco/services/health_monitor.py": {
-      "digest": "dc533f444ecd27f09f097fabd789621855441acea060e4ea5f1c37929749e5ab",
-      "generated_at": "2026-11-26T07:28:09Z",
-      "source_commit": "30e51b52aa66343af9e39715ecf06f6ef43d9100"
+      "digest": "346c5f3053a790867a7d4f65bf39f9312ab4fd62bb1519cb767ccb6eeccdfb63",
+      "generated_at": "2026-11-27T16:40:18Z",
+      "source_commit": "2014e250f29ab01970d4ed077f00d1ad92f61adb"
     },
     "gco/services/inference_monitor.py": {
       "digest": "61cbe524238b7c21b4f69b6a72ad2cd84c79919df83cf59eca13a8ed3b30170d",

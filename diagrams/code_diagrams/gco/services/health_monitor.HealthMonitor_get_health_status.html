@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-26T07:28:09Z">
-        <meta name="gco-source-commit" content="30e51b52aa66343af9e39715ecf06f6ef43d9100">
-        <meta name="gco-flow-digest" content="4d8a39a684ec4824">
+        <meta name="gco-generated-at" content="2026-11-27T16:40:18Z">
+        <meta name="gco-source-commit" content="2014e250f29ab01970d4ed077f00d1ad92f61adb">
+        <meta name="gco-flow-digest" content="d8298295854576e4">
         <title>Health status policy (thresholds, violations, collection failure)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,21 +208,21 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1966=>operation: 'Get current health status of the cluster.\n\n        Single-flight: a caller that arrives while a refresh runs (the\n        background loop and an API request, say) shares that refresh instead\n        of starting its own set of reads. A cancelled caller does not cancel\n        the shared refresh.\n        '
-op1968=>operation: refresh = self._refresh
-cond1971=>condition: if refresh is None or refresh.done()
-op1975=>operation: refresh = asyncio.create_task(self._refresh_health_status())
-op1977=>operation: self._refresh = refresh
-io1985=>inputoutput: output: await asyncio.shield(refresh)
-e1983=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Get current health status of the cluster.\n\n        Single-flight: a caller that arrives while a refresh runs (the\n        background loop and an API request, say) shares that refresh instead\n        of starting its own set of reads. A cancelled caller does not cancel\n        the shared refresh.\n        '
+op4=>operation: refresh = self._refresh
+cond7=>condition: if refresh is None or refresh.done()
+op11=>operation: refresh = asyncio.create_task(self._refresh_health_status())
+op13=>operation: self._refresh = refresh
+io21=>inputoutput: output: await asyncio.shield(refresh)
+e19=>end: end function return
 
-op1966->op1968
-op1968->cond1971
-cond1971(yes)->op1975
-op1975->op1977
-op1977->io1985
-io1985->e1983
-cond1971(no)->io1985
+op2->op4
+op4->cond7
+cond7(yes)->op11
+op11->op13
+op13->io21
+io21->e19
+cond7(no)->io21
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -232,17 +232,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-26T07:28:09Z -->
-        <!-- Generated from Git commit: 30e51b52aa66343af9e39715ecf06f6ef43d9100 -->
+        <!-- Generated at (UTC): 2026-11-27T16:40:18Z -->
+        <!-- Generated from Git commit: 2014e250f29ab01970d4ed077f00d1ad92f61adb -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-26T07:28:09Z">2026-11-26T07:28:09Z</time>
+            Generated at (UTC): <time datetime="2026-11-27T16:40:18Z">2026-11-27T16:40:18Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>30e51b52aa66343af9e39715ecf06f6ef43d9100</code>
+            Source commit: <code>2014e250f29ab01970d4ed077f00d1ad92f61adb</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>4d8a39a684ec4824</code>
+            Flow content SHA-256: <code>d8298295854576e4</code>
           </p>
           <div id="canvas"></div>
         </div>
