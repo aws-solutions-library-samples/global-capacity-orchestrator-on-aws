@@ -44,6 +44,9 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Endpoint and project labels on the monitor's objects](#endpoint-and-project-labels-on-the-monitors-objects)
   - [Training job admission](#training-job-admission)
   - [The per-container GPU cap is an admission policy](#the-per-container-gpu-cap-is-an-admission-policy)
+  - [One admission for the REST and SQS paths](#one-admission-for-the-rest-and-sqs-paths)
+  - [The inference monitor's leader Lease](#the-inference-monitors-leader-lease)
+  - [Lambda dependencies follow the lock file](#lambda-dependencies-follow-the-lock-file)
   - [Stopped inference endpoints stay stopped](#stopped-inference-endpoints-stay-stopped)
   - [Health readings and the `active_jobs` metric](#health-readings-and-the-active_jobs-metric)
   - [Job status filter and request paths](#job-status-filter-and-request-paths)
@@ -956,6 +959,61 @@ monitor checks before it deletes a stale object
   refuses a manifest nested deeper than the limit (default 50), as the REST
   path already did.
 
+### One admission for the REST and SQS paths
+
+- **The SQS queue consumer judges manifests with the REST service's
+  admission code.** It ran its own copy of every check, and a copy that
+  drifts on that path admits a manifest the REST path refuses. Both now run
+  `gco.job_admission.admit_manifest`: the same checks in the same order, with
+  the same policy read from the same environment variables, so a manifest
+  sent straight to a Region's job queue is held to exactly what
+  `POST /api/v1/manifests` enforces.
+- **BREAKING (scripts that match the queue consumer's errors): its refusals
+  use the REST wording.** The error it records for a refused manifest reads
+  as the REST response does, for example
+  `Namespace 'team-a' not allowed. Allowed namespaces: ['gco-jobs']` instead of
+  `namespace 'team-a' not in allowed list [...]`, and a security refusal is
+  prefixed `Security context validation failed:`.
+- **Both paths refuse a workload without a pod spec.** A Job, CronJob,
+  Deployment, StatefulSet, DaemonSet, ReplicaSet or Pod whose pod spec cannot
+  be found is refused with `<kind> manifest must contain a valid pod spec`,
+  because no check could read its pods. The REST path admitted it and left
+  the API server to refuse the apply. Its namespace refusal also lists the
+  allowed namespaces sorted.
+
+### The inference monitor's leader Lease
+
+- **The manifests create the Lease, and the monitor's RBAC shrinks.** The
+  `inference-monitor-leader` Lease in `gco-inference` is created by
+  `02-rbac.yaml` (45 seconds, the 15-second reconcile interval times three),
+  and `gco-inference-monitor-role` grants only `get` and `update` on it. It
+  granted `create, get, list, watch, patch, update, delete` on every Lease in
+  the namespace, because the monitor created its Lease when it found none. On
+  an in-place update the applier adds labels to the existing Lease and keeps
+  its holder; the label patch can make one in-flight renewal conflict, which
+  ends one reconcile pass early, and the next pass renews.
+- **A replica whose clock runs ahead no longer takes the Lease.** A standby
+  takes the Lease only after seeing it unchanged for the lease duration on its
+  own monotonic clock, as the health monitor's elections and client-go do, and
+  the leader stops mutating one lease duration after its last successful
+  renewal. The holder's `renewTime` was compared with the standby's wall
+  clock, so clock skew could put two replicas in charge until the first
+  noticed.
+- If the Lease is deleted, no replica reconciles, and each logs that the
+  manifests create it, until a redeploy restores it.
+
+### Lambda dependencies follow the lock file
+
+The kubectl-applier Lambda package and the helm installer and TLS certificate
+manager images now install their dependencies constrained by
+`requirements-lock.txt`, as the service images do, so their indirect
+dependencies are the locked versions instead of the newest ones PyPI served
+when they were built. The first deploy after upgrading rebuilds all three and
+updates those functions; after that, a change to `requirements-lock.txt`
+rebuilds them. The TLS certificate manager image now builds from the
+repository root (its asset keeps only its own files and the lock). No
+configuration changes.
+
 ### The per-container GPU cap is an admission policy
 
 The gco-jobs `LimitRange` capped each container's GPUs and wrote
@@ -1330,6 +1388,19 @@ window so that short GPU Jobs run back to back reuse it
 - **Admission judges manifests that select the pool.** A manifest that
   selects `gco.aws/keep-warm` but could never run on the pool is refused on
   every submission path. Manifests that don't select it are judged as before.
+- **Admission reads the required node affinity of pods that select the
+  pool.** A manifest that selects `gco.aws/keep-warm` but whose
+  `requiredDuringSchedulingIgnoredDuringExecution` node affinity no keep-warm
+  node satisfies, such as `node.kubernetes.io/instance-type In [p4d.24xlarge]`,
+  is refused on every submission path, by the policy pre-check and by
+  `--keep-warm`, naming what no keep-warm node carries. Terms are judged as
+  the scheduler reads them (ORed, their expressions ANDed), so one term a
+  keep-warm node can meet is enough; preferred terms and labels the pool does
+  not fix are not judged. Such a manifest used to be admitted, and its pods
+  stayed Pending. A pod whose required node affinity requires
+  `gco.aws/keep-warm` in every term now counts as selecting the pool, so it
+  needs the toleration and an `nvidia.com/gpu` request, and it may not be a
+  Deployment or StatefulSet.
 
 ### Log groups earlier upgrades left behind
 
@@ -1443,6 +1514,15 @@ The fleet status document (`gco status`):
   teardown (`deleted`) counts as healthy, in `gco stacks addons status` too.
 
 Prompts, namespaces, Regions and permissions:
+
+- **A value with a trailing newline is refused.** The CLI's checks of Region
+  names, cluster names, instance, VPC, subnet, security group and AMI IDs,
+  instance types, image references and similar single values matched with a
+  pattern whose `$` also accepts one trailing newline, so `"us-east-1\n"`
+  passed and reached an AWS CLI or kubectl argument. They now match the whole
+  value. Values typed on a command line are unaffected; values read from files
+  or other programs' output with their newline kept are refused, so strip
+  them.
 
 - **BREAKING: `gco jobs submit-queue` is `gco queue submit` under a second
   name.** It goes through the global API (a Region's bridge only with

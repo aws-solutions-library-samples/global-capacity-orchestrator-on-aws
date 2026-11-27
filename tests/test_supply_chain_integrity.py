@@ -393,6 +393,88 @@ def test_dev_container_installs_the_project_against_the_lock() -> None:
     assert "COPY pyproject.toml requirements-lock.txt ./" in _read("Dockerfile.dev")
 
 
+def _pip_install_arguments(run: str) -> list[list[str]]:
+    """The arguments of every ``pip install`` command in one joined RUN instruction.
+
+    The instruction is split as the shell splits it, so a quoted message that
+    mentions pip install is not a command, and each command's arguments end
+    at the first shell operator.
+    """
+    lexer = shlex.shlex(run, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+    installs: list[list[str]] = []
+    for index in range(len(tokens) - 1):
+        if tokens[index : index + 2] != ["pip", "install"]:
+            continue
+        arguments: list[str] = []
+        for token in tokens[index + 2 :]:
+            if set(token) <= set("();<>|&"):
+                break
+            arguments.append(token)
+        installs.append(arguments)
+    return installs
+
+
+def test_lambda_images_install_their_requirements_against_the_lock() -> None:
+    """Each Lambda image constrains its one pip install with requirements-lock.txt.
+
+    requirements.txt pins only a Lambda's direct dependencies. Installed alone,
+    every transitive one resolved to whatever PyPI served at build time, which
+    is neither the graph the lock records nor the one its scans cover. The
+    lock is copied next to requirements.txt, into the working directory the
+    install runs in, before that install.
+    """
+    dockerfiles = sorted(
+        path
+        for path in (ROOT / "lambda").glob("*/Dockerfile")
+        if not path.parent.name.endswith("-build")
+    )
+    assert [path.parent.name for path in dockerfiles] == [
+        "helm-installer",
+        "tls-certificate-manager",
+    ]
+    for path in dockerfiles:
+        content = path.read_text(encoding="utf-8")
+        installs = [
+            arguments
+            for run in _dockerfile_run_instructions(content)
+            for arguments in _pip_install_arguments(run)
+        ]
+        assert len(installs) == 1, f"{path}: {installs}"
+        (arguments,) = installs
+        requirements = [
+            arguments[i + 1] for i, a in enumerate(arguments) if a in {"-r", "--requirement"}
+        ]
+        constraints = [
+            arguments[i + 1] for i, a in enumerate(arguments) if a in {"-c", "--constraint"}
+        ]
+        assert requirements == ["requirements.txt"], path
+        assert constraints == ["requirements-lock.txt"], path
+        lines = content.splitlines()
+        copies = [
+            number
+            for number, line in enumerate(lines)
+            if re.fullmatch(
+                r"COPY (?:lambda/[a-z0-9-]+/)?requirements\.txt requirements-lock\.txt \./", line
+            )
+        ]
+        install = next(
+            number
+            for number, line in enumerate(lines)
+            if "pip install" in line and not line.lstrip().startswith("#")
+        )
+        assert len(copies) == 1, f"{path} does not copy the lock next to requirements.txt"
+        assert copies[0] < install, path
+
+    assert _pip_install_arguments("if pip install -r a.txt -c b.txt; then break; fi") == [
+        ["-r", "a.txt", "-c", "b.txt"]
+    ]
+    assert (
+        _pip_install_arguments('echo "pip install failed" >&2; python -m pip uninstall pip') == []
+    )
+
+
 def test_retried_artifact_uploads_overwrite_only_their_own_first_attempt() -> None:
     """Retries overwrite, so no two uploads in one workflow may share a name.
 

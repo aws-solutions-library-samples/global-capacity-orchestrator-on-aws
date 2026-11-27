@@ -57,15 +57,20 @@ RUN curl --fail --show-error --location --retry 3 \
     && rm -f /tmp/kubectl \
     && kubectl version --client=true
 
-# Install Python dependencies.
+# Install Python dependencies. requirements.txt pins the direct ones, and
+# requirements-lock.txt constrains the complete transitive graph, as it does
+# for the service images. The lock is not in this directory: the deployed
+# image builds from lambda/helm-installer-build, the copy
+# StackManager._build_helm_installer_lambda (cli/stacks.py) makes of this
+# directory with the repository's lock added.
 #
 # pip flags + bash retry loop guard against transient PyPI/CDN drops
 # (see Dockerfile.dev for the rationale).
-COPY requirements.txt .
+COPY requirements.txt requirements-lock.txt ./
 RUN for attempt in 1 2 3; do \
         if pip install --no-cache-dir \
             --retries 10 --timeout 120 --resume-retries 5 \
-            -r requirements.txt; then \
+            -r requirements.txt -c requirements-lock.txt; then \
             break; \
         fi; \
         if [ "${attempt}" -eq 3 ]; then \

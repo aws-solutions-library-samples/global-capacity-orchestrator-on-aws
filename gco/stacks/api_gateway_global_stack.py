@@ -93,6 +93,24 @@ from gco.stacks.lambda_assets import lambda_source_code
 # Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
 # <pyflowchart-code-diagram> END
 
+#: What the TLS certificate manager image is built from, relative to the
+#: repository root. Its build context is the repository root, as the service
+#: images' is, so its pip install can be constrained by requirements-lock.txt.
+_TLS_CERTIFICATE_MANAGER_IMAGE_INPUTS = (
+    "lambda/tls-certificate-manager/Dockerfile",
+    "lambda/tls-certificate-manager/handler.py",
+    "lambda/tls-certificate-manager/requirements.txt",
+    "requirements-lock.txt",
+)
+#: The image asset's exclude patterns, in .dockerignore syntax: leave out
+#: everything, then keep only the inputs, so an edit to any other file leaves
+#: the asset hash unchanged. CDK applies the repository's .dockerignore
+#: patterns before these and always keeps .dockerignore itself.
+_TLS_CERTIFICATE_MANAGER_IMAGE_EXCLUDES = (
+    "*",
+    *(f"!{path}" for path in _TLS_CERTIFICATE_MANAGER_IMAGE_INPUTS),
+)
+
 
 @dataclass(frozen=True)
 class AnalyticsApiConfig:
@@ -401,7 +419,9 @@ class GCOApiGatewayGlobalStack(Stack):
             "BackendTlsCertificateManager",
             function_name=f"{project_name}-backend-tls-manager",
             code=lambda_.DockerImageCode.from_image_asset(
-                directory="lambda/tls-certificate-manager",
+                directory=".",
+                file="lambda/tls-certificate-manager/Dockerfile",
+                exclude=list(_TLS_CERTIFICATE_MANAGER_IMAGE_EXCLUDES),
                 platform=ecr_assets.Platform.LINUX_AMD64,
             ),
             architecture=lambda_.Architecture.X86_64,

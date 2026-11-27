@@ -61,7 +61,7 @@ def _strip_expired_table_streams(
         kept: list[dict[str, Any]] = []
         for entry in resources.get("tagged_resources", []):
             arn = str(entry.get("arn") or "")
-            match = _TABLE_STREAM_ARN.match(arn)
+            match = _TABLE_STREAM_ARN.fullmatch(arn)
             if (
                 match is None
                 or match.group("region") != region

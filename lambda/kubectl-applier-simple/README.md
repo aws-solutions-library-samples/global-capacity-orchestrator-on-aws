@@ -100,6 +100,7 @@ mkdir -p lambda/kubectl-applier-simple-build
 cp lambda/kubectl-applier-simple/handler.py lambda/kubectl-applier-simple/requirements.txt lambda/kubectl-applier-simple-build/
 cp -r lambda/kubectl-applier-simple/manifests lambda/kubectl-applier-simple-build/
 python3 -m pip install -r lambda/kubectl-applier-simple/requirements.txt \
+  -c requirements-lock.txt \
   -t lambda/kubectl-applier-simple-build/ --upgrade \
   --platform manylinux2014_x86_64 --only-binary=:all:
 ```

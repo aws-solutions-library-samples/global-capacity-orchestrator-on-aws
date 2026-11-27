@@ -159,7 +159,7 @@ class ImageReference:
         tag: str | None = None
         if ":" in path.rsplit("/", 1)[-1]:
             path, tag = path.rsplit(":", 1)
-        if not all(path.split("/")) or tag == "" or (digest and not DIGEST_RE.match(digest)):
+        if not all(path.split("/")) or tag == "" or (digest and not DIGEST_RE.fullmatch(digest)):
             raise PreloadError(f"cannot parse the image reference {reference!r}")
         if not digest and tag is None:
             tag = "latest"
@@ -292,7 +292,7 @@ def ecr_public_digest(
         sleep=sleep,
     )
     digest = str(headers.get("Docker-Content-Digest") or "").strip()
-    if not DIGEST_RE.match(digest):
+    if not DIGEST_RE.fullmatch(digest):
         raise PreloadError(f"{manifest_url} returned no usable Docker-Content-Digest ({digest!r})")
     return digest
 
@@ -437,7 +437,7 @@ def _pinned_argument(value: str) -> tuple[str, str]:
 def daemon_platform(*, capture: Capturer = _capture) -> str:
     """The Docker daemon's ``os/arch``: the one platform its images have content for."""
     platform = capture(DAEMON_PLATFORM_ARGV).strip()
-    if not PLATFORM_RE.match(platform):
+    if not PLATFORM_RE.fullmatch(platform):
         raise PreloadError(f"docker version reported no usable daemon platform ({platform!r})")
     return platform
 

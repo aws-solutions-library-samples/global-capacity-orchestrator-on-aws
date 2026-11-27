@@ -1213,6 +1213,39 @@ def test_asset_tree_digest_handles_entries_and_failures(tmp_path: Path) -> None:
     assert stacks._asset_tree_digest(tmp_path / "absent") is None
 
 
+def test_asset_source_digest_adds_project_inputs_to_the_source_selection(tmp_path: Path) -> None:
+    """Project-root inputs join the digest; an asset without any keeps its own digest."""
+    import cli.stacks as stacks
+
+    source = tmp_path / "lambda" / "demo"
+    source.mkdir(parents=True)
+    (source / "handler.py").write_text("handler", encoding="utf-8")
+    lock = tmp_path / "requirements-lock.txt"
+    lock.write_text("pyyaml==6.0.3\n", encoding="utf-8")
+    selection = ("handler.py",)
+    project = ("requirements-lock.txt",)
+
+    def digest() -> str | None:
+        return stacks._asset_source_digest(source, source_inputs=selection, project_inputs=project)
+
+    own = stacks._asset_tree_digest(source, source_inputs=selection)
+    assert own is not None
+    assert stacks._asset_source_digest(source, source_inputs=selection) == own
+    combined = digest()
+    assert combined is not None
+    assert combined != own
+    assert digest() == combined
+
+    lock.write_text("pyyaml==6.0.3\nsix==1.17.0\n", encoding="utf-8")
+    assert digest() not in {combined, None}
+    lock.unlink()
+    assert digest() is None
+    # A missing source selection gives None before the project inputs are read.
+    lock.write_text("pyyaml==6.0.3\n", encoding="utf-8")
+    (source / "handler.py").unlink()
+    assert digest() is None
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO requires POSIX")
 def test_asset_tree_digest_rejects_unsupported_entry(tmp_path: Path) -> None:
     import cli.stacks as stacks
@@ -2360,14 +2393,30 @@ def test_published_while_waiting_is_throttled_and_needs_the_shared_lock(tmp_path
         patch.object(stacks, "_release_file_lock") as release,
         patch.object(stacks, "_asset_build_is_fresh_unlocked", side_effect=[False, True]) as fresh,
     ):
-        published = stacks._published_while_waiting(source, build, source_inputs=("handler.py",))
+        published = stacks._published_while_waiting(
+            source,
+            build,
+            source_inputs=("handler.py",),
+            project_inputs=("requirements-lock.txt",),
+        )
         # 1.0 and 3.0 fall inside the interval; 2.0 finds a publish holding the
         # lock; 4.0 reads a stale build; 6.5 reads the published one.
         assert [published() for _ in range(5)] == [False, False, False, False, True]
 
     assert lock.call_count == 3
     assert release.call_count == 2
-    assert fresh.call_args_list == [call(source, build, source_inputs=("handler.py",))] * 2
+    assert (
+        fresh.call_args_list
+        == [
+            call(
+                source,
+                build,
+                source_inputs=("handler.py",),
+                project_inputs=("requirements-lock.txt",),
+            )
+        ]
+        * 2
+    )
 
 
 def test_lambda_asset_lock_yields_false_and_holds_nothing_when_the_wait_stops(
@@ -2539,6 +2588,7 @@ def test_cdk_asset_consumer_fails_after_repeated_source_churn(tmp_path: Path) ->
     spec = SimpleNamespace(
         name="demo",
         source_inputs=None,
+        project_inputs=(),
         paths=lambda _root: (source, build),
     )
 

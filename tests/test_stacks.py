@@ -23,6 +23,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from botocore.exceptions import ClientError
 
+#: The helm-installer asset's project inputs (``_HELM_CDK_ASSET.project_inputs``):
+#: the fixtures below write a ``requirements-lock.txt`` so the CLI's own
+#: freshness checks, which include it, accept their builds.
+HELM_PROJECT_INPUTS = ("requirements-lock.txt",)
+
 
 class _FakePopenProcess:
     """Deterministic ``Popen`` process used by direct ``_run_cdk`` tests."""
@@ -328,15 +333,19 @@ class TestCdkAssetConsumerLocking:
         build_dir = root / "lambda" / "helm-installer-build"
         source_dir.mkdir(parents=True)
         build_dir.mkdir(parents=True)
+        (root / "requirements-lock.txt").write_text("pyyaml==6.0.3\n", encoding="utf-8")
         (source_dir / "handler.py").write_text(content, encoding="utf-8")
         (build_dir / "handler.py").write_text(content, encoding="utf-8")
-        source_digest = stacks_module._asset_tree_digest(source_dir, source_inputs=None)
+        source_digest = stacks_module._asset_source_digest(
+            source_dir, source_inputs=None, project_inputs=HELM_PROJECT_INPUTS
+        )
         assert source_digest is not None
         stacks_module._write_build_manifest(build_dir, source_digest)
         assert stacks_module._asset_build_is_fresh_unlocked(
             source_dir,
             build_dir,
             source_inputs=None,
+            project_inputs=HELM_PROJECT_INPUTS,
         )
         return source_dir, build_dir
 
@@ -354,7 +363,9 @@ class TestCdkAssetConsumerLocking:
         staging_dir = build_dir.with_name(f".{build_dir.name}.staging-test")
         staging_dir.mkdir()
         (staging_dir / "handler.py").write_text(content, encoding="utf-8")
-        source_digest = stacks_module._asset_tree_digest(source_dir, source_inputs=None)
+        source_digest = stacks_module._asset_source_digest(
+            source_dir, source_inputs=None, project_inputs=HELM_PROJECT_INPUTS
+        )
         assert source_digest is not None
         stacks_module._write_build_manifest(staging_dir, source_digest)
         return staging_dir
@@ -410,6 +421,7 @@ class TestCdkAssetConsumerLocking:
                         source_dir,
                         build_dir,
                         source_inputs=None,
+                        project_inputs=HELM_PROJECT_INPUTS,
                     )
                     consumer_entered.set()
             except BaseException as exc:  # pragma: no cover - surfaced by assertion below
@@ -548,6 +560,7 @@ class TestAssetLockSharedFirst:
                     source_inputs=None,
                     display_name="helm-installer",
                     builder=forbidden_builder,
+                    project_inputs=HELM_PROJECT_INPUTS,
                 )
                 is False
             )
@@ -573,6 +586,7 @@ class TestAssetLockSharedFirst:
                 source_inputs=None,
                 display_name="helm-installer",
                 builder=builder,
+                project_inputs=HELM_PROJECT_INPUTS,
             )
             is True
         )
@@ -692,6 +706,7 @@ class TestAssetLockSharedFirst:
                 source_inputs=None,
                 display_name="helm-installer",
                 builder=forbidden_builder,
+                project_inputs=HELM_PROJECT_INPUTS,
             )
             elapsed = time.monotonic() - started
         finally:
@@ -718,9 +733,11 @@ class TestAssetLockSharedFirst:
         real_is_fresh = stacks_module._asset_build_is_fresh_unlocked
         checks: list[Path] = []
 
-        def counted_is_fresh(source: Path, build: Path, *, source_inputs):
+        def counted_is_fresh(source: Path, build: Path, *, source_inputs, project_inputs):
             checks.append(build)
-            return real_is_fresh(source, build, source_inputs=source_inputs)
+            return real_is_fresh(
+                source, build, source_inputs=source_inputs, project_inputs=project_inputs
+            )
 
         def forbidden_builder(staging_dir: Path) -> None:
             raise AssertionError("no exclusive lock, so nothing may be built")
@@ -739,6 +756,7 @@ class TestAssetLockSharedFirst:
                     source_inputs=None,
                     display_name="helm-installer",
                     builder=forbidden_builder,
+                    project_inputs=HELM_PROJECT_INPUTS,
                 )
         finally:
             holder.close()
@@ -760,7 +778,7 @@ class TestAssetLockSharedFirst:
             stacks_module, tmp_path, "fresh-version"
         )
         published = stacks_module._published_while_waiting(
-            source_dir, build_dir, source_inputs=None
+            source_dir, build_dir, source_inputs=None, project_inputs=HELM_PROJECT_INPUTS
         )
         lock_path = build_dir.with_name(f".{build_dir.name}.lock")
         with lock_path.open("a+b") as publisher_lock:
@@ -3241,6 +3259,7 @@ class TestBuildLambdaPackages:
         source_dir.mkdir(parents=True)
         (source_dir / "handler.py").write_text("# handler")
         (source_dir / "requirements.txt").write_text("pyyaml\n")
+        (tmp_path / "requirements-lock.txt").write_text("pyyaml==6.0.3\n")
         manifests = source_dir / "manifests"
         manifests.mkdir()
         (manifests / "01-test.yaml").write_text("kind: Test")
@@ -3259,6 +3278,56 @@ class TestBuildLambdaPackages:
         assert (build_dir / "handler.py").read_text() == "# handler"
         assert (build_dir / "manifests" / "01-test.yaml").exists()
         mock_run.assert_called_once()
+
+    def test_installs_against_the_lock_and_rebuilds_when_it_changes(self, tmp_path):
+        """pip is constrained by the project's lock, which is an input but not shipped."""
+        import cli.stacks as stacks_module
+
+        source_dir = tmp_path / "lambda" / "kubectl-applier-simple"
+        (source_dir / "manifests").mkdir(parents=True)
+        (source_dir / "handler.py").write_text("# handler")
+        (source_dir / "requirements.txt").write_text("PyYAML==6.0.3\n")
+        lock = tmp_path / "requirements-lock.txt"
+        lock.write_text("pyyaml==6.0.3\n")
+        manager = stacks_module.StackManager.__new__(stacks_module.StackManager)
+        manager.project_root = tmp_path
+        build_dir = tmp_path / "lambda" / "kubectl-applier-simple-build"
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+            manager._build_kubectl_lambda()
+            assert manager._kubectl_build_is_fresh(source_dir, build_dir)
+            manager._build_kubectl_lambda()  # fresh: nothing to install
+            assert mock_run.call_count == 1
+            lock.write_text("pyyaml==6.0.3\nsix==1.17.0\n")
+            assert not manager._kubectl_build_is_fresh(source_dir, build_dir)
+            manager._build_kubectl_lambda()
+
+        assert mock_run.call_count == 2
+        argv = mock_run.call_args.args[0]
+        assert argv[argv.index("-r") + 1] == str(source_dir / "requirements.txt")
+        assert argv[argv.index("-c") + 1] == str(lock)
+        assert stacks_module._KUBECTL_CDK_ASSET.project_inputs == ("requirements-lock.txt",)
+        assert not (build_dir / "requirements-lock.txt").exists()
+        assert manager._kubectl_build_is_fresh(source_dir, build_dir)
+
+    def test_a_missing_lock_fails_the_build(self, tmp_path):
+        """Without the lock the package cannot be built as locked, so it is not built."""
+        from cli.stacks import StackManager
+
+        source_dir = tmp_path / "lambda" / "kubectl-applier-simple"
+        (source_dir / "manifests").mkdir(parents=True)
+        (source_dir / "handler.py").write_text("# handler")
+        (source_dir / "requirements.txt").write_text("PyYAML==6.0.3\n")
+        manager = StackManager.__new__(StackManager)
+        manager.project_root = tmp_path
+
+        with (
+            patch("subprocess.run") as mock_run,
+            pytest.raises(RuntimeError, match="source inputs are incomplete or unreadable"),
+        ):
+            manager._build_kubectl_lambda()
+        mock_run.assert_not_called()
+        assert not (tmp_path / "lambda" / "kubectl-applier-simple-build").exists()
 
     def test_skips_when_source_missing(self, tmp_path):
         from cli.stacks import StackManager
@@ -3294,6 +3363,7 @@ class TestBuildLambdaPackages:
         source_dir.mkdir(parents=True)
         (source_dir / "handler.py").write_text("# handler")
         (source_dir / "requirements.txt").write_text("pyyaml\n")
+        (tmp_path / "requirements-lock.txt").write_text("pyyaml==6.0.3\n")
         manifests = source_dir / "manifests"
         manifests.mkdir()
         (manifests / "01-test.yaml").write_text("kind: Test")
@@ -3326,6 +3396,13 @@ class TestBuildLambdaPackages:
 class TestBuildHelmInstallerPackage:
     """Tests for _build_helm_installer_lambda."""
 
+    @pytest.fixture(autouse=True)
+    def project_lock(self, tmp_path):
+        """The project's requirements-lock.txt, which every helm build copies."""
+        lock = tmp_path / "requirements-lock.txt"
+        lock.write_text("pyyaml==6.0.3\n")
+        return lock
+
     def test_builds_helm_installer_with_all_files(self, tmp_path):
         from cli.stacks import StackManager
 
@@ -3349,6 +3426,42 @@ class TestBuildHelmInstallerPackage:
         assert (build_dir / "charts.yaml").read_text() == "charts: {}"
         assert (build_dir / "requirements.txt").read_text() == "pyyaml\n"
         assert (build_dir / "Dockerfile").read_text() == "FROM python:3.14"
+        assert (build_dir / "requirements-lock.txt").read_text() == "pyyaml==6.0.3\n"
+
+    def test_a_lock_change_rebuilds_the_context_with_the_new_lock(self, tmp_path, project_lock):
+        """The lock is an input of the Docker context, not only a copied file."""
+        import cli.stacks as stacks_module
+
+        source_dir = tmp_path / "lambda" / "helm-installer"
+        source_dir.mkdir(parents=True)
+        (source_dir / "Dockerfile").write_text("FROM python:3.14")
+        manager = stacks_module.StackManager.__new__(stacks_module.StackManager)
+        manager.project_root = tmp_path
+        build_dir = tmp_path / "lambda" / "helm-installer-build"
+
+        manager._build_helm_installer_lambda()
+        assert manager._helm_build_is_fresh(source_dir, build_dir)
+        project_lock.write_text("pyyaml==6.0.3\nsix==1.17.0\n")
+        assert not manager._helm_build_is_fresh(source_dir, build_dir)
+        manager._build_helm_installer_lambda()
+
+        assert (build_dir / "requirements-lock.txt").read_text() == "pyyaml==6.0.3\nsix==1.17.0\n"
+        assert manager._helm_build_is_fresh(source_dir, build_dir)
+        assert stacks_module._HELM_CDK_ASSET.project_inputs == HELM_PROJECT_INPUTS
+
+    def test_a_missing_lock_fails_the_build(self, tmp_path, project_lock):
+        from cli.stacks import StackManager
+
+        source_dir = tmp_path / "lambda" / "helm-installer"
+        source_dir.mkdir(parents=True)
+        (source_dir / "Dockerfile").write_text("FROM python:3.14")
+        project_lock.unlink()
+        manager = StackManager.__new__(StackManager)
+        manager.project_root = tmp_path
+
+        with pytest.raises(RuntimeError, match="source inputs are incomplete or unreadable"):
+            manager._build_helm_installer_lambda()
+        assert not (tmp_path / "lambda" / "helm-installer-build").exists()
 
     def test_skips_when_source_missing(self, tmp_path):
         from cli.stacks import StackManager

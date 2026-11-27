@@ -209,7 +209,7 @@ class ImageManager:
 
     def _validate_tag(self, tag: str) -> str:
         """Validate an image tag against ``_TAG_RE``."""
-        if not _TAG_RE.match(tag):
+        if not _TAG_RE.fullmatch(tag):
             raise ValueError(
                 f"Invalid image tag: {tag!r}. Expected alphanumerics, dots, "
                 "dashes, and underscores; max 128 chars."

@@ -161,7 +161,7 @@ class ReleaseTag:
     @classmethod
     def parse(cls, name: str) -> ReleaseTag | None:
         """Return the tag when ``name`` has the release shape, else ``None``."""
-        match = RELEASE_TAG_RE.match(name.strip())
+        match = RELEASE_TAG_RE.fullmatch(name.strip())
         if match is None:
             return None
         major, minor, patch = (int(part) for part in match.groups())

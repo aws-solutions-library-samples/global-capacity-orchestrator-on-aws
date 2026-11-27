@@ -583,7 +583,7 @@ def deploy_dialog() -> None:
     st.code(ui.shell_words(*words), language="bash", wrap_lines=True)
 
     problems = []
-    if name and not ENDPOINT_NAME.match(name):
+    if name and not ENDPOINT_NAME.fullmatch(name):
         problems.append(
             "The name must be lowercase letters, digits and '-', start with a letter, 55 at most."
         )

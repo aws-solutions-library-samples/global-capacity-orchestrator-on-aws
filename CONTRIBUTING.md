@@ -133,6 +133,8 @@ HTTP clients use [`httpx2`](https://pypi.org/project/httpx2/), the maintained su
 
 CDK dependencies are in a separate `[cdk]` extras group so operators who only use the CLI don't need to install the full CDK toolchain. The six `image-*` groups are build metadata and the single source of direct dependency pins for production service images: each Dockerfile extracts only its own group with `tomllib`, constrains it with `requirements-lock.txt`, and deletes the generated requirements file in the same layer. Do not add per-image requirements files or install `.[image-*]` inside production images, because either approach introduces extra dependencies or another synchronization surface.
 
+The three Lambda builds that install packages (the `kubectl-applier-simple` package and the `helm-installer` and `tls-certificate-manager` images) keep their direct pins in their own `requirements.txt` and install it constrained by `requirements-lock.txt` in the same way, so the lock also fixes every indirect dependency they deploy. Every package those files pin must be in the lock at the same version (`tests/test_dependency_pin_consistency.py`), and a lock change rebuilds all three; see [lambda/README.md](lambda/README.md#build).
+
 #### Node.js Dependency Graphs
 
 | Graph | Purpose | Install command |

@@ -57,11 +57,11 @@ gco queue submit trial.yaml -r us-east-1 --keep-warm
 `--keep-warm` adds the node selector and the toleration to every Job,
 CronJob and Pod in the manifest. It refuses, before anything is submitted, a
 manifest it cannot place: another kind, a pod without an `nvidia.com/gpu`
-request, or a pod whose node selector asks for something no keep-warm node
-has, such as another NodePool, workload type or architecture, an instance
-type outside the pool's families, or SageMaker HyperPod capacity. A selector
-the pool can satisfy, such as an instance type in its families or a zone,
-stays as it is.
+request, or a pod whose node selector or required node affinity asks for
+something no keep-warm node has, such as another NodePool, workload type or
+architecture, an instance type outside the pool's families, or SageMaker
+HyperPod capacity. A selector or node affinity the pool can satisfy, such as
+an instance type in its families or a zone, stays as it is.
 The MCP server's `submit_job_api` and `submit_job_sqs` tools take
 `keep_warm: true` for the same effect.
 
@@ -94,11 +94,40 @@ spec:
 
 Every submission path applies the same check to a manifest that selects the
 pool: it must tolerate the pool's taint, its pods must request
-`nvidia.com/gpu`, its node selector must not also ask for something no
-keep-warm node has, and it must not be a Deployment or StatefulSet, whose
-pods never finish and would hold the node for good. A Job labelled for the
-`gco-hyperpod` Kueue queue is refused too, because that queue sends its pods
-to HyperPod nodes. A DaemonSet may select the pool without a GPU.
+`nvidia.com/gpu`, neither its node selector nor its required node affinity
+may also ask for something no keep-warm node has, and it must not be a
+Deployment or StatefulSet, whose pods never finish and would hold the node
+for good. A Job labelled for the `gco-hyperpod` Kueue queue is refused too,
+because that queue sends its pods to HyperPod nodes. A DaemonSet may select
+the pool without a GPU.
+
+A pod selects the pool with the `gco.aws/keep-warm: "true"` node selector, or
+with a required node affinity every term of which requires
+`gco.aws/keep-warm` (`In` with `"true"` among the values, or `Exists`),
+because only keep-warm nodes carry that label.
+
+The check reads the required node affinity
+(`requiredDuringSchedulingIgnoredDuringExecution`) as the scheduler does: the
+pod can run where any one of its terms holds, and a term holds where all of
+its expressions do. The manifest is refused only when no term can hold on any
+keep-warm node. Each expression is judged against what a keep-warm node
+carries: the pool's own labels with the values it gives them, an instance
+type in one of its families, and no SageMaker HyperPod
+`gco.aws/capacity-provider` label. A term with neither `matchExpressions`
+nor `matchFields` matches no node, so it never holds. Expressions on other
+labels, such as the zone, pass. So do `matchFields`, the preferred terms
+(`preferredDuringSchedulingIgnoredDuringExecution`), and expressions whose
+shape the Kubernetes API refuses, which the API reports itself. A Job named
+`train` that selects the pool and requires
+`node.kubernetes.io/instance-type In [p4d.24xlarge]` is refused with this
+reason:
+
+```text
+Job train selects gco.aws/keep-warm=true but requires node.kubernetes.io/instance-type in [p4d.24xlarge], which no keep-warm node carries (the pool's instance families are g4dn, g5, g6, g6e, g6f, g7, g7e, gr6, gr6f), so it would never schedule; drop one or the other (docs/GPU_KEEP_WARM.md)
+```
+
+The same Job is admitted when it lists `g6e.12xlarge` beside
+`p4d.24xlarge`, because one of the values is in the pool's families.
 
 Reuse only happens when the next pod fits the waiting node. Pin
 `node.kubernetes.io/instance-type` so every Job of a run asks for the same

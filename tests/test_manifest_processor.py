@@ -18,6 +18,11 @@ import pytest
 from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
 
+from gco.job_admission import (
+    check_resource_caps,
+    check_security_context,
+    validate_image_sources,
+)
 from gco.models import ManifestSubmissionRequest
 from gco.services.manifest_processor import (
     DEFAULT_ALLOWED_KINDS,
@@ -2340,10 +2345,10 @@ class TestDynamicClientProperty:
 
 
 class TestValidateResourceLimitsExceptionPath:
-    """Tests for _validate_resource_limits exception handling (lines 223-225)."""
+    """check_resource_caps turns an unparseable quantity into a refusal."""
 
     def test_validate_resource_limits_exception(self):
-        """Test _validate_resource_limits returns False on exception (line 223-225)."""
+        """An invalid CPU quantity is a refusal, not an exception."""
         with patch("gco.services.manifest_processor.config"):
             processor = ManifestProcessor(
                 cluster_id="test-cluster",
@@ -2374,7 +2379,7 @@ class TestValidateResourceLimitsExceptionPath:
                     }
                 },
             }
-            result = processor._validate_resource_limits(manifest)
+            result = check_resource_caps(manifest, processor.job_validation_policy())
             assert result[0] is False
 
 
@@ -2419,15 +2424,15 @@ class TestValidateResourceLimitsGpuExceeded:
                     }
                 },
             }
-            result = processor._validate_resource_limits(manifest)
+            result = check_resource_caps(manifest, processor.job_validation_policy())
             assert result[0] is False
 
 
 class TestValidateSecurityContextExceptionPath:
-    """Tests for _validate_security_context exception handling (lines 323-325)."""
+    """check_security_context turns an exception into a refusal."""
 
     def test_security_context_exception(self):
-        """Test _validate_security_context returns False on exception (lines 323-325)."""
+        """A security context that raises when read is a refusal."""
         with patch("gco.services.manifest_processor.config"):
             processor = ManifestProcessor(
                 cluster_id="test-cluster",
@@ -2453,16 +2458,16 @@ class TestValidateSecurityContextExceptionPath:
                     }
                 },
             }
-            result = processor._validate_security_context(manifest)
+            result = check_security_context(manifest, processor.job_validation_policy())
             is_valid, _error = result
             assert is_valid is False
 
 
 class TestValidateImageSourcesExceptionPath:
-    """Tests for _validate_image_sources exception handling (lines 385-387)."""
+    """validate_image_sources turns an exception into a refusal."""
 
     def test_image_sources_exception(self):
-        """Test _validate_image_sources returns False on exception (lines 385-387)."""
+        """A containers field that is not a list is a refusal."""
         with patch("gco.services.manifest_processor.config"):
             processor = ManifestProcessor(
                 cluster_id="test-cluster",
@@ -2479,7 +2484,9 @@ class TestValidateImageSourcesExceptionPath:
                 "metadata": {"name": "test", "namespace": "default"},
                 "spec": {"template": {"spec": {"containers": "not-a-list"}}},
             }
-            result = processor._validate_image_sources(manifest)
+            result = validate_image_sources(
+                manifest, processor.trusted_registries, processor.trusted_dockerhub_orgs
+            )
             is_valid, _error = result
             assert is_valid is False
 
@@ -2515,7 +2522,9 @@ class TestImageSourceUntrustedDockerHubOrg:
                     }
                 },
             }
-            result = processor._validate_image_sources(manifest)
+            result = validate_image_sources(
+                manifest, processor.trusted_registries, processor.trusted_dockerhub_orgs
+            )
             is_valid, _error = result
             assert is_valid is False
 
@@ -3008,10 +3017,9 @@ class TestValidateManifestExceptionPath:
                     "validation_enabled": True,
                 },
             )
-            # Patch _validate_resource_limits to raise
-            with patch.object(
-                processor,
-                "_validate_resource_limits",
+            # Make the shared admission sequence raise
+            with patch(
+                "gco.services.manifest_processor.admit_manifest",
                 side_effect=RuntimeError("Unexpected"),
             ):
                 manifest = {

@@ -12,7 +12,7 @@ import subprocess
 import sys
 import venv
 from contextlib import nullcontext
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
 
@@ -165,9 +165,16 @@ def _code_directory(node: ast.expr | None, assigned: dict[str, ast.expr]) -> str
         # here would name another handler, which this reader does not model.
         overrides = {keyword.arg for keyword in node.keywords} & {"cmd", "entrypoint"}
         assert not overrides, f"from_image_asset overrides {sorted(overrides)}"
-        for keyword in node.keywords:
-            if keyword.arg == "directory" and isinstance(keyword.value, ast.Constant):
-                return str(keyword.value.value)
+        paths = {
+            keyword.arg: str(keyword.value.value)
+            for keyword in node.keywords
+            if keyword.arg in {"directory", "file"} and isinstance(keyword.value, ast.Constant)
+        }
+        if "directory" in paths:
+            # A repository-root build context names its Dockerfile with
+            # ``file=``; the image's code is the Dockerfile's directory.
+            dockerfile = PurePosixPath(paths["directory"], paths.get("file", "Dockerfile"))
+            return dockerfile.parent.as_posix()
     return None
 
 
@@ -274,11 +281,13 @@ _IN_IMAGE_IMPORT = (
 
 
 def _in_image_import_programs() -> dict[str, list[str]]:
-    """Image build context -> the ``-c`` programs its job runs inside the image it builds.
+    """Image Dockerfile directory -> the ``-c`` programs its job runs inside the image it builds.
 
     A step counts only as ``docker run --rm --network none -e AWS_REGION=...
     -e AWS_DEFAULT_REGION=... --entrypoint python <tag> -I -B -c <program>``
-    with the tag the same job's image build gives that context.
+    with the tag the same job's image build gives that Dockerfile. An image is
+    keyed by its Dockerfile's directory rather than its build context, which
+    can be the repository root.
     """
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     programs: dict[str, list[str]] = {}
@@ -288,7 +297,8 @@ def _in_image_import_programs() -> dict[str, list[str]]:
             if build.get("uses") != "./.github/actions/build-image-with-retry":
                 continue
             prefix = [*_IN_IMAGE_IMPORT, build["with"]["tags"], "-I", "-B", "-c"]
-            found = programs.setdefault(build["with"]["context"], [])
+            dockerfile = build["with"].get("file") or f"{build['with']['context']}/Dockerfile"
+            found = programs.setdefault(PurePosixPath(dockerfile).parent.as_posix(), [])
             for step in steps:
                 run = str(step.get("run") or "").strip()
                 if not run.startswith("docker run "):

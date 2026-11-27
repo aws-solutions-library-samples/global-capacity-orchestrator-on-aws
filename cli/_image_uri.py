@@ -22,11 +22,13 @@ from functools import cache
 
 import botocore.session
 
+from gco.aws_names import AWS_REGION_NAME_PATTERN
+
 # ECR registry host shape in any AWS partition:
 #   <account-id>.dkr.ecr.<region>.<partition-url-suffix>
 _ECR_HOST_RE = re.compile(
     r"^(?P<account>\d+)\.dkr\.ecr\."
-    r"(?P<region>[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+)\."
+    rf"(?P<region>{AWS_REGION_NAME_PATTERN})\."
     r"(?P<suffix>[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)$"
 )
 
@@ -94,7 +96,7 @@ def rewrite_image_uri_for_region(uri: str, region: str) -> str:
         return uri
     parts = uri.split("/", 1)
     host = parts[0]
-    match = _ECR_HOST_RE.match(host)
+    match = _ECR_HOST_RE.fullmatch(host)
     if match is None:
         return uri
 

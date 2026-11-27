@@ -1159,7 +1159,7 @@ This policy is enforced on **both** submission paths:
 - the REST manifest processor (`POST /api/v1/manifests`)
 - the SQS queue processor (`gco jobs submit-sqs`)
 
-CDK wires the same configuration values into both services at deploy time, so a single policy change applies uniformly. An attacker holding `sqs:SendMessage` on the job queue cannot use the SQS path to bypass the checks enforced by the REST path.
+CDK wires the same configuration values into both services at deploy time, and both run the same admission code (`admit_manifest` in [`gco/job_admission.py`](../gco/job_admission.py)), so a single policy change applies uniformly and a manifest gets the same verdict and the same message on either path. An attacker holding `sqs:SendMessage` on the job queue cannot use the SQS path to bypass the checks enforced by the REST path.
 
 > **To read what a region actually enforces, don't read this file — ask the cluster.** `gco jobs policy --region <region>` (or `GET /api/v1/policy`) returns the deployed policy, plus the per-container ceilings (the namespace `LimitRange` for CPU and memory, the GPU cap admission policy for GPUs) and the namespace `ResourceQuota` that form the second and third admission layers. `cdk.json` is the *input* to a deploy: it drifts the moment a stack is deployed from a different checkout, and CDK adds the project's own ECR registries to `trusted_registries` at synth time, so the effective allowlist is always larger than what you see here. See [Reading the deployed validation policy](API.md#reading-the-deployed-validation-policy).
 
@@ -3181,10 +3181,11 @@ The shipped `examples/keda-scaled-job.yaml` is a safe **non-consuming scaling de
 
 ### Security Parity with the REST Path
 
-The queue processor enforces the same security checks as the REST manifest processor. Both paths read the same `job_validation_policy.manifest_security_policy` section in `cdk.json`, so a single toggle flip (for example setting `block_run_as_root: true`) applies to both submission paths at the next deploy.
+The queue processor runs the REST manifest processor's admission code, `admit_manifest` in [`gco/job_admission.py`](../gco/job_admission.py): the same checks, in the same order, refusing with the same messages. Both paths read the same `job_validation_policy` section in `cdk.json`, so a single toggle flip (for example setting `block_run_as_root: true`) applies to both submission paths at the next deploy. The one setting only the REST service reads is `manifest_processor.validation_enabled`: the queue processor always validates.
 
 The checks enforced on both paths are:
 
+- Manifest structure (`apiVersion`, `kind`, `metadata.name`), and a pod spec for every workload kind (Job, CronJob, Deployment, StatefulSet, DaemonSet, ReplicaSet, Pod)
 - Namespace allowlist
 - Resource kind allowlist (`allowed_kinds`)
 - Privileged pods and containers (`block_privileged`)
@@ -3196,6 +3197,8 @@ The checks enforced on both paths are:
 - Image registry allowlist (`trusted_registries`, `trusted_dockerhub_orgs`)
 - Resource caps (CPU, memory, GPU summed across all container kinds)
 - Accelerator tolerations (`require_accelerator_toleration`)
+- AWS Nitro Sandbox constraints and the sandbox RuntimeClass ([NITRO_SANDBOXES.md](NITRO_SANDBOXES.md))
+- Keep-warm GPU pool selection ([GPU_KEEP_WARM.md](GPU_KEEP_WARM.md))
 - Manifest nesting depth (`manifest_processor.yaml_max_depth`, default 50; the queue processor receives the REST Deployment's value)
 
 See [Security Policy Configuration](#security-policy-configuration) for the full reference and JSON examples.

@@ -13,8 +13,9 @@ The health monitor writes each idle interval onto the Job whose pod finished
 last on the node (:data:`IDLE_ANNOTATION`), and Get Job reports it, so a
 caller can account for the idle node time its Jobs caused.
 
-This module holds the shared names, the window validation and the idle-record
-format without importing AWS CDK or the Kubernetes client, so the stacks,
+This module holds the shared names, what a keep-warm node offers a pod's node
+selector and node affinity, the window validation and the idle-record format
+without importing AWS CDK or the Kubernetes client, so the stacks,
 ``ConfigLoader``, the CLI, admission, the health monitor and the API share one
 source.
 """
@@ -25,7 +26,9 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
+
+from gco.hyperpod_config import CAPACITY_PROVIDER_LABEL
 
 #: Node label and taint key of the keep-warm pool, and the value both carry.
 KEEP_WARM_LABEL = "gco.aws/keep-warm"
@@ -62,6 +65,9 @@ KEEP_WARM_NODE_LABELS: dict[str, frozenset[str]] = {
     "karpenter.sh/capacity-type": frozenset({"on-demand", "spot"}),
 }
 _INSTANCE_TYPE_LABEL = "node.kubernetes.io/instance-type"
+#: The node labels that name an instance type or its family, the two whose
+#: values the pool limits to :data:`KEEP_WARM_INSTANCE_FAMILIES`.
+KEEP_WARM_INSTANCE_LABELS = frozenset({_INSTANCE_TYPE_LABEL, "eks.amazonaws.com/instance-family"})
 
 #: cdk.json context key of the block, and its one setting.
 KEEP_WARM_CONTEXT_KEY = "gpu_keep_warm"
@@ -181,6 +187,171 @@ def keep_warm_selector_conflicts(selector: Mapping[str, Any]) -> list[str]:
         ):
             conflicts.append(f"{key}={value}")
     return conflicts
+
+
+#: The operators of a node selector requirement (a ``matchExpressions`` entry).
+_NODE_SELECTOR_OPERATORS = ("In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt")
+#: A ``Gt`` or ``Lt`` operand as Kubernetes parses one (Go's ``strconv.ParseInt``
+#: in base 10): an optional sign and ASCII digits, within 64 bits.
+_INTEGER_RE = re.compile(r"[+-]?[0-9]+")
+_INT64_LIMIT = 2**63
+
+
+class NodeSelectorRequirement(NamedTuple):
+    """One well-formed ``matchExpressions`` entry of a node selector term."""
+
+    key: str
+    operator: str
+    #: Empty for ``Exists`` and ``DoesNotExist``, which take no values.
+    values: tuple[str, ...]
+
+
+def keep_warm_affinity_conflicts(affinity: object) -> list[list[NodeSelectorRequirement]]:
+    """The terms of a pod's required node affinity that no keep-warm node satisfies.
+
+    *affinity* is a pod spec's ``affinity``. Kubernetes ORs the
+    ``nodeSelectorTerms`` of ``nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution``
+    and ANDs the ``matchExpressions`` within a term, so a keep-warm node can
+    take the pod when one term holds there. When no term does, the result has
+    one entry per term: its expressions no keep-warm node satisfies, or ``[]``
+    for a term with neither ``matchExpressions`` nor ``matchFields``, which
+    matches no node. Otherwise the result is ``[]``, as it is for a pod that
+    requires no node affinity.
+
+    Each expression is judged on its own label, as
+    :func:`keep_warm_selector_conflicts` judges a nodeSelector entry: a label in
+    :data:`KEEP_WARM_NODE_LABELS` always has one of the values listed there,
+    the instance type belongs to one of :data:`KEEP_WARM_INSTANCE_FAMILIES`, and
+    SageMaker HyperPod's capacity-provider label, which only HyperPod nodes
+    carry, is absent. Expressions on other labels pass, and so do
+    ``matchFields`` and the preferred terms, which are not read. So does an
+    expression the API server refuses for its shape (not a mapping, no key, an
+    unknown operator, values that are not a list of strings where the operator
+    reads them): admission leaves it to the API. Expressions are judged one at
+    a time, so two that contradict each other on one label are not caught.
+    """
+    unsatisfiable = []
+    for term in _required_node_selector_terms(affinity):
+        conflicts = _term_conflicts(term)
+        if conflicts is None:
+            return []
+        unsatisfiable.append(conflicts)
+    return unsatisfiable
+
+
+def affinity_selects_keep_warm(affinity: object) -> bool:
+    """Whether a pod's required node affinity lets it run on keep-warm nodes only.
+
+    True when every term requires :data:`KEEP_WARM_LABEL`, by ``In`` with
+    :data:`KEEP_WARM_VALUE` among its values or by ``Exists``: no other node
+    carries the label.
+    """
+    terms = _required_node_selector_terms(affinity)
+    return bool(terms) and all(_term_requires_keep_warm(term) for term in terms)
+
+
+def _required_node_selector_terms(affinity: object) -> list[Any]:
+    """A pod's required node-affinity terms; ``[]`` when it requires none or the shape is wrong."""
+    node_affinity = affinity.get("nodeAffinity") if isinstance(affinity, Mapping) else None
+    required = (
+        node_affinity.get("requiredDuringSchedulingIgnoredDuringExecution")
+        if isinstance(node_affinity, Mapping)
+        else None
+    )
+    terms = required.get("nodeSelectorTerms") if isinstance(required, Mapping) else None
+    return terms if isinstance(terms, list) else []
+
+
+def _node_selector_requirement(expression: object) -> NodeSelectorRequirement | None:
+    """A ``matchExpressions`` entry, or ``None`` when the API server would refuse its shape."""
+    if not isinstance(expression, Mapping):
+        return None
+    key = expression.get("key")
+    operator = expression.get("operator")
+    values = expression.get("values")
+    if not isinstance(key, str) or operator not in _NODE_SELECTOR_OPERATORS:
+        return None
+    if operator in ("Exists", "DoesNotExist"):
+        return NodeSelectorRequirement(key, operator, ())
+    if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+        return None
+    return NodeSelectorRequirement(key, operator, tuple(values))
+
+
+def _term_conflicts(term: object) -> list[NodeSelectorRequirement] | None:
+    """A term's expressions no keep-warm node satisfies; ``None`` when one may satisfy the term.
+
+    A term that is not a mapping, or whose expression lists are not lists, has
+    a shape the API server refuses, so it is not judged and counts as one a
+    keep-warm node may satisfy.
+    """
+    if not isinstance(term, Mapping):
+        return None
+    expressions = term.get("matchExpressions")
+    fields = term.get("matchFields")
+    if any(part is not None and not isinstance(part, list) for part in (expressions, fields)):
+        return None
+    if not expressions and not fields:
+        return []
+    conflicts = [
+        requirement
+        for requirement in map(_node_selector_requirement, expressions or [])
+        if requirement is not None and not _keep_warm_node_satisfies(requirement)
+    ]
+    return conflicts or None
+
+
+def _term_requires_keep_warm(term: object) -> bool:
+    """Whether a term requires :data:`KEEP_WARM_LABEL` as :func:`affinity_selects_keep_warm` says."""
+    expressions = term.get("matchExpressions") if isinstance(term, Mapping) else None
+    return isinstance(expressions, list) and any(
+        requirement is not None
+        and requirement.key == KEEP_WARM_LABEL
+        and (
+            requirement.operator == "Exists"
+            or (requirement.operator == "In" and KEEP_WARM_VALUE in requirement.values)
+        )
+        for requirement in map(_node_selector_requirement, expressions)
+    )
+
+
+def _keep_warm_node_satisfies(requirement: NodeSelectorRequirement) -> bool:
+    """Whether some keep-warm node satisfies one expression, judged on its label alone."""
+    key, operator, values = requirement
+    if key == CAPACITY_PROVIDER_LABEL:
+        # Only SageMaker HyperPod nodes carry it.
+        return operator in ("NotIn", "DoesNotExist")
+    if key == _INSTANCE_TYPE_LABEL:
+        # Every keep-warm node has an instance type in one of the pool's
+        # families, which hold dozens of types, so a NotIn list leaves one. No
+        # instance type is a number, so Gt and Lt never hold.
+        if operator == "In":
+            return any(value.split(".", 1)[0] in KEEP_WARM_INSTANCE_FAMILIES for value in values)
+        return operator in ("NotIn", "Exists")
+    allowed = KEEP_WARM_NODE_LABELS.get(key)
+    if allowed is None:
+        return True
+    if operator == "In":
+        return not allowed.isdisjoint(values)
+    if operator == "NotIn":
+        return not allowed.issubset(values)
+    if operator in ("Exists", "DoesNotExist"):
+        return operator == "Exists"
+    # Gt or Lt: Kubernetes compares exactly one integer operand with the
+    # label's value read as an integer, and any other operand matches no node.
+    bound = _label_integer(values[0]) if len(values) == 1 else None
+    if bound is None:
+        return False
+    numbers = [number for number in map(_label_integer, allowed) if number is not None]
+    return any(number > bound if operator == "Gt" else number < bound for number in numbers)
+
+
+def _label_integer(value: str) -> int | None:
+    """*value* read as Kubernetes reads a ``Gt`` or ``Lt`` operand or label value, else ``None``."""
+    if not _INTEGER_RE.fullmatch(value):
+        return None
+    number = int(value)
+    return number if -_INT64_LIMIT <= number < _INT64_LIMIT else None
 
 
 # ── Idle records ────────────────────────────────────────────────────

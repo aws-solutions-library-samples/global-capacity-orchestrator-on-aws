@@ -228,7 +228,13 @@ class TestReadSecretKey:
 
     @pytest.mark.parametrize(
         ("namespace", "name", "label"),
-        [("Bad_NS", "ok", "namespace"), ("ok", "a;b", "Secret name")],
+        [
+            ("Bad_NS", "ok", "namespace"),
+            ("ok", "a;b", "Secret name"),
+            # ``$`` also matches before a final newline; the check is a fullmatch.
+            ("argocd\n", "ok", "namespace"),
+            ("ok", "argocd-initial-admin-secret\n", "Secret name"),
+        ],
     )
     def test_rejects_invalid_names(self, namespace: str, name: str, label: str) -> None:
         with pytest.raises(ValueError, match=f"Invalid {label}"):

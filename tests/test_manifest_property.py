@@ -201,6 +201,16 @@ def make_processor(**overrides):
     return processor
 
 
+def _image_verdict(processor, manifest: dict) -> tuple[bool, str | None]:
+    """The image-source check of *processor*'s admission, under its policy's allowlists."""
+    from gco.job_admission import validate_image_sources
+
+    policy = processor.job_validation_policy()
+    return validate_image_sources(
+        manifest, policy.trusted_registries, policy.trusted_dockerhub_orgs
+    )
+
+
 # ---------------------------------------------------------------------------
 # Property-based tests
 # ---------------------------------------------------------------------------
@@ -386,7 +396,7 @@ class TestImageValidationProperties:
                 }
             },
         }
-        is_valid, _ = self.processor._validate_image_sources(manifest)
+        is_valid, _ = _image_verdict(self.processor, manifest)
         assert is_valid
 
     @given(
@@ -414,7 +424,7 @@ class TestImageValidationProperties:
                 }
             },
         }
-        is_valid, _ = self.processor._validate_image_sources(manifest)
+        is_valid, _ = _image_verdict(self.processor, manifest)
         assert is_valid
 
     @given(
@@ -433,5 +443,5 @@ class TestImageValidationProperties:
                 }
             },
         }
-        is_valid, _ = self.processor._validate_image_sources(manifest)
+        is_valid, _ = _image_verdict(self.processor, manifest)
         assert not is_valid

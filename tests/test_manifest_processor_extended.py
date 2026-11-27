@@ -216,7 +216,9 @@ class TestManifestValidationErrors:
         }
 
         # Should not raise, but return (False, error_message)
-        result = manifest_processor._validate_resource_limits(manifest)
+        from gco.job_admission import check_resource_caps
+
+        result = check_resource_caps(manifest, manifest_processor.job_validation_policy())
         assert result[0] is False
 
 
@@ -669,6 +671,16 @@ def _make_processor_for_registry_tests(**overrides):
     return processor
 
 
+def _image_verdict(processor, manifest: dict) -> tuple[bool, str | None]:
+    """The image-source check of *processor*'s admission, under its policy's allowlists."""
+    from gco.job_admission import validate_image_sources
+
+    policy = processor.job_validation_policy()
+    return validate_image_sources(
+        manifest, policy.trusted_registries, policy.trusted_dockerhub_orgs
+    )
+
+
 def _build_job_manifest(image: str) -> dict:
     """Build a minimal valid Job manifest with the given image."""
     return {
@@ -776,7 +788,7 @@ class TestRegistryDomainValidationProperty:
         image = f"{bare_org}/{path}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, error = _image_verdict(self.processor, manifest)
 
         # The bare org is NOT in trusted_dockerhub_orgs and has no dot,
         # so it must NOT match any trusted_registries entry (which are all domains).
@@ -798,7 +810,7 @@ class TestRegistryDomainValidationProperty:
         image = f"{registry}/{path}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, error = _image_verdict(self.processor, manifest)
 
         assert is_valid is True, (
             f"Image '{image}' from trusted registry '{registry}' should be accepted "
@@ -818,7 +830,7 @@ class TestRegistryDomainValidationProperty:
         image = f"{org}/{path}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, error = _image_verdict(self.processor, manifest)
 
         assert is_valid is True, (
             f"Image '{image}' from trusted Docker Hub org '{org}' should be accepted "
@@ -847,7 +859,7 @@ class TestRegistryDomainValidationProperty:
         image = f"{untrusted_domain}/{path}"
         manifest = _build_job_manifest(image)
 
-        is_valid, _error = self.processor._validate_image_sources(manifest)
+        is_valid, _error = _image_verdict(self.processor, manifest)
 
         assert is_valid is False, (
             f"Image '{image}' from untrusted domain '{untrusted_domain}' should be "
@@ -938,7 +950,7 @@ class TestImageDigestOrTrustedTagValidationProperty:
         image = f"{registry}/{name}@sha256:{digest}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, error = _image_verdict(self.processor, manifest)
 
         assert is_valid is True, (
             f"Image '{image}' with digest from trusted registry '{registry}' "
@@ -956,7 +968,7 @@ class TestImageDigestOrTrustedTagValidationProperty:
         image = f"{org}/{name}@sha256:{digest}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, error = _image_verdict(self.processor, manifest)
 
         assert is_valid is True, (
             f"Image '{image}' with digest from trusted Docker Hub org '{org}' "
@@ -977,7 +989,7 @@ class TestImageDigestOrTrustedTagValidationProperty:
         image = f"{registry}/{name}:{tag}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, error = _image_verdict(self.processor, manifest)
 
         assert is_valid is True, (
             f"Image '{image}' with tag from trusted registry '{registry}' "
@@ -995,7 +1007,7 @@ class TestImageDigestOrTrustedTagValidationProperty:
         image = f"{org}/{name}:{tag}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, error = _image_verdict(self.processor, manifest)
 
         assert is_valid is True, (
             f"Image '{image}' with tag from trusted Docker Hub org '{org}' "
@@ -1019,7 +1031,7 @@ class TestImageDigestOrTrustedTagValidationProperty:
         image = f"{untrusted_org}/{name}@sha256:{digest}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, error = _image_verdict(self.processor, manifest)
 
         assert is_valid is False, (
             f"Image '{image}' with digest from untrusted org '{untrusted_org}' "
@@ -1042,7 +1054,7 @@ class TestImageDigestOrTrustedTagValidationProperty:
         image = f"{untrusted_dom}/{name}@sha256:{digest}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, error = _image_verdict(self.processor, manifest)
 
         assert is_valid is False, (
             f"Image '{image}' with digest from untrusted domain '{untrusted_dom}' "
@@ -1065,7 +1077,7 @@ class TestImageDigestOrTrustedTagValidationProperty:
         image = f"{untrusted_org}/{name}:{tag}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, error = _image_verdict(self.processor, manifest)
 
         assert is_valid is False, (
             f"Image '{image}' with tag from untrusted org '{untrusted_org}' "
@@ -1085,7 +1097,7 @@ class TestImageDigestOrTrustedTagValidationProperty:
         image = f"{untrusted_dom}/{name}:{tag}"
         manifest = _build_job_manifest(image)
 
-        is_valid, error = self.processor._validate_image_sources(manifest)
+        is_valid, error = _image_verdict(self.processor, manifest)
 
         assert is_valid is False, (
             f"Image '{image}' with tag from untrusted domain '{untrusted_dom}' "

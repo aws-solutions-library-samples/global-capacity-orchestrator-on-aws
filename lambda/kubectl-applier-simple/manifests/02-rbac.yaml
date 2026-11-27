@@ -404,6 +404,23 @@ subjects:
     namespace: gco-system
 
 # ─── Inference Monitor: namespace-scoped write in gco-inference ────
+# Pre-create the reconciler's election Lease, as the health monitor's are, so
+# the Role below grants get and update on this one Lease instead of create on
+# every Lease in gco-inference. The applier patches this body onto a Lease that
+# already exists, so it names no holder. leaseDurationSeconds is the monitor's
+# default: three reconcile intervals (LEASE_DURATION_INTERVALS) at
+# RECONCILE_INTERVAL_SECONDS=15 (32-inference-monitor.yaml), 45 seconds.
+---
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: inference-monitor-leader
+  namespace: gco-inference
+  labels:
+    app: inference-monitor
+    project: gco
+spec:
+  leaseDurationSeconds: 45
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -480,10 +497,13 @@ rules:
     resources: ["scaledobjects"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
 
-  # Coordination — leader election leases
+  # Coordination — the election Lease pre-created above, by name. The monitor
+  # reads it and replaces it with the resourceVersion it read; it never
+  # creates, lists, watches, patches or deletes a Lease.
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+    resourceNames: ["inference-monitor-leader"]
+    verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -101,6 +101,27 @@ class TestPortForwardCommand:
         with pytest.raises(ValueError, match=re.escape("Invalid local port ")):
             build_port_forward_command("monitoring", "svc/x", port, 80)
 
+    @pytest.mark.parametrize(
+        ("field", "message"),
+        [
+            ("namespace", "Invalid namespace"),
+            ("target", "Invalid port-forward target"),
+            ("tls_server_name", "Invalid --tls-server-name"),
+        ],
+    )
+    def test_rejects_a_trailing_newline(self, field: str, message: str) -> None:
+        # ``$`` also matches just before a final newline, so each check is a fullmatch.
+        values: dict[str, Any] = {
+            "namespace": "monitoring",
+            "target": "svc/x",
+            "server": "https://127.0.0.1:8443",
+            "tls_server_name": "h.example.com",
+        }
+        assert build_port_forward_command(local_port=3000, remote_port=80, **values)
+        values[field] += "\n"
+        with pytest.raises(ValueError, match=re.escape(message)):
+            build_port_forward_command(local_port=3000, remote_port=80, **values)
+
 
 # ---------------------------------------------------------------------------
 # SSM remote-host tunnel argv builder
@@ -165,6 +186,26 @@ class TestSsmTunnelCommand:
             ssm_tunnel.build_remote_host_port_forward_command(
                 "i-0123456789abcdef0", "h.example.com", port, "us-east-1"
             )
+
+    @pytest.mark.parametrize(
+        ("field", "message"),
+        [
+            ("instance_id", "Invalid SSM target"),
+            ("remote_host", "Invalid remote host"),
+            ("region", "Invalid AWS region"),
+        ],
+    )
+    def test_rejects_a_trailing_newline(self, field: str, message: str) -> None:
+        # ``$`` also matches just before a final newline, so each check is a fullmatch.
+        values: dict[str, Any] = {
+            "instance_id": "i-0123456789abcdef0",
+            "remote_host": "h.example.com",
+            "region": "us-east-1",
+        }
+        assert ssm_tunnel.build_remote_host_port_forward_command(local_port=8443, **values)
+        values[field] += "\n"
+        with pytest.raises(ValueError, match=re.escape(message)):
+            ssm_tunnel.build_remote_host_port_forward_command(local_port=8443, **values)
 
     def test_endpoint_host_rejects_empty(self) -> None:
         with pytest.raises(

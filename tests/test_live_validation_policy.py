@@ -217,6 +217,16 @@ class TestSynthTimeEcrAugmentation:
         with pytest.raises(RuntimeError, match="no project ECR registry"):
             _validate_region_policy(_ctx(payload), "us-east-1")  # type: ignore[arg-type]
 
+    def test_a_hostname_with_a_trailing_newline_does_not_satisfy_it(self) -> None:
+        # The hostname check is a fullmatch: ``$`` alone also matches before a final newline.
+        payload = _payload()
+        payload["policy"]["trusted_registries"] = [
+            "docker.io",
+            f"{ACCOUNT}.dkr.ecr.us-east-1.amazonaws.com\n",
+        ]
+        with pytest.raises(RuntimeError, match="no project ECR registry"):
+            _validate_region_policy(_ctx(payload), "us-east-1")  # type: ignore[arg-type]
+
     def test_present_augmentation_is_recorded_as_evidence(self) -> None:
         result = _validate_region_policy(_ctx(), "us-east-1")  # type: ignore[arg-type]
         assert result["synth_time_ecr_registries"] == [f"{ACCOUNT}.dkr.ecr.us-east-1.amazonaws.com"]

@@ -54,8 +54,7 @@ Configuration via environment variables:
 Security policy toggles (all default to true except ``BLOCK_RUN_AS_ROOT``
 which defaults to false, matching job_validation_policy.manifest_security_policy
 in cdk.json). Each one controls whether the corresponding pod/container
-setting is rejected; the REST manifest_processor enforces an identical set
-so both submission paths apply the same policy:
+setting is rejected:
 
     BLOCK_PRIVILEGED:             Reject ``securityContext.privileged: true``
                                   on pod or container (default: true)
@@ -76,6 +75,13 @@ so both submission paths apply the same policy:
     BLOCK_RUN_AS_ROOT:            Reject runAsUser: 0 at pod or container
                                   level (default: false — many public
                                   images still run as root)
+
+The admission variables (the allowlists, caps, toggles,
+REQUIRE_ACCELERATOR_TOLERATION and YAML_MAX_DEPTH) are the REST manifest
+processor's, read with its defaults into the policy that ``validate_manifest``
+judges every manifest against with ``gco.job_admission.admit_manifest``, the
+REST service's own admission. The REST service's VALIDATION_ENABLED is not
+read: this consumer always validates.
 """
 
 from __future__ import annotations
@@ -92,23 +98,11 @@ from kubernetes import client, config, dynamic
 from kubernetes.client.exceptions import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
-from gco.hyperpod_config import (
-    CAPACITY_PROVIDER_HYPERPOD,
-    CAPACITY_PROVIDER_LABEL,
-    HYPERPOD_LOCAL_QUEUE,
-    HYPERPOD_TAINT_KEY,
-)
 from gco.job_admission import (
-    KUEUE_QUEUE_NAME_LABEL,
-    check_keep_warm,
-    check_sandbox,
-    check_sandbox_runtime_class,
-    hyperpod_routing,
+    JobValidationPolicy,
+    admit_manifest,
     parse_cpu_millicores,
     parse_memory_bytes,
-    pod_tolerations,
-    resource_totals,
-    within_nesting_depth,
 )
 from gco.job_envelope import DEFAULT_JOB_NAMESPACE
 from gco.manifest_security_policy import parse_boolean_environment
@@ -121,8 +115,6 @@ from gco.services.manifest_processor import (
     DEFAULT_TRUSTED_DOCKERHUB_ORGS,
     DEFAULT_TRUSTED_REGISTRIES,
     RuntimeClassPresence,
-    extract_trainjob_pod_specs,
-    validate_resource_kind,
 )
 from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobStore
@@ -144,24 +136,6 @@ logging.basicConfig(
 log = logging.getLogger("queue-processor")
 
 
-def _parse_cpu_string(cpu_str: object) -> int:
-    """A CPU quantity in millicores (``"500m"`` -> 500, ``"4"`` -> 4000, ``0.5`` -> 500).
-
-    Any form the API server accepts, through the parser the REST gate uses
-    (:func:`gco.job_admission.parse_cpu_millicores`); an empty value is 0.
-    """
-    return parse_cpu_millicores(cpu_str)
-
-
-def _parse_memory_string(memory_str: object) -> int:
-    """A memory quantity in bytes (``"1Gi"``, ``"512M"``, ``2147483648``, ``"1e9"``).
-
-    Any form the API server accepts, through the parser the REST gate uses
-    (:func:`gco.job_admission.parse_memory_bytes`); an empty value is 0.
-    """
-    return parse_memory_bytes(memory_str)
-
-
 # --- Configuration from environment ---
 # These are set by the KEDA ScaledJob manifest (post-helm-sqs-consumer.yaml)
 # and populated from cdk.json queue_processor settings during CDK deploy.
@@ -179,20 +153,6 @@ JOBS_TABLE_NAME = os.environ.get("JOBS_TABLE_NAME", "")
 # recorded as a terminal FAILED job record. Env override exists for tests
 # and for operators who retune the queue's redrive policy out-of-band.
 FINAL_RECEIVE_COUNT = int(os.environ.get("QP_JOB_QUEUE_MAX_RECEIVE_COUNT", "3"))
-_allowed_namespaces_env = os.environ.get("ALLOWED_NAMESPACES")
-ALLOWED_NAMESPACES = (
-    {"gco-jobs"}
-    if _allowed_namespaces_env is None
-    else {
-        namespace.strip() for namespace in _allowed_namespaces_env.split(",") if namespace.strip()
-    }
-)
-_allowed_kinds_env = os.environ.get("ALLOWED_KINDS")
-ALLOWED_KINDS = (
-    set(DEFAULT_ALLOWED_KINDS)
-    if _allowed_kinds_env is None
-    else {kind.strip() for kind in _allowed_kinds_env.split(",") if kind.strip()}
-)
 # Whether a Nitro Sandbox RuntimeClass exists here (validate_manifest). The
 # client is built per lookup because the Kubernetes configuration is loaded
 # after import; like every client here it bounds each request
@@ -200,160 +160,99 @@ ALLOWED_KINDS = (
 runtime_class_exists = RuntimeClassPresence(
     lambda name: client.NodeV1Api(BoundedApiClient()).read_runtime_class(name)
 )
-# Defaults come from the shared source of truth
-# (gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS - two full
-# accelerator-node slices) so both submission front doors and the deployed
-# cdk.json values tell one story. The old inline fallback here was "10000",
-# which this parser reads as 10,000 whole cores - a thousandfold looser than
-# the REST processor's fallback of the same era.
-MAX_CPU = _parse_cpu_string(
-    os.environ.get(
-        "MAX_CPU_PER_MANIFEST",
-        str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_cpu_per_manifest"]),
-    )
-)  # millicores
-MAX_MEMORY = _parse_memory_string(
-    os.environ.get(
-        "MAX_MEMORY_PER_MANIFEST",
-        str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_memory_per_manifest"]),
-    )
-)  # bytes
-MAX_GPU = int(
-    os.environ.get(
-        "MAX_GPU_PER_MANIFEST",
-        str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_gpu_per_manifest"]),
-    )
-)
-
-# Accelerator resource keys and their node taint keys (taint key == resource
-# key for all three). Kept in sync with the mirror in
-# gco/services/manifest_processor.py::ACCELERATOR_TAINTS.
-ACCELERATOR_TAINTS = ("nvidia.com/gpu", "aws.amazon.com/neuron", "vpc.amazonaws.com/efa")
-
-# Trusted image sources (populated from cdk.json::manifest_processor at deploy time).
-# Empty/unset values use the same secure defaults as ManifestProcessor so the
-# SQS path cannot bypass REST image-source validation after a wiring error.
-TRUSTED_REGISTRIES = [
-    r.strip() for r in os.environ.get("TRUSTED_REGISTRIES", "").split(",") if r.strip()
-] or list(DEFAULT_TRUSTED_REGISTRIES)
-TRUSTED_DOCKERHUB_ORGS = [
-    o.strip() for o in os.environ.get("TRUSTED_DOCKERHUB_ORGS", "").split(",") if o.strip()
-] or list(DEFAULT_TRUSTED_DOCKERHUB_ORGS)
 
 
-# Security-policy toggles. Every one of these mirrors an attribute the REST
-# manifest_processor exposes via cdk.json::job_validation_policy.manifest_security_policy.
-# Both submission paths MUST enforce the same policy — an attacker holding
-# sqs:SendMessage on the job queue must not be able to bypass checks the REST
-# path applies. Structural parity is pinned by
-# tests/test_queue_processor.py::TestSecurityPolicyParityWithManifestProcessor.
-BLOCK_PRIVILEGED = parse_boolean_environment("BLOCK_PRIVILEGED", True)
-BLOCK_PRIVILEGE_ESCALATION = parse_boolean_environment("BLOCK_PRIVILEGE_ESCALATION", True)
-BLOCK_HOST_NETWORK = parse_boolean_environment("BLOCK_HOST_NETWORK", True)
-BLOCK_HOST_PID = parse_boolean_environment("BLOCK_HOST_PID", True)
-BLOCK_HOST_IPC = parse_boolean_environment("BLOCK_HOST_IPC", True)
-BLOCK_HOST_PATH = parse_boolean_environment("BLOCK_HOST_PATH", True)
-BLOCK_ADDED_CAPABILITIES = parse_boolean_environment("BLOCK_ADDED_CAPABILITIES", True)
-BLOCK_RUN_AS_ROOT = parse_boolean_environment("BLOCK_RUN_AS_ROOT", False)
-
-# Hard-reject accelerator jobs that lack a matching node toleration. Mirrors
-# manifest_processor.require_accelerator_toleration so the SQS path is not a
-# bypass.
-REQUIRE_ACCELERATOR_TOLERATION = parse_boolean_environment("REQUIRE_ACCELERATOR_TOLERATION", True)
-
-# Maximum manifest nesting depth: the variable and default the REST processor
-# reads (create_manifest_processor_from_env), checked the same way.
-YAML_MAX_DEPTH = int(os.environ.get("YAML_MAX_DEPTH", "50"))
+def _comma_separated(value: str) -> list[str]:
+    """The items of a comma-separated variable, stripped, without empty ones."""
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _is_registry_domain(entry: str) -> bool:
-    """True if the entry looks like a registry domain (has '.' or ':')."""
-    return "." in entry or ":" in entry
+def job_validation_policy_from_environment() -> JobValidationPolicy:
+    """The admission policy this consumer enforces, read from its environment.
 
+    The ScaledJob (post-helm-sqs-consumer.yaml) carries the REST manifest
+    processor's admission variables, rendered from the same cdk.json
+    ``job_validation_policy``, and this reads them with the defaults and
+    fallbacks ``create_manifest_processor_from_env`` applies, so the result
+    equals the REST service's ``job_validation_policy()``
+    (tests/test_job_submission_validation.py::TestOnePolicy pins that):
 
-def _positive_quantity(value: Any) -> bool:
-    """True if a K8s resource quantity is present and greater than zero."""
-    if value is None:
-        return False
-    try:
-        return float(value) > 0
-    except TypeError, ValueError:
-        return True
+    * The caps default to ``DEFAULT_MANIFEST_RESOURCE_CAPS`` and take any
+      Kubernetes quantity (``MAX_CPU_PER_MANIFEST=10`` is ten cores).
+    * An unset ``ALLOWED_NAMESPACES`` or ``ALLOWED_KINDS`` is the shipped
+      allowlist; one set to an empty value allows nothing.
+    * An unset or empty ``TRUSTED_REGISTRIES`` or ``TRUSTED_DOCKERHUB_ORGS`` is
+      the shipped allowlist, so a wiring error cannot switch image-source
+      validation off.
+    * The ``BLOCK_*`` toggles default to true except ``BLOCK_RUN_AS_ROOT``,
+      and ``REQUIRE_ACCELERATOR_TOLERATION`` to true.
 
+    ``VALIDATION_ENABLED``, the REST service's switch for turning admission
+    off, is not read: the ScaledJob does not carry it, and a queue consumer
+    that applies whatever arrives must never run without admission.
 
-def _toleration_matches(tolerations: list[dict[str, Any]], taint_key: str) -> bool:
-    """True if *tolerations* tolerates the ``<taint_key>=true:NoSchedule`` taint.
-
-    Matches manifest_processor._toleration_matches: the toleration's ``key``
-    must equal *taint_key*, its effect must be empty or ``NoSchedule``, and it
-    must use ``operator: Exists`` or ``operator: Equal`` with ``value: "true"``.
+    Raises:
+        ValueError: when a toggle is not an explicit boolean, or a cap or the
+            depth is not a number, so the pod fails at startup rather than
+            admit under a policy nobody configured.
     """
-    for tol in tolerations:
-        if not isinstance(tol, dict) or tol.get("key") != taint_key:
-            continue
-        effect = tol.get("effect", "")
-        if effect not in ("", "NoSchedule"):
-            continue
-        operator = tol.get("operator", "Equal")
-        if operator == "Exists":
-            return True
-        if operator == "Equal" and str(tol.get("value")) == "true":
-            return True
-    return False
+    allowed_namespaces = os.environ.get("ALLOWED_NAMESPACES")
+    allowed_kinds = os.environ.get("ALLOWED_KINDS")
+    trusted_registries = _comma_separated(os.environ.get("TRUSTED_REGISTRIES", ""))
+    trusted_dockerhub_orgs = _comma_separated(os.environ.get("TRUSTED_DOCKERHUB_ORGS", ""))
+    return JobValidationPolicy(
+        max_cpu_millicores=parse_cpu_millicores(
+            os.environ.get(
+                "MAX_CPU_PER_MANIFEST",
+                str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_cpu_per_manifest"]),
+            )
+        ),
+        max_memory_bytes=parse_memory_bytes(
+            os.environ.get(
+                "MAX_MEMORY_PER_MANIFEST",
+                str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_memory_per_manifest"]),
+            )
+        ),
+        max_gpu_count=int(
+            os.environ.get(
+                "MAX_GPU_PER_MANIFEST",
+                str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_gpu_per_manifest"]),
+            )
+        ),
+        allowed_namespaces=frozenset(
+            ["gco-jobs"] if allowed_namespaces is None else _comma_separated(allowed_namespaces)
+        ),
+        allowed_kinds=frozenset(
+            DEFAULT_ALLOWED_KINDS if allowed_kinds is None else _comma_separated(allowed_kinds)
+        ),
+        # Sorted, as ManifestProcessor.job_validation_policy() sorts them.
+        trusted_registries=tuple(sorted(trusted_registries or DEFAULT_TRUSTED_REGISTRIES)),
+        trusted_dockerhub_orgs=tuple(
+            sorted(trusted_dockerhub_orgs or DEFAULT_TRUSTED_DOCKERHUB_ORGS)
+        ),
+        require_accelerator_toleration=parse_boolean_environment(
+            "REQUIRE_ACCELERATOR_TOLERATION", True
+        ),
+        security={
+            "block_privileged": parse_boolean_environment("BLOCK_PRIVILEGED", True),
+            "block_privilege_escalation": parse_boolean_environment(
+                "BLOCK_PRIVILEGE_ESCALATION", True
+            ),
+            "block_host_network": parse_boolean_environment("BLOCK_HOST_NETWORK", True),
+            "block_host_pid": parse_boolean_environment("BLOCK_HOST_PID", True),
+            "block_host_ipc": parse_boolean_environment("BLOCK_HOST_IPC", True),
+            "block_host_path": parse_boolean_environment("BLOCK_HOST_PATH", True),
+            "block_added_capabilities": parse_boolean_environment("BLOCK_ADDED_CAPABILITIES", True),
+            "block_run_as_root": parse_boolean_environment("BLOCK_RUN_AS_ROOT", False),
+        },
+        validation_enabled=True,
+        yaml_max_depth=int(os.environ.get("YAML_MAX_DEPTH", "50")),
+    )
 
 
-def _requested_accelerators(pod_spec: dict[str, Any]) -> set[str]:
-    """Return the set of accelerator taint keys any container requests."""
-    requested: set[str] = set()
-    for _kind, c in _iter_containers(pod_spec):
-        res = c.get("resources", {}) or {}
-        for section in ("requests", "limits"):
-            values = res.get(section, {}) or {}
-            for taint in ACCELERATOR_TAINTS:
-                if _positive_quantity(values.get(taint)):
-                    requested.add(taint)
-    return requested
-
-
-def _iter_containers(pod_spec: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    """Yield (kind, container_dict) for every container, initContainer, and
-    ephemeralContainer in a pod spec."""
-    out: list[tuple[str, dict[str, Any]]] = []
-    for c in pod_spec.get("containers", []) or []:
-        out.append(("container", c))
-    for c in pod_spec.get("initContainers", []) or []:
-        out.append(("initContainer", c))
-    for c in pod_spec.get("ephemeralContainers", []) or []:
-        out.append(("ephemeralContainer", c))
-    return out
-
-
-def _is_image_trusted(image: str) -> bool:
-    """True if the image reference is from a trusted registry or Docker Hub org.
-
-    Matches the semantics of manifest_processor._validate_image_sources:
-      1. Official Docker Hub images (no '/') are always allowed
-      2. Images with a registry domain (first segment has '.' or ':') must
-         match an entry in TRUSTED_REGISTRIES exactly (or a multi-segment
-         prefix like "public.ecr.aws/lambda")
-      3. Docker Hub images with an org (first segment has no '.' or ':') must
-         match an entry in TRUSTED_DOCKERHUB_ORGS
-
-    Empty or missing environment allowlists use the REST processor's secure
-    defaults; they never disable image-source validation.
-    """
-    if not image:
-        return True
-    if "/" not in image:
-        # Case 1: Official Docker Hub image — always trusted
-        return True
-    first = image.split("/", 1)[0]
-    if _is_registry_domain(first):
-        for registry in TRUSTED_REGISTRIES:
-            if first == registry or image.startswith(registry + "/"):
-                return True
-        return False
-    return first in TRUSTED_DOCKERHUB_ORGS
+# The policy validate_manifest judges every manifest against. Read once, at
+# import, so a malformed variable stops the pod before it receives a message.
+JOB_VALIDATION_POLICY = job_validation_policy_from_environment()
 
 
 # The standard in-cluster credential paths the kubernetes client reads. The
@@ -432,282 +331,21 @@ def load_k8s() -> None:
         ) from kubeconfig_error
 
 
-def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
-    """Validate a manifest before applying it to the cluster.
+def validate_manifest(m: dict[str, Any]) -> tuple[bool, str | None]:
+    """Judge a manifest before it is applied, exactly as the REST service would.
 
-    The queue processor mirrors the security checks performed by the REST
-    `manifest_processor` service (``gco/services/manifest_processor.py``)
-    so that the SQS path cannot bypass them. Checks performed:
-
-    1. **Namespace allowlist** — manifest namespace must be in
-       ``ALLOWED_NAMESPACES`` (from ``ALLOWED_NAMESPACES`` env var,
-       populated from ``cdk.json::job_validation_policy.allowed_namespaces``,
-       shared with the REST manifest_processor).
-
-    2. **Pod-level security policy** (configurable via cdk.json::
-       job_validation_policy.manifest_security_policy, shared between both
-       services). Rejects ``hostNetwork``, ``hostPID``, ``hostIPC``,
-       ``hostPath`` volumes, privileged pod security context, and
-       (if ``BLOCK_RUN_AS_ROOT``) pod-level ``runAsUser: 0``.
-
-    3. **Container-level security policy** — for every container kind
-       (regular, init, ephemeral) rejects ``privileged``,
-       ``allowPrivilegeEscalation``, ``capabilities.add``, and (if
-       ``BLOCK_RUN_AS_ROOT``) container-level ``runAsUser: 0``. Iterating
-       every container kind catches the classic "smuggle it via an init
-       container" bypass.
-
-    4. **Image registry allowlist** — every container's image must come
-       from ``TRUSTED_REGISTRIES`` (registry domains like ``nvcr.io``)
-       or ``TRUSTED_DOCKERHUB_ORGS`` (Docker Hub orgs like ``nvidia``).
-       Official Docker Hub images with no slash are always allowed. Empty or
-       missing allowlists use the shared secure defaults. Keep explicit lists
-       in sync with ``cdk.json::job_validation_policy.trusted_registries`` and
-       ``trusted_dockerhub_orgs`` — CDK wires the same config into both
-       services.
-
-    5. **Resource caps** — the TOTAL CPU, memory, and GPU across ALL
-       containers (regular + init + ephemeral) must not exceed
-       ``MAX_CPU``, ``MAX_MEMORY``, and ``MAX_GPU``. This matches
-       ``manifest_processor._validate_resource_limits`` — K8s accounts
-       init/ephemeral resources differently at scheduling time, but
-       from an enforcement perspective we sum them so an operator's
-       ``max_*_per_manifest`` budget is a hard cap regardless of where
-       the request is placed.
-
-    A TrainJob has no single pod spec: checks 2-5 run over its decomposition
-    (synthetic ``spec.trainer`` view plus every pod spec embedded in
-    ``runtimePatches`` — see ``manifest_processor.TrainJobPodSpecs``), with
-    the trainer view's resources counted once per ``numNodes`` for check 5,
-    accelerator requests unioned across views for the toleration check,
-    and the tolerations those its pod templates carry once Trainer merges
-    the patches (``gco.job_admission.pod_tolerations``, shared with the
-    REST path).
-
-    Before any of these, the manifest must nest no deeper than
-    ``YAML_MAX_DEPTH`` levels (``yaml_max_depth``, default 50), checked by
-    the function the REST path uses and reported in its words.
+    Returns :func:`gco.job_admission.admit_manifest`'s verdict, the one
+    ``ManifestProcessor.validate_manifest`` returns, for
+    :data:`JOB_VALIDATION_POLICY` and this cluster's sandbox RuntimeClasses:
+    the same checks in the same order, worded the same way, so a submitter
+    holding ``sqs:SendMessage`` on the job queue meets the REST path's
+    admission and nothing weaker. A manifest without ``metadata.namespace`` is
+    judged in ``gco-jobs``, where :func:`apply_manifest` creates it.
 
     Returns:
-        ``(True, "")`` if the manifest is accepted, otherwise
-        ``(False, reason)`` where ``reason`` is a human-readable string.
+        ``(True, None)`` when the manifest is admitted, else ``(False, reason)``.
     """
-    if not within_nesting_depth(m, YAML_MAX_DEPTH):
-        return False, f"Manifest exceeds maximum nesting depth of {YAML_MAX_DEPTH} levels"
-    kind = m.get("kind")
-    if not kind:
-        return False, "missing 'kind'"
-    api = m.get("apiVersion")
-    if not api:
-        return False, "missing 'apiVersion'"
-    meta = m.get("metadata")
-    if not isinstance(meta, dict) or not meta.get("name"):
-        return False, "missing 'metadata.name'"
-    ns = meta.get("namespace", "gco-jobs")
-    if ns not in ALLOWED_NAMESPACES:
-        return False, f"namespace '{ns}' not in allowed list {ALLOWED_NAMESPACES}"
-
-    kind_valid, kind_error = validate_resource_kind(m, ALLOWED_KINDS)
-    if not kind_valid:
-        return False, kind_error or "resource kind is not allowed"
-
-    # Get pod spec(s) for security and resource checks, each with a replica
-    # multiplier for resource-cap accounting.
-    # Handle multiple resource shapes, matching manifest_processor._get_all_containers:
-    #   - Deployments / StatefulSets / ReplicaSets / DaemonSets / Jobs: spec.template.spec
-    #   - CronJob: spec.jobTemplate.spec.template.spec
-    #   - Pod (bare): spec (has 'containers' directly)
-    #   - TrainJob: synthetic spec.trainer view weighted by numNodes, plus every
-    #     pod spec embedded under spec (runtimePatches) weighted 1 — see
-    #     manifest_processor.TrainJobPodSpecs for why this decomposition exists.
-    weighted_pod_specs: list[tuple[dict[str, Any], int]] = []
-    if kind == "TrainJob":
-        trainjob_specs = extract_trainjob_pod_specs(m)
-        if trainjob_specs.trainer is not None:
-            weighted_pod_specs.append((trainjob_specs.trainer, trainjob_specs.num_nodes))
-        weighted_pod_specs.extend((item, 1) for item in trainjob_specs.embedded)
-        toleration_hint_example = (
-            "examples/kubeflow-trainjob.yaml (GPU variant, via runtimePatches)"
-        )
-    else:
-        pod_spec = _extract_pod_spec(m)
-        workload_kinds = {
-            "Job",
-            "CronJob",
-            "Deployment",
-            "StatefulSet",
-            "DaemonSet",
-            "ReplicaSet",
-            "Pod",
-        }
-        if kind in workload_kinds and pod_spec is None:
-            return False, f"{kind} manifest must contain a valid pod spec"
-        if pod_spec is not None:
-            weighted_pod_specs.append((pod_spec, 1))
-        toleration_hint_example = "examples/gpu-job.yaml"
-
-    if weighted_pod_specs:
-        # --- Accelerator toleration check ---
-        # Mirror manifest_processor._validate_tolerations: a job requesting a
-        # GPU/Neuron/EFA resource must carry a matching toleration or it would
-        # stay Pending forever on tainted accelerator nodes. For a TrainJob the
-        # request usually lives in spec.trainer.resourcesPerNode while the
-        # toleration can only be expressed through a runtimePatches pod spec,
-        # so requests are unioned across every view, and the tolerations are
-        # those the pod templates carry once Trainer merges the patches (a
-        # later patch's list replaces an earlier one for the same replicated
-        # job). One definition with the REST path: pod_tolerations.
-        if REQUIRE_ACCELERATOR_TOLERATION:
-            requested_taints: set[str] = set()
-            for pod_spec, _multiplier in weighted_pod_specs:
-                requested_taints.update(_requested_accelerators(pod_spec))
-            tolerations = pod_tolerations(m, [spec for spec, _ in weighted_pod_specs])
-            # A workload routed to SageMaker HyperPod nodes meets none of the
-            # accelerator taints, only gco.aws/hyperpod: the Kueue queue path
-            # has the ResourceFlavor inject that toleration, the node-selector
-            # path must carry it. One definition of "routed to HyperPod", shared
-            # with the REST path (gco.job_admission.hyperpod_routing).
-            routing = hyperpod_routing(m, [spec for spec, _multiplier in weighted_pod_specs])
-            if routing == "queue":
-                requested_taints = set()
-            elif routing == "selector":
-                if not _toleration_matches(tolerations, HYPERPOD_TAINT_KEY):
-                    return (
-                        False,
-                        f"Job selects SageMaker HyperPod nodes ({CAPACITY_PROVIDER_LABEL}="
-                        f"{CAPACITY_PROVIDER_HYPERPOD}) but no matching toleration for taint "
-                        f"{HYPERPOD_TAINT_KEY}=true:NoSchedule was found. add a matching "
-                        f"toleration (e.g. key '{HYPERPOD_TAINT_KEY}', operator 'Equal', "
-                        f"value 'true', effect 'NoSchedule'), or label the Job "
-                        f"{KUEUE_QUEUE_NAME_LABEL}: {HYPERPOD_LOCAL_QUEUE} and let Kueue "
-                        "inject it; see docs/HYPERPOD.md",
-                    )
-                requested_taints = set()
-            for taint in requested_taints:
-                if not _toleration_matches(tolerations, taint):
-                    hint = (
-                        f"add a matching toleration (e.g. key '{taint}', operator "
-                        f"'Exists', effect 'NoSchedule'); see {toleration_hint_example}"
-                    )
-                    return (
-                        False,
-                        f"Job requests accelerator '{taint}' but no matching "
-                        f"toleration for taint {taint}=true:NoSchedule was found. {hint}",
-                    )
-
-        for pod_spec, _multiplier in weighted_pod_specs:
-            # --- Pod-level security policy checks ---
-            # Mirror manifest_processor._validate_security_context so the SQS
-            # path enforces the same policy as the REST path.
-            if BLOCK_HOST_NETWORK and pod_spec.get("hostNetwork", False):
-                return False, "hostNetwork is not permitted"
-            if BLOCK_HOST_PID and pod_spec.get("hostPID", False):
-                return False, "hostPID is not permitted"
-            if BLOCK_HOST_IPC and pod_spec.get("hostIPC", False):
-                return False, "hostIPC is not permitted"
-            if BLOCK_HOST_PATH:
-                for volume in pod_spec.get("volumes", []) or []:
-                    if volume.get("hostPath") is not None:
-                        return False, "hostPath volumes are not permitted"
-
-            pod_security_context = pod_spec.get("securityContext", {}) or {}
-            if BLOCK_PRIVILEGED and pod_security_context.get("privileged", False):
-                return False, "privileged pod security context is not permitted"
-            if BLOCK_RUN_AS_ROOT:
-                pod_run_as_user = pod_security_context.get("runAsUser")
-                if pod_run_as_user is not None and pod_run_as_user == 0:
-                    return False, "running as root (runAsUser: 0) is not permitted"
-
-            # --- Container-level security policy checks ---
-            # Every toggle is applied to every container kind (regular, init,
-            # ephemeral). An init container running as root or with CAP_SYS_ADMIN
-            # has the same blast radius as a regular container running the same
-            # way; there is no reason to give any kind a free pass.
-            for container_type, c in _iter_containers(pod_spec):
-                cname = c.get("name", "unknown")
-                sc = c.get("securityContext", {}) or {}
-                if BLOCK_PRIVILEGED and sc.get("privileged", False):
-                    return (
-                        False,
-                        f"{container_type} '{cname}': privileged containers are not permitted",
-                    )
-                if BLOCK_PRIVILEGE_ESCALATION and sc.get("allowPrivilegeEscalation", False):
-                    return (
-                        False,
-                        f"{container_type} '{cname}': allowPrivilegeEscalation is not permitted",
-                    )
-                if BLOCK_ADDED_CAPABILITIES:
-                    added_caps = (sc.get("capabilities", {}) or {}).get("add", []) or []
-                    if added_caps:
-                        return (
-                            False,
-                            f"{container_type} '{cname}': added capabilities are not permitted",
-                        )
-                if BLOCK_RUN_AS_ROOT:
-                    ras = sc.get("runAsUser")
-                    if ras is not None and ras == 0:
-                        return (
-                            False,
-                            f"{container_type} '{cname}': running as root (runAsUser: 0) is not permitted",
-                        )
-
-            # Enforce image registry allowlist (matches manifest_processor semantics)
-            for container_type, c in _iter_containers(pod_spec):
-                image = c.get("image", "")
-                if not _is_image_trusted(image):
-                    cname = c.get("name", "unknown")
-                    return (
-                        False,
-                        f"{container_type} '{cname}': untrusted image source '{image}'",
-                    )
-
-        # Enforce resource caps across ALL container kinds and pod-spec views.
-        # Sum the resource requests/limits of every container (regular,
-        # init, and ephemeral), scaled by each view's replica multiplier
-        # (a TrainJob runs its trainer spec once per node — counting a
-        # 16-node GPU job as one node would make the cap meaningless).
-        # This is stricter than the K8s scheduler's accounting but matches
-        # our security intent: an operator's configured "max CPU/memory/GPU
-        # per manifest" is a hard cap on the total resources a submitter
-        # can request regardless of which container kind carries the request.
-        try:
-            total_cpu, total_memory, total_gpu = resource_totals(weighted_pod_specs)
-        except ValueError as exc:
-            # Same message shape as the REST gate (job_admission.check_resource_caps).
-            return False, f"Resource limit validation error: {exc}"
-
-        errors = []
-        if total_gpu > MAX_GPU:
-            errors.append(f"GPU {total_gpu} exceeds max {MAX_GPU}")
-        if total_cpu > MAX_CPU:
-            errors.append(f"CPU {total_cpu}m exceeds max {MAX_CPU}m")
-        if total_memory > MAX_MEMORY:
-            errors.append(
-                f"Memory {total_memory / (1024**3):.0f}Gi "
-                f"exceeds max {MAX_MEMORY / (1024**3):.0f}Gi"
-            )
-        if errors:
-            hint = (
-                "To raise limits, update job_validation_policy.resource_quotas in cdk.json "
-                "and redeploy (see examples/README.md#troubleshooting)"
-            )
-            return False, "; ".join(errors) + f". {hint}"
-
-    # AWS Nitro Sandbox constraints, then whether this cluster has the sandbox
-    # RuntimeClass at all: the same functions the REST path calls.
-    sandbox_valid, sandbox_error = check_sandbox(m)
-    if sandbox_valid:
-        sandbox_valid, sandbox_error = check_sandbox_runtime_class(m, runtime_class_exists)
-    if not sandbox_valid:
-        return False, f"Nitro Sandbox validation failed: {sandbox_error}"
-
-    # The keep-warm GPU pool takes only GPU pods that finish: the function the
-    # REST path calls.
-    keep_warm_valid, keep_warm_error = check_keep_warm(m)
-    if not keep_warm_valid:
-        return False, f"Keep-warm validation failed: {keep_warm_error}"
-
-    return True, ""
+    return admit_manifest(m, JOB_VALIDATION_POLICY, runtime_class_exists=runtime_class_exists)
 
 
 def _extract_pod_spec(manifest: dict[str, Any]) -> dict[str, Any] | None:
@@ -927,7 +565,7 @@ def process_one_message() -> bool:
 
     # Validate the entire batch before applying anything. A disallowed resource
     # later in the message must not leave an earlier resource partially applied.
-    validation_errors: list[tuple[int, str]] = []
+    validation_errors: list[tuple[int, str | None]] = []
     for i, manifest in enumerate(manifests):
         try:
             ok, reason = validate_manifest(manifest)

@@ -1236,6 +1236,11 @@ jobs:
         run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
+      - name: Stage the lock file in the build context
+        # The Dockerfile constrains its pip install with requirements-lock.txt,
+        # which the deployed image gets from cli/stacks.py's copy of this
+        # directory (lambda/helm-installer-build).
+        run: cp requirements-lock.txt lambda/helm-installer/requirements-lock.txt
       - name: Build image
         uses: ./.github/actions/build-image-with-retry
         with:
@@ -1318,7 +1323,9 @@ jobs:
       - name: Build image
         uses: ./.github/actions/build-image-with-retry
         with:
-          context: lambda/tls-certificate-manager
+          # The repository root, as the CDK image asset builds it, so the
+          # Dockerfile can copy requirements-lock.txt.
+          context: .
           file: lambda/tls-certificate-manager/Dockerfile
           tags: tls-certificate-manager:ci
           load: true

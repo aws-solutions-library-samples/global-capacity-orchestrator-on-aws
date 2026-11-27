@@ -233,7 +233,7 @@ def _require_choice(value: object, choices: Iterable[str], path: str) -> str:
 
 
 def _require_name(value: object, path: str) -> str:
-    if not isinstance(value, str) or not NAME_PATTERN.match(value):
+    if not isinstance(value, str) or not NAME_PATTERN.fullmatch(value):
         raise HyperpodConfigError(
             f"{path} must be 1-63 letters, digits and hyphens starting and ending with a "
             f"letter or digit, got {value!r}"
@@ -266,7 +266,7 @@ def _validate_instance_group(raw: object, path: str) -> dict[str, Any]:
     group = _deep_merge(INSTANCE_GROUP_DEFAULTS, block)
     group["name"] = _require_name(group["name"], f"{path}.name")
     instance_type = group["instance_type"]
-    if not isinstance(instance_type, str) or not INSTANCE_TYPE_PATTERN.match(instance_type):
+    if not isinstance(instance_type, str) or not INSTANCE_TYPE_PATTERN.fullmatch(instance_type):
         raise HyperpodConfigError(
             f"{path}.instance_type must be a SageMaker HyperPod instance type such as "
             f"ml.g5.8xlarge, got {instance_type!r}"
@@ -287,7 +287,9 @@ def _validate_instance_group(raw: object, path: str) -> dict[str, Any]:
         )
     group["deep_health_checks"] = list(dict.fromkeys(checks))
     arn = group["training_plan_arn"]
-    if arn is not None and (not isinstance(arn, str) or not TRAINING_PLAN_ARN_PATTERN.match(arn)):
+    if arn is not None and (
+        not isinstance(arn, str) or not TRAINING_PLAN_ARN_PATTERN.fullmatch(arn)
+    ):
         raise HyperpodConfigError(
             f"{path}.training_plan_arn must be a SageMaker training-plan ARN or null, got {arn!r}"
         )
@@ -335,7 +337,7 @@ def validate_hyperpod_config(raw: object) -> dict[str, Any]:
     )
     zone = config["availability_zone"]
     if zone is not None and (
-        not isinstance(zone, str) or not AVAILABILITY_ZONE_PATTERN.match(zone)
+        not isinstance(zone, str) or not AVAILABILITY_ZONE_PATTERN.fullmatch(zone)
     ):
         raise HyperpodConfigError(
             f"hyperpod.availability_zone must be an Availability Zone name such as us-east-1a "

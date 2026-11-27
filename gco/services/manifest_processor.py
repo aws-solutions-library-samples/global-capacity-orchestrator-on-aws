@@ -111,6 +111,9 @@ from gco.job_admission import (
     _untrusted_container_in_pod_spec as _untrusted_container_in_pod_spec,
 )
 from gco.job_admission import (
+    admit_manifest,
+)
+from gco.job_admission import (
     check_keep_warm as check_keep_warm,
 )
 from gco.job_admission import (
@@ -889,109 +892,25 @@ class ManifestProcessor:
         same effective namespace or the request default could bypass the
         namespace allowlist.
 
+        The checks are :func:`gco.job_admission.admit_manifest`, which the SQS
+        queue processor runs too, against this instance's
+        :meth:`job_validation_policy` and this cluster's sandbox RuntimeClasses.
+
         Returns: ``(is_valid, error_message)``.
         """
         if not self.validation_enabled:
             return True, None
 
         try:
-            # YAML depth check — reject excessively nested documents
-            if not self._check_yaml_depth(manifest):
-                return (
-                    False,
-                    f"Manifest exceeds maximum nesting depth of {self.yaml_max_depth} levels",
-                )
-
-            # Basic structure validation
-            required_fields = ["apiVersion", "kind", "metadata"]
-            for field in required_fields:
-                if field not in manifest:
-                    return False, f"Missing required field: {field}"
-
-            # Validate metadata
-            metadata = manifest.get("metadata", {})
-            if "name" not in metadata:
-                return False, "Missing metadata.name field"
-
-            # Validate namespace
-            namespace = metadata.get("namespace", default_namespace or "gco-jobs")
-            if namespace not in self.allowed_namespaces:
-                return (
-                    False,
-                    f"Namespace '{namespace}' not allowed. Allowed namespaces: {list(self.allowed_namespaces)}",
-                )
-
-            # Validate resource kind using the policy shared with the SQS path.
-            kind_valid, kind_error = validate_resource_kind(manifest, self.allowed_kinds)
-            if not kind_valid:
-                return False, kind_error
-
-            # Every manifest is held to the caps, whatever its kind: a bare Pod
-            # runs on the same nodes as a Job's template, and a manifest with
-            # no pod spec sums to zero. The SQS consumer gates the same way.
-            resource_valid, resource_error = self._validate_resource_limits(manifest)
-            if not resource_valid:
-                return False, resource_error
-
-            # Require accelerator jobs to carry a matching toleration.
-            if self.require_accelerator_toleration:
-                tol_valid, tol_error = self._validate_tolerations(manifest)
-                if not tol_valid:
-                    return False, tol_error
-
-            # Security validations
-            sec_valid, sec_error = self._validate_security_context(manifest)
-            if not sec_valid:
-                return False, f"Security context validation failed: {sec_error}"
-
-            # AWS Nitro Sandbox constraints, then whether this cluster has the
-            # sandbox RuntimeClass at all (gco.job_admission).
-            sandbox_valid, sandbox_error = check_sandbox(manifest)
-            if sandbox_valid:
-                sandbox_valid, sandbox_error = check_sandbox_runtime_class(
-                    manifest, self.runtime_class_exists
-                )
-            if not sandbox_valid:
-                return False, f"Nitro Sandbox validation failed: {sandbox_error}"
-
-            # The keep-warm GPU pool takes only GPU pods that finish (gco.keep_warm).
-            keep_warm_valid, keep_warm_error = check_keep_warm(manifest)
-            if not keep_warm_valid:
-                return False, f"Keep-warm validation failed: {keep_warm_error}"
-
-            # Validate image sources (prevent pulling from untrusted registries)
-            img_valid, img_error = self._validate_image_sources(manifest)
-            if not img_valid:
-                return False, img_error or "Untrusted image sources detected"
-
-            return True, None
-
+            return admit_manifest(
+                manifest,
+                self.job_validation_policy(),
+                runtime_class_exists=self.runtime_class_exists,
+                default_namespace=default_namespace,
+            )
         except Exception as e:
             logger.error(f"Error validating manifest: {e}")
             return False, f"Validation error: {e!s}"
-
-    def _validate_resource_limits(self, manifest: dict[str, Any]) -> tuple[bool, str]:
-        """Validate resource limits in manifest.
-
-        Delegates to :func:`gco.job_admission.check_resource_caps` so the
-        offline and multi-region pre-checks judge a manifest with the same code
-        that gates it here.
-
-        Returns:
-            Tuple of (is_valid, error_message). error_message is empty if valid.
-        """
-        return check_resource_caps(manifest, self.job_validation_policy())
-
-    def _validate_tolerations(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
-        """Require accelerator jobs to carry a matching node toleration.
-
-        Delegates to :func:`gco.job_admission.check_tolerations`; see there for
-        why TrainJob needs every pod-spec view unioned before matching.
-
-        Returns:
-            Tuple of (is_valid, error_message). error_message is None if valid.
-        """
-        return check_tolerations(manifest)
 
     def _requested_accelerators(self, pod_spec: dict[str, Any]) -> set[str]:
         """Return the set of accelerator taint keys any container requests
@@ -1007,17 +926,6 @@ class ManifestProcessor:
         """
         return _iter_all_containers(pod_spec)
 
-    def _validate_security_context(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
-        """Validate security context settings.
-
-        Delegates to :func:`gco.job_admission.check_security_context`, which
-        reads the same eight toggles off a policy object instead of ``self``.
-
-        Returns:
-            Tuple of (is_valid, error_message). error_message is None if valid.
-        """
-        return check_security_context(manifest, self.job_validation_policy())
-
     @staticmethod
     def _is_registry_domain(entry: str) -> bool:
         """Check if a registry entry is a proper domain (contains dot or colon).
@@ -1027,18 +935,6 @@ class ManifestProcessor:
         organization names (e.g., 'nvidia', 'gco').
         """
         return "." in entry or ":" in entry
-
-    def _validate_image_sources(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
-        """Validate container image sources against this deployment's allowlists.
-
-        Delegates to the module-level :func:`validate_image_sources` so the
-        REST/SQS services and offline validators share one implementation.
-        """
-        return validate_image_sources(
-            manifest,
-            trusted_registries=self.trusted_registries,
-            trusted_dockerhub_orgs=self.trusted_dockerhub_orgs,
-        )
 
     async def process_manifest_submission(
         self, request: ManifestSubmissionRequest

@@ -161,7 +161,7 @@ def collect_pins(path: Path) -> list[Pin]:
                 line=number,
                 ref=ref,
                 action=action,
-                sha=revision if SHA_RE.match(revision) else "",
+                sha=revision if SHA_RE.fullmatch(revision) else "",
                 version=comment.group("body") if comment else "",
                 trailer=trailer,
             )
@@ -190,7 +190,7 @@ def format_problems(pins: Iterable[Pin]) -> list[str]:
                 f"trailing '# vX.Y.Z' comment"
             )
             continue
-        if not SEMVER_TAG_RE.match(pin.version):
+        if not SEMVER_TAG_RE.fullmatch(pin.version):
             problems.append(
                 f"{pin.location}: {pin.action} version comment {pin.version!r} is not an "
                 f"exact vX.Y.Z semantic version"
@@ -297,7 +297,7 @@ def _fetch_commit(
         return TagResolution(error=f"lookup failed ({error.__class__.__name__})"), None
 
     sha = payload.get("sha") if isinstance(payload, dict) else None
-    if not isinstance(sha, str) or not SHA_RE.match(sha):
+    if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
         return TagResolution(error="response carried no commit sha"), None
     return TagResolution(sha=sha), None
 
@@ -327,9 +327,9 @@ def resolve_tag(
     in workflow files, which on a fork pull request are attacker-authored, so a
     crafted ``uses:`` must not be able to steer the URL.
     """
-    if not REPOSITORY_RE.match(repository):
+    if not REPOSITORY_RE.fullmatch(repository):
         return TagResolution(error=f"refusing to look up malformed repository {repository!r}")
-    if not SEMVER_TAG_RE.match(version):
+    if not SEMVER_TAG_RE.fullmatch(version):
         return TagResolution(error=f"refusing to look up malformed version {version!r}")
 
     resolution, status = _fetch_commit(repository, version, token, timeout)
@@ -357,7 +357,7 @@ def upstream_problems(
     wanted: dict[tuple[str, str], set[str]] = defaultdict(set)
     sites: dict[tuple[str, str], list[str]] = defaultdict(list)
     for pin in third_party(pins):
-        if not pin.sha or not SEMVER_TAG_RE.match(pin.version):
+        if not pin.sha or not SEMVER_TAG_RE.fullmatch(pin.version):
             continue
         wanted[(pin.repository, pin.version)].add(pin.sha)
         sites[(pin.repository, pin.version)].append(pin.location)

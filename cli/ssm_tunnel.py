@@ -30,10 +30,11 @@ import weakref
 from typing import IO, Any
 from urllib.parse import urlparse
 
+from gco.aws_names import is_aws_region_name
+
 # SSM managed-node ids: EC2 (i-...) and hybrid/managed (mi-...), 8 or 17 hex.
 _INSTANCE_RE = re.compile(r"^(i|mi)-[0-9a-f]{8}([0-9a-f]{9})?$")
 _HOST_RE = re.compile(r"^[a-zA-Z0-9.\-]{1,255}$")
-_REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 
 # AWS SSM document that forwards a local port to an arbitrary remote host
 # reachable from the managed node (here, the private EKS API endpoint).
@@ -56,19 +57,19 @@ _READ_CHUNK_BYTES = 64 * 1024
 
 
 def _validate_instance_id(instance_id: str) -> None:
-    if not _INSTANCE_RE.match(instance_id):
+    if not _INSTANCE_RE.fullmatch(instance_id):
         raise ValueError(
             f"Invalid SSM target {instance_id!r}: expected an instance id like i-0123456789abcdef0"
         )
 
 
 def _validate_host(host: str) -> None:
-    if not _HOST_RE.match(host):
+    if not _HOST_RE.fullmatch(host):
         raise ValueError(f"Invalid remote host {host!r}")
 
 
 def _validate_region(region: str) -> None:
-    if not _REGION_RE.match(region):
+    if not is_aws_region_name(region):
         raise ValueError(f"Invalid AWS region {region!r}: expected format like 'us-east-1'")
 
 

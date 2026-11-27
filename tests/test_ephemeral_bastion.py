@@ -42,6 +42,28 @@ class TestValidators:
         with pytest.raises(ValueError, match=re.escape("Invalid thing: '")):
             eb._validate(value, pattern, "thing")  # type: ignore[arg-type]
 
+    @pytest.mark.parametrize(
+        ("value", "pattern"),
+        [
+            ("us-east-1", eb._REGION_RE),
+            ("gco-us-east-1", eb._CLUSTER_RE),
+            ("i-0123456789abcdef0", eb._INSTANCE_RE),
+            ("vpc-0123456789abcdef0", eb._VPC_RE),
+            ("subnet-0123456789abcdef0", eb._SUBNET_RE),
+            ("sg-0123456789abcdef0", eb._SG_RE),
+            ("ami-0123456789abcdef0", eb._AMI_RE),
+            ("gco", eb._PROJECT_RE),
+        ],
+    )
+    def test_validate_refuses_a_trailing_newline(
+        self, value: str, pattern: re.Pattern[str]
+    ) -> None:
+        # The patterns end in ``$``, which also matches just before a final newline.
+        assert eb._validate(value, pattern, "thing") == value
+        with_newline = f"{value}\n"
+        with pytest.raises(ValueError, match=re.escape(f"Invalid thing: {with_newline!r}")):
+            eb._validate(with_newline, pattern, "thing")
+
     def test_validate_ttl_bounds(self) -> None:
         assert eb._validate_ttl(120) == 120
         assert eb._validate_ttl(5) == 5
@@ -211,6 +233,18 @@ class TestBuilders:
             eb.build_run_instances_command(
                 ami_id="ami-0123456789abcdef0",
                 instance_type="bogus_type",
+                subnet_id="subnet-0123456789abcdef0",
+                security_group_id="sg-0123456789abcdef0",
+                profile_name=eb.BASTION_PROFILE_NAME,
+                region="us-east-1",
+                user_data="x",
+            )
+
+    def test_run_instances_refuses_an_instance_type_with_a_trailing_newline(self) -> None:
+        with pytest.raises(ValueError, match=re.escape("Invalid instance type 't3.micro\\n'")):
+            eb.build_run_instances_command(
+                ami_id="ami-0123456789abcdef0",
+                instance_type="t3.micro\n",
                 subnet_id="subnet-0123456789abcdef0",
                 security_group_id="sg-0123456789abcdef0",
                 profile_name=eb.BASTION_PROFILE_NAME,

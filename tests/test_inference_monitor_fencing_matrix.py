@@ -15,18 +15,34 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from kubernetes.client import V1Lease, V1LeaseSpec, V1ObjectMeta
 from kubernetes.client.rest import ApiException
 
 import gco.services.inference_monitor as inference_monitor
 from gco.services.inference_monitor import (
+    LEADER_LEASE_NAME,
+    LEASE_DURATION_INTERVALS,
     PASS_STALL_INTERVALS,
     InferenceMonitor,
     ReconcileAuthority,
     ReconcileFencedError,
 )
 
+#: The Lease duration of every ``_monitor()``, whose reconcile interval is 5 seconds.
+LEASE_SECONDS = 5 * LEASE_DURATION_INTERVALS
 
-def _monitor(store: Any | None = None) -> InferenceMonitor:
+
+class _Clock:
+    """A monotonic clock the test moves by hand."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _monitor(store: Any | None = None, clock: _Clock | None = None) -> InferenceMonitor:
     with (
         patch("gco.services.inference_monitor.config.load_incluster_config"),
         patch("gco.services.inference_monitor.client.AppsV1Api"),
@@ -40,7 +56,14 @@ def _monitor(store: Any | None = None) -> InferenceMonitor:
             store=store or MagicMock(),
             namespace="gco-inference",
             reconcile_interval=5,
+            lease_clock=clock or _Clock(),
         )
+
+
+def _hold(monitor: InferenceMonitor, *, holder: str = "pod-a", epoch: str = "epoch-a") -> None:
+    """Make ``monitor`` the holder it is right after a successful write to the ``leader`` Lease."""
+    monitor._lease_name, monitor._lease_holder, monitor._leader_epoch = "leader", holder, epoch
+    monitor._lease_written_at = monitor._lease_clock()
 
 
 def _lease(
@@ -132,11 +155,7 @@ class TestWedgedPassReleasesLeadership:
 
     def test_renewal_continues_while_the_pass_progresses(self) -> None:
         monitor = _monitor()
-        monitor._lease_name, monitor._lease_holder, monitor._leader_epoch = (
-            "leader",
-            "pod-a",
-            "epoch-a",
-        )
+        _hold(monitor)
         coordination = MagicMock()
         coordination.read_namespaced_lease.return_value = _lease()
 
@@ -179,16 +198,15 @@ class TestWedgedPassReleasesLeadership:
             assert monitor._renew_current_lease() is True
             monitor._assert_current_leadership()
             coordination.read_namespaced_lease.side_effect = ApiException(status=404)
-            monitor._leader_epoch = None
-            assert monitor._try_acquire_lease("leader", "pod-a") is True
+            assert monitor._try_acquire_lease("leader", "pod-a") is False
 
         calls = [
             *coordination.read_namespaced_lease.call_args_list,
             *coordination.replace_namespaced_lease.call_args_list,
-            *coordination.create_namespaced_lease.call_args_list,
         ]
-        assert len(calls) == 7
+        assert len(calls) == 6
         assert all(call.kwargs.get("_request_timeout") == timeout for call in calls)
+        coordination.create_namespaced_lease.assert_not_called()
 
     def test_every_namespaced_kubernetes_call_names_a_timeout(self) -> None:
         """No call in the monitor may block forever: the client sets no default timeout."""
@@ -208,11 +226,20 @@ class TestWedgedPassReleasesLeadership:
 
 
 class _LeaseServer:
-    """One Lease behind a fake coordination API, replaced compare-and-swap on resourceVersion."""
+    """One Lease behind a fake coordination API, replaced compare-and-swap on resourceVersion.
+
+    It starts as the manifests create it, with no holder, and has no create
+    method: the monitor never creates its Lease.
+    """
 
     def __init__(self) -> None:
-        self.lease: Any | None = None
-        self._version = 0
+        self._version = 1
+        self.lease: Any | None = V1Lease(
+            metadata=V1ObjectMeta(
+                name=LEADER_LEASE_NAME, namespace="gco-inference", resource_version="1"
+            ),
+            spec=V1LeaseSpec(lease_duration_seconds=LEASE_SECONDS),
+        )
 
     def _store(self, body: Any) -> Any:
         self._version += 1
@@ -224,11 +251,6 @@ class _LeaseServer:
         if self.lease is None:
             raise ApiException(status=404)
         return copy.deepcopy(self.lease)
-
-    def create_namespaced_lease(self, _namespace: str, body: Any, **_kwargs: Any) -> Any:
-        if self.lease is not None:
-            raise ApiException(status=409)
-        return self._store(body)
 
     def replace_namespaced_lease(
         self, _name: str, _namespace: str, body: Any, **_kwargs: Any
@@ -335,11 +357,7 @@ class TestShutdownHandsOverLeadership:
         self, holder: str, epoch: str
     ) -> None:
         monitor = _monitor()
-        monitor._lease_name, monitor._lease_holder, monitor._leader_epoch = (
-            "leader",
-            "pod-a",
-            "epoch-a",
-        )
+        _hold(monitor)
         coordination = MagicMock()
         coordination.read_namespaced_lease.return_value = _lease(holder=holder, epoch=epoch)
 
@@ -350,6 +368,7 @@ class TestShutdownHandsOverLeadership:
 
         coordination.replace_namespaced_lease.assert_not_called()
         assert monitor._leader_epoch is None
+        assert monitor._lease_written_at is None
         assert monitor._leadership_lost.is_set()
 
     def test_release_failure_leaves_the_lease_to_expire(
@@ -419,14 +438,51 @@ class TestLeaseEpochFencing:
         assert monitor._leader_epoch == "local"
         coordination.replace_namespaced_lease.assert_not_called()
 
-    def test_naive_renew_time_and_invalid_duration_use_safe_defaults(self) -> None:
+    def test_adoption_does_not_judge_the_persisted_renew_time(self) -> None:
+        """A restarted process adopts its holder name's epoch however old renewTime looks.
+
+        Only an earlier process with this holder name can have written the
+        record, and its age cannot be read without comparing wall clocks.
+        """
         monitor = _monitor()
-        now = datetime.now(UTC)
-        lease = _lease(renew_time=(now - timedelta(seconds=20)).replace(tzinfo=None))
-        lease.spec.lease_duration_seconds = True
-        assert monitor._lease_is_expired(lease, now) is True
-        lease.spec.renew_time = None
-        assert monitor._lease_is_expired(lease, now) is True
+        coordination = MagicMock()
+        lease = _lease(epoch="persisted", renew_time=datetime.now(UTC) - timedelta(hours=1))
+        coordination.read_namespaced_lease.return_value = lease
+        with (
+            patch(
+                "gco.services.inference_monitor.client.CoordinationV1Api",
+                return_value=coordination,
+            ),
+            patch("gco.services.inference_monitor.secrets.token_hex") as token,
+        ):
+            assert monitor._try_acquire_lease("leader", "pod-a") is True
+        assert monitor._leader_epoch == "persisted"
+        assert lease.spec.lease_transitions == 1  # a renewal, not an acquisition
+        token.assert_not_called()
+
+    def test_an_earlier_record_left_unchanged_for_a_duration_gets_a_new_epoch(self) -> None:
+        """After a failed adoption write, a record that then stands still is acquired anew."""
+        clock = _Clock()
+        monitor = _monitor(clock=clock)
+        record = _lease(epoch="persisted")
+        coordination = MagicMock()
+        coordination.read_namespaced_lease.side_effect = lambda *_a, **_k: copy.deepcopy(record)
+        coordination.replace_namespaced_lease.side_effect = [ApiException(status=500), None]
+        with (
+            patch(
+                "gco.services.inference_monitor.client.CoordinationV1Api",
+                return_value=coordination,
+            ),
+            patch("gco.services.inference_monitor.secrets.token_hex", return_value="fresh"),
+        ):
+            assert monitor._try_acquire_lease("leader", "pod-a") is False
+            clock.now += LEASE_SECONDS
+            assert monitor._try_acquire_lease("leader", "pod-a") is True
+
+        written = coordination.replace_namespaced_lease.call_args.args[2]
+        assert written.metadata.annotations["gco.io/leader-epoch"] == "fresh"
+        assert written.spec.lease_transitions == 2
+        assert monitor._leader_epoch == "fresh"
 
     def test_renew_requires_complete_local_identity(self) -> None:
         monitor = _monitor()
@@ -435,25 +491,23 @@ class TestLeaseEpochFencing:
         coordination.assert_not_called()
 
     @pytest.mark.parametrize(
-        ("holder", "epoch", "expired"),
+        ("holder", "epoch", "elapsed"),
         [
-            ("other", "epoch-a", False),
-            ("pod-a", "other", False),
-            ("pod-a", "epoch-a", True),
+            ("other", "epoch-a", 0),
+            ("pod-a", "other", 0),
+            ("pod-a", "epoch-a", LEASE_SECONDS),
         ],
+        ids=["another-holder", "another-epoch", "lapsed-hold"],
     )
-    def test_renew_rejects_changed_or_expired_persisted_lease(
-        self, holder: str, epoch: str, expired: bool
+    def test_renew_rejects_a_changed_lease_or_a_lapsed_hold(
+        self, holder: str, epoch: str, elapsed: int
     ) -> None:
-        monitor = _monitor()
-        monitor._lease_name = "leader"
-        monitor._lease_holder = "pod-a"
-        monitor._leader_epoch = "epoch-a"
+        clock = _Clock()
+        monitor = _monitor(clock=clock)
+        _hold(monitor)
+        clock.now += elapsed
         coordination = MagicMock()
-        renew_time = datetime.now(UTC) - timedelta(minutes=1) if expired else datetime.now(UTC)
-        coordination.read_namespaced_lease.return_value = _lease(
-            holder=holder, epoch=epoch, renew_time=renew_time
-        )
+        coordination.read_namespaced_lease.return_value = _lease(holder=holder, epoch=epoch)
         with patch(
             "gco.services.inference_monitor.client.CoordinationV1Api",
             return_value=coordination,
@@ -462,10 +516,10 @@ class TestLeaseEpochFencing:
         coordination.replace_namespaced_lease.assert_not_called()
 
     def test_renew_updates_only_matching_holder_epoch(self) -> None:
-        monitor = _monitor()
-        monitor._lease_name = "leader"
-        monitor._lease_holder = "pod-a"
-        monitor._leader_epoch = "epoch-a"
+        clock = _Clock()
+        monitor = _monitor(clock=clock)
+        _hold(monitor)
+        clock.now += LEASE_SECONDS - 1
         coordination = MagicMock()
         lease = _lease()
         old = lease.spec.renew_time
@@ -479,13 +533,16 @@ class TestLeaseEpochFencing:
         coordination.replace_namespaced_lease.assert_called_once_with(
             "leader", "gco-inference", lease, _request_timeout=monitor._k8s_timeout
         )
+        # The hold now runs a full Lease duration from this write.
+        assert monitor._lease_written_at == clock.now
 
     @pytest.mark.parametrize("operation", ["read", "replace"])
     def test_renew_api_failures_do_not_escape(self, operation: str) -> None:
-        monitor = _monitor()
-        monitor._lease_name = "leader"
-        monitor._lease_holder = "pod-a"
-        monitor._leader_epoch = "epoch-a"
+        clock = _Clock()
+        monitor = _monitor(clock=clock)
+        _hold(monitor)
+        written_at = monitor._lease_written_at
+        clock.now += 1
         coordination = MagicMock()
         if operation == "read":
             coordination.read_namespaced_lease.side_effect = RuntimeError("offline")
@@ -497,12 +554,12 @@ class TestLeaseEpochFencing:
             return_value=coordination,
         ):
             assert monitor._renew_current_lease() is False
+        # A failed renewal does not extend the hold.
+        assert monitor._lease_written_at == written_at
 
     def test_current_leadership_reads_and_accepts_exact_lease(self) -> None:
         monitor = _monitor()
-        monitor._lease_name = "leader"
-        monitor._lease_holder = "pod-a"
-        monitor._leader_epoch = "epoch-a"
+        _hold(monitor)
         coordination = MagicMock()
         coordination.read_namespaced_lease.return_value = _lease()
         with patch(
@@ -518,14 +575,11 @@ class TestLeaseEpochFencing:
             RuntimeError("offline"),
             _lease(holder="other"),
             _lease(epoch="other"),
-            _lease(renew_time=datetime.now(UTC) - timedelta(minutes=1)),
         ],
     )
     def test_current_leadership_failure_sets_local_fence(self, lease_or_error: Any) -> None:
         monitor = _monitor()
-        monitor._lease_name = "leader"
-        monitor._lease_holder = "pod-a"
-        monitor._leader_epoch = "epoch-a"
+        _hold(monitor)
         coordination = MagicMock()
         if isinstance(lease_or_error, Exception):
             coordination.read_namespaced_lease.side_effect = lease_or_error
@@ -542,6 +596,230 @@ class TestLeaseEpochFencing:
         ):
             monitor._assert_current_leadership()
         assert monitor._leadership_lost.is_set()
+
+
+class TestLeaseHoldsAreTimedOnTheMonotonicClock:
+    """No hold is judged by comparing a renewTime with this process's wall clock."""
+
+    def test_a_lapsed_own_hold_fences_mutation_and_is_not_renewed(self) -> None:
+        clock = _Clock()
+        monitor = _monitor(clock=clock)
+        _hold(monitor)
+        coordination = MagicMock()
+        # The Lease still names this process and its epoch, renewed "just now".
+        coordination.read_namespaced_lease.return_value = _lease()
+        with patch(
+            "gco.services.inference_monitor.client.CoordinationV1Api", return_value=coordination
+        ):
+            clock.now += LEASE_SECONDS - 1
+            monitor._assert_current_leadership()
+            clock.now += 1
+            assert monitor._renew_current_lease() is False
+            with pytest.raises(ReconcileFencedError, match="hold lapsed without a renewal"):
+                monitor._assert_current_leadership()
+
+        coordination.replace_namespaced_lease.assert_not_called()
+        assert monitor._leadership_lost.is_set()
+
+    def test_an_epoch_without_a_successful_write_holds_nothing(self) -> None:
+        """The epoch chosen for an acquisition write that failed is no hold to act under."""
+        monitor = _monitor()
+        monitor._lease_name, monitor._lease_holder, monitor._leader_epoch = (
+            "leader",
+            "pod-a",
+            "epoch-a",
+        )
+        coordination = MagicMock()
+        coordination.read_namespaced_lease.return_value = _lease()
+        with patch(
+            "gco.services.inference_monitor.client.CoordinationV1Api", return_value=coordination
+        ):
+            assert monitor._renew_current_lease() is False
+            with pytest.raises(ReconcileFencedError, match="hold lapsed"):
+                monitor._assert_current_leadership()
+
+        coordination.replace_namespaced_lease.assert_not_called()
+
+    def test_a_live_own_hold_ignores_how_old_its_renew_time_looks(self) -> None:
+        """A wall clock that jumped back an hour does not end a hold that is renewing."""
+        monitor = _monitor()
+        _hold(monitor)
+        coordination = MagicMock()
+        coordination.read_namespaced_lease.return_value = _lease(
+            renew_time=datetime.now(UTC) - timedelta(hours=1)
+        )
+        with patch(
+            "gco.services.inference_monitor.client.CoordinationV1Api", return_value=coordination
+        ):
+            monitor._assert_current_leadership()
+            assert monitor._renew_current_lease() is True
+
+        assert not monitor._leadership_lost.is_set()
+
+    def test_a_lapsed_own_hold_still_on_the_lease_is_reacquired_with_a_new_epoch(self) -> None:
+        clock = _Clock()
+        monitor = _monitor(clock=clock)
+        _hold(monitor)
+        lease = _lease()
+        coordination = MagicMock()
+        coordination.read_namespaced_lease.return_value = lease
+        clock.now += LEASE_SECONDS
+        with (
+            patch(
+                "gco.services.inference_monitor.client.CoordinationV1Api",
+                return_value=coordination,
+            ),
+            patch("gco.services.inference_monitor.secrets.token_hex", return_value="epoch-next"),
+        ):
+            assert monitor._try_acquire_lease("leader", "pod-a") is True
+
+        assert monitor._leader_epoch == "epoch-next"
+        assert lease.metadata.annotations["gco.io/leader-epoch"] == "epoch-next"
+        assert lease.spec.lease_transitions == 2
+        assert monitor._lease_written_at == clock.now
+
+    def test_a_holder_that_keeps_renewing_is_never_taken_however_old_renew_time_looks(
+        self,
+    ) -> None:
+        """Its renewTime an hour behind this replica's wall clock, but changed at every read."""
+        clock = _Clock()
+        standby = _monitor(clock=clock)
+        renewed = datetime.now(UTC) - timedelta(hours=1)
+        coordination = MagicMock()
+        with patch(
+            "gco.services.inference_monitor.client.CoordinationV1Api", return_value=coordination
+        ):
+            for step in range(5):
+                coordination.read_namespaced_lease.return_value = _lease(
+                    holder="pod-b", epoch="epoch-b", renew_time=renewed + timedelta(seconds=step)
+                )
+                assert standby._try_acquire_lease("leader", "pod-a") is False
+                clock.now += 10 * LEASE_SECONDS
+
+        coordination.replace_namespaced_lease.assert_not_called()
+
+    def test_an_unchanged_record_is_taken_after_the_duration_it_declares(self) -> None:
+        clock = _Clock()
+        standby = _monitor(clock=clock)
+        lease = _lease(holder="pod-b", epoch="epoch-b", duration=30)
+        coordination = MagicMock()
+        coordination.read_namespaced_lease.return_value = lease
+        with (
+            patch(
+                "gco.services.inference_monitor.client.CoordinationV1Api",
+                return_value=coordination,
+            ),
+            patch("gco.services.inference_monitor.secrets.token_hex", return_value="epoch-new"),
+        ):
+            assert standby._try_acquire_lease("leader", "pod-a") is False
+            clock.now += 29
+            assert standby._try_acquire_lease("leader", "pod-a") is False
+            coordination.replace_namespaced_lease.assert_not_called()
+            clock.now += 1
+            assert standby._try_acquire_lease("leader", "pod-a") is True
+
+        assert lease.spec.holder_identity == "pod-a"
+        assert lease.metadata.annotations["gco.io/leader-epoch"] == "epoch-new"
+        assert lease.spec.lease_transitions == 2
+        # The new holder declares its own duration.
+        assert lease.spec.lease_duration_seconds == LEASE_SECONDS
+
+    def test_a_record_without_renew_time_is_taken_at_once(self) -> None:
+        standby = _monitor()
+        lease = _lease(holder="pod-b", epoch="epoch-b")
+        lease.spec.renew_time = None
+        coordination = MagicMock()
+        coordination.read_namespaced_lease.return_value = lease
+        with patch(
+            "gco.services.inference_monitor.client.CoordinationV1Api", return_value=coordination
+        ):
+            assert standby._try_acquire_lease("leader", "pod-a") is True
+
+        assert lease.spec.holder_identity == "pod-a"
+
+    @pytest.mark.parametrize("declared", [None, 0, -5, True, "45"])
+    def test_an_invalid_declared_duration_falls_back_to_the_monitors_own(
+        self, declared: Any
+    ) -> None:
+        clock = _Clock()
+        standby = _monitor(clock=clock)
+        lease = _lease(holder="pod-b", epoch="epoch-b")
+        lease.spec.lease_duration_seconds = declared
+        coordination = MagicMock()
+        coordination.read_namespaced_lease.return_value = lease
+        with patch(
+            "gco.services.inference_monitor.client.CoordinationV1Api", return_value=coordination
+        ):
+            assert standby._try_acquire_lease("leader", "pod-a") is False
+            clock.now += LEASE_SECONDS - 1
+            assert standby._try_acquire_lease("leader", "pod-a") is False
+            clock.now += 1
+            assert standby._try_acquire_lease("leader", "pod-a") is True
+
+    def test_a_missing_lease_is_not_held_and_never_created(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        server = _LeaseServer()
+        server.lease = None
+        monitor = _monitor()
+        with (
+            patch("gco.services.inference_monitor.client.CoordinationV1Api", return_value=server),
+            caplog.at_level("WARNING", logger="gco.services.inference_monitor"),
+        ):
+            assert monitor._try_acquire_lease(LEADER_LEASE_NAME, "pod-a") is False
+
+        assert server.lease is None
+        assert monitor._leadership_lost.is_set()
+        assert (
+            "Leader Lease gco-inference/inference-monitor-leader does not exist; the manifests "
+            "create it (02-rbac.yaml), and reconciliation waits until it does"
+        ) in caplog.text
+
+    def test_a_standby_waits_out_a_skewed_leader_then_takes_over_after_it(self) -> None:
+        """Two monitors on one Lease, the leader's wall clock an hour behind the standby's.
+
+        The standby never takes the Lease while the leader renews it, however
+        far behind its renewTime looks. Once the renewals stop, the leader's
+        own hold lapses no later than the standby takes over, and the old
+        leader is fenced before its next mutation.
+        """
+        server = _LeaseServer()
+        leader_clock, standby_clock = _Clock(), _Clock()
+        leader, standby = _monitor(clock=leader_clock), _monitor(clock=standby_clock)
+        skewed = datetime.now(UTC) - timedelta(hours=1)
+
+        def leader_wrote(step: int) -> None:
+            assert server.lease is not None
+            server.lease.spec.renew_time = skewed + timedelta(seconds=step)
+
+        def both_clocks_advance(seconds: int) -> None:
+            leader_clock.now += seconds
+            standby_clock.now += seconds
+
+        with patch("gco.services.inference_monitor.client.CoordinationV1Api", return_value=server):
+            assert leader._try_acquire_lease(LEADER_LEASE_NAME, "pod-a") is True
+            leader_wrote(0)
+            for step in range(1, 5):
+                assert standby._try_acquire_lease(LEADER_LEASE_NAME, "pod-b") is False
+                # More than a Lease duration passes before the standby looks
+                # again, and the leader renews twice in it.
+                for renewal in range(2):
+                    both_clocks_advance(LEASE_SECONDS - 5)
+                    assert leader._renew_current_lease() is True
+                    leader_wrote(2 * step + renewal)
+
+            # The leader stops renewing without releasing (it hangs, or its node is lost).
+            assert standby._try_acquire_lease(LEADER_LEASE_NAME, "pod-b") is False
+            both_clocks_advance(LEASE_SECONDS - 1)
+            assert standby._try_acquire_lease(LEADER_LEASE_NAME, "pod-b") is False
+            both_clocks_advance(1)
+            with pytest.raises(ReconcileFencedError, match="hold lapsed"):
+                leader._assert_current_leadership()
+            assert standby._try_acquire_lease(LEADER_LEASE_NAME, "pod-b") is True
+            assert leader._renew_current_lease() is False
+
+        assert server.lease is not None
+        assert server.lease.spec.holder_identity == "pod-b"
 
 
 class TestEndpointAndObjectAuthority:

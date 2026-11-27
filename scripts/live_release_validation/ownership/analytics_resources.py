@@ -92,7 +92,7 @@ _KINDS = (
 
 def _kind_of(arn: str) -> tuple[_Kind, re.Match[str]] | None:
     for kind in _KINDS:
-        match = kind.arn.match(arn)
+        match = kind.arn.fullmatch(arn)
         if match is not None:
             return kind, match
     return None

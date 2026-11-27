@@ -4,7 +4,8 @@ Tests for the RBAC manifest at lambda/kubectl-applier-simple/manifests/02-rbac.y
 Asserts least-privilege separation across the per-service service
 accounts: gco-health-monitor-role is cluster-wide but read-only (only
 get/list/watch, no write verbs), manifest processor is scoped to the
-gco-jobs namespace, inference monitor is scoped to gco-inference,
+gco-jobs namespace, inference monitor is scoped to gco-inference
+(where it may get and update only its pre-created election Lease),
 each Role/ClusterRole is bound only to its own SA, no role mixes
 read+write on cluster-wide secrets, the old gco-cluster-role is gone,
 and dedicated SAs live in gco-system. Fixtures load and classify the
@@ -702,6 +703,47 @@ class TestInferenceMonitorRole:
             f"inference-monitor statefulsets must allow at least create+get, got {ss_verbs}"
         )
 
+    def test_inference_monitor_may_get_and_update_only_its_pre_created_lease(self, rbac_docs):
+        """The election Lease is pre-created, so the Role names it and grants no create.
+
+        The applier patches this body onto a live Lease, so it names no
+        holder, and it declares the duration the monitor writes at the
+        interval its Deployment sets.
+        """
+        import inspect
+
+        from gco.services.inference_monitor import (
+            LEADER_LEASE_NAME,
+            LEASE_DURATION_INTERVALS,
+            InferenceMonitor,
+        )
+
+        role = _find_doc(rbac_docs, "Role", "gco-inference-monitor-role")
+        lease_rules = [rule for rule in role["rules"] if "leases" in rule.get("resources", [])]
+        assert lease_rules == [
+            {
+                "apiGroups": ["coordination.k8s.io"],
+                "resources": ["leases"],
+                "resourceNames": [LEADER_LEASE_NAME],
+                "verbs": ["get", "update"],
+            }
+        ]
+        lease = _find_doc(rbac_docs, "Lease", LEADER_LEASE_NAME)
+        assert lease is not None, f"02-rbac.yaml must pre-create the {LEADER_LEASE_NAME} Lease"
+        assert lease["metadata"]["namespace"] == role["metadata"]["namespace"]
+        assert lease["metadata"]["labels"] == {"app": "inference-monitor", "project": "gco"}
+        interval = int(_inference_monitor_env("RECONCILE_INTERVAL_SECONDS"))
+        default = inspect.signature(InferenceMonitor).parameters["reconcile_interval"].default
+        assert interval == default
+        assert lease["spec"] == {"leaseDurationSeconds": interval * LEASE_DURATION_INTERVALS}
+        assert lease["spec"]["leaseDurationSeconds"] == 45
+
+    def test_inference_monitor_lease_calls_are_a_read_and_a_replace(self):
+        """get and update cover every Lease call the monitor process makes."""
+        calls = _kubernetes_api_calls(_process_modules("gco.services.inference_monitor"))
+        lease_calls = {method for method, _group, _plural in calls if "lease" in method}
+        assert lease_calls == {"read_namespaced_lease", "replace_namespaced_lease"}
+
 
 # ─── Role Bindings ──────────────────────────────────────────────────
 
@@ -1134,6 +1176,24 @@ def _kubernetes_api_calls(modules) -> set[tuple[str, str | None, str | None]]:
                 else:
                     found.add((node.attr, None, None))
     return found
+
+
+def _inference_monitor_env(name: str) -> str:
+    """The value the shipped inference-monitor Deployment gives environment variable ``name``."""
+    import re
+
+    path = RBAC_MANIFEST_PATH.parent / "32-inference-monitor.yaml"
+    text = re.sub(r"\{\{[A-Z0-9_]+\}\}", "placeholder", path.read_text(encoding="utf-8"))
+    values = [
+        str(variable["value"])
+        for doc in yaml.safe_load_all(text)
+        if isinstance(doc, dict) and doc.get("kind") == "Deployment"
+        for container in doc["spec"]["template"]["spec"]["containers"]
+        for variable in container.get("env", [])
+        if variable["name"] == name
+    ]
+    assert len(values) == 1, f"32-inference-monitor.yaml should set {name} once: {values}"
+    return values[0]
 
 
 def _grants(role: dict) -> set[tuple[str, str, str]]:

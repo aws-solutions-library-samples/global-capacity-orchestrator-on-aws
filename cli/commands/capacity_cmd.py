@@ -10,6 +10,7 @@ from typing import Any
 import click
 from botocore.exceptions import ClientError
 
+from gco.aws_names import is_aws_region_name
 from gco.bedrock import BEDROCK_FTU_REMEDIATION, is_bedrock_ftu_form_error
 
 from ..capacity import get_capacity_checker
@@ -592,8 +593,6 @@ _AI_DISCLAIMER_LINES = (
     "",
 )
 
-#: An AWS Region name (us-east-1, ap-southeast-5, us-gov-west-1).
-_AWS_REGION_NAME = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 #: An EC2 instance type once aliases are expanded (g5.xlarge, p6-b200.48xlarge).
 _EC2_INSTANCE_TYPE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9-]+$")
 
@@ -610,7 +609,7 @@ def _ai_instance_types(ctx: click.Context, param: click.Parameter, value: Any) -
     for item in value or ():
         canonical, note = normalize_instance_type(item)
         canonical = canonical.strip().lower()
-        if not _EC2_INSTANCE_TYPE.match(canonical):
+        if not _EC2_INSTANCE_TYPE.fullmatch(canonical):
             raise click.BadParameter(
                 f"{item!r} is not an EC2 instance type" + (f" ({note})" if note else ""),
                 ctx=ctx,
@@ -628,7 +627,7 @@ def _aws_region_names(ctx: click.Context, param: click.Parameter, value: Any) ->
     regions: list[str] = []
     for item in value if isinstance(value, tuple) else (value,):
         name = item.strip().lower()
-        if not _AWS_REGION_NAME.match(name):
+        if not is_aws_region_name(name):
             raise click.BadParameter(f"{item!r} is not an AWS Region name", ctx=ctx, param=param)
         if name not in regions:
             regions.append(name)

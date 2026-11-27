@@ -2536,6 +2536,11 @@ class TestDerivedLogGroupNames:
         assert derive("AWS::SageMaker::Cluster", _HYPERPOD_ARN, {"name": "a/b"}) == ()
         assert derive("AWS::SageMaker::Cluster", "gco-hyperpod", _hyperpod_identity()) == ()
 
+    def test_a_cluster_arn_with_a_trailing_newline_derives_nothing(self) -> None:
+        # The ARN check is a fullmatch: ``$`` alone also matches before a final newline.
+        derive = ownership_log_groups._derived_log_group_names
+        assert derive("AWS::SageMaker::Cluster", f"{_HYPERPOD_ARN}\n", _hyperpod_identity()) == ()
+
 
 class TestHyperpodClusterLogAuthorityIdentity:
     def _ctx(
@@ -2596,6 +2601,8 @@ class TestHyperpodClusterLogAuthorityIdentity:
             _HYPERPOD_ARN.replace(_REGION, _OTHER_REGION),
             _HYPERPOD_ARN.replace(_ACCOUNT, "210987654321"),
             "gco-hyperpod",
+            # ``$`` also matches before a final newline; the check is a fullmatch.
+            f"{_HYPERPOD_ARN}\n",
         ):
             with pytest.raises(RuntimeError, match="not this account's"):
                 ownership_log_groups._hyperpod_cluster_log_authority_identity(

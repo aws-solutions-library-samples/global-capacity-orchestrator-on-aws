@@ -1695,6 +1695,17 @@ class TestStripDeletedAnalyticsResources:
         emr.get_application.assert_not_called()
         ctx.session.client.assert_called_once_with("cognito-idp", region_name=_REGION)
 
+    @pytest.mark.parametrize("arn", [_POOL_ARN, _APP_ARN])
+    def test_an_arn_with_a_trailing_newline_stays_residue(self, arn: str) -> None:
+        # The ARN check is a fullmatch: ``$`` alone also matches before a final newline.
+        ctx, cognito, emr = self._environment()
+        entry = {"arn": f"{arn}\n", "tags": {}}
+        residual, accepted = self._strip(ctx, self._inventory(entry))
+        assert residual["regional"][_REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+        cognito.describe_user_pool.assert_not_called()
+        emr.get_application.assert_not_called()
+
     @pytest.mark.parametrize("application", [None, {"state": "TERMINATED"}])
     def test_a_terminated_or_unknown_application_is_accepted(self, application: Any) -> None:
         ctx, _cognito, emr = self._environment(application=application)

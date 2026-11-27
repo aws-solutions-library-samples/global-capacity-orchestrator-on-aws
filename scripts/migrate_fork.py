@@ -291,7 +291,7 @@ class Report:
 def parse_target(args: argparse.Namespace) -> tuple[str, str]:
     """Resolve and validate the destination ``owner``/``repo``."""
     if args.repo_url:
-        match = _REPO_URL_RE.match(args.repo_url.strip())
+        match = _REPO_URL_RE.fullmatch(args.repo_url.strip())
         if not match:
             raise SystemExit(
                 f"Could not parse --repo-url {args.repo_url!r}. Expected something like "
@@ -303,9 +303,9 @@ def parse_target(args: argparse.Namespace) -> tuple[str, str]:
 
     if not owner or not repo:
         raise SystemExit("Provide --repo-url, or both --owner and --repo.")
-    if not _OWNER_RE.match(owner):
+    if not _OWNER_RE.fullmatch(owner):
         raise SystemExit(f"Invalid GitHub owner name: {owner!r}")
-    if not _REPO_NAME_RE.match(repo):
+    if not _REPO_NAME_RE.fullmatch(repo):
         raise SystemExit(f"Invalid GitHub repository name: {repo!r}")
     if (owner, repo) == (UPSTREAM_OWNER, UPSTREAM_REPO):
         raise SystemExit(f"Target is the upstream repository ({owner}/{repo}); nothing to migrate.")

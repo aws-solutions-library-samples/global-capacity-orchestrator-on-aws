@@ -190,7 +190,7 @@ def validate_structure(charts: dict[str, Any], *, enabled_only: bool = False) ->
 
         if not (isinstance(version, str) and version.strip()):
             errors.append(f"{name}: missing or empty 'version'")
-        elif not _VERSION_RE.match(version.strip()):
+        elif not _VERSION_RE.fullmatch(version.strip()):
             errors.append(f"{name}: version {version!r} is not a valid SemVer chart version")
 
         if not (isinstance(repo_url, str) and repo_url.strip()):

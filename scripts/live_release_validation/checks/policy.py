@@ -141,7 +141,7 @@ def _validate_synth_time_ecr_augmentation(
     account = str(ctx.settings.expected_account or "")
     augmentation: list[str] = []
     for entry in registries:
-        match = _ECR_HOSTNAME.match(str(entry))
+        match = _ECR_HOSTNAME.fullmatch(str(entry))
         if match and (not account or match.group(1) == account):
             augmentation.append(str(entry))
 

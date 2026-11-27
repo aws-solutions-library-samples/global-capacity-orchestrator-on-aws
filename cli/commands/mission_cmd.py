@@ -38,16 +38,33 @@ from typing import TYPE_CHECKING, Any, cast
 
 import click
 
-# The Mission package lives under ``gco_mcp/mission/`` and is imported as
-# ``mission.*``. Match the path-injection pattern used throughout the
-# MCP module surface and the ``test_mission_*`` test files so the
-# imports below resolve regardless of how this module is loaded.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gco_mcp"))
-
 from gco.bedrock import BedrockFTUFormNotAcceptedError
 
+# Type checkers resolve ``mission`` through ``mypy_path = "gco_mcp"`` in
+# pyproject.toml, so this import needs no sys.path change.
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
     from mission.types import SessionState
+
+
+#: The ``gco_mcp/`` directory that sits beside the ``cli`` package.
+_GCO_MCP_DIR = str(Path(__file__).resolve().parent.parent.parent / "gco_mcp")
+
+
+def ensure_mcp_package_importable() -> None:
+    """Put ``gco_mcp/`` on ``sys.path`` so its modules import by bare name.
+
+    Mission and Swarm live in ``gco_mcp/`` and are imported as ``mission.*``,
+    ``tools`` and ``server``. Those generic top-level names would shadow any
+    installed or standard-library module of the same name, so importing this
+    module (and with it ``cli.main``) leaves ``sys.path`` alone. The
+    ``gco mission`` and ``gco swarm`` code calls this right before each lazy
+    import from ``gco_mcp``. A second call finds the entry and changes nothing.
+    """
+    # Index 0: the gco_mcp modules import their siblings by bare name
+    # (``from server import mcp``), exactly as when the MCP server runs
+    # (gco_mcp/run_mcp.py), so gco_mcp/ must come ahead of every other entry.
+    if _GCO_MCP_DIR not in sys.path:
+        sys.path.insert(0, _GCO_MCP_DIR)
 
 
 _FEATURE_FLAG_HINT = (
@@ -88,6 +105,7 @@ def configure_mission_deployment() -> None:
     config = context.find_object(GCOConfig) if context is not None else None
     if config is None:
         return
+    ensure_mcp_package_importable()
     from mission import deployment
 
     deployment.configure(project_name=config.project_name, global_region=config.global_region)
@@ -107,6 +125,7 @@ def _strip_private_criteria(session: Mapping[str, Any]) -> dict[str, Any]:
     ``_strip_private_criteria`` name so the call sites in this file
     don't churn while the underlying logic is consolidated.
     """
+    ensure_mcp_package_importable()
     from mission.validation import strip_private_fields
 
     cleaned: dict[str, Any] = strip_private_fields(session)
@@ -122,6 +141,7 @@ def _strip_iteration(iteration: Any) -> Any:
     """
     if not isinstance(iteration, Mapping):
         return iteration
+    ensure_mcp_package_importable()
     from mission.validation import strip_private_fields_iterations
 
     return strip_private_fields_iterations([iteration])[0]
@@ -179,6 +199,7 @@ def _make_stub_dispatcher() -> Any:
     :func:`_build_engine` which decides between the live FastMCP
     dispatcher and this stub based on ``--dry-run`` opt-in.
     """
+    ensure_mcp_package_importable()
     from mission._engine_factory import make_stub_dispatcher
 
     return make_stub_dispatcher()
@@ -365,6 +386,7 @@ def mission_start(
     is printed as one JSON line to stderr; the final stdout is the
     Final_Report JSON.
     """
+    ensure_mcp_package_importable()
     from mission import (  # lazy: avoids cost when help-only
         sampling as mission_sampling,
     )
@@ -522,6 +544,7 @@ def _run_to_completion(session_id: str, *, dry_run: bool = False) -> None:
     stdout is the Final_Report JSON when present, falling back to the
     persisted session JSON otherwise.
     """
+    ensure_mcp_package_importable()
     from mission import state as mission_state
     from mission._engine_factory import build_mission_engine
     from mission.engine import MissionEngineError
@@ -590,7 +613,7 @@ def _ensure_tool_registry() -> None:
     module load; calling it twice is harmless because the per-module
     decorators only fire on the first import.
     """
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gco_mcp"))
+    ensure_mcp_package_importable()
     from tools import register_all_tools
 
     register_all_tools()
@@ -630,6 +653,7 @@ def _resolve_cli_allowlist(*, allow_all_tools: bool, tool_allowlist: tuple[str, 
     :class:`MissionValidationError` the structured envelope is emitted and the
     process exits 1 — before the caller builds or persists a session.
     """
+    ensure_mcp_package_importable()
     from mission import validation as mission_validation
     from mission.validation import MissionValidationError
 
@@ -673,6 +697,7 @@ def _resolve_cli_allowlist(*, allow_all_tools: bool, tool_allowlist: tuple[str, 
 )
 def mission_status_cmd(session_id: str, output: str) -> None:
     """Get the full state of a Mission session."""
+    ensure_mcp_package_importable()
     from mission.state import get_backend
 
     backend = get_backend()
@@ -737,6 +762,7 @@ def mission_iterate_cmd(session_id: str, max_iterations: int, dry_run: bool, out
     disable sampling — useful for smoke-testing the bookkeeping
     without spending Bedrock or AWS credits.
     """
+    ensure_mcp_package_importable()
     from mission._engine_factory import build_mission_engine
     from mission.engine import MissionEngineError
     from mission.state import get_backend
@@ -817,6 +843,7 @@ def mission_iterate_cmd(session_id: str, max_iterations: int, dry_run: bool, out
 )
 def mission_checkpoint_cmd(session_id: str, output: str) -> None:
     """Re-run the verdict cascade on the latest iteration of a session."""
+    ensure_mcp_package_importable()
     from mission.decide import decide_verdict
     from mission.state import get_backend
 
@@ -858,6 +885,7 @@ def mission_checkpoint_cmd(session_id: str, output: str) -> None:
 )
 def mission_complete_cmd(session_id: str, output: str) -> None:
     """Force a Mission session into ``completed`` status."""
+    ensure_mcp_package_importable()
     from mission.state import get_backend
     from mission.types import TERMINAL_STATES
 
@@ -909,6 +937,7 @@ def mission_abort_cmd(session_id: str, pause: bool, output: str) -> None:
     Without ``--pause``, transitions to ``terminated`` and stamps the
     final verdict.
     """
+    ensure_mcp_package_importable()
     from mission.state import get_backend
     from mission.types import TERMINAL_STATES
 
@@ -953,6 +982,7 @@ def mission_abort_cmd(session_id: str, pause: bool, output: str) -> None:
 )
 def mission_resume_cmd(session_id: str, output: str) -> None:
     """Resume a paused Mission session."""
+    ensure_mcp_package_importable()
     from mission.state import get_backend
 
     backend = get_backend()
@@ -1008,6 +1038,7 @@ def mission_resume_cmd(session_id: str, output: str) -> None:
 )
 def mission_history_cmd(session_id: str, fmt: str, include_obs: bool, output: str) -> None:
     """Get the iteration history of a Mission session."""
+    ensure_mcp_package_importable()
     from mission.state import get_backend
 
     backend = get_backend()
@@ -1090,6 +1121,7 @@ def mission_history_cmd(session_id: str, fmt: str, include_obs: bool, output: st
 )
 def mission_list_cmd(status: str | None, output: str) -> None:
     """List Mission sessions."""
+    ensure_mcp_package_importable()
     from mission.state import get_backend
 
     backend = get_backend()
@@ -1198,6 +1230,7 @@ def mission_scaffold_criteria_cmd(
     resulting file is immediately usable with ``mission start
     --criteria-file``.
     """
+    ensure_mcp_package_importable()
     import mission.criteria_scaffold as criteria_scaffold  # lazy: avoids cost when help-only
     from mission import (
         sampling as mission_sampling,
@@ -1448,6 +1481,7 @@ def mission_run_cmd(
     also written to ``PATH`` so the operator can inspect / re-use it
     without re-running the scaffold step.
     """
+    ensure_mcp_package_importable()
     import mission.criteria_scaffold as criteria_scaffold  # lazy
     from mission import (
         sampling as mission_sampling,
@@ -1618,6 +1652,7 @@ _MEMORY_UNAVAILABLE_HINT = (
 
 def _build_memory_store() -> Any:
     """Construct the mission-memory store (SSM-lazy; free until first use)."""
+    ensure_mcp_package_importable()
     from mission.memory import MissionMemoryStore
 
     return MissionMemoryStore()
@@ -1625,6 +1660,7 @@ def _build_memory_store() -> Any:
 
 def _exit_memory_unavailable(err: Exception) -> None:
     """Print the deployment hint and a structured envelope, then exit 1."""
+    ensure_mcp_package_importable()
     from mission import deployment
 
     # The global stack of the project the memory store read (<project>-global).
@@ -1669,6 +1705,7 @@ def mission_memory_cmd() -> None:
 )
 def mission_memory_search_cmd(directive: str, top_k: int, verdict: str | None, output: str) -> None:
     """Search mission memory for missions similar to DIRECTIVE."""
+    ensure_mcp_package_importable()
     from mission.memory import MissionMemoryUnavailableError
 
     try:
@@ -1712,6 +1749,7 @@ def mission_memory_search_cmd(directive: str, top_k: int, verdict: str | None, o
 )
 def mission_memory_list_cmd(limit: int, output: str) -> None:
     """List what mission memory currently holds."""
+    ensure_mcp_package_importable()
     from mission.memory import MissionMemoryUnavailableError
 
     try:
@@ -1756,6 +1794,7 @@ def mission_memory_backfill_cmd(root: str | None) -> None:
     Re-running is safe: writes are keyed on ``session_id`` and simply
     overwrite (re-embedding the same directive).
     """
+    ensure_mcp_package_importable()
     from mission.memory import MissionMemoryUnavailableError
     from mission.state import FilesystemBackend
 

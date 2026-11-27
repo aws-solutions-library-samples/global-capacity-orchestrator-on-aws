@@ -36,6 +36,22 @@ class TestUpdateKubeconfigInputValidation:
             update_kubeconfig("my-cluster", "not-a-region")
         mock_run.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("cluster_name", "region", "message"),
+        [
+            ("my-cluster\n", "us-east-1", "Invalid cluster name"),
+            ("my-cluster", "us-east-1\n", "Invalid AWS region"),
+        ],
+    )
+    def test_rejects_a_trailing_newline(self, cluster_name, region, message):
+        """``$`` also matches before a final newline, so both checks are fullmatches."""
+        with (
+            patch("cli.kubectl_helpers.subprocess.run") as mock_run,
+            pytest.raises(ValueError, match=message),
+        ):
+            update_kubeconfig(cluster_name, region)
+        mock_run.assert_not_called()
+
 
 class TestUpdateKubeconfig:
     """Tests for update_kubeconfig helper."""

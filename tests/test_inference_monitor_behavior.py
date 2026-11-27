@@ -1322,7 +1322,10 @@ def test_lease_replace_errors_lose_leadership_without_escaping(holder: str, stat
     coordination.read_namespaced_lease.return_value = SimpleNamespace(
         spec=SimpleNamespace(
             holder_identity=holder,
+            acquire_time=None,
             renew_time=datetime.now(UTC),
+            lease_transitions=0,
+            lease_duration_seconds=45,
         )
     )
     coordination.replace_namespaced_lease.side_effect = ApiException(status=status)
@@ -1335,6 +1338,9 @@ def test_lease_replace_errors_lose_leadership_without_escaping(holder: str, stat
 
     assert acquired is False
     coordination.replace_namespaced_lease.assert_called_once()
+    # A write that failed records no hold to renew or to reconcile under.
+    assert monitor._leadership_lost.is_set()
+    assert monitor._lease_written_at is None
 
 
 def test_master_status_helper_propagates_non_not_found_api_error() -> None:

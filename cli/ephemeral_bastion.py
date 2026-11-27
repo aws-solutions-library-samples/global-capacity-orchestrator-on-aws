@@ -40,6 +40,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from gco.aws_names import AWS_REGION_NAME_RE
+
 from ._image_uri import aws_partition, aws_url_suffix
 
 logger = logging.getLogger(__name__)
@@ -138,7 +140,7 @@ BASTION_TRUST_POLICY: dict[str, object] = bastion_trust_policy("us-east-1")
 # Validators — every AWS-supplied id is re-validated before it enters an argv.
 # --------------------------------------------------------------------------
 
-_REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
+_REGION_RE = AWS_REGION_NAME_RE  # The shared AWS Region rule (gco.aws_names).
 _CLUSTER_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]{0,99}$")
 _INSTANCE_RE = re.compile(r"^i-[0-9a-f]{8}([0-9a-f]{9})?$")
 _VPC_RE = re.compile(r"^vpc-[0-9a-f]{8}([0-9a-f]{9})?$")
@@ -149,7 +151,9 @@ _INSTANCE_TYPE_RE = re.compile(r"^[a-z0-9]+\.[a-z0-9]+$")
 
 
 def _validate(value: str, pattern: re.Pattern[str], what: str) -> str:
-    if not isinstance(value, str) or not pattern.match(value):
+    # fullmatch, not match: the patterns end in ``$``, which also matches just
+    # before a trailing newline.
+    if not isinstance(value, str) or not pattern.fullmatch(value):
         raise ValueError(f"Invalid {what}: {value!r}")
     return value
 
@@ -413,7 +417,7 @@ def build_run_instances_command(
     _validate(profile_name, _CLUSTER_RE, "instance-profile name")
     _validate(region, _REGION_RE, "region")
     ttl = _validate_ttl(ttl_minutes)
-    if not _INSTANCE_TYPE_RE.match(instance_type):
+    if not _INSTANCE_TYPE_RE.fullmatch(instance_type):
         raise ValueError(f"Invalid instance type {instance_type!r}")
 
     cmd = [

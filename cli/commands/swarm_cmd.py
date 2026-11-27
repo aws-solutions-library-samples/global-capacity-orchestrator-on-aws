@@ -34,20 +34,18 @@ import asyncio
 import json
 import os
 import secrets
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import click
 
-# The Mission package lives under ``gco_mcp/mission/`` and is imported as
-# ``mission.*``. Match the path-injection pattern used throughout the
-# MCP module surface so the imports below resolve regardless of how this
-# module is loaded.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gco_mcp"))
-
 from gco.bedrock import BedrockFTUFormNotAcceptedError
+
+# The Mission package lives under ``gco_mcp/mission/`` and is imported as
+# ``mission.*``. The functions below call this helper before their lazy
+# imports from gco_mcp, so importing this module leaves sys.path alone.
+from .mission_cmd import ensure_mcp_package_importable
 
 _FEATURE_FLAG_HINT = (
     "Swarm tools are gated. Set GCO_ENABLE_SWARM=true (or GCO_ENABLE_ALL_TOOLS=true) to enable."
@@ -114,7 +112,7 @@ def _ensure_tool_registry() -> None:
     dispatcher and the spawn validators look tools up on the shared
     FastMCP instance, which starts empty in a plain CLI process.
     """
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "gco_mcp"))
+    ensure_mcp_package_importable()
     from tools import register_all_tools
 
     register_all_tools()
@@ -146,6 +144,7 @@ def _deps_builder(*, dry_run: bool) -> Any:
     the catalog); children build plain engines. ``--dry-run`` swaps in
     the canned-stub dispatcher, mirroring ``gco mission run``.
     """
+    ensure_mcp_package_importable()
     from mission._engine_factory import build_engine_dependencies
     from mission.swarm import (
         SUPERVISOR_TOOL_DOCSTRINGS,
@@ -182,6 +181,7 @@ def _deps_builder(*, dry_run: bool) -> Any:
 
 
 def _make_runner(orchestrator_id: str, *, dry_run: bool) -> Any:
+    ensure_mcp_package_importable()
     from mission.state import get_backend
     from mission.swarm_runner import SwarmRunner
 
@@ -224,6 +224,7 @@ def _persist_orchestrator(
     Exits 1 with the structured envelope on any validation failure —
     before anything is persisted.
     """
+    ensure_mcp_package_importable()
     from mission import sampling as mission_sampling
     from mission import swarm as swarm_rules
     from mission import validation as mission_validation
@@ -284,6 +285,7 @@ def _scaffold_plan(
     except the permanent Anthropic first-time-use gate, which is
     reported as a hard error (Mission precedent).
     """
+    ensure_mcp_package_importable()
     from mission import sampling as mission_sampling
     from mission import swarm as swarm_rules
     from mission import swarm_scaffold
@@ -545,6 +547,7 @@ def _drive(
     max_orchestrator_iterations: int | None = None,
 ) -> dict[str, Any]:
     """Build a runner and drive the swarm, mapping runner errors to exits."""
+    ensure_mcp_package_importable()
     from mission.swarm_runner import SwarmRunnerBusyError
     from mission.validation import MissionValidationError
 
@@ -687,6 +690,7 @@ def swarm_iterate_cmd(
 
 
 def _load_orchestrator_or_exit(session_id: str) -> tuple[Any, dict[str, Any]]:
+    ensure_mcp_package_importable()
     from mission.state import get_backend
 
     backend = get_backend()
@@ -708,6 +712,7 @@ def _load_orchestrator_or_exit(session_id: str) -> tuple[Any, dict[str, Any]]:
 @click.option("--output", type=click.Choice(["json", "table"]), default="json", show_default=True)
 def swarm_status_cmd(session_id: str, output: str) -> None:
     """One-call fleet rollup: rails, pool, child table, findings."""
+    ensure_mcp_package_importable()
     from mission.swarm_runner import build_fleet_rollup
 
     backend, session = _load_orchestrator_or_exit(session_id)
@@ -737,6 +742,7 @@ def swarm_status_cmd(session_id: str, output: str) -> None:
 @click.argument("session_id")
 def swarm_abort_cmd(session_id: str) -> None:
     """Terminate the orchestrator and abort every non-terminal child."""
+    ensure_mcp_package_importable()
     from mission.swarm_runner import abort_swarm
     from mission.types import TERMINAL_STATES
 
@@ -751,6 +757,7 @@ def swarm_abort_cmd(session_id: str) -> None:
 @click.option("--status", default=None, help="Filter by lifecycle status.")
 def swarm_list_cmd(status: str | None) -> None:
     """List swarm (orchestrator) sessions on the configured backend."""
+    ensure_mcp_package_importable()
     from mission.state import get_backend
     from mission.swarm_runner import list_swarms
 

@@ -62,10 +62,31 @@ invocation in AWS; the image Lambdas' `integration:docker:*` jobs import their
 handlers inside the built images. To run it locally you need Docker or Finch:
 `CDK_DOCKER=finch python3 .github/scripts/verify_lambda_imports.py`.
 
+The three builds that install dependencies, `kubectl-applier-simple` and the two
+container images, install their `requirements.txt` with the repository's
+`requirements-lock.txt` as a constraints file, as the service images do:
+`requirements.txt` pins a Lambda's direct dependencies and the lock pins every
+indirect one, so what deploys is the graph the lock records and its scans cover.
+Every package a `requirements.txt` pins must therefore be in the lock at the
+same version (`tests/test_dependency_pin_consistency.py`). The lock is an input
+of all three builds, and a change to it rebuilds them:
+
+- `kubectl-applier-simple`: pip reads the lock from the repository root (it is
+  not copied into the package), and the CLI's build manifest records it with
+  the package's own inputs.
+- `helm-installer`: the CLI copies the lock into `helm-installer-build`, the
+  Docker context the regional stack builds the image from.
+- `tls-certificate-manager`: the image builds from the repository root, like
+  the service images, with an exclude list
+  (`gco/stacks/api_gateway_global_stack.py`) that keeps only its `Dockerfile`,
+  `handler.py` and `requirements.txt` and the lock, so no other edit changes
+  its asset hash.
+
 The `kubectl-applier-simple` Lambda requires a build step to package dependencies.
 `gco stacks deploy` runs it automatically (`StackManager._build_kubectl_lambda`
 in `cli/stacks.py`); this is the equivalent by hand, pinned by the package's
-`requirements.txt` and built for the Lambda platform rather than your laptop's:
+`requirements.txt` and the lock, and built for the Lambda platform rather than
+your laptop's:
 
 ```bash
 rm -rf lambda/kubectl-applier-simple-build
@@ -73,6 +94,7 @@ mkdir -p lambda/kubectl-applier-simple-build
 cp lambda/kubectl-applier-simple/handler.py lambda/kubectl-applier-simple/requirements.txt lambda/kubectl-applier-simple-build/
 cp -r lambda/kubectl-applier-simple/manifests lambda/kubectl-applier-simple-build/
 python3 -m pip install -r lambda/kubectl-applier-simple/requirements.txt \
+  -c requirements-lock.txt \
   -t lambda/kubectl-applier-simple-build/ --upgrade \
   --platform manylinux2014_x86_64 --only-binary=:all:
 ```

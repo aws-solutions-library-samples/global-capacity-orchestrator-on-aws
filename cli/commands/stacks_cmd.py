@@ -1141,7 +1141,7 @@ _CIDR_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$")
 
 def _valid_cidr(value: str) -> bool:
     """True for a syntactically valid IPv4 CIDR (octets 0-255, prefix 0-32)."""
-    match = _CIDR_RE.match(value)
+    match = _CIDR_RE.fullmatch(value)
     if not match:
         return False
     octets = [int(part) for part in match.groups()[:4]]

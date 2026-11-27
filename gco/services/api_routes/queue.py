@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 
+from gco.aws_names import is_aws_region_name
 from gco.services.api_shared import QueuedJobRequest, _check_processor, internal_server_error
 from gco.services.central_queue_worker import process_queued_jobs_once
 from gco.services.structured_logging import sanitize_log_value
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/v1/queue", tags=["Job Queue"])
 logger = logging.getLogger(__name__)
 
-_AWS_REGION_PATTERN = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 _DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._~:/+=-]{1,128}$")
 _IDEMPOTENCY_NAMESPACE = uuid.UUID("88284d12-1e04-47d5-8871-607a9e4dac09")
@@ -41,7 +41,7 @@ def _validated_queue_manifest(request: QueuedJobRequest) -> dict[str, Any]:
     if configured_regions:
         if request.target_region not in configured_regions:
             raise HTTPException(status_code=422, detail="target_region is not deployed")
-    elif not _AWS_REGION_PATTERN.fullmatch(request.target_region):
+    elif not is_aws_region_name(request.target_region):
         raise HTTPException(status_code=422, detail="target_region is not a valid AWS region")
 
     processor = _check_processor()

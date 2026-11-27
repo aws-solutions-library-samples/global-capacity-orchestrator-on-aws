@@ -461,6 +461,9 @@ _SERVICE_IMAGE_COMMON_EXCLUDES = (
     "cli/**",
     "gco/stacks/**",
     "dockerfiles/README.md",
+    # .dockerignore keeps the TLS certificate manager's files for that
+    # image's root-context build; no service image copies them.
+    "lambda/**",
 )
 
 

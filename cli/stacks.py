@@ -125,6 +125,11 @@ _CDK_SCHEMA_MISMATCH_MARKER = "Cloud assembly schema version mismatch"
 _CDK_LIBRARY_LOOKUP_LOCK = Lock()
 _INFERENCE_STREAMING_PACKAGE_FILES = ("index.mjs", "package.json", "package-lock.json")
 _KUBECTL_PACKAGE_INPUTS = ("handler.py", "requirements.txt", "manifests")
+#: The lock of the complete Python dependency graph, at the project root. The
+#: kubectl-applier-simple and helm-installer builds install their
+#: requirements.txt constrained by it, as the service images do, so it is an
+#: input of both and a change to it rebuilds them.
+_REQUIREMENTS_LOCK = "requirements-lock.txt"
 _LAMBDA_BUILD_MANIFEST = ".gco-build-manifest.json"
 _LAMBDA_BUILD_MANIFEST_VERSION = 1
 _LAMBDA_SOURCE_IGNORED_DIRECTORIES = frozenset({"__pycache__", ".mypy_cache", ".pytest_cache"})
@@ -224,6 +229,9 @@ class _CdkAssetSpec:
     source_directory: str
     build_directory: str
     source_inputs: tuple[str, ...] | None
+    #: Files outside the source directory, relative to the project root, that
+    #: the build also reads. They are part of the source digest.
+    project_inputs: tuple[str, ...] = ()
 
     def paths(self, project_root: Path) -> tuple[Path, Path]:
         lambda_dir = project_root / "lambda"
@@ -235,12 +243,14 @@ _KUBECTL_CDK_ASSET = _CdkAssetSpec(
     source_directory="kubectl-applier-simple",
     build_directory="kubectl-applier-simple-build",
     source_inputs=_KUBECTL_PACKAGE_INPUTS,
+    project_inputs=(_REQUIREMENTS_LOCK,),
 )
 _HELM_CDK_ASSET = _CdkAssetSpec(
     name="helm-installer",
     source_directory="helm-installer",
     build_directory="helm-installer-build",
     source_inputs=None,
+    project_inputs=(_REQUIREMENTS_LOCK,),
 )
 _INFERENCE_STREAMING_CDK_ASSET = _CdkAssetSpec(
     name="inference-streaming-proxy",
@@ -333,6 +343,29 @@ def _asset_tree_digest(
     except OSError, UnicodeError:
         return None
     return digest.hexdigest()
+
+
+def _asset_source_digest(
+    source_dir: Path,
+    *,
+    source_inputs: tuple[str, ...] | None,
+    project_inputs: tuple[str, ...] = (),
+) -> str | None:
+    """Hash everything one asset is built from: its source selection and project inputs.
+
+    ``source_dir`` is ``<project root>/lambda/<name>`` (``_CdkAssetSpec.paths``),
+    and ``project_inputs`` are relative to that project root. An asset with no
+    project inputs keeps its source selection's own digest, so the manifests
+    already recorded for it stay valid. A missing or unreadable input gives
+    ``None``, like a missing source file.
+    """
+    source_digest = _asset_tree_digest(source_dir, source_inputs=source_inputs)
+    if source_digest is None or not project_inputs:
+        return source_digest
+    project_digest = _asset_tree_digest(source_dir.parent.parent, source_inputs=project_inputs)
+    if project_digest is None:
+        return None
+    return hashlib.sha256(f"{source_digest}\n{project_digest}".encode()).hexdigest()
 
 
 def _read_build_manifest(build_dir: Path) -> dict[str, Any] | None:
@@ -565,11 +598,14 @@ def _asset_build_is_fresh_unlocked(
     build_dir: Path,
     *,
     source_inputs: tuple[str, ...] | None,
+    project_inputs: tuple[str, ...] = (),
 ) -> bool:
     manifest = _read_build_manifest(build_dir)
     if manifest is None or manifest.get("schema_version") != _LAMBDA_BUILD_MANIFEST_VERSION:
         return False
-    source_digest = _asset_tree_digest(source_dir, source_inputs=source_inputs)
+    source_digest = _asset_source_digest(
+        source_dir, source_inputs=source_inputs, project_inputs=project_inputs
+    )
     build_digest = _asset_tree_digest(build_dir)
     return (
         source_digest is not None
@@ -906,6 +942,7 @@ def _published_while_waiting(
     build_dir: Path,
     *,
     source_inputs: tuple[str, ...] | None,
+    project_inputs: tuple[str, ...] = (),
 ) -> Callable[[], bool]:
     """Return a check that another process published a fresh ``build_dir``.
 
@@ -934,6 +971,7 @@ def _published_while_waiting(
                     source_dir,
                     build_dir,
                     source_inputs=source_inputs,
+                    project_inputs=project_inputs,
                 )
             finally:
                 _release_file_lock(probe_file)
@@ -946,12 +984,14 @@ def _asset_build_is_fresh(
     build_dir: Path,
     *,
     source_inputs: tuple[str, ...] | None,
+    project_inputs: tuple[str, ...] = (),
 ) -> bool:
     with _lambda_asset_lock(build_dir, exclusive=False):
         return _asset_build_is_fresh_unlocked(
             source_dir,
             build_dir,
             source_inputs=source_inputs,
+            project_inputs=project_inputs,
         )
 
 
@@ -999,6 +1039,7 @@ def _prepare_lambda_asset(
     source_inputs: tuple[str, ...] | None,
     display_name: str,
     builder: Callable[[Path], None],
+    project_inputs: tuple[str, ...] = (),
 ) -> bool:
     """Build and atomically publish an asset when its completion proof is stale.
 
@@ -1013,8 +1054,15 @@ def _prepare_lambda_asset(
     another publisher's build is fresh: the pytest sessions that then hold
     shared locks for their whole run would otherwise keep the exclusive lock
     from it until the timeout.
+
+    ``project_inputs`` are the files outside ``source_dir``, relative to the
+    project root, that ``builder`` also reads (``_CdkAssetSpec.project_inputs``).
+    The completion manifest records them with the source selection, so a
+    change to one makes the build stale.
     """
-    if _asset_build_is_fresh(source_dir, build_dir, source_inputs=source_inputs):
+    if _asset_build_is_fresh(
+        source_dir, build_dir, source_inputs=source_inputs, project_inputs=project_inputs
+    ):
         return False
     with _lambda_asset_lock(
         build_dir,
@@ -1023,18 +1071,22 @@ def _prepare_lambda_asset(
             source_dir,
             build_dir,
             source_inputs=source_inputs,
+            project_inputs=project_inputs,
         ),
     ) as locked:
         if not locked:
             return False
         _recover_interrupted_asset_publish(build_dir)
-        source_digest = _asset_tree_digest(source_dir, source_inputs=source_inputs)
+        source_digest = _asset_source_digest(
+            source_dir, source_inputs=source_inputs, project_inputs=project_inputs
+        )
         if source_digest is None:
             raise RuntimeError(f"{display_name} source inputs are incomplete or unreadable")
         if _asset_build_is_fresh_unlocked(
             source_dir,
             build_dir,
             source_inputs=source_inputs,
+            project_inputs=project_inputs,
         ):
             return False
 
@@ -1045,13 +1097,19 @@ def _prepare_lambda_asset(
         try:
             builder(staging_dir)
             _normalize_asset_modes(staging_dir)
-            if _asset_tree_digest(source_dir, source_inputs=source_inputs) != source_digest:
+            if (
+                _asset_source_digest(
+                    source_dir, source_inputs=source_inputs, project_inputs=project_inputs
+                )
+                != source_digest
+            ):
                 raise RuntimeError(f"{display_name} sources changed while packaging")
             _write_build_manifest(staging_dir, source_digest)
             if not _asset_build_is_fresh_unlocked(
                 source_dir,
                 staging_dir,
                 source_inputs=source_inputs,
+                project_inputs=project_inputs,
             ):
                 raise RuntimeError(f"{display_name} completion manifest verification failed")
             _publish_staged_asset(staging_dir, build_dir)
@@ -1727,6 +1785,7 @@ def cdk_asset_consumer(project_root: str | Path) -> Iterator[None]:
                     source_dir,
                     build_dir,
                     source_inputs=spec.source_inputs,
+                    project_inputs=spec.project_inputs,
                 )
             ]
             if stale_assets:
@@ -1902,6 +1961,7 @@ class StackManager:
             source_dir,
             build_dir,
             source_inputs=_KUBECTL_CDK_ASSET.source_inputs,
+            project_inputs=_KUBECTL_CDK_ASSET.project_inputs,
         )
 
     @staticmethod
@@ -1911,6 +1971,7 @@ class StackManager:
             source_dir,
             build_dir,
             source_inputs=_HELM_CDK_ASSET.source_inputs,
+            project_inputs=_HELM_CDK_ASSET.project_inputs,
         )
 
     @staticmethod
@@ -2243,7 +2304,12 @@ class StackManager:
         self._build_inference_streaming_proxy_lambda()
 
     def _build_kubectl_lambda(self) -> None:
-        """Build the kubectl-applier-simple Lambda package."""
+        """Build the kubectl-applier-simple Lambda package.
+
+        pip installs ``requirements.txt`` constrained by the project's
+        ``requirements-lock.txt``, so the indirect dependencies are the locked
+        ones too. The lock is read where it is and not copied into the package.
+        """
         source_dir, build_dir = _KUBECTL_CDK_ASSET.paths(self.project_root)
         requirements = source_dir / "requirements.txt"
         if not source_dir.is_dir() or not requirements.is_file():
@@ -2264,6 +2330,8 @@ class StackManager:
                         "install",
                         "-r",
                         str(requirements),
+                        "-c",
+                        str(self.project_root / _REQUIREMENTS_LOCK),
                         "-t",
                         str(staging_dir),
                         "--upgrade",
@@ -2300,10 +2368,16 @@ class StackManager:
             source_inputs=_KUBECTL_CDK_ASSET.source_inputs,
             display_name=display_name,
             builder=build,
+            project_inputs=_KUBECTL_CDK_ASSET.project_inputs,
         )
 
     def _build_helm_installer_lambda(self) -> None:
-        """Build the complete helm-installer Lambda Docker context."""
+        """Build the complete helm-installer Lambda Docker context.
+
+        The context is the source directory plus a copy of the project's
+        ``requirements-lock.txt``, which the Dockerfile's pip install is
+        constrained by.
+        """
         source_dir, build_dir = _HELM_CDK_ASSET.paths(self.project_root)
         if not source_dir.is_dir():
             return
@@ -2315,6 +2389,7 @@ class StackManager:
                 ignore=shutil.ignore_patterns(*_LAMBDA_SOURCE_COPY_IGNORE_PATTERNS),
                 dirs_exist_ok=True,
             )
+            shutil.copy2(self.project_root / _REQUIREMENTS_LOCK, staging_dir / _REQUIREMENTS_LOCK)
 
         _prepare_lambda_asset(
             source_dir,
@@ -2322,6 +2397,7 @@ class StackManager:
             source_inputs=_HELM_CDK_ASSET.source_inputs,
             display_name="helm-installer Lambda package",
             builder=build,
+            project_inputs=_HELM_CDK_ASSET.project_inputs,
         )
 
     def _build_inference_streaming_proxy_lambda(self) -> None:

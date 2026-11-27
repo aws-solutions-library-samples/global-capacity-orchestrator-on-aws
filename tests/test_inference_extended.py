@@ -2,8 +2,9 @@
 Extended tests for the inference endpoint feature.
 
 Covers the leader-election path on InferenceMonitor (_try_acquire_lease
-for renew-as-holder, claim-when-empty, claim-when-None, and the
-not-leader branch), HPA creation, deployment creation with
+for renew-as-holder, claim-when-empty, claim-when-None, the not-leader
+branch, a takeover only after a full lease duration on the monitor's own
+clock, and a missing Lease left to the manifests), HPA creation, deployment creation with
 model_source, the start/stop lifecycle, the monitor's main() entry
 point, and InferenceManager.add_region / remove_region. Uses a
 _make_monitor helper that patches every kubernetes client class at once
@@ -12,6 +13,8 @@ so the fixture surface stays small.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -23,7 +26,17 @@ from kubernetes.client.rest import ApiException
 # =============================================================================
 
 
-def _make_monitor(mock_store=None):
+class _Clock:
+    """A monotonic clock the test moves by hand."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _make_monitor(mock_store=None, lease_clock: Callable[[], float] = time.monotonic):
     """Create an InferenceMonitor with all K8s clients mocked."""
     with (
         patch("gco.services.inference_monitor.config.load_incluster_config"),
@@ -46,6 +59,7 @@ def _make_monitor(mock_store=None):
             store=store,
             namespace="gco-inference",
             reconcile_interval=5,
+            lease_clock=lease_clock,
         )
         m.apps_v1 = mock_apps.return_value
         m.core_v1 = mock_core.return_value
@@ -125,51 +139,52 @@ class TestLeaderElection:
 
         assert result is False
 
-    def test_lease_takeover_when_expired(self):
-        monitor = _make_monitor()
+    def test_lease_takeover_waits_a_full_duration_on_the_monitors_clock(self):
+        """A renewTime far behind this replica's wall clock is no proof the holder stopped."""
+        clock = _Clock()
+        monitor = _make_monitor(lease_clock=clock)
         mock_coord = MagicMock()
         lease = MagicMock()
         lease.spec.holder_identity = "dead-pod"
-        # Expired: renew_time is way in the past
         lease.spec.renew_time = datetime.now(UTC) - timedelta(minutes=10)
+        lease.spec.lease_duration_seconds = 15
+        lease.spec.lease_transitions = 4
         mock_coord.read_namespaced_lease.return_value = lease
 
         with patch(
             "gco.services.inference_monitor.client.CoordinationV1Api", return_value=mock_coord
         ):
-            result = monitor._try_acquire_lease("test-lease", "my-pod")
+            assert monitor._try_acquire_lease("test-lease", "my-pod") is False
+            clock.now += 14
+            assert monitor._try_acquire_lease("test-lease", "my-pod") is False
+            mock_coord.replace_namespaced_lease.assert_not_called()
+            # Unchanged for the full 15 seconds on this replica's own clock.
+            clock.now += 1
+            assert monitor._try_acquire_lease("test-lease", "my-pod") is True
 
-        assert result is True
+        assert lease.spec.holder_identity == "my-pod"
+        assert lease.spec.lease_transitions == 5
 
-    def test_lease_create_when_404(self):
-        from kubernetes.client.rest import ApiException
-
+    def test_missing_lease_is_not_held_and_never_created(self, caplog):
+        """The manifests pre-create the Lease, and the monitor's Role cannot create one."""
         monitor = _make_monitor()
         mock_coord = MagicMock()
         mock_coord.read_namespaced_lease.side_effect = ApiException(status=404)
 
-        with patch(
-            "gco.services.inference_monitor.client.CoordinationV1Api", return_value=mock_coord
-        ):
-            result = monitor._try_acquire_lease("test-lease", "my-pod")
-
-        assert result is True
-        mock_coord.create_namespaced_lease.assert_called_once()
-
-    def test_lease_create_conflict_returns_false(self):
-        from kubernetes.client.rest import ApiException
-
-        monitor = _make_monitor()
-        mock_coord = MagicMock()
-        mock_coord.read_namespaced_lease.side_effect = ApiException(status=404)
-        mock_coord.create_namespaced_lease.side_effect = ApiException(status=409)
-
-        with patch(
-            "gco.services.inference_monitor.client.CoordinationV1Api", return_value=mock_coord
+        with (
+            patch(
+                "gco.services.inference_monitor.client.CoordinationV1Api", return_value=mock_coord
+            ),
+            caplog.at_level("WARNING", logger="gco.services.inference_monitor"),
         ):
             result = monitor._try_acquire_lease("test-lease", "my-pod")
 
         assert result is False
+        mock_coord.create_namespaced_lease.assert_not_called()
+        mock_coord.replace_namespaced_lease.assert_not_called()
+        assert monitor._leadership_lost.is_set()
+        assert "Leader Lease gco-inference/test-lease does not exist" in caplog.text
+        assert "reconciliation waits until it does" in caplog.text
 
     def test_lease_api_error_returns_false(self):
         from kubernetes.client.rest import ApiException

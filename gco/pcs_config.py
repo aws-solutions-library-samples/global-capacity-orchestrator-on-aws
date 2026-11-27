@@ -424,7 +424,7 @@ def _validate_custom_settings(raw: object, path: str) -> dict[str, str]:
     settings: dict[str, str] = {}
     for key, value in block.items():
         name = str(key)
-        if not SLURM_PARAMETER_PATTERN.match(name):
+        if not SLURM_PARAMETER_PATTERN.fullmatch(name):
             raise PcsConfigError(f"{path} key {name!r} is not a Slurm parameter name")
         if type(value) is bool or not isinstance(value, str | int | float):
             raise PcsConfigError(f"{path}.{name} must be a string or a number, got {value!r}")
@@ -475,7 +475,7 @@ def instance_architecture(instance_type: str) -> str:
     AMI lookup and the preflight compare against ``describe_instance_types``.
     """
     family = instance_type.split(".", 1)[0]
-    if family == "a1" or _GRAVITON_FAMILY_PATTERN.match(family):
+    if family == "a1" or _GRAVITON_FAMILY_PATTERN.fullmatch(family):
         return "arm64"
     return "x86_64"
 
@@ -485,7 +485,7 @@ def _validate_instance_types(raw: object, path: str) -> tuple[list[str], str]:
     if not types:
         raise PcsConfigError(f"{path} must name at least one EC2 instance type")
     for instance_type in types:
-        if not INSTANCE_TYPE_PATTERN.match(instance_type):
+        if not INSTANCE_TYPE_PATTERN.fullmatch(instance_type):
             raise PcsConfigError(f"{path} has an invalid EC2 instance type {instance_type!r}")
     if len(set(types)) != len(types):
         raise PcsConfigError(f"{path} lists an instance type twice")
@@ -499,7 +499,9 @@ def _validate_instance_types(raw: object, path: str) -> tuple[list[str], str]:
 
 
 def _validate_ami(value: object, path: str) -> str:
-    if not isinstance(value, str) or not (value in PCS_AMI_CHOICES or AMI_ID_PATTERN.match(value)):
+    if not isinstance(value, str) or not (
+        value in PCS_AMI_CHOICES or AMI_ID_PATTERN.fullmatch(value)
+    ):
         raise PcsConfigError(
             f"{path} must be 'sample', 'dlami' or an AMI id (ami-...), got {value!r}"
         )
@@ -509,7 +511,7 @@ def _validate_ami(value: object, path: str) -> str:
 def _validate_availability_zones(raw: object, path: str) -> list[str]:
     zones = _require_string_list(raw, path)
     for zone in zones:
-        if not AVAILABILITY_ZONE_PATTERN.match(zone):
+        if not AVAILABILITY_ZONE_PATTERN.fullmatch(zone):
             raise PcsConfigError(f"{path} has an invalid availability zone {zone!r}")
     if len(set(zones)) != len(zones):
         raise PcsConfigError(f"{path} lists an availability zone twice")
@@ -523,7 +525,7 @@ def _validate_capacity_reservation(raw: object, path: str) -> dict[str, str] | N
     _reject_unknown_keys(block, ("type", "id"), path)
     kind = _require_choice(block.get("type"), CAPACITY_RESERVATION_TYPES, f"{path}.type")
     reservation_id = _require_nonempty_string(block.get("id"), f"{path}.id")
-    if not CAPACITY_RESERVATION_ID_PATTERN.match(reservation_id):
+    if not CAPACITY_RESERVATION_ID_PATTERN.fullmatch(reservation_id):
         raise PcsConfigError(
             f"{path}.id must be a capacity reservation id (cr-...), got {reservation_id!r}"
         )
@@ -535,7 +537,7 @@ def _validate_node_group(raw: object, index: int) -> dict[str, Any]:
     block = _require_object(raw, path)
     _reject_unknown_keys(block, (*NODE_GROUP_DEFAULTS.keys(), "name"), path)
     name = _require_nonempty_string(block.get("name"), f"{path}.name")
-    if not PCS_NAME_PATTERN.match(name):
+    if not PCS_NAME_PATTERN.fullmatch(name):
         raise PcsConfigError(
             f"{path}.name {name!r} is not a PCS compute node group name: 3-25 characters, a "
             "letter followed by letters, digits and hyphens"
@@ -654,7 +656,7 @@ def _validate_queue(raw: object, index: int, node_group_names: set[str]) -> dict
     block = _require_object(raw, path)
     _reject_unknown_keys(block, (*QUEUE_DEFAULTS.keys(), "name"), path)
     name = _require_nonempty_string(block.get("name"), f"{path}.name")
-    if not PCS_NAME_PATTERN.match(name):
+    if not PCS_NAME_PATTERN.fullmatch(name):
         raise PcsConfigError(
             f"{path}.name {name!r} is not a PCS queue name: 3-25 characters, a letter followed "
             "by letters, digits and hyphens"
@@ -711,7 +713,7 @@ def _validate_identity(
     _reject_unknown_keys(block, PCS_DEFAULTS["identity"].keys(), path)
     identity = _deep_merge(PCS_DEFAULTS["identity"], block)
     name = _require_nonempty_string(identity["name"], f"{path}.name")
-    if not POSIX_NAME_PATTERN.match(name):
+    if not POSIX_NAME_PATTERN.fullmatch(name):
         raise PcsConfigError(f"{path}.name must be a POSIX user name, got {name!r}")
     identity["name"] = name
     identity["uid"] = _require_int(identity["uid"], (0, 2**31 - 1), f"{path}.uid")
@@ -733,7 +735,7 @@ def _validate_identity(
         directory = _require_nonempty_string(identity["dir"], f"{path}.dir")
         if not directory.startswith("/"):
             raise PcsConfigError(f"{path}.dir must be an absolute path, got {directory!r}")
-        if home_on_efs and not EFS_HOME_DIR_PATTERN.match(directory):
+        if home_on_efs and not EFS_HOME_DIR_PATTERN.fullmatch(directory):
             raise PcsConfigError(
                 f"{path}.dir must be a directory straight under {PCS_HOME_MOUNT_PATH} (the "
                 f"shared EFS home the managed cluster mounts, where the node lifecycle action "
@@ -773,7 +775,7 @@ def _validate_managed(raw: object, *, fsx_enabled: bool) -> dict[str, Any]:
 
     if managed["cluster_name"] is not None:
         cluster_name = _require_nonempty_string(managed["cluster_name"], f"{path}.cluster_name")
-        if not PCS_CLUSTER_NAME_PATTERN.match(cluster_name):
+        if not PCS_CLUSTER_NAME_PATTERN.fullmatch(cluster_name):
             raise PcsConfigError(
                 f"{path}.cluster_name {cluster_name!r} is not a PCS cluster name: 3-40 "
                 "characters, a letter followed by letters, digits and hyphens"
@@ -805,7 +807,7 @@ def _validate_managed(raw: object, *, fsx_enabled: bool) -> dict[str, Any]:
     login = managed["login"]
     _require_bool(login["enabled"], f"{path}.login.enabled")
     instance_type = _require_nonempty_string(login["instance_type"], f"{path}.login.instance_type")
-    if not INSTANCE_TYPE_PATTERN.match(instance_type):
+    if not INSTANCE_TYPE_PATTERN.fullmatch(instance_type):
         raise PcsConfigError(
             f"{path}.login.instance_type has an invalid EC2 instance type {instance_type!r}"
         )
@@ -920,7 +922,7 @@ def validate_pcs_config(raw: object, *, fsx_enabled: bool = False) -> dict[str, 
     cluster_id = config["cluster_id"]
     if cluster_id is not None:
         cluster_id = _require_nonempty_string(cluster_id, "pcs.cluster_id")
-        if not PCS_CLUSTER_ID_PATTERN.match(cluster_id):
+        if not PCS_CLUSTER_ID_PATTERN.fullmatch(cluster_id):
             raise PcsConfigError(
                 f"pcs.cluster_id must be a PCS cluster id (pcs_...; see `aws pcs list-clusters`), "
                 f"got {cluster_id!r}"
@@ -1025,7 +1027,7 @@ def managed_cluster_name(config: Mapping[str, Any], project_name: str) -> str:
     if configured:
         return str(configured)
     name = f"{project_name}-pcs"
-    if not PCS_CLUSTER_NAME_PATTERN.match(name):
+    if not PCS_CLUSTER_NAME_PATTERN.fullmatch(name):
         raise PcsConfigError(
             f"derived PCS cluster name {name!r} is not valid for PCS (3-40 characters, a letter "
             "followed by letters, digits and hyphens); set pcs.managed.cluster_name"

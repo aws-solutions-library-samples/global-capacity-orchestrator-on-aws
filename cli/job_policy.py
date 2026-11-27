@@ -463,7 +463,7 @@ def registry_drift(policies: list[RegionPolicy]) -> PolicyDrift | None:
             sorted(
                 host
                 for host in entry.policy.trusted_registries  # type: ignore[union-attr]
-                if not _ECR_HOSTNAME.match(host)
+                if not _ECR_HOSTNAME.fullmatch(host)
             )
         )
         for entry in readable
@@ -486,7 +486,7 @@ def ecr_augmentation(policies: list[RegionPolicy]) -> dict[str, list[str]]:
         entry.region: sorted(
             host
             for host in entry.policy.trusted_registries  # type: ignore[union-attr]
-            if _ECR_HOSTNAME.match(host)
+            if _ECR_HOSTNAME.fullmatch(host)
         )
         for entry in policies
         if entry.ok

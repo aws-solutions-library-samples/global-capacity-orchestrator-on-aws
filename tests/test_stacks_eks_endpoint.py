@@ -55,6 +55,11 @@ class TestValidCidr:
         assert not _valid_cidr("10.0.0.0/33")  # prefix out of range
         assert not _valid_cidr("corp-office")
 
+    def test_rejects_a_trailing_newline(self) -> None:
+        # ``$`` also matches before a final newline; the check is a fullmatch.
+        assert _valid_cidr("203.0.113.7/32")
+        assert not _valid_cidr("203.0.113.7/32\n")
+
 
 class TestEndpointSet:
     def _invoke(self, args: list[str], tmp_path: Any, context: dict[str, Any] | None = None):

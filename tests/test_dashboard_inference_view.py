@@ -1166,7 +1166,8 @@ class TestDeployDialog:
             "--extra-args=--max-model-len --extra-args 4096"
         ]
 
-    @pytest.mark.parametrize("name", ["Qwen-chat", "7b-chat", "qwen_chat", "qwen-"])
+    # "qwen-chat\n": ``$`` also matches before a final newline; the check is a fullmatch.
+    @pytest.mark.parametrize("name", ["Qwen-chat", "7b-chat", "qwen_chat", "qwen-", "qwen-chat\n"])
     def test_an_invalid_name_is_refused(self, fake_fleet: FakeFleet, name: str) -> None:
         app = _deploy_dialog()
         app.text_input(key="deploy_name").input(name)

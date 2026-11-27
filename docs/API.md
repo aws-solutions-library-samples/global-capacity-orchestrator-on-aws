@@ -2532,9 +2532,12 @@ deployed policy for two independent reasons:
   the services' default list (`gco/job_admission.py`
   `DEFAULT_TRUSTED_REGISTRIES`) rather than from ECR alone.
 
-Because both the REST manifest processor and the SQS queue processor read the
-same environment variables, this endpoint describes both submission paths —
-neither is a bypass of the other.
+The SQS queue processor reads the same environment variables into the same
+policy and judges a manifest with the same admission code
+(`gco.job_admission.admit_manifest`), so this endpoint describes both
+submission paths and neither is a bypass of the other. The exception is
+`validation_enabled`: only the REST service reads it, and the queue processor
+always validates.
 
 Three layers govern admission, and the response reports all three:
 

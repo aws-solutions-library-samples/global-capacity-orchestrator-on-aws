@@ -457,25 +457,26 @@ class TestSubmissionPathParity:
         from gco.services import queue_processor
         from gco.services.manifest_processor import ManifestProcessor
 
-        processor = ManifestProcessor.__new__(ManifestProcessor)
-        processor.validation_enabled = True
-        processor.yaml_max_depth = 50
-        processor.allowed_namespaces = {"gco-jobs"}
-        processor.allowed_kinds = set(ja.DEFAULT_ALLOWED_KINDS)
-        processor.require_accelerator_toleration = False
-        processor._validate_resource_limits = lambda m: (True, "")  # type: ignore[method-assign]
-        processor._validate_security_context = lambda m: (True, None)  # type: ignore[method-assign]
-        processor._validate_image_sources = lambda m: (True, None)  # type: ignore[method-assign]
+        with (
+            patch("gco.services.manifest_processor.config"),
+            patch("gco.services.manifest_processor.client"),
+        ):
+            processor = ManifestProcessor(
+                "c", "us-east-1", {"require_accelerator_toleration": False}
+            )
         processor.runtime_class_exists = lambda name: runtime_class_present
         monkeypatch.setattr(
             queue_processor, "runtime_class_exists", lambda name: runtime_class_present
         )
+        monkeypatch.setattr(
+            queue_processor, "JOB_VALIDATION_POLICY", processor.job_validation_policy()
+        )
         rest_ok, rest_message = processor.validate_manifest(copy.deepcopy(manifest))
         sqs_ok, sqs_message = queue_processor.validate_manifest(copy.deepcopy(manifest))
-        assert rest_ok is sqs_ok is expected
+        assert (sqs_ok, sqs_message) == (rest_ok, rest_message)
+        assert rest_ok is expected
         if not expected:
             assert str(rest_message).startswith("Nitro Sandbox validation failed: ")
-            assert rest_message == sqs_message
 
 
 # ---------------------------------------------------------------------------

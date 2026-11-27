@@ -13,7 +13,9 @@ build published before that no longer counts as fresh, every copy a cloud
 assembly publishes is given git's modes once ``app.py`` has synthesized it,
 and ``deploy`` refuses a checkout whose deployable sources other users cannot
 read. They also pin what the stacks package from a ``lambda/`` source
-directory: never the caches a local test run leaves in it.
+directory: never the caches a local test run leaves in it. The TLS
+certificate manager image builds from the repository root, and it stages and
+hashes only its own inputs and requirements-lock.txt.
 """
 
 from __future__ import annotations
@@ -616,6 +618,141 @@ def test_a_working_checkout_zips_what_a_clean_clone_zips(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
+# The TLS certificate manager image's repository-root build context
+# ---------------------------------------------------------------------------
+
+_TLS_MANAGER_DOCKERFILE = "lambda/tls-certificate-manager/Dockerfile"
+
+
+def test_tls_manager_image_stages_only_its_inputs_and_the_lock(tmp_path: Path) -> None:
+    """The image builds from the repository root but hashes only what it is built from.
+
+    The stack's asset stages exactly the image's inputs and .dockerignore, and
+    its hash is the hash of a directory holding nothing else, so editing any
+    other file in the checkout leaves it unchanged. Editing the lock changes it.
+    """
+    import shutil
+
+    import aws_cdk as cdk
+    from aws_cdk import aws_ecr_assets as ecr_assets
+
+    from gco.stacks import api_gateway_global_stack as global_api
+
+    outdir = tmp_path / "cdk.out"
+    app = cdk.App(outdir=str(outdir))
+    global_api.GCOApiGatewayGlobalStack(app, "TlsContext", global_accelerator_dns="ga.example.com")
+    app.synth()
+    images = {}
+    for manifest in outdir.glob("*.assets.json"):
+        images.update(json.loads(manifest.read_text(encoding="utf-8"))["dockerImages"])
+    ((asset_id, asset),) = [
+        (key, image)
+        for key, image in images.items()
+        if image["source"].get("dockerFile") == _TLS_MANAGER_DOCKERFILE
+    ]
+    copy = outdir / asset["source"]["directory"]
+    inputs = set(global_api._TLS_CERTIFICATE_MANAGER_IMAGE_INPUTS)
+    assert _TLS_MANAGER_DOCKERFILE in inputs and "requirements-lock.txt" in inputs
+    staged = {path.relative_to(copy).as_posix() for path in copy.rglob("*") if path.is_file()}
+    assert staged == inputs | {".dockerignore"}
+
+    def image_hash(checkout: Path) -> str:
+        bare = cdk.App(outdir=str(tmp_path / f"cdk.out.{checkout.name}"))
+        return ecr_assets.DockerImageAsset(
+            cdk.Stack(bare, "Bare"),
+            "Image",
+            directory=str(checkout),
+            file=_TLS_MANAGER_DOCKERFILE,
+            exclude=list(global_api._TLS_CERTIFICATE_MANAGER_IMAGE_EXCLUDES),
+            platform=ecr_assets.Platform.LINUX_AMD64,
+        ).asset_hash
+
+    def checkout(name: str) -> Path:
+        root = tmp_path / name
+        for relative in sorted(inputs | {".dockerignore"}):
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO_ROOT / relative, root / relative)
+        return root
+
+    assert image_hash(checkout("clean")) == asset_id
+    working = checkout("working")
+    for unrelated in (
+        "lambda/tls-certificate-manager/README.md",
+        "lambda/tls-certificate-manager/__pycache__/handler.cpython-314.pyc",
+        "lambda/helm-installer/handler.py",
+        "gco/services/api.py",
+        "cli/main.py",
+        "pyproject.toml",
+        "dockerfiles/Dockerfile.health-monitor",
+    ):
+        _write(working / unrelated)
+    assert image_hash(working) == asset_id
+    relocked = checkout("relocked")
+    with (relocked / "requirements-lock.txt").open("a", encoding="utf-8") as lock:
+        lock.write("six==1.17.0\n")
+    assert image_hash(relocked) != asset_id
+
+
+def test_docker_keeps_every_file_the_tls_manager_image_copies() -> None:
+    """Docker filters the staged context by .dockerignore again, so it must keep the COPY sources.
+
+    CDK stages the image's inputs with the repository's .dockerignore, which
+    the build then applies. That file allowlists the service images' inputs,
+    and everything else, lambda/ included, is dropped unless it is listed.
+    """
+    import aws_cdk as cdk
+
+    from gco.stacks.api_gateway_global_stack import _TLS_CERTIFICATE_MANAGER_IMAGE_INPUTS
+
+    dockerfile = (REPO_ROOT / _TLS_MANAGER_DOCKERFILE).read_text(encoding="utf-8")
+    sources = [
+        source
+        for line in dockerfile.splitlines()
+        if line.startswith("COPY ") and "--from=" not in line
+        for source in line.split()[1:-1]
+    ]
+    assert "requirements-lock.txt" in sources
+    assert set(sources) <= set(_TLS_CERTIFICATE_MANAGER_IMAGE_INPUTS)
+    patterns = [
+        line
+        for line in (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    docker = cdk.DockerIgnoreStrategy(str(REPO_ROOT), patterns)
+    dropped = [source for source in sources if docker.ignores(str(REPO_ROOT / source))]
+    assert not dropped, f".dockerignore drops files the TLS manager image copies: {dropped}"
+
+
+def test_no_service_image_context_holds_the_tls_manager_files() -> None:
+    """Allowlisting the TLS manager's files for its image must not add them to the services'.
+
+    The service images share the repository-root context and .dockerignore,
+    so a TLS handler edit would otherwise change every service image's hash.
+    """
+    import aws_cdk as cdk
+
+    from gco.stacks.api_gateway_global_stack import _TLS_CERTIFICATE_MANAGER_IMAGE_INPUTS
+    from gco.stacks.regional_stack import (
+        _SERVICE_IMAGE_BUILD_INPUTS,
+        _service_image_asset_excludes,
+    )
+
+    patterns = [
+        line
+        for line in (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    lambda_inputs = [path for path in _TLS_CERTIFICATE_MANAGER_IMAGE_INPUTS if "/" in path]
+    assert lambda_inputs
+    for dockerfile in _SERVICE_IMAGE_BUILD_INPUTS:
+        context = cdk.DockerIgnoreStrategy(
+            str(REPO_ROOT), patterns + _service_image_asset_excludes(dockerfile)
+        )
+        kept = [path for path in lambda_inputs if not context.ignores(str(REPO_ROOT / path))]
+        assert not kept, f"{dockerfile} would stage {kept}"
+
+
+# ---------------------------------------------------------------------------
 # The checkout readability preflight
 # ---------------------------------------------------------------------------
 
@@ -767,8 +904,9 @@ def test_every_asset_directory_is_covered_by_the_preflight_or_the_cli_build() ->
     # what the regional stack excludes from every image.
     from gco.stacks.regional_stack import _SERVICE_IMAGE_COMMON_EXCLUDES
 
+    # An allowlisted path counts by its top-level directory or file.
     allowed = {
-        line[1:].strip().rstrip("/")
+        line[1:].strip().rstrip("/").split("/")[0]
         for line in (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
         if line.startswith("!")
     }
@@ -784,6 +922,19 @@ def test_every_asset_directory_is_covered_by_the_preflight_or_the_cli_build() ->
         if pattern.removesuffix("/**") not in fully_excluded
     }
     assert partially_excluded == set(stacks._ASSET_SOURCE_EXCLUDED)
+
+    # The TLS certificate manager image builds from the repository root too,
+    # from the files its exclude list keeps; the preflight walks every one.
+    from gco.stacks.api_gateway_global_stack import _TLS_CERTIFICATE_MANAGER_IMAGE_INPUTS
+
+    for path in _TLS_CERTIFICATE_MANAGER_IMAGE_INPUTS:
+        parts = path.split("/")
+        assert parts[0] in stacks._ASSET_SOURCE_ROOTS, path
+        for depth in range(1, len(parts) - 1):
+            parent = "/".join(parts[:depth])
+            assert not stacks._skip_asset_source_directory(parent, parts[depth]), path
+        if len(parts) > 1:
+            assert not stacks._skip_asset_source_file("/".join(parts[:-1]), parts[-1]), path
 
 
 def test_the_real_checkout_is_deployable() -> None:

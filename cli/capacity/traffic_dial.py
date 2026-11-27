@@ -97,7 +97,7 @@ class TrafficDialManager:
                 kwargs["NextToken"] = token
             response = ssm.get_parameters_by_path(**kwargs)
             for parameter in response.get("Parameters", []):
-                match = pattern.match(str(parameter.get("Name", "")))
+                match = pattern.fullmatch(str(parameter.get("Name", "")))
                 if match:
                     groups[match.group("region")] = str(parameter.get("Value", ""))
             token = response.get("NextToken")

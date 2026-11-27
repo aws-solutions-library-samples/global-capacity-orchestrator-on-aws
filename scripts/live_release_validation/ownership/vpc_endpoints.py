@@ -66,7 +66,7 @@ def _strip_deleted_vpc_endpoints(
         kept: list[dict[str, Any]] = []
         for entry in resources.get("tagged_resources", []):
             arn = str(entry.get("arn") or "")
-            match = _VPC_ENDPOINT_ARN.match(arn)
+            match = _VPC_ENDPOINT_ARN.fullmatch(arn)
             if (
                 match is None
                 or match.group("region") != region

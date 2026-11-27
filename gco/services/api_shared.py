@@ -1069,7 +1069,7 @@ def _collect_job_events(
         pod_name = _event_involved_name(event)
         if pod_name is None:
             continue
-        if pod_name not in covered_pod_names and not name_pattern.match(pod_name):
+        if pod_name not in covered_pod_names and not name_pattern.fullmatch(pod_name):
             continue
         covered_pod_names.add(pod_name)
         pod_events.append(event)

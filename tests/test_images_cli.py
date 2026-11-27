@@ -170,6 +170,15 @@ def test_rewrite_image_uri_rejects_ecr_lookalike_suffix() -> None:
     assert _rewrite_image_uri_for_region(uri, "us-west-2") == uri
 
 
+def test_rewrite_image_uri_leaves_a_host_with_a_trailing_newline_alone() -> None:
+    """The host check is a fullmatch: ``$`` alone would also match before the newline."""
+    host = "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+    assert _rewrite_image_uri_for_region(host, "us-west-2") == (
+        "123456789012.dkr.ecr.us-west-2.amazonaws.com"
+    )
+    assert _rewrite_image_uri_for_region(f"{host}\n", "us-west-2") == f"{host}\n"
+
+
 @given(
     bad_path=st.from_regex(r"^[a-z]+(/\.\.)+/[a-z]+$", fullmatch=True),
 )
@@ -210,6 +219,13 @@ def test_validate_tag_rejects_dot_prefix(manager: ImageManager) -> None:
 def test_validate_tag_rejects_too_long(manager: ImageManager) -> None:
     with pytest.raises(ValueError, match="Invalid image tag"):
         manager._validate_tag("a" * 200)
+
+
+def test_validate_tag_rejects_a_trailing_newline(manager: ImageManager) -> None:
+    """A trailing newline slipped past ``match`` with ``$``; the check is a fullmatch."""
+    assert manager._validate_tag("v1.2.3") == "v1.2.3"
+    with pytest.raises(ValueError, match="Invalid image tag"):
+        manager._validate_tag("v1.2.3\n")
 
 
 # ---------------------------------------------------------------------------

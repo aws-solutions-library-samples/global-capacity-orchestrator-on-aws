@@ -240,3 +240,42 @@ class TestWorkflowWiring:
                     referenced = (step.get("with") or {}).get("file")
                     if referenced and "${{" not in referenced:
                         assert (REPO_ROOT / referenced).is_file(), f"{name}: {referenced}"
+
+
+@pytest.mark.parametrize(
+    ("dockerfile", "context"),
+    [
+        pytest.param("FROM scratch\nCOPY handler.py .\n", "lambda/demo", id="own-directory"),
+        pytest.param(
+            "FROM scratch\nCOPY lambda/demo/handler.py requirements-lock.txt ./\n",
+            ".",
+            id="repository-paths",
+        ),
+        pytest.param(
+            "FROM scratch\ncopy --chown=1000:1000 --chmod=0644 lambda/demo/handler.py .\n",
+            ".",
+            id="flags-and-lowercase",
+        ),
+        pytest.param("FROM scratch\nADD lambda/demo/data.tar /opt/\n", ".", id="add"),
+        # Only a source counts: a destination under lambda/ is no repository path.
+        pytest.param("FROM scratch\nCOPY handler.py lambda/demo/\n", "lambda/demo", id="dest"),
+        pytest.param("FROM scratch\nRUN echo lambda/demo\n", "lambda/demo", id="not-a-copy"),
+    ],
+)
+def test_a_container_lambda_builds_from_the_root_only_when_it_copies_repository_paths(
+    tmp_path: Path, dockerfile: str, context: str
+) -> None:
+    """The context is read from the Dockerfile, so CI builds each image as its asset does."""
+    _write(tmp_path / "lambda" / "demo" / "Dockerfile", dockerfile)
+
+    (build,) = [b for b in discover_image_builds(tmp_path) if b.image == "demo"]
+
+    assert (build.dockerfile, build.context) == ("lambda/demo/Dockerfile", context)
+
+
+def test_the_tls_certificate_manager_builds_from_the_root_and_the_helm_installer_does_not() -> None:
+    """The two container Lambdas the lock constrains, built where their CDK assets build them."""
+    builds = {b.image: b.context for b in discover_image_builds()}
+
+    assert builds["tls-certificate-manager"] == "."
+    assert builds["helm-installer"] == "lambda/helm-installer"

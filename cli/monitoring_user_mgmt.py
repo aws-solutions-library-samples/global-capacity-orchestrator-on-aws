@@ -61,9 +61,9 @@ def read_grafana_admin_credentials(
     ``RuntimeError`` if kubectl fails, does not answer within
     ``_KUBECTL_TIMEOUT_SECONDS``, or the keys are absent.
     """
-    if not _NAMESPACE_RE.match(namespace):
+    if not _NAMESPACE_RE.fullmatch(namespace):
         raise ValueError(f"Invalid namespace {namespace!r}")
-    if not _SECRET_RE.match(secret_name):
+    if not _SECRET_RE.fullmatch(secret_name):
         raise ValueError(f"Invalid secret name {secret_name!r}")
 
     cmd = [

@@ -2127,10 +2127,13 @@ class TestInferenceStreamingProxyBuild:
         source: Path,
         build: Path,
         source_inputs: tuple[str, ...] | None,
+        project_inputs: tuple[str, ...] = (),
     ) -> None:
-        from cli.stacks import _asset_tree_digest, _write_build_manifest
+        from cli.stacks import _asset_source_digest, _write_build_manifest
 
-        source_digest = _asset_tree_digest(source, source_inputs=source_inputs)
+        source_digest = _asset_source_digest(
+            source, source_inputs=source_inputs, project_inputs=project_inputs
+        )
         assert source_digest is not None
         _write_build_manifest(build, source_digest)
 
@@ -2152,16 +2155,58 @@ class TestInferenceStreamingProxyBuild:
         build = tmp_path / "lambda" / "kubectl-applier-simple-build"
         self._write_asset_tree(source, files)
         self._write_asset_tree(build, files)
+        (tmp_path / "requirements-lock.txt").write_text("pyyaml==6.0.3\n", encoding="utf-8")
         (build / "yaml").mkdir()
         self._complete_asset_manifest(
             source,
             build,
             ("handler.py", "requirements.txt", "manifests"),
+            ("requirements-lock.txt",),
         )
         assert StackManager._kubectl_build_is_fresh(source, build)
 
         (build / relative_path).write_text("stale\n", encoding="utf-8")
         assert not StackManager._kubectl_build_is_fresh(source, build)
+
+    @pytest.mark.parametrize(
+        ("source_directory", "source_inputs"),
+        [
+            ("kubectl-applier-simple", ("handler.py", "requirements.txt", "manifests")),
+            ("helm-installer", None),
+        ],
+    )
+    def test_python_asset_freshness_tracks_the_project_lock(
+        self,
+        tmp_path: Path,
+        source_directory: str,
+        source_inputs: tuple[str, ...] | None,
+    ) -> None:
+        """Both builds install against requirements-lock.txt, so a lock edit makes them stale."""
+        from cli.stacks import StackManager
+
+        files = {
+            "handler.py": "def handler():\n    return None\n",
+            "requirements.txt": "PyYAML==6.0.3\n",
+            "manifests/00-namespaces.yaml": "apiVersion: v1\nkind: Namespace\n",
+        }
+        source = tmp_path / "lambda" / source_directory
+        build = tmp_path / "lambda" / f"{source_directory}-build"
+        self._write_asset_tree(source, files)
+        self._write_asset_tree(build, files)
+        lock = tmp_path / "requirements-lock.txt"
+        lock.write_text("pyyaml==6.0.3\n", encoding="utf-8")
+        self._complete_asset_manifest(source, build, source_inputs, ("requirements-lock.txt",))
+        is_fresh = (
+            StackManager._helm_build_is_fresh
+            if source_directory == "helm-installer"
+            else StackManager._kubectl_build_is_fresh
+        )
+        assert is_fresh(source, build)
+
+        lock.write_text("pyyaml==6.0.3\nsix==1.17.0\n", encoding="utf-8")
+        assert not is_fresh(source, build)
+        lock.unlink()
+        assert not is_fresh(source, build)
 
     @pytest.mark.parametrize(
         "relative_path",
@@ -2183,7 +2228,8 @@ class TestInferenceStreamingProxyBuild:
         build = tmp_path / "lambda" / "helm-installer-build"
         self._write_asset_tree(source, files)
         self._write_asset_tree(build, files)
-        self._complete_asset_manifest(source, build, None)
+        (tmp_path / "requirements-lock.txt").write_text("pyyaml==6.0.3\n", encoding="utf-8")
+        self._complete_asset_manifest(source, build, None, ("requirements-lock.txt",))
         assert StackManager._helm_build_is_fresh(source, build)
 
         (build / relative_path).write_text("stale\n", encoding="utf-8")

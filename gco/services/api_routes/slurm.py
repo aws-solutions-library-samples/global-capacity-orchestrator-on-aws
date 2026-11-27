@@ -105,21 +105,21 @@ class SlurmJobSubmission(BaseModel):
     @field_validator("name")
     @classmethod
     def _name_shape(cls, value: str) -> str:
-        if not _JOB_NAME_RE.match(value):
+        if not _JOB_NAME_RE.fullmatch(value):
             raise ValueError("name must be 1-128 characters of letters, digits, _ . : + -")
         return value
 
     @field_validator("partition")
     @classmethod
     def _partition_shape(cls, value: str | None) -> str | None:
-        if value is not None and not _PARTITION_RE.match(value):
+        if value is not None and not _PARTITION_RE.fullmatch(value):
             raise ValueError("partition must be a lowercase partition name")
         return value
 
     @field_validator("time_limit")
     @classmethod
     def _time_shape(cls, value: str | None) -> str | None:
-        if value is not None and not _TIME_LIMIT_RE.match(value.strip()):
+        if value is not None and not _TIME_LIMIT_RE.fullmatch(value.strip()):
             raise ValueError("time_limit must be a Slurm time (minutes, HH:MM:SS, D-HH:MM:SS)")
         return value.strip() if value else value
 
@@ -134,7 +134,7 @@ class SlurmJobSubmission(BaseModel):
     @classmethod
     def _environment_shape(cls, value: dict[str, str]) -> dict[str, str]:
         for key, item in value.items():
-            if not _ENV_NAME_RE.match(key):
+            if not _ENV_NAME_RE.fullmatch(key):
                 raise ValueError(f"environment variable name {key!r} is not valid")
             if "\n" in item or "\x00" in item:
                 raise ValueError(f"environment variable {key!r} must be a single-line value")

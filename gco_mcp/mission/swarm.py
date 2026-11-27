@@ -427,7 +427,7 @@ def validate_spawn(
 
     # 2. Slot.
     slot = request.get("slot")
-    if not isinstance(slot, str) or not _SLOT_RE.match(slot):
+    if not isinstance(slot, str) or not _SLOT_RE.fullmatch(slot):
         raise _reject("spawn", "slot_missing_or_invalid")
     existing_slots = {entry["slot"] for entry in children}
     if slot in existing_slots and slot != respawn_of_slot:
