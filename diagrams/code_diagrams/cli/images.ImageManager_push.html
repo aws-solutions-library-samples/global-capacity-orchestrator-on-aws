@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T14:17:34Z">
-        <meta name="gco-source-commit" content="d0db0066b3e8f603134a252ab3753efd40d90493">
-        <meta name="gco-flow-digest" content="45e991fe714171ce">
+        <meta name="gco-generated-at" content="2026-11-27T20:35:51Z">
+        <meta name="gco-source-commit" content="6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef">
+        <meta name="gco-flow-digest" content="09fae95d75029906">
         <title>gco images push — auth + push existing local image</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,42 +208,42 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op725=>operation: "Push an already-built local image to the project's ECR repo.\n\n        Tags ``local_image`` as the project URI before invoking\n        ``<runtime> push``. Skips the build step but otherwise mirrors\n        ``build`` (init repo, login, push, optional retain tag). When ``quiet``\n        is true, the local tag command is captured for machine-readable output.\n        "
-op727=>operation: validated_name = self._validate_name(name)
-op729=>operation: validated_tag = self._validate_tag(tag)
-cond732=>operation: raise ValueError('local_image must be a non-empty image reference') if  not local_image
-op742=>operation: runtime = self._runtime_or_error()
-sub744=>subroutine: self.init(name, retain=retain)
-sub746=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
-sub748=>subroutine: self._ecr_login(runtime)
-op750=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
-op752=>operation: tag_run_kwargs: dict[str, Any] = {'stdin': subprocess.DEVNULL}
-cond755=>operation: tag_run_kwargs.update(capture_output=True, text=True) if  quiet
-sub765=>subroutine: subprocess.run([runtime, 'tag', local_image, full_uri], check=True, **tag_run_kwargs)
-op767=>operation: push_result = subprocess.run([runtime, 'push', full_uri], stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True)
-op769=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
-cond772=>operation: self._apply_retain_tag(validated_name) if  retain
-op782=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
-io787=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
-e785=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op1697=>operation: "Push an already-built local image to the project's ECR repo.\n\n        Tags ``local_image`` as the project URI before invoking\n        ``<runtime> push``. Skips the build step but otherwise mirrors\n        ``build`` (init repo, login, push, optional retain tag). When ``quiet``\n        is true, the local tag command is captured for machine-readable output.\n        "
+op1699=>operation: validated_name = self._validate_name(name)
+op1701=>operation: validated_tag = self._validate_tag(tag)
+cond1704=>operation: raise ValueError('local_image must be a non-empty image reference') if  not local_image
+op1714=>operation: runtime = self._runtime_or_error()
+sub1716=>subroutine: self.init(name, retain=retain)
+sub1718=>subroutine: self._check_tag_immutable_collision(validated_name, validated_tag)
+sub1720=>subroutine: self._ecr_login(runtime)
+op1722=>operation: full_uri = f'{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}'
+op1724=>operation: tag_run_kwargs: dict[str, Any] = {'stdin': subprocess.DEVNULL}
+cond1727=>operation: tag_run_kwargs.update(capture_output=True, text=True) if  quiet
+sub1737=>subroutine: subprocess.run([runtime, 'tag', local_image, full_uri], check=True, **tag_run_kwargs)
+op1739=>operation: push_result = subprocess.run([runtime, 'push', full_uri], stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True)
+op1741=>operation: digest = self._extract_digest((push_result.stdout or '') + (push_result.stderr or ''))
+cond1744=>operation: self._apply_retain_tag(validated_name) if  retain
+op1754=>operation: size_bytes = self._image_size_bytes(validated_name, validated_tag)
+io1759=>inputoutput: output: {'image_uri': full_uri, 'digest': digest, 'size_bytes': size_bytes, 'runtime': runtime, 'repository': f'{self._repo_prefix}/{validated_name}', 'tag': validated_tag, 'region': self.region, 'retain': retain}
+e1757=>end: end function return
 
-op725->op727
-op727->op729
-op729->cond732
-cond732->op742
-op742->sub744
-sub744->sub746
-sub746->sub748
-sub748->op750
-op750->op752
-op752->cond755
-cond755->sub765
-sub765->op767
-op767->op769
-op769->cond772
-cond772->op782
-op782->io787
-io787->e785
+op1697->op1699
+op1699->op1701
+op1701->cond1704
+cond1704->op1714
+op1714->sub1716
+sub1716->sub1718
+sub1718->sub1720
+sub1720->op1722
+op1722->op1724
+op1724->cond1727
+cond1727->sub1737
+sub1737->op1739
+op1739->op1741
+op1741->cond1744
+cond1744->op1754
+op1754->io1759
+io1759->e1757
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -253,17 +253,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T14:17:34Z -->
-        <!-- Generated from Git commit: d0db0066b3e8f603134a252ab3753efd40d90493 -->
+        <!-- Generated at (UTC): 2026-11-27T20:35:51Z -->
+        <!-- Generated from Git commit: 6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T14:17:34Z">2026-11-19T14:17:34Z</time>
+            Generated at (UTC): <time datetime="2026-11-27T20:35:51Z">2026-11-27T20:35:51Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>d0db0066b3e8f603134a252ab3753efd40d90493</code>
+            Source commit: <code>6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>45e991fe714171ce</code>
+            Flow content SHA-256: <code>09fae95d75029906</code>
           </p>
           <div id="canvas"></div>
         </div>

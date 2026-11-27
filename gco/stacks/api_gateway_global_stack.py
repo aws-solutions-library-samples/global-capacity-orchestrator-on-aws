@@ -85,13 +85,14 @@ from gco.stacks.control_plane_alarms import add_api_alarms, create_alert_topic
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-24T14:05:08Z
-# Generated from Git commit: 9d3160a1b68d2fdc13355b73df0e30f2af4bc047
+# Generated at (UTC): 2026-11-27T20:35:51Z
+# Generated from Git commit: 6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef
 # Flowchart(s) generated from this file:
 #   * ``GCOApiGatewayGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.png``)
 # Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
 # <pyflowchart-code-diagram> END
+
 
 #: What the TLS certificate manager image is built from, relative to the
 #: repository root. Its build context is the repository root, as the service

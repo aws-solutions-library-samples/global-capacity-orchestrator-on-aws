@@ -58,8 +58,8 @@ from . import __version__
 from ._container_runtime import container_runtime_error_message, detect_container_runtime
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T06:05:34Z
-# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
+# Generated at (UTC): 2026-11-27T20:35:51Z
+# Generated from Git commit: 6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef
 # Flowchart(s) generated from this file:
 #   * ``run_stack_cycle`` -> ``diagrams/code_diagrams/cli/upgrade.run_stack_cycle.html``
 #     (PNG: ``diagrams/code_diagrams/cli/upgrade.run_stack_cycle.png``)

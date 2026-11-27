@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-26T07:28:09Z">
-        <meta name="gco-source-commit" content="30e51b52aa66343af9e39715ecf06f6ef43d9100">
-        <meta name="gco-flow-digest" content="8543c4b008ee3a5f">
+        <meta name="gco-generated-at" content="2026-11-27T20:35:51Z">
+        <meta name="gco-source-commit" content="6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef">
+        <meta name="gco-flow-digest" content="0edcf60250d55e0b">
         <title>REST manifest validation pipeline (structure, kinds, limits, tolerations, images)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,62 +208,18 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1835=>operation: 'Validate a Kubernetes manifest for security and resource constraints.\n\n        ``default_namespace`` is the request-level destination for manifests\n        that omit ``metadata.namespace``. Validation and apply must resolve the\n        same effective namespace or the request default could bypass the\n        namespace allowlist.\n\n        Returns: ``(is_valid, error_message)``.\n        '
-cond1838=>condition: if not self.validation_enabled
-io1845=>inputoutput: output: (True, None)
-e1843=>end: end function return
-op1852=>operation: if not self._check_yaml_depth(manifest):
-    return (False, f'Manifest exceeds maximum nesting depth of {self.yaml_max_depth} levels')
-required_fields = ['apiVersion', 'kind', 'metadata']
-for field in required_fields:
-    if field not in manifest:
-        return (False, f'Missing required field: {field}')
-metadata = manifest.get('metadata', {})
-if 'name' not in metadata:
-    return (False, 'Missing metadata.name field')
-namespace = metadata.get('namespace', default_namespace or 'gco-jobs')
-if namespace not in self.allowed_namespaces:
-    return (False, f"Namespace '{namespace}' not allowed. Allowed namespaces: {list(self.allowed_namespaces)}")
-kind_valid, kind_error = validate_resource_kind(manifest, self.allowed_kinds)
-if not kind_valid:
-    return (False, kind_error)
-resource_valid, resource_error = self._validate_resource_limits(manifest)
-if not resource_valid:
-    return (False, resource_error)
-if self.require_accelerator_toleration:
-    tol_valid, tol_error = self._validate_tolerations(manifest)
-    if not tol_valid:
-        return (False, tol_error)
-sec_valid, sec_error = self._validate_security_context(manifest)
-if not sec_valid:
-    return (False, f'Security context validation failed: {sec_error}')
-sandbox_valid, sandbox_error = check_sandbox(manifest)
-if sandbox_valid:
-    sandbox_valid, sandbox_error = check_sandbox_runtime_class(manifest, self.runtime_class_exists)
-if not sandbox_valid:
-    return (False, f'Nitro Sandbox validation failed: {sandbox_error}')
-keep_warm_valid, keep_warm_error = check_keep_warm(manifest)
-if not keep_warm_valid:
-    return (False, f'Keep-warm validation failed: {keep_warm_error}')
-img_valid, img_error = self._validate_image_sources(manifest)
-if not img_valid:
-    return (False, img_error or 'Untrusted image sources detected')
-return (True, None)
-cond1851=>condition: exception raised?
-cond1854=>condition: except Exception as e
-sub1858=>subroutine: logger.error(f'Error validating manifest: {e}')
-io1863=>inputoutput: output: (False, f'Validation error: {e!s}')
-e1861=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op1984=>operation: "Validate a Kubernetes manifest for security and resource constraints.\n\n        ``default_namespace`` is the request-level destination for manifests\n        that omit ``metadata.namespace``. Validation and apply must resolve the\n        same effective namespace or the request default could bypass the\n        namespace allowlist.\n\n        The checks are :func:`gco.job_admission.admit_manifest`, which the SQS\n        queue processor runs too, against this instance's\n        :meth:`job_validation_policy` and this cluster's sandbox RuntimeClasses.\n\n        Returns: ``(is_valid, error_message)``.\n        "
+cond1987=>condition: if not self.validation_enabled
+io1994=>inputoutput: output: (True, None)
+e1992=>end: end function return
+io2006=>inputoutput: output: admit_manifest(manifest, self.job_validation_policy(), runtime_class_exists=self.runtime_class_exists, default_namespace=default_namespace)
+e2004=>end: end function return
 
-op1835->cond1838
-cond1838(yes)->io1845
-io1845->e1843
-cond1838(no)->op1852
-op1852->cond1851
-cond1851(yes)->cond1854
-cond1854(yes)->sub1858
-sub1858->io1863
-io1863->e1861
+op1984->cond1987
+cond1987(yes)->io1994
+io1994->e1992
+cond1987(no)->io2006
+io2006->e2004
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -273,17 +229,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-26T07:28:09Z -->
-        <!-- Generated from Git commit: 30e51b52aa66343af9e39715ecf06f6ef43d9100 -->
+        <!-- Generated at (UTC): 2026-11-27T20:35:51Z -->
+        <!-- Generated from Git commit: 6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-26T07:28:09Z">2026-11-26T07:28:09Z</time>
+            Generated at (UTC): <time datetime="2026-11-27T20:35:51Z">2026-11-27T20:35:51Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>30e51b52aa66343af9e39715ecf06f6ef43d9100</code>
+            Source commit: <code>6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>8543c4b008ee3a5f</code>
+            Flow content SHA-256: <code>0edcf60250d55e0b</code>
           </p>
           <div id="canvas"></div>
         </div>

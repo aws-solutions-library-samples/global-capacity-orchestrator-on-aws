@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
-        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
-        <meta name="gco-flow-digest" content="fc3bf1555c1966a6">
+        <meta name="gco-generated-at" content="2026-11-27T20:35:51Z">
+        <meta name="gco-source-commit" content="6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef">
+        <meta name="gco-flow-digest" content="6cff2d6e9ccde6f7">
         <title>gco upgrade stack cycle (asset gate, retried teardown, control-plane update + regional recreate)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,82 +208,82 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1118=>operation: "Scale the workload tier to zero, then deploy-all from the new release.\n\n    The checkout's deployable sources are checked first\n    (:meth:`cli.stacks.StackManager.ensure_asset_sources_readable`): the\n    redeploy refuses owner-only sources, so a checkout it could not deploy —\n    for example one whose files the upgrade's own ``git checkout`` wrote under\n    a restrictive umask — must stop the upgrade before the teardown, not\n    after it. The teardown's monitoring detach would catch it too, but only\n    when the monitoring stack is deployed.\n\n    Then the preserved cdk.json is loaded with the checked-out release's\n    configuration loader (:func:`check_preserved_configuration`, with the\n    run's ``cdk_context`` overrides): each warning goes to ``warn`` (``log``\n    when not given), and a cdk.json that release rejects stops the upgrade\n    before the teardown, with the loader's message, instead of failing the\n    teardown's first synth.\n\n    The teardown uses the same retry loop as ``gco stacks destroy-all``: a\n    failed attempt clears the orphaned network interfaces that typically block\n    VPC deletion, waits, and tries again. The redeploy is a single\n    ``deploy_orchestrated`` pass — global, API Gateway and analytics stacks\n    update in place, regional stacks and their bridges are recreated,\n    monitoring is updated back to the full topology.\n\n    Raises:\n        cli.stacks.AssetPermissionError: before any stack is touched, when a\n            deployable source is owner-only.\n        UpgradeError: before any stack is touched, when the checked-out\n            release cannot deploy the preserved cdk.json.\n    "
-op1120=>operation: import time
-op1122=>operation: wait = sleep or time.sleep
-op1124=>operation: result = StackCycleResult()
-sub1126=>subroutine: manager.ensure_asset_sources_readable()
-sub1128=>subroutine: log("Checking cdk.json with the checked-out release's configuration loader...")
-op1130=>operation: configuration = check_preserved_configuration(Path(manager.project_root), cdk_context)
-cond1133=>operation: (warn or log)(f'cdk.json: {warning}') while  warning in configuration.warnings
-cond1143=>operation: raise UpgradeError(f"Stopped before the teardown: {configuration.error.rstrip('.')}. No stack was changed. Fix cdk.json (the upgrade kept it byte for byte), then run 'gco upgrade --skip-checkout' to cycle the stacks on this checkout.") if  configuration.error is not None
-sub1153=>subroutine: log('Phase 1/2: scaling the workload tier to zero (control plane stays)...')
-op1155=>operation: ok = False
-op1157=>operation: failed: list[str] = []
-cond1160=>condition: for attempt in range(1, max_attempts + 1)
-op1164=>operation: result.teardown_attempts = attempt
-cond1167=>condition: if attempt > 1
-sub1171=>subroutine: log('Clearing orphaned network interfaces that can block VPC deletion...')
-sub1173=>subroutine: manager.cleanup_orphaned_network_interfaces(keep_control_plane=True)
-sub1175=>subroutine: log(f'Teardown attempt {attempt}/{max_attempts} in {retry_wait_seconds:.0f}s...')
-sub1177=>subroutine: wait(retry_wait_seconds)
-op1182=>operation: ok, destroyed, failed = manager.destroy_orchestrated(force=True, keep_control_plane=True, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
-cond1185=>condition: for stack in destroyed
-cond1190=>operation: result.destroyed.append(stack) if  stack not in result.destroyed
-cond1203=>operation: break if  ok
-cond1216=>condition: if not ok
-op1220=>operation: result.failed = list(failed)
-op1222=>operation: result.phase_failed = 'teardown'
-io1227=>inputoutput: output: result
-e1225=>end: end function return
-sub1233=>subroutine: log('Phase 2/2: updating the control plane in place and recreating the regional stacks...')
-op1235=>operation: ok, deployed, failed = manager.deploy_orchestrated(require_approval=False, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
-op1237=>operation: result.deployed = list(deployed)
-cond1240=>condition: if not ok
-op1244=>operation: result.failed = list(failed)
-op1246=>operation: result.phase_failed = 'deploy'
-io1254=>inputoutput: output: result
-e1252=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2026=>operation: "Scale the workload tier to zero, then deploy-all from the new release.\n\n    The checkout's deployable sources are checked first\n    (:meth:`cli.stacks.StackManager.ensure_asset_sources_readable`): the\n    redeploy refuses owner-only sources, so a checkout it could not deploy —\n    for example one whose files the upgrade's own ``git checkout`` wrote under\n    a restrictive umask — must stop the upgrade before the teardown, not\n    after it. The teardown's monitoring detach would catch it too, but only\n    when the monitoring stack is deployed.\n\n    Then the preserved cdk.json is loaded with the checked-out release's\n    configuration loader (:func:`check_preserved_configuration`, with the\n    run's ``cdk_context`` overrides): each warning goes to ``warn`` (``log``\n    when not given), and a cdk.json that release rejects stops the upgrade\n    before the teardown, with the loader's message, instead of failing the\n    teardown's first synth.\n\n    The teardown uses the same retry loop as ``gco stacks destroy-all``: a\n    failed attempt clears the orphaned network interfaces that typically block\n    VPC deletion, waits, and tries again. The redeploy is a single\n    ``deploy_orchestrated`` pass — global, API Gateway and analytics stacks\n    update in place, regional stacks and their bridges are recreated,\n    monitoring is updated back to the full topology.\n\n    Raises:\n        cli.stacks.AssetPermissionError: before any stack is touched, when a\n            deployable source is owner-only.\n        UpgradeError: before any stack is touched, when the checked-out\n            release cannot deploy the preserved cdk.json.\n    "
+op2028=>operation: import time
+op2030=>operation: wait = sleep or time.sleep
+op2032=>operation: result = StackCycleResult()
+sub2034=>subroutine: manager.ensure_asset_sources_readable()
+sub2036=>subroutine: log("Checking cdk.json with the checked-out release's configuration loader...")
+op2038=>operation: configuration = check_preserved_configuration(Path(manager.project_root), cdk_context)
+cond2041=>operation: (warn or log)(f'cdk.json: {warning}') while  warning in configuration.warnings
+cond2051=>operation: raise UpgradeError(f"Stopped before the teardown: {configuration.error.rstrip('.')}. No stack was changed. Fix cdk.json (the upgrade kept it byte for byte), then run 'gco upgrade --skip-checkout' to cycle the stacks on this checkout.") if  configuration.error is not None
+sub2061=>subroutine: log('Phase 1/2: scaling the workload tier to zero (control plane stays)...')
+op2063=>operation: ok = False
+op2065=>operation: failed: list[str] = []
+cond2068=>condition: for attempt in range(1, max_attempts + 1)
+op2072=>operation: result.teardown_attempts = attempt
+cond2075=>condition: if attempt > 1
+sub2079=>subroutine: log('Clearing orphaned network interfaces that can block VPC deletion...')
+sub2081=>subroutine: manager.cleanup_orphaned_network_interfaces(keep_control_plane=True)
+sub2083=>subroutine: log(f'Teardown attempt {attempt}/{max_attempts} in {retry_wait_seconds:.0f}s...')
+sub2085=>subroutine: wait(retry_wait_seconds)
+op2090=>operation: ok, destroyed, failed = manager.destroy_orchestrated(force=True, keep_control_plane=True, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
+cond2093=>condition: for stack in destroyed
+cond2098=>operation: result.destroyed.append(stack) if  stack not in result.destroyed
+cond2111=>operation: break if  ok
+cond2124=>condition: if not ok
+op2128=>operation: result.failed = list(failed)
+op2130=>operation: result.phase_failed = 'teardown'
+io2135=>inputoutput: output: result
+e2133=>end: end function return
+sub2141=>subroutine: log('Phase 2/2: updating the control plane in place and recreating the regional stacks...')
+op2143=>operation: ok, deployed, failed = manager.deploy_orchestrated(require_approval=False, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
+op2145=>operation: result.deployed = list(deployed)
+cond2148=>condition: if not ok
+op2152=>operation: result.failed = list(failed)
+op2154=>operation: result.phase_failed = 'deploy'
+io2162=>inputoutput: output: result
+e2160=>end: end function return
 
-op1118->op1120
-op1120->op1122
-op1122->op1124
-op1124->sub1126
-sub1126->sub1128
-sub1128->op1130
-op1130->cond1133
-cond1133->cond1143
-cond1143->sub1153
-sub1153->op1155
-op1155->op1157
-op1157->cond1160
-cond1160(yes)->op1164
-op1164->cond1167
-cond1167(yes)->sub1171
-sub1171->sub1173
-sub1173->sub1175
-sub1175->sub1177
-sub1177->op1182
-op1182->cond1185
-cond1185(yes)->cond1190
-cond1190->cond1185
-cond1185(no)->cond1203
-cond1203->cond1160
-cond1167(no)->op1182
-cond1160(no)->cond1216
-cond1216(yes)->op1220
-op1220->op1222
-op1222->io1227
-io1227->e1225
-cond1216(no)->sub1233
-sub1233->op1235
-op1235->op1237
-op1237->cond1240
-cond1240(yes)->op1244
-op1244->op1246
-op1246->io1254
-io1254->e1252
-cond1240(no)->io1254
+op2026->op2028
+op2028->op2030
+op2030->op2032
+op2032->sub2034
+sub2034->sub2036
+sub2036->op2038
+op2038->cond2041
+cond2041->cond2051
+cond2051->sub2061
+sub2061->op2063
+op2063->op2065
+op2065->cond2068
+cond2068(yes)->op2072
+op2072->cond2075
+cond2075(yes)->sub2079
+sub2079->sub2081
+sub2081->sub2083
+sub2083->sub2085
+sub2085->op2090
+op2090->cond2093
+cond2093(yes)->cond2098
+cond2098->cond2093
+cond2093(no)->cond2111
+cond2111->cond2068
+cond2075(no)->op2090
+cond2068(no)->cond2124
+cond2124(yes)->op2128
+op2128->op2130
+op2130->io2135
+io2135->e2133
+cond2124(no)->sub2141
+sub2141->op2143
+op2143->op2145
+op2145->cond2148
+cond2148(yes)->op2152
+op2152->op2154
+op2154->io2162
+io2162->e2160
+cond2148(no)->io2162
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -293,17 +293,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
-        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
+        <!-- Generated at (UTC): 2026-11-27T20:35:51Z -->
+        <!-- Generated from Git commit: 6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
+            Generated at (UTC): <time datetime="2026-11-27T20:35:51Z">2026-11-27T20:35:51Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
+            Source commit: <code>6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>fc3bf1555c1966a6</code>
+            Flow content SHA-256: <code>6cff2d6e9ccde6f7</code>
           </p>
           <div id="canvas"></div>
         </div>
