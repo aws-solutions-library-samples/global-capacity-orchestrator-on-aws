@@ -82,9 +82,9 @@
       "source_commit": "30e51b52aa66343af9e39715ecf06f6ef43d9100"
     },
     "gco/services/manifest_processor.py": {
-      "digest": "f15446fc2b13026354824d8a547a9137a18c4348987d597cddd4813c8c5e5e39",
-      "generated_at": "2026-11-27T20:35:51Z",
-      "source_commit": "6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef"
+      "digest": "5b3f09d3e56d626a26162e9b2aa43fc426ce41a5ad223140101dfa441c23ea55",
+      "generated_at": "2026-11-27T20:56:38Z",
+      "source_commit": "3bf3e3df42d9444e91f323e5aeeee6b0f0185c33"
     },
     "gco/services/mooncake_pd_proxy.py": {
       "digest": "e86bcdf4a19f33472dde9d4f94b7473ea4ce512455cde9468bcd07b458eb034b",
