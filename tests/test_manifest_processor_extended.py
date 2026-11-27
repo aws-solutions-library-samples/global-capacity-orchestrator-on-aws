@@ -2128,7 +2128,7 @@ class TestTrustedImageSourceLockstep:
 
         import yaml
 
-        from gco.services.manifest_processor import validate_image_sources
+        from gco.job_admission import validate_image_sources
 
         root = Path(__file__).resolve().parent.parent
         for path in sorted((root / "examples").glob("inference-*.yaml")):

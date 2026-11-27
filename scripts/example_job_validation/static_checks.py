@@ -193,7 +193,7 @@ def check_transport_acceptance(parsed: ParsedExample) -> list[StaticFinding]:
         return []
     # Module-level pure functions: no Kubernetes client construction, so the
     # checks run on machines with no kubeconfig (CI runners, fresh laptops).
-    from gco.services.manifest_processor import validate_image_sources, validate_resource_kind
+    from gco.job_admission import validate_image_sources, validate_resource_kind
 
     findings: list[StaticFinding] = []
     for doc in parsed.documents:
@@ -406,7 +406,7 @@ def check_embedded_workloads(repo_root: Path, parsed: ParsedExample) -> list[Sta
     from trusted image sources and fit the default gco-jobs governance. An
     Application must also source a non-empty path of this repository.
     """
-    from gco.services.manifest_processor import validate_image_sources
+    from gco.job_admission import validate_image_sources
 
     findings: list[StaticFinding] = []
     for doc in parsed.documents:

@@ -46,6 +46,16 @@ if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
     from mission.types import SessionState
 
 
+def _session_state(session: Any) -> SessionState:
+    """``session`` as the backend's ``SessionState``, for the type checker only.
+
+    ``SessionState`` is imported only while type checking (``mission`` is not
+    importable until a mission command puts ``gco_mcp/`` on the path), and
+    annotations are not evaluated at run time.
+    """
+    return cast("SessionState", session)
+
+
 #: The ``gco_mcp/`` directory that sits beside the ``cli`` package.
 _GCO_MCP_DIR = str(Path(__file__).resolve().parent.parent.parent / "gco_mcp")
 
@@ -504,7 +514,7 @@ def mission_start(
     # the in-memory copy so the engine can use them at iterate time —
     # we'll re-validate when iterate next runs against the loaded
     # session.
-    backend.save_session(cast("SessionState", _strip_private_criteria(session)))
+    backend.save_session(_session_state(_strip_private_criteria(session)))
 
     summary = {
         "session_id": session_id,
@@ -904,7 +914,7 @@ def mission_complete_cmd(session_id: str, output: str) -> None:
     session["status"] = "completed"
     session["final_verdict"] = "complete"
     session["ended_at"] = now_iso
-    backend.save_session(cast("SessionState", _strip_private_criteria(session)))
+    backend.save_session(_session_state(_strip_private_criteria(session)))
     payload = {
         "session_id": session_id,
         "status": "completed",
@@ -959,7 +969,7 @@ def mission_abort_cmd(session_id: str, pause: bool, output: str) -> None:
         session["status"] = "terminated"
         session["final_verdict"] = "terminate"
         session["ended_at"] = now_iso
-    backend.save_session(cast("SessionState", _strip_private_criteria(session)))
+    backend.save_session(_session_state(_strip_private_criteria(session)))
     payload = {"session_id": session_id, "status": session["status"]}
     if output == "table":
         click.echo(f"Session {session_id}: {session['status']}")
@@ -997,7 +1007,7 @@ def mission_resume_cmd(session_id: str, output: str) -> None:
         )
         sys.exit(1)
     session["status"] = "running"
-    backend.save_session(cast("SessionState", _strip_private_criteria(session)))
+    backend.save_session(_session_state(_strip_private_criteria(session)))
     payload = {"session_id": session_id, "status": "running"}
     if output == "table":
         click.echo(f"Session {session_id}: running")
@@ -1618,7 +1628,7 @@ def mission_run_cmd(
         session["bedrock_model_id"] = bedrock_model_id
 
     backend = mission_state.get_backend()
-    backend.save_session(cast("SessionState", _strip_private_criteria(session)))
+    backend.save_session(_session_state(_strip_private_criteria(session)))
 
     # Emit a one-line scaffold summary to stderr so the operator can see
     # what shape the criteria landed in before the loop starts. Stdout is
