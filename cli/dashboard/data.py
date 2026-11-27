@@ -345,6 +345,21 @@ class ExampleManifest:
     prerequisites: str = ""
 
 
+@dataclass(frozen=True)
+class ServingDefaults:
+    """What an inference example serves: the deploy dialog's preset for its runtime.
+
+    A field the example does not state keeps its default: no image (the
+    operator names one), no model, and the port and health path
+    ``gco inference deploy`` assumes.
+    """
+
+    image: str = ""
+    port: int = 8000
+    health: str = "/health"
+    model: str = ""
+
+
 #: A bullet (``- item``) or numbered (``1. item``) line in an example's header.
 _LIST_ITEM = re.compile(r"-|\d+[.)]\s")
 
@@ -399,6 +414,11 @@ def _object(value: object) -> dict[str, Any]:
 def _objects(value: object) -> list[dict[str, Any]]:
     """The JSON objects in ``value`` when it is a list, else none (API lists can be null)."""
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _text(value: object) -> str | None:
+    """``value`` when it is a non-empty string, else None."""
+    return value if isinstance(value, str) and value else None
 
 
 def _fan_out(regions: Sequence[str], read: Callable[[str], dict[str, Any]]) -> list[RegionRead]:
@@ -464,6 +484,41 @@ def load_manifest_text(text: str) -> list[dict[str, Any]]:
     if not all(isinstance(doc, dict) and doc.get("kind") for doc in manifests):
         raise DashboardError("Every YAML document must be a Kubernetes object with a kind.")
     return manifests
+
+
+def serving_defaults(
+    documents: Iterable[object], *, source: str = "the manifests"
+) -> ServingDefaults:
+    """What the first container of the first Deployment in ``documents`` serves.
+
+    Its image, its first ``containerPort``, its readiness probe's
+    ``httpGet.path`` and its ``MODEL`` variable. A field the container does
+    not state keeps its default; a missing image, port or health path is
+    logged at debug, naming ``source``.
+    """
+    deployment = next(
+        (doc for doc in documents if isinstance(doc, dict) and doc.get("kind") == "Deployment"),
+        {},
+    )
+    pod = _object(_object(_object(deployment.get("spec")).get("template")).get("spec"))
+    container = next(iter(_objects(pod.get("containers"))), {})
+    image = _text(container.get("image"))
+    ports = [entry.get("containerPort") for entry in _objects(container.get("ports"))]
+    port = next((n for n in ports if type(n) is int and 0 < n < 65536), None)
+    health = _text(_object(_object(container.get("readinessProbe")).get("httpGet")).get("path"))
+    env = _objects(container.get("env"))
+    model = next((_text(var.get("value")) for var in env if var.get("name") == "MODEL"), None)
+    stated = (("image", image), ("containerPort", port), ("readiness probe path", health))
+    missing = [what for what, value in stated if value is None]
+    if missing:
+        logger.debug("No %s in %s; the defaults stand in", ", ".join(missing), source)
+    fallback = ServingDefaults()
+    return ServingDefaults(
+        image=image or fallback.image,
+        port=port or fallback.port,
+        health=health or fallback.health,
+        model=model or fallback.model,
+    )
 
 
 class FleetData:
@@ -1419,3 +1474,19 @@ class FleetData:
                 )
             )
         return found
+
+    def inference_example(self, name: str, root: Path | None = None) -> ServingDefaults:
+        """What the checkout's ``examples/<name>.yaml`` serves, for the deploy dialog to preset.
+
+        An example that is missing or does not parse gives the defaults, so
+        the dialog still opens and the operator names the image.
+        """
+        from gco.services.manifest_processor import safe_load_all_yaml
+
+        path = (root or _project_dir()) / "examples" / f"{name}.yaml"
+        try:
+            documents = safe_load_all_yaml(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.debug("No serving defaults from %s: %s", path, exc)
+            return ServingDefaults()
+        return serving_defaults(documents, source=str(path))

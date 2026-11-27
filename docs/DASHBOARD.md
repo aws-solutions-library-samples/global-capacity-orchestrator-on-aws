@@ -91,6 +91,13 @@ queue, or to a Region's SQS queue. **Validate** has the Region's API check
 the manifests with a dry run first, and the dialog shows the equivalent `gco`
 command.
 
+The Inference page's deploy dialog reads the image, port, health path and
+model of its vLLM, SGLang and Triton presets from the checkout's
+[`inference-vllm.yaml`](../examples/inference-vllm.yaml),
+[`inference-sglang.yaml`](../examples/inference-sglang.yaml) and
+[`inference-triton.yaml`](../examples/inference-triton.yaml) examples, so
+bumping an example's image updates the dialog.
+
 ## What it reads and changes
 
 The dashboard reads and writes through the same code as the CLI
@@ -217,8 +224,46 @@ The code lives in [`cli/dashboard/`](../cli/dashboard/):
 | `brand.py`, `regions.py`, `assets/`, `.streamlit/` | Colours, the icon, Region coordinates, the offline world map and the light and dark themes |
 
 The world map needs no tile server: `assets/world_land.json` holds the
-1:110m land polygons of [Natural Earth](https://www.naturalearthdata.com/),
-which are in the public domain. Made with Natural Earth.
+1:110m land polygons of [Natural Earth](https://www.naturalearthdata.com/)
+v5.1.2, from
+[`geojson/ne_110m_land.geojson`](https://github.com/nvkelso/natural-earth-vector/blob/v5.1.2/geojson/ne_110m_land.geojson)
+(SHA-256 `9e0729ee253ca7d7a5c4ae9395fb1902264c5377c52e224d13dd85010e2835d9`).
+Each polygon keeps only its outer ring (the file's one interior ring is
+dropped), every coordinate is rounded to 0.1 degree, and consecutive repeated
+points are removed, which leaves 127 rings and 5,070 points. The asset records
+the same source, URL, checksum and license. Natural Earth data is in the
+[public domain](https://www.naturalearthdata.com/about/terms-of-use/). Made
+with Natural Earth.
+
+To reproduce or update the asset, download the file into the checkout root:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_110m_land.geojson
+```
+
+Then run this from the checkout root. It refuses a file whose checksum differs
+from the asset's `sha256` and keeps the asset's metadata, so for another
+version, update `source`, `url` and `sha256` first. On v5.1.2 it rewrites the
+asset byte for byte.
+
+```python
+import hashlib
+import itertools
+import json
+from pathlib import Path
+
+asset = Path("cli/dashboard/assets/world_land.json")
+document = json.loads(asset.read_text())
+raw = Path("ne_110m_land.geojson").read_bytes()
+assert hashlib.sha256(raw).hexdigest() == document["sha256"], "not the pinned file"
+polygons = []
+for feature in json.loads(raw)["features"]:
+    outer = feature["geometry"]["coordinates"][0]  # the outer ring; holes are dropped
+    rounded = [[round(lon, 1), round(lat, 1)] for lon, lat in outer]
+    polygons.append([point for point, _ in itertools.groupby(rounded)])
+document["polygons"] = polygons
+asset.write_text(json.dumps(document, separators=(",", ":")) + "\n")
+```
 
 `gco dashboard serve` is the quickest loop while changing a page; reload the
 browser after an edit. The tests drive every page through Streamlit's

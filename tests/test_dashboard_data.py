@@ -5,8 +5,9 @@ covers what every read and action relies on: ``describe_error`` (any failure
 from the CLI layers turned into an operator message and hint), the endpoint
 discovery memo the signed clients share across threads, the per-Region
 fan-out, the manifest and example-header parsers, example discovery (on a
-``tmp_path`` tree and, read-only, on the checkout's own ``examples/``), and
-the client, session, topology and identity plumbing. The reads and the writes
+``tmp_path`` tree and, read-only, on the checkout's own ``examples/``), what
+the inference examples serve (the deploy dialog's presets), and the client,
+session, topology and identity plumbing. The reads and the writes
 have their own files (``test_dashboard_data_reads.py`` and
 ``test_dashboard_data_writes.py``), which import the doubles defined here.
 
@@ -20,8 +21,10 @@ to the CLI client's own HTTP seam. Nothing reaches the network.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import io
 import json
+import logging
 import pickle
 import threading
 import time
@@ -40,6 +43,8 @@ import requests
 from botocore.credentials import Credentials
 from botocore.exceptions import ClientError, EndpointConnectionError, NoCredentialsError
 from botocore.stub import Stubber
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from cli.aws_client import (
     ApiEndpoint,
@@ -57,6 +62,7 @@ from cli.dashboard.data import (
     ExampleManifest,
     FleetData,
     RegionRead,
+    ServingDefaults,
     SharedDiscoveryClient,
     Topology,
     UtilizationRows,
@@ -70,6 +76,7 @@ from cli.dashboard.data import (
     example_header,
     load_manifest_text,
     manifest_requests_gpu,
+    serving_defaults,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -1368,6 +1375,241 @@ class TestExamples:
             assert "Job" in example.kinds
             assert example.title
             assert Path(example.path).parent == REPO_ROOT / "examples"
+
+
+# ---------------------------------------------------------------------------
+# serving_defaults and FleetData.inference_example
+# ---------------------------------------------------------------------------
+
+#: A serving container that states every field the deploy dialog presets.
+SERVER: dict[str, Any] = {
+    "name": "server",
+    "image": "registry.example/server:1.2",
+    "ports": [{"containerPort": 9000, "name": "http"}, {"containerPort": 9001, "name": "grpc"}],
+    "env": [{"name": "DTYPE", "value": "auto"}, {"name": "MODEL", "value": "org/model"}],
+    "livenessProbe": {"httpGet": {"path": "/live", "port": 9000}},
+    "readinessProbe": {"httpGet": {"path": "/ready", "port": 9000}},
+}
+SERVED = ServingDefaults(
+    image="registry.example/server:1.2", port=9000, health="/ready", model="org/model"
+)
+
+
+def _deployment(container: object, *, name: str = "model") -> dict[str, Any]:
+    """A Deployment whose pod runs ``container``, then a sidecar."""
+    sidecar = {"name": "sidecar", "image": "registry.example/sidecar:1"}
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": name},
+        "spec": {"template": {"spec": {"containers": [container, sidecar]}}},
+    }
+
+
+def _service() -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": "model"},
+        "spec": {"ports": [{"port": 80, "targetPort": 9000}]},
+    }
+
+
+#: Keys a serving manifest uses (and a few that no manifest does), for the property test.
+_KEYS = (
+    st.sampled_from(
+        [
+            "kind",
+            "spec",
+            "template",
+            "containers",
+            "image",
+            "ports",
+            "containerPort",
+            "env",
+            "name",
+            "value",
+            "readinessProbe",
+            "httpGet",
+            "path",
+        ]
+    )
+    | st.integers()
+)
+_LEAVES = (
+    st.none()
+    | st.booleans()
+    | st.integers()
+    | st.floats()
+    | st.text(max_size=6)
+    | st.sampled_from(["Deployment", "MODEL", "/ready"])
+)
+_TREES = st.recursive(
+    _LEAVES,
+    lambda tree: st.lists(tree, max_size=3) | st.dictionaries(_KEYS, tree, max_size=4),
+    max_leaves=24,
+)
+
+
+class TestServingDefaults:
+    def test_each_field_comes_from_the_first_container(self) -> None:
+        assert serving_defaults([_deployment(SERVER)]) == SERVED
+
+    def test_the_first_deployment_among_the_documents_is_read(self) -> None:
+        other = _deployment({**SERVER, "image": "registry.example/other:9"}, name="other")
+        documents = [_service(), "a stray scalar", None, _deployment(SERVER), other]
+        assert serving_defaults(documents) == SERVED
+
+    def test_a_container_without_a_readiness_probe_or_model_keeps_those_defaults(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        container = {k: v for k, v in SERVER.items() if k not in ("readinessProbe", "env")}
+        with caplog.at_level(logging.DEBUG, logger=data.__name__):
+            found = serving_defaults([_deployment(container)], source="examples/x.yaml")
+        assert found == dataclasses.replace(SERVED, health="/health", model="")
+        assert caplog.messages == [
+            "No readiness probe path in examples/x.yaml; the defaults stand in"
+        ]
+
+    @pytest.mark.parametrize(
+        ("changes", "expected"),
+        [
+            pytest.param({"image": 7}, {"image": ""}, id="image-not-a-string"),
+            pytest.param({"image": ""}, {"image": ""}, id="empty-image"),
+            pytest.param(
+                {
+                    "ports": [
+                        {"name": "metrics"},
+                        {"containerPort": "http"},
+                        {"containerPort": True},
+                        {"containerPort": 0},
+                        {"containerPort": 65536},
+                        {"containerPort": 9100},
+                    ]
+                },
+                {"port": 9100},
+                id="the-first-usable-port",
+            ),
+            pytest.param(
+                {"ports": [{"containerPort": 70000}]}, {"port": 8000}, id="no-usable-port"
+            ),
+            pytest.param({"ports": None}, {"port": 8000}, id="ports-null"),
+            pytest.param(
+                {"readinessProbe": {"tcpSocket": {"port": 9000}}},
+                {"health": "/health"},
+                id="tcp-readiness-probe",
+            ),
+            pytest.param(
+                {"readinessProbe": {"httpGet": {"path": ""}}},
+                {"health": "/health"},
+                id="empty-probe-path",
+            ),
+            pytest.param(
+                {"env": [{"name": "MODEL", "valueFrom": {"configMapKeyRef": {"key": "model"}}}]},
+                {"model": ""},
+                id="model-from-a-reference",
+            ),
+            pytest.param({"env": "MODEL=org/model"}, {"model": ""}, id="env-not-a-list"),
+        ],
+    )
+    def test_a_value_that_is_not_usable_keeps_its_default(
+        self, changes: dict[str, Any], expected: dict[str, Any]
+    ) -> None:
+        found = serving_defaults([_deployment({**SERVER, **changes})])
+        assert found == dataclasses.replace(SERVED, **expected)
+
+    @pytest.mark.parametrize(
+        "documents",
+        [
+            pytest.param([_service(), ["a", "list"]], id="no-deployment"),
+            pytest.param([{"kind": "Deployment", "spec": None}], id="no-pod-template"),
+            pytest.param(
+                [{"kind": "Deployment", "spec": {"template": {"spec": {"containers": []}}}}],
+                id="no-containers",
+            ),
+        ],
+    )
+    def test_documents_without_a_serving_container_give_the_defaults(
+        self, caplog: pytest.LogCaptureFixture, documents: list[object]
+    ) -> None:
+        with caplog.at_level(logging.DEBUG, logger=data.__name__):
+            assert serving_defaults(documents) == ServingDefaults()
+        assert caplog.messages == [
+            "No image, containerPort, readiness probe path in the manifests; the defaults stand in"
+        ]
+
+    @settings(max_examples=200, deadline=None)
+    @given(documents=st.lists(_TREES | _TREES.map(_deployment), max_size=3))
+    def test_whatever_the_documents_hold_the_dialog_gets_usable_values(
+        self, documents: list[object]
+    ) -> None:
+        found = serving_defaults(documents)
+        assert isinstance(found.image, str)
+        assert isinstance(found.model, str)
+        assert found.health
+        assert type(found.port) is int
+        assert 0 < found.port < 65536
+
+
+class TestInferenceExample:
+    def test_reads_the_named_example_from_a_multi_document_file(
+        self, fleet: FleetData, tmp_path: Path
+    ) -> None:
+        examples = tmp_path / "examples"
+        examples.mkdir()
+        documents = "\n---\n".join(json.dumps(doc) for doc in (_service(), _deployment(SERVER)))
+        _write(examples, "inference-x.yaml", f"# A serving example\n{documents}\n")
+        assert fleet.inference_example("inference-x", root=tmp_path) == SERVED
+
+    def test_the_default_root_is_the_cli_project_directory(
+        self, monkeypatch: pytest.MonkeyPatch, fleet: FleetData, tmp_path: Path
+    ) -> None:
+        examples = tmp_path / "examples"
+        examples.mkdir()
+        _write(examples, "inference-x.yaml", json.dumps(_deployment(SERVER)))
+        monkeypatch.setattr(data, "_project_dir", lambda: tmp_path)
+        assert fleet.inference_example("inference-x") == SERVED
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param(None, id="missing"),
+            pytest.param("kind: Deployment\nspec: [unclosed\n", id="malformed-yaml"),
+            pytest.param(b"kind: Deployment\n\xff\xfe\n", id="not-utf-8"),
+        ],
+    )
+    def test_an_example_that_cannot_be_read_gives_the_defaults(
+        self,
+        fleet: FleetData,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        text: str | bytes | None,
+    ) -> None:
+        examples = tmp_path / "examples"
+        examples.mkdir()
+        if text is not None:
+            _write(examples, "inference-x.yaml", text)
+        with caplog.at_level(logging.DEBUG, logger=data.__name__):
+            assert fleet.inference_example("inference-x", root=tmp_path) == ServingDefaults()
+        (message,) = caplog.messages
+        assert message.startswith(f"No serving defaults from {examples / 'inference-x.yaml'}: ")
+
+    def test_the_checkouts_examples_preset_todays_values(self, fleet: FleetData) -> None:
+        vllm, sglang, triton = (
+            fleet.inference_example(name, root=REPO_ROOT)
+            for name in ("inference-vllm", "inference-sglang", "inference-triton")
+        )
+        model = "Qwen/Qwen2.5-1.5B-Instruct"
+        assert (vllm.port, vllm.health, vllm.model) == (8000, "/health", model)
+        assert (sglang.port, sglang.health, sglang.model) == (30000, "/health", model)
+        assert (triton.port, triton.health, triton.model) == (8000, "/v2/health/ready", "")
+        # The tags are the examples' to bump; the repository says which runtime each is.
+        images = [example.image.rpartition(":") for example in (vllm, sglang, triton)]
+        assert [(repository, bool(tag)) for repository, _, tag in images] == [
+            ("vllm/vllm-openai", True),
+            ("lmsysorg/sglang", True),
+            ("nvcr.io/nvidia/tritonserver", True),
+        ]
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ AWS.
 from __future__ import annotations
 
 import inspect
+import itertools
 import json
 import math
 import string
@@ -178,12 +179,32 @@ class TestLandPolygons:
             -180 <= lon <= 180 and -90 <= lat <= 90 for ring in polygons for lon, lat in ring
         )
 
-    def test_land_is_the_public_domain_natural_earth_outline(self) -> None:
+    def test_land_names_the_pinned_public_domain_natural_earth_file(self) -> None:
         asset = REPO_ROOT / "cli" / "dashboard" / "assets" / "world_land.json"
         document = json.loads(asset.read_text("utf-8"))
-        assert document["source"].startswith("Natural Earth")
-        assert "public domain" in document["source"]
+        assert list(document) == ["source", "url", "sha256", "license", "polygons"]
+        assert document["source"].startswith("Natural Earth v5.1.2 ")
+        assert "geojson/ne_110m_land.geojson" in document["source"]
+        assert document["url"] == (
+            "https://github.com/nvkelso/natural-earth-vector/blob/v5.1.2/geojson/ne_110m_land.geojson"
+        )
+        assert document["sha256"] == (
+            "9e0729ee253ca7d7a5c4ae9395fb1902264c5377c52e224d13dd85010e2835d9"
+        )
+        assert document["license"] == (
+            "Public domain (https://www.naturalearthdata.com/about/terms-of-use/)"
+        )
         assert document["polygons"] == charts.land_polygons()
+
+    def test_land_rings_are_closed_and_rounded_to_a_tenth_of_a_degree(self) -> None:
+        polygons = charts.land_polygons()
+        assert (len(polygons), sum(map(len, polygons))) == (127, 5070)
+        assert all(ring[0] == ring[-1] for ring in polygons)
+        assert all(
+            round(value, 1) == value for ring in polygons for point in ring for value in point
+        )
+        # Consecutive repeated points, most of them made by the rounding, were removed.
+        assert all(a != b for ring in polygons for a, b in itertools.pairwise(ring))
 
     def test_land_is_read_once(self) -> None:
         assert charts.land_polygons() is charts.land_polygons()

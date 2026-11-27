@@ -29,6 +29,7 @@ from cli.dashboard.data import (
     FleetData,
     JobsSnapshot,
     RegionRead,
+    ServingDefaults,
     Topology,
     clear_discovery_cache,
     describe_error,
@@ -107,6 +108,11 @@ def load_endpoints() -> list[dict[str, Any]]:
 @st.cache_data(ttl=120, show_spinner=False)
 def load_examples() -> list[ExampleManifest]:
     return fleet().examples()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_inference_example(name: str) -> ServingDefaults:
+    return fleet().inference_example(name)
 
 
 @st.cache_data(ttl=900, show_spinner="Asking Cost Explorer...")
@@ -219,6 +225,7 @@ LIVE_LOADERS: tuple[Any, ...] = (
     load_queue_stats,
     load_endpoints,
     load_examples,
+    load_inference_example,
     load_global_health,
     load_regional_status,
     load_templates,

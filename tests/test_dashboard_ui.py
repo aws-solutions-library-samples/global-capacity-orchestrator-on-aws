@@ -141,6 +141,7 @@ LOADERS: list[tuple[str, tuple[Any, ...], str, tuple[Any, ...], dict[str, Any]]]
     ("load_queue_stats", (), "queue_stats", (), {}),
     ("load_endpoints", (), "endpoints", (), {}),
     ("load_examples", (), "examples", (), {}),
+    ("load_inference_example", ("inference-vllm",), "inference_example", ("inference-vllm",), {}),
     ("load_costs", (30,), "costs", (), {"days": 30}),
     (
         "load_spot_history",

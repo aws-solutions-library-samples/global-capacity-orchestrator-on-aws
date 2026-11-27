@@ -23,8 +23,10 @@ from cli.config import GCOConfig
 from cli.dashboard.data import (
     DashboardError,
     ExampleManifest,
+    FleetData,
     JobsSnapshot,
     RegionRead,
+    ServingDefaults,
     Topology,
     load_manifest_text,
 )
@@ -893,6 +895,12 @@ class FakeFleet:
             ),
         ]
         return self._call("examples", found)
+
+    def inference_example(self, name: str) -> ServingDefaults:
+        # The checkout's own example, read as the dashboard reads it, so the
+        # deploy dialog's tests expect whatever image the example pins.
+        shipped = FleetData(self.config).inference_example(name, root=REPO_ROOT)
+        return self._call("inference_example", shipped, name)
 
 
 def simple_manifest() -> dict[str, Any]:

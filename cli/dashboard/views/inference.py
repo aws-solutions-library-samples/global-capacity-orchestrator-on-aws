@@ -10,7 +10,7 @@ from typing import Any
 import streamlit as st
 
 from cli.dashboard import charts, frames, ui
-from cli.dashboard.data import Topology, describe_error
+from cli.dashboard.data import ServingDefaults, Topology, describe_error
 from cli.dashboard.regions import region_label
 
 TABLE_KEY = "inference_table"
@@ -20,42 +20,38 @@ HEALTH_KEY = "inference_health"
 #: DNS-1035 label of at most 55 characters (``gco inference deploy``'s rule).
 ENDPOINT_NAME = re.compile(r"^[a-z]([-a-z0-9]{0,53}[a-z0-9])?$")
 
-#: Serving runtimes the deploy dialog presets, as docs/INFERENCE.md documents them.
+#: Serving runtimes the deploy dialog presets. The image, container port,
+#: health path (the readiness probe's) and default MODEL of each come from the
+#: example manifest it names, read from the checkout's ``examples/``: the files
+#: docs/INFERENCE.md links, the dependency scan's image sweep watches and
+#: ``gco examples validate`` runs, so bumping an example's image updates the
+#: dialog. Only the dialog's own choices live here: the label, the
+#: ``--framework`` value and the default server arguments. Custom names no
+#: example, so it starts with no image and the port and health path
+#: ``gco inference deploy`` assumes, as does a preset whose example cannot be read.
 PRESETS: dict[str, dict[str, Any]] = {
     "vllm": {
         "label": "vLLM",
-        "image": "vllm/vllm-openai:v0.32.0",
-        "port": 8000,
-        "health": "/health",
+        "example": "inference-vllm",
         "framework": "vllm",
-        "model": "Qwen/Qwen2.5-1.5B-Instruct",
         "args": "--max-model-len\n4096",
     },
     "sglang": {
         "label": "SGLang",
-        "image": "lmsysorg/sglang:v0.5.23",
-        "port": 30000,
-        "health": "/health",
+        "example": "inference-sglang",
         "framework": "sglang",
-        "model": "Qwen/Qwen2.5-1.5B-Instruct",
         "args": "",
     },
     "triton": {
         "label": "Triton",
-        "image": "nvcr.io/nvidia/tritonserver:26.09-py3",
-        "port": 8000,
-        "health": "/v2/health/ready",
+        "example": "inference-triton",
         "framework": None,
-        "model": "",
         "args": "tritonserver\n--model-repository=/models/NAME",
     },
     "custom": {
         "label": "Custom",
-        "image": "",
-        "port": 8000,
-        "health": "/health",
+        "example": None,
         "framework": None,
-        "model": "",
         "args": "",
     },
 }
@@ -482,18 +478,18 @@ def deploy_dialog() -> None:
         key="deploy_preset",
     )
     preset = PRESETS[str(preset_key)]
+    example = preset["example"]
+    served = ui.load_inference_example(example) if example else ServingDefaults()
     left, right = st.columns(2)
     name = left.text_input("Name", key="deploy_name", placeholder="qwen-chat", max_chars=55)
-    image = right.text_input("Image", value=str(preset["image"]), key=f"deploy_image_{preset_key}")
+    image = right.text_input("Image", value=served.image, key=f"deploy_image_{preset_key}")
     model = left.text_input(
         "Model (MODEL)",
-        value=str(preset["model"]),
+        value=served.model,
         key=f"deploy_model_{preset_key}",
         help="A Hugging Face id or a path under /models; the renderer passes it to the server.",
     )
-    port = int(
-        right.number_input("Port", 1, 65535, int(preset["port"]), key=f"deploy_port_{preset_key}")
-    )
+    port = int(right.number_input("Port", 1, 65535, served.port, key=f"deploy_port_{preset_key}"))
     regions = st.multiselect(
         "Regions",
         list(topology.workload_regions),
@@ -517,9 +513,7 @@ def deploy_dialog() -> None:
     gpu_type = a.text_input(
         "Preferred instance type", key="deploy_gpu_type", placeholder="g6e.xlarge (a hint)"
     )
-    health = b.text_input(
-        "Health path", value=str(preset["health"]), key=f"deploy_health_{preset_key}"
-    )
+    health = b.text_input("Health path", value=served.health, key=f"deploy_health_{preset_key}")
     autoscale = c.toggle("Autoscale", key="deploy_autoscale")
     autoscaling = None
     scaled_on = ""

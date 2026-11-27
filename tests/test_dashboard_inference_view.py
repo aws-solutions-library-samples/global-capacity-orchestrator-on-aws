@@ -25,13 +25,15 @@ from typing import Any
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from cli.config import GCOConfig
 from cli.dashboard import charts, ui
-from cli.dashboard.data import DashboardError
+from cli.dashboard.data import DashboardError, FleetData, ServingDefaults
 from cli.dashboard.regions import region_label
 from cli.dashboard.views import inference
 from tests._dashboard_fakes import (
     APP,
     REGIONS,
+    REPO_ROOT,
     FakeFleet,
     fake_fleet_fixture,  # noqa: F401
     sample_endpoint,
@@ -39,9 +41,15 @@ from tests._dashboard_fakes import (
 )
 
 NAME = "qwen-chat"
-IMAGE = "vllm/vllm-openai:v0.32.0"
+#: The image the sample endpoint runs.
+IMAGE = sample_endpoint()["spec"]["image"]
 NEW_IMAGE = "vllm/vllm-openai:v0.33.0"
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+#: What the checkout's inference examples serve, which the deploy dialog presets.
+VLLM, SGLANG, TRITON = (
+    FleetData(GCOConfig()).inference_example(name, root=REPO_ROOT)
+    for name in ("inference-vllm", "inference-sglang", "inference-triton")
+)
 REFUSAL_CARD = "**The API refused the change.**\n\nCheck the endpoint's state and retry."
 FIRST_ENDPOINT = "The first endpoint; select a row for another."
 NAME_RULE = "The name must be lowercase letters, digits and '-', start with a letter, 55 at most."
@@ -337,7 +345,8 @@ class TestEndpointList:
     def test_the_deploy_button_opens_the_deploy_dialog(self, fake_fleet: FakeFleet) -> None:
         app = _click(_page(), "inference_deploy")
         assert any(
-            code.startswith(f"gco inference deploy NAME -i {IMAGE}") for code in _values(app.code)
+            code.startswith(f"gco inference deploy NAME -i {VLLM.image} ")
+            for code in _values(app.code)
         )
         assert app.button(key="deploy_go").disabled
 
@@ -436,7 +445,7 @@ class TestOverview:
                 id="autoscaling-off",
             ),
             pytest.param(
-                {"image": "nvcr.io/nvidia/tritonserver:26.09-py3", "capacity_type": "on-demand"},
+                {"image": TRITON.image, "capacity_type": "on-demand"},
                 {
                     "**Framework** not pinned",
                     "**Model** set by the arguments",
@@ -1069,6 +1078,16 @@ def _registration(fake: FakeFleet) -> dict[str, Any]:
     return call[1]
 
 
+def _preset_fields(app: AppTest, preset: str) -> tuple[Any, ...]:
+    """The image, port, health path and model the dialog shows for ``preset``."""
+    return (
+        app.text_input(key=f"deploy_image_{preset}").value,
+        app.number_input(key=f"deploy_port_{preset}").value,
+        app.text_input(key=f"deploy_health_{preset}").value,
+        app.text_input(key=f"deploy_model_{preset}").value,
+    )
+
+
 class TestDeployDialog:
     def test_opens_on_the_vllm_preset(self, fake_fleet: FakeFleet) -> None:
         app = _deploy_dialog()
@@ -1085,7 +1104,7 @@ class TestDeployDialog:
         ]
         assert app.multiselect(key="deploy_regions").value == list(REGIONS)
         assert _values(app.code) == [
-            f"gco inference deploy NAME -i {IMAGE} --framework vllm -e MODEL={MODEL} "
+            f"gco inference deploy NAME -i {VLLM.image} --framework vllm -e MODEL={MODEL} "
             "--extra-args=--max-model-len --extra-args 4096"
         ]
         assert not app.warning
@@ -1093,6 +1112,59 @@ class TestDeployDialog:
         assert app.button(key="deploy_go").disabled
         # Only a preset with a NAME placeholder explains it.
         assert app.text_area(key="deploy_args_vllm").help == ""
+
+    @pytest.mark.parametrize(
+        ("preset", "example"),
+        [
+            ("vllm", "inference-vllm"),
+            ("sglang", "inference-sglang"),
+            ("triton", "inference-triton"),
+        ],
+    )
+    def test_a_runtime_presets_what_its_example_serves(
+        self, fake_fleet: FakeFleet, preset: str, example: str
+    ) -> None:
+        fake_fleet.overrides["inference_example"] = lambda name: ServingDefaults(
+            image=f"registry.example/{name}:next", port=9000, health="/ready", model="org/model"
+        )
+        app = _deploy_dialog()
+        app.segmented_control(key="deploy_preset").set_value(preset)
+        app = _run(app)
+        assert _preset_fields(app, preset) == (
+            f"registry.example/{example}:next",
+            9000,
+            "/ready",
+            "org/model",
+        )
+        assert ((example,), {}) in fake_fleet.called("inference_example")
+
+    def test_custom_reads_no_example_and_starts_from_the_cli_defaults(
+        self, fake_fleet: FakeFleet
+    ) -> None:
+        app = _deploy_dialog()
+        app.segmented_control(key="deploy_preset").set_value("custom")
+        app = _run(app)
+        assert _preset_fields(app, "custom") == ("", 8000, "/health", "")
+        # Only the vLLM preset the dialog opened on read its example.
+        assert fake_fleet.called("inference_example") == [(("inference-vllm",), {})]
+
+    def test_a_runtime_whose_example_cannot_be_read_asks_for_an_image(
+        self, fake_fleet: FakeFleet
+    ) -> None:
+        fake_fleet.overrides["inference_example"] = ServingDefaults()
+        app = _deploy_dialog()
+        app.text_input(key="deploy_name").input(NAME)
+        app = _run(app)
+        assert _preset_fields(app, "vllm") == ("", 8000, "/health", "")
+        assert _values(app.warning) == ["Name a container image."]
+        assert app.button(key="deploy_go").disabled
+        app.text_input(key="deploy_image_vllm").input("registry.example/vllm:1")
+        app = _run(app)
+        assert not app.warning
+        assert _values(app.code) == [
+            f"gco inference deploy {NAME} -i registry.example/vllm:1 --framework vllm "
+            "--extra-args=--max-model-len --extra-args 4096"
+        ]
 
     @pytest.mark.parametrize("name", ["Qwen-chat", "7b-chat", "qwen_chat", "qwen-"])
     def test_an_invalid_name_is_refused(self, fake_fleet: FakeFleet, name: str) -> None:
@@ -1125,7 +1197,7 @@ class TestDeployDialog:
         app = _click(_run(app), "deploy_go")
         assert _registration(fake_fleet) == {
             "endpoint_name": NAME,
-            "image": IMAGE,
+            "image": VLLM.image,
             "framework": "vllm",
             "target_regions": list(REGIONS),
             "replicas": 1,
@@ -1161,7 +1233,7 @@ class TestDeployDialog:
         app.selectbox(key="deploy_metric").select("cpu:70")
         app = _run(app)
         assert _values(app.code) == [
-            "gco inference deploy sg-chat -i lmsysorg/sglang:v0.5.23 --framework sglang "
+            f"gco inference deploy sg-chat -i {SGLANG.image} --framework sglang "
             f"--port 30000 -e MODEL={MODEL} --health-path /ready -r us-east-1 -r eu-west-1 "
             "--replicas 2 --gpu-count 4 --gpu-type g6e.xlarge --capacity-type on-demand "
             "--min-replicas 2 --max-replicas 2 --autoscale-metric cpu:70 "
@@ -1170,7 +1242,7 @@ class TestDeployDialog:
         app = _click(app, "deploy_go")
         assert _registration(fake_fleet) == {
             "endpoint_name": "sg-chat",
-            "image": "lmsysorg/sglang:v0.5.23",
+            "image": SGLANG.image,
             "framework": "sglang",
             "target_regions": ["us-east-1", "eu-west-1"],
             "replicas": 2,
@@ -1195,7 +1267,7 @@ class TestDeployDialog:
         app.segmented_control(key="deploy_preset").set_value("triton")
         app = _run(app)
         assert _values(app.code) == [
-            "gco inference deploy tri-chat -i nvcr.io/nvidia/tritonserver:26.09-py3 "
+            f"gco inference deploy tri-chat -i {TRITON.image} "
             "--health-path /v2/health/ready --extra-args tritonserver "
             "--extra-args=--model-repository=/models/tri-chat"
         ]
@@ -1222,7 +1294,7 @@ class TestDeployDialog:
         app.text_input(key="deploy_name").input("tri-chat")
         app = _run(app)
         assert _values(app.code) == [
-            "gco inference deploy tri-chat -i nvcr.io/nvidia/tritonserver:26.09-py3 "
+            f"gco inference deploy tri-chat -i {TRITON.image} "
             "--health-path /v2/health/ready --extra-args tritonserver "
             "--extra-args=--model-repository=/models/tri-chat"
         ]
@@ -1259,7 +1331,7 @@ class TestDeployDialog:
         app.text_area(key="deploy_args_triton").input(text)
         app = _run(app)
         assert _values(app.code) == [
-            "gco inference deploy tri-chat -i nvcr.io/nvidia/tritonserver:26.09-py3 "
+            f"gco inference deploy tri-chat -i {TRITON.image} "
             f"--health-path /v2/health/ready {command}"
         ]
         app = _click(app, "deploy_go")
@@ -1272,7 +1344,9 @@ class TestDeployDialog:
         app.text_input(key="deploy_health_vllm").input("")
         app.text_area(key="deploy_args_vllm").input("")
         app = _run(app)
-        assert _values(app.code) == [f"gco inference deploy {NAME} -i {IMAGE} --framework vllm"]
+        assert _values(app.code) == [
+            f"gco inference deploy {NAME} -i {VLLM.image} --framework vllm"
+        ]
         app = _click(app, "deploy_go")
         registered = _registration(fake_fleet)
         assert (registered["env"], registered["health_check_path"], registered["extra_args"]) == (
