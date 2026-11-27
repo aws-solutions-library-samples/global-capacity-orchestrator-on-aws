@@ -141,7 +141,9 @@ def _recommend() -> None:
             width="stretch",
             column_config={
                 "score": st.column_config.NumberColumn("Score", format="%.3f"),
-                "gpu_utilization": st.column_config.NumberColumn("GPU %", format="%.0f"),
+                "gpu_utilization": st.column_config.NumberColumn(
+                    "GPU %", format="%.0f", help="Empty where the Region has no GPU nodes"
+                ),
                 "spot_placement": st.column_config.ProgressColumn(
                     "Spot placement", min_value=0, max_value=1
                 ),

@@ -556,29 +556,49 @@ class TestServices:
                     "threshold_violations": ["CPU: 130.4% > 80%"],
                 },
             ),
-            # A monitor that reports nothing yet: no readings, no limits.
-            RegionRead(region="us-west-2", data={"resource_utilization": None}),
-            RegionRead(region="eu-west-1", error="The health monitor timed out."),
+            # A monitor whose cluster reads fail: every value null, the read named.
+            RegionRead(
+                region="us-west-2",
+                data={
+                    "status": "unhealthy",
+                    "message": "Health check error: listing pods failed",
+                    "resource_utilization": {
+                        "cpu_percent": None,
+                        "memory_percent": None,
+                        "gpu_percent": None,
+                    },
+                    "thresholds": {
+                        "cpu_threshold": 80,
+                        "memory_threshold": 80,
+                        "gpu_threshold": 60,
+                    },
+                    "threshold_violations": [],
+                },
+            ),
+            # A monitor that reports nothing at all.
+            RegionRead(region="eu-west-1", data={"resource_utilization": None}),
+            RegionRead(region="ap-south-1", error="The health monitor timed out."),
         ]
 
         app = _page("Services")
 
         markdown = _values(app.markdown)
-        assert _region_headings(app) == ["**us-east-1 · N. Virginia**", "**us-west-2 · Oregon**"]
+        assert _region_headings(app) == [f"**{label}**" for label in REGION_LABELS]
         assert markdown.count(":red-badge[over threshold]") == 1
-        assert markdown.count(":green-badge[within thresholds]") == 1
+        # Nothing was measured, so neither is within its thresholds.
+        assert markdown.count(":green-badge[within thresholds]") == 0
+        assert markdown.count(":orange-badge[no cluster reading]") == 2
         assert _bars(app) == [
             # Over-commit is drawn as a full bar; the label keeps the real number.
             (100, "CPU requested: 130% (limit 80%)"),
             (40, "Memory requested: 40% (limit 0%)"),
             (0, "GPU allocated: — (no limit)"),
-            (0, "CPU requested: — (no limit)"),
-            (0, "Memory requested: — (no limit)"),
-            (0, "GPU allocated: — (no limit)"),
         ]
         captions = _values(app.caption)
         assert ":material/warning: CPU: 130.4% > 80%" in captions
-        assert "eu-west-1: The health monitor timed out." in captions
+        assert ":material/warning: Health check error: listing pods failed" in captions
+        assert ":material/warning: The health monitor sent no cluster reading" in captions
+        assert "ap-south-1: The health monitor timed out." in captions
 
     def test_a_region_without_gpu_nodes_says_so_instead_of_an_idle_gpu_bar(
         self, fake_fleet: FakeFleet

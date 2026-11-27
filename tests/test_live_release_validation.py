@@ -1406,6 +1406,8 @@ class TestDeterministicTopologyReadiness:
                         "cpu_percent": 12.5,
                         "memory_percent": 33.0,
                         "gpu_percent": 0,
+                        "gpu_allocatable": 0,
+                        "gpu_requested": 0,
                     },
                     "thresholds": {
                         "cpu_threshold": 80,

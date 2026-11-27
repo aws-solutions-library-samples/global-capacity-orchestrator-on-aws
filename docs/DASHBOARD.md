@@ -109,6 +109,13 @@ cost modules), so it sees what `gco` sees:
   the dashboard drops the live reads it made stale. Reads that cost money or
   have quotas (Cost Explorer, Spot price history, placement scores) keep
   their own cache and reload button.
+- **GPU figures**: GPU use comes from each Region's health monitor, which
+  counts the GPUs its nodes offer and the GPUs pods request. A Region without
+  GPU nodes says `No GPU nodes` instead of showing 0% (an idle GPU it does
+  not have) and is left out of the fleet's GPU share and the GPU history
+  chart. A health monitor whose cluster reads are failing sends no figures at
+  all: the Region's gauges are empty, its card and the Platform page name
+  the failed read, and it is left out of the fleet's GPU share.
 
 Every change runs as the signed-in AWS principal, exactly as the matching
 `gco` command would, and goes through the same API validation and policies.

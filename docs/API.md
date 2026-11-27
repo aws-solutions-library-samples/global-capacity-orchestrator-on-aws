@@ -2470,14 +2470,27 @@ The `resource_utilization` object of `/api/v1/metrics`:
 nodes report as allocatable, so it is `0` both for a cluster with no GPU nodes
 and for one whose GPUs are all free. `gpu_allocatable` and `gpu_requested` are
 those two counts, which tell the cases apart: `0` and `0` without GPU nodes,
-`4` and `0` for four idle GPUs. Both are `null` in a status that holds no
-cluster reading, such as the `unhealthy` status reported when a read fails and
-no recent reading can stand in (see below). Health monitors deployed before the
-counts existed leave both out.
+`4` and `0` for four idle GPUs. Health monitors deployed before the counts
+existed leave both out.
+
+A status that holds no cluster reading, the `unhealthy` status reported when a
+read fails and no recent reading can stand in (see below), has no utilization:
+every `resource_utilization` value and `active_jobs` are `null`,
+`threshold_violations` is empty, and `message` names the failed read. A zero
+there would describe an idle cluster nobody measured.
 
 The health monitor also publishes resource utilization and health status to
 CloudWatch every 30 seconds independently of these endpoints, which is how
-dashboards and alarms are fed. See the [Monitoring Guide](MONITORING.md).
+dashboards and alarms are fed: `ClusterCpuUtilization`,
+`ClusterMemoryUtilization`, `ClusterGpuUtilization`, `ActiveJobs`, the GPU
+counts `ClusterGpuAllocatable` and `ClusterGpuRequested`, `ClusterHealthy` and
+`ThresholdViolations` (namespace `GCO/HealthMonitor`, dimensions `ClusterName`
+and `Region`). A status without a cluster reading publishes only the last two,
+so the utilization series have a gap rather than zeros, and once its last
+datapoints are five minutes old `gco capacity` reads the Region's running
+jobs (and its GPU allocation, where Container Insights has no GPU series) as
+unavailable instead of idle. See the
+[Monitoring Guide](MONITORING.md).
 
 Each refresh reads metrics-server once and lists the nodes and pods once;
 requests that arrive while a refresh runs share it. If one of those reads

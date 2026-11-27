@@ -7,6 +7,7 @@ plain fixtures. Times are timezone-aware UTC throughout.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -381,6 +382,26 @@ def _utilization(reading: RegionRead | None) -> dict[str, Any]:
     return as_dict(reading.data.get("resource_utilization")) if reading and reading.ok else {}
 
 
+#: The percentages a health monitor's ``resource_utilization`` carries.
+_PERCENT_KEYS = ("cpu_percent", "memory_percent", "gpu_percent")
+
+
+def missing_reading(reading: RegionRead | None) -> str:
+    """Why a health monitor that answered sent no cluster reading; empty when it sent one.
+
+    A monitor whose cluster reads failed, with no recent reading to stand in,
+    answers ``unhealthy`` with every utilization value null and the failed
+    read named in ``message``. A request that failed is not this case: its
+    ``error`` says why there is no answer at all.
+    """
+    if reading is None or not reading.ok:
+        return ""
+    utilization = _utilization(reading)
+    if any(isinstance(utilization.get(key), int | float) for key in _PERCENT_KEYS):
+        return ""
+    return str(reading.data.get("message") or "The health monitor sent no cluster reading")
+
+
 def _gpu_counts(utilization: Mapping[str, Any]) -> tuple[int | None, int | None]:
     """``(allocatable, requested)`` GPUs a health monitor reported, else ``(None, None)``.
 
@@ -418,6 +439,8 @@ def regions_frame(
 
     ``gpu_allocatable`` and ``gpu_requested`` are empty where the Region's
     health monitor sent no GPU counts, leaving only its ``gpu`` percentage.
+    ``cpu``, ``memory``, ``gpu`` and ``active_jobs`` are empty where it sent no
+    cluster reading, and ``error`` then carries the monitor's reason.
     """
     sections = (fleet or {}).get("sections") or {}
     # Each Region's health is its regional stack's (``<project>-<region>``),
@@ -459,9 +482,7 @@ def regions_frame(
                 "gpu": utilization.get("gpu_percent"),
                 "gpu_allocatable": gpu_allocatable,
                 "gpu_requested": gpu_requested,
-                "active_jobs": int(reading.data.get("active_jobs", 0) or 0)
-                if reading and reading.ok
-                else 0,
+                "active_jobs": _whole(reading.data.get("active_jobs") if reading else None),
                 "running": int((region_jobs["status"] == "running").sum())
                 if region_jobs is not None
                 else 0,
@@ -471,7 +492,7 @@ def regions_frame(
                 "queued": int((queue.get(region) or {}).get("available", 0) or 0),
                 "dlq": int((queue.get(region) or {}).get("dlq", 0) or 0),
                 "endpoints": len(serving),
-                "error": reading.error if reading and not reading.ok else "",
+                "error": reading.error if reading and not reading.ok else missing_reading(reading),
             }
         )
     columns = [
@@ -714,6 +735,13 @@ def cost_frames(report: Mapping[str, Any]) -> dict[str, Any]:
     return {"daily": daily, "services": services, "regions": regions}
 
 
+def _whole(value: object) -> int | None:
+    """A non-negative whole number from a JSON number, else None."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return int(value) if math.isfinite(value) and value >= 0 else None
+
+
 def _number(value: object) -> float | None:
     """A float from a JSON number or numeric string (Athena returns strings)."""
     if isinstance(value, bool):
@@ -789,7 +817,9 @@ def recommendation_frame(result: Mapping[str, Any]) -> Any:
     """A placement recommendation's ranking of every Region, best first.
 
     Lower scores rank higher. Weighted recommendations (an instance type was
-    given) also carry the Spot signals they were scored on.
+    given) also carry the Spot signals they were scored on. A Region the
+    checker counted no GPUs in has no GPU use to report, so its
+    ``gpu_utilization`` is left empty instead of reading 0%.
     """
     rows = []
     for rank, entry in enumerate(result.get("all_regions") or [], start=1):
@@ -801,7 +831,9 @@ def recommendation_frame(result: Mapping[str, Any]) -> Any:
                 "region": str(entry.get("region", "")),
                 "score": _number(entry.get("score")),
                 "queue_depth": _number(entry.get("queue_depth")),
-                "gpu_utilization": _number(entry.get("gpu_utilization")),
+                "gpu_utilization": None
+                if entry.get("total_gpus") == 0
+                else _number(entry.get("gpu_utilization")),
                 "running_jobs": _number(entry.get("running_jobs")),
                 "spot_placement": _number(entry.get("spot_placement_score")),
                 "spot_price_ratio": _number(entry.get("spot_price_ratio")),

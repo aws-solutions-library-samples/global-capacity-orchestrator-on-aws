@@ -1031,6 +1031,34 @@ changes this:
   Messages from `GET /api/v1/health` name the read that failed instead of
   carrying the exception text. Clients that matched on either text need the
   new one.
+- **BREAKING (API contract and dashboards): an unhealthy status with no
+  cluster reading reports no utilization.** Once that 60-second window ran
+  out, `GET /api/v1/metrics` answered `0` for `cpu_percent`, `memory_percent`,
+  `gpu_percent` and `active_jobs`, and the monitor published the zeros to
+  `ClusterCpuUtilization`, `ClusterMemoryUtilization`,
+  `ClusterGpuUtilization` and `ActiveJobs`, so the cluster charted as idle
+  and `gco capacity` ranked the Region as the emptiest. The response now
+  carries `null` for every `resource_utilization` value and for
+  `active_jobs`, `threshold_violations` is empty, and `message` names the
+  failed read. Nothing is published to those four metrics until a read
+  succeeds (`ClusterHealthy` still reports 0), so `gco capacity` reads the
+  Region's running jobs, and its GPU allocation where Container Insights has
+  no GPU series, as unavailable and ranks it after the Regions it can read.
+  Clients that sum or average the fields need to skip nulls, and alarms on
+  those metrics should treat missing data as breaching or as missing, not as
+  zero.
+- **New metrics: `ClusterGpuAllocatable` and `ClusterGpuRequested`.** The
+  health monitor publishes the GPU counts behind `ClusterGpuUtilization`
+  (unit `Count`, same namespace and dimensions), which is `0` both without
+  GPU nodes and with idle GPUs. `gco capacity status`, `gco capacity
+  recommend-region`, `gco status`, the capacity advisor and the dashboard
+  read them: a Region without GPU nodes shows `none` instead of `0%`, and
+  its recommendation reason says `no GPU nodes running (Auto Mode launches
+  them on demand)` instead of `100% GPU available`. Placement scoring is
+  unchanged. `RegionCapacity.total_gpus` and `available_gpus`, always `0`
+  before, carry the counts, or `None` until the redeployed monitor has
+  published them; the `capacity` section of the `gco status` document and
+  the recommendation's `all_regions` entries carry them too.
 
 ### Job status filter and request paths
 

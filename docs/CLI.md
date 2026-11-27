@@ -707,7 +707,12 @@ running jobs nor score it as idle. The same values feed
 
 In the table, a signal that could not be read shows as `-` rather than `0`, and the
 `TELEMETRY` column says whether a Region's readings are `complete`, `partial` or
-`unavailable`. A Region whose check failed is named on stderr; when Region discovery
+`unavailable`. `GPU%` is `none` for a Region without GPU nodes, whose 0% is no idle
+GPU: the health monitor's `ClusterGpuAllocatable` and `ClusterGpuRequested` counts tell
+the two apart, and they are reported as `total_gpus` (allocatable GPUs) and
+`available_gpus` (those no running pod requested) in JSON and YAML, `null` where the
+monitor has not published them. Such a Region still scores as uncontended, because EKS
+Auto Mode launches GPU nodes when a pod asks for them. A Region whose check failed is named on stderr; when Region discovery
 fails, or every Region does, the command exits 1 instead of reporting that no stacks
 were found.
 
@@ -759,6 +764,10 @@ gco capacity recommend-region [OPTIONS]
 When `--instance-type` is provided, the recommendation uses weighted multi-signal
 scoring that combines spot placement scores, spot-vs-on-demand pricing, queue depth,
 GPU utilization, and running job counts. Without it, a simpler composite score is used.
+A Region without GPU nodes scores as uncontended (EKS Auto Mode launches them on
+demand), and its reason says so instead of claiming `100% GPU available`; each entry of
+`all_regions` carries `total_gpus` and `available_gpus` as
+[`gco capacity status`](#gco-capacity-status) reports them.
 The spot placement score is asked for the number of instances that hold `--gpu-count`
 (or `--min-gpus`) GPUs of the type, rounded up (`-i p4d.24xlarge --gpu-count 16` scores
 2 instances), and for one instance when no GPU count is given or the type's GPU count is
@@ -6489,7 +6498,7 @@ Kubernetes API, so both are opt-in flags.
 | `addons` | 1 | Add-on convergence per region: the record each convergence phase (the kubectl applier's base and post-Helm passes, the validators) and Helm chart writes to SSM under `/<project>/addons/<region>/`, read with one `GetParametersByPath` listing per region, as [`gco stacks addons status`](#gco-stacks-addons) reads them. A failed convergence never fails the regional stack, so the `stacks` section reads healthy through it. `data.by_region.<region>` is `{readable, addons}`, and each record is `{name, status, health, message, updated_at}` with `health` `healthy` (a status `addons status` counts as healthy), `unhealthy` (`failed`), `in-progress` (`teardown-active`, an add-on teardown) or `unknown` (any other status). A region whose records cannot be read is `readable: false` and named in `errors`, which makes the section `partial`, or `error` when no region can be read; `empty` means no region has recorded anything yet. Table output lists each record that is not healthy, failures first, then one `<healthy> of <total> healthy` line per region |
 | `queue` | 1 | SQS job-queue and dead-letter-queue depth per region, as `gco jobs queue-status --all-regions` shows it |
 | `jobs` | 1 | Central job-queue records by region and status from the queue-statistics API, as `gco queue stats` shows them (`source: central job queue`). Only `gco queue submit` and `gco jobs submit-queue` create these records, so jobs sent with `gco jobs submit`, `submit-sqs` or `submit-direct` are not counted; list those with `gco jobs list --all-regions` |
-| `capacity` | 1 | Queue depth and GPU/CPU utilization per region, with telemetry provenance |
+| `capacity` | 1 | Queue depth and GPU/CPU utilization per region, with telemetry provenance, and the GPU counts (`total_gpus`, `available_gpus`; `null` when not published) that tell a region without GPU nodes (`total_gpus: 0`, shown as `gpu none`) from one with idle GPUs |
 | `inference` | 1 | Inference endpoint desired state from the global registry |
 | `costs` | 2 | Cost Explorer 30-day total by service, plus cost-allocation-tag status (`--with-costs`) |
 | `policy` | 1 per region | Cross-region job-validation policy agreement (`--with-policy`). No per-region overrides exist, so a differing field means a region was deployed from a different `cdk.json` checkout; each one becomes a warn finding |

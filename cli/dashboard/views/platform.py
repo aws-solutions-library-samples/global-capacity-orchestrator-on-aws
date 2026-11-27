@@ -161,9 +161,15 @@ def _services(topology: Topology, regions: tuple[str, ...]) -> None:
         utilization = read.data.get("resource_utilization") or {}
         thresholds = read.data.get("thresholds") or {}
         violations = read.data.get("threshold_violations") or []
+        missing = frames.missing_reading(read)
         with st.container(border=True):
             top = st.container(horizontal=True, vertical_alignment="center")
             top.markdown(f"**{region_label(read.region)}**")
+            if missing:
+                # Nothing was measured, so nothing is within (or over) a threshold.
+                top.markdown(":orange-badge[no cluster reading]")
+                st.caption(f":material/warning: {missing}")
+                continue
             top.markdown(
                 ":red-badge[over threshold]" if violations else ":green-badge[within thresholds]"
             )

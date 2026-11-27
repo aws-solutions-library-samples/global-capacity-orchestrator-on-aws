@@ -742,12 +742,18 @@ def _gather_jobs(config: GCOConfig, region: str | None) -> Section:
 
 
 def _capacity_entry_from(cap: RegionCapacity) -> dict[str, Any]:
-    """Document entry for one region's capacity sweep result."""
+    """Document entry for one region's capacity sweep result.
+
+    ``total_gpus`` and ``available_gpus`` are the health monitor's GPU counts
+    (None when not read); ``total_gpus`` 0 means the Region has no GPU nodes.
+    """
     return {
         "queue_depth": int(cap.queue_depth),
         "running_jobs": int(cap.running_jobs),
         "gpu_utilization": float(cap.gpu_utilization),
         "cpu_utilization": float(cap.cpu_utilization),
+        "total_gpus": cap.total_gpus,
+        "available_gpus": cap.available_gpus,
         "telemetry_status": str(cap.telemetry_status),
         "unavailable_signals": list(cap.unavailable_signals),
     }
@@ -765,6 +771,8 @@ def _capacity_unavailable_entry() -> dict[str, Any]:
         "running_jobs": 0,
         "gpu_utilization": 0.0,
         "cpu_utilization": 0.0,
+        "total_gpus": None,
+        "available_gpus": None,
         "telemetry_status": STATUS_UNAVAILABLE,
         "unavailable_signals": ["queue", "gpu", "cpu", "jobs"],
     }

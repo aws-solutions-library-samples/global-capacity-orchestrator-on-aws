@@ -351,7 +351,8 @@ class TestGpuCounts:
         assert monitor._calculate_gpu_utilization(nodes, pods) == percent
 
     @pytest.mark.asyncio
-    async def test_a_status_without_a_reading_has_no_counts(self):
+    async def test_a_status_without_a_reading_has_no_utilization_or_counts(self):
+        """Zeros there would describe an idle cluster nobody measured."""
         monitor = _monitor()
         _serve(monitor, nodes=[_node("g1", gpus=1)])
         monitor.core_v1.list_node.side_effect = TimeoutError("read timed out")
@@ -359,9 +360,27 @@ class TestGpuCounts:
         status = await monitor.get_health_status()
 
         assert status.status == "unhealthy"
-        assert status.resource_utilization.gpu == 0.0
-        assert status.resource_utilization.gpu_allocatable is None
-        assert status.resource_utilization.gpu_requested is None
+        assert status.message == "Health check error: listing nodes failed"
+        assert status.resource_utilization is None
+        assert (status.active_jobs, status.pending_pods, status.pending_requested) == (
+            None,
+            None,
+            None,
+        )
+        assert status.get_threshold_violations() == []
+        assert status.is_healthy() is False
+
+    @pytest.mark.asyncio
+    async def test_a_reading_that_cannot_be_judged_has_no_utilization_either(self):
+        from gco.models import RequestedResources, ResourceUtilization
+
+        monitor = _monitor()
+        reading = (ResourceUtilization(1.0, 1.0, 0.0), -1, 0, RequestedResources(0.0, 0.0, 0))
+        with patch.object(monitor, "get_cluster_metrics", return_value=reading):
+            status = await monitor.get_health_status()
+
+        assert status.resource_utilization is None
+        assert status.active_jobs is None
 
 
 class TestActiveJobs:

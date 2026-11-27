@@ -15,6 +15,7 @@ from gco.bedrock import BEDROCK_FTU_REMEDIATION, is_bedrock_ftu_form_error
 from ..capacity import get_capacity_checker
 from ..capacity.blocks import group_rejections
 from ..capacity.history import METRIC_FIELDS
+from ..capacity.multi_region import NO_GPU_NODES_REASON
 from ..config import GCOConfig
 from ..output import confirm, format_capacity_table, get_output_formatter, interactive_echo
 
@@ -433,7 +434,7 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
                     missing = set(c.unavailable_signals)
                     queue = "-" if "queue" in missing else str(c.queue_depth)
                     running = "-" if "jobs" in missing else str(c.running_jobs)
-                    gpu = "-" if "gpu" in missing else f"{c.gpu_utilization:.0f}%"
+                    gpu = _gpu_cell(c.gpu_utilization, c.total_gpus, measured="gpu" not in missing)
                     cpu = "-" if "cpu" in missing else f"{c.cpu_utilization:.0f}%"
                     print(
                         f"  {c.region:<15} {queue:>5}  {running:>7}  {gpu:>4}  {cpu:>5}  "
@@ -441,6 +442,8 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
                     )
 
                 print()
+                if any(c.without_gpu_nodes for c in capacities):
+                    print(f"  GPU% none: {NO_GPU_NODES_REASON}\n")
                 best = min(capacities, key=lambda x: x.recommendation_score)
                 formatter.print_info(f"Recommended region: {best.region} (lowest score = best)")
             else:
@@ -449,6 +452,16 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
     except Exception as e:
         formatter.print_error(f"Failed to get capacity status: {e}")
         sys.exit(1)
+
+
+def _gpu_cell(utilization: float, total_gpus: int | None, *, measured: bool = True) -> str:
+    """A Region's GPU% cell: ``-`` unmeasured, ``none`` without GPU nodes, else the percent.
+
+    A Region without GPU nodes reads 0%, which is no idle GPU.
+    """
+    if not measured:
+        return "-"
+    return "none" if total_gpus == 0 else f"{utilization:.0f}%"
 
 
 def _ranked_region_line(backend: str, entry: dict[str, Any]) -> str:
@@ -471,7 +484,8 @@ def _ranked_region_line(backend: str, entry: dict[str, Any]) -> str:
             f"pending={'?' if pending is None else pending}, "
             f"headroom={'?' if headroom is None else headroom}"
         )
-    return f"{line}, queue={entry['queue_depth']}, gpu={entry['gpu_utilization']:.0f}%"
+    gpu = _gpu_cell(entry["gpu_utilization"], entry.get("total_gpus"))
+    return f"{line}, queue={entry['queue_depth']}, gpu={gpu}"
 
 
 @capacity.command("recommend-region")

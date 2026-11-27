@@ -787,14 +787,13 @@ class TestRegionsFrame:
         assert list(frame["health"]) == ["unknown"] * 3
         assert list(frame["stack_status"]) == ["not deployed"] * 3
         assert (
-            frame[["cpu", "memory", "gpu", "gpu_allocatable", "gpu_requested"]].isna().all().all()
-        )
-        assert (
-            frame[["active_jobs", "running", "failed", "queued", "dlq", "endpoints"]]
-            .eq(0)
+            frame[["cpu", "memory", "gpu", "gpu_allocatable", "gpu_requested", "active_jobs"]]
+            .isna()
             .all()
             .all()
         )
+        assert frame[["running", "failed", "queued", "dlq", "endpoints"]].eq(0).all().all()
+        assert list(frame["error"]) == [""] * 3
 
     def test_partial_and_foreign_data(self) -> None:
         fleet = {
@@ -839,7 +838,7 @@ class TestRegionsFrame:
             "UPDATE_IN_PROGRESS",
             "timed out",
         )
-        assert pd.isna(east["cpu"]) and east["active_jobs"] == 0 and east["queued"] == 0
+        assert pd.isna(east["cpu"]) and pd.isna(east["active_jobs"]) and east["queued"] == 0
         assert pd.isna(east["gpu_allocatable"]) and pd.isna(east["gpu_requested"])
         assert (west["gpu_allocatable"], west["gpu_requested"]) == (2, 1)
         assert (west["health"], west["stack_status"], west["cpu"]) == (
@@ -922,8 +921,40 @@ class TestRegionsFrame:
             topology(workload_regions=("us-east-1",)), fleet_status_document(), [reading]
         )
         assert frame["health"].iloc[0] == "unhealthy"
-        assert frame["active_jobs"].iloc[0] == 0
+        assert pd.isna(frame["active_jobs"].iloc[0])
         assert pd.isna(frame["cpu"].iloc[0])
+        assert frame["error"].iloc[0] == "The health monitor sent no cluster reading"
+
+    def test_a_monitor_whose_reads_fail_sends_nulls_and_names_the_read(self) -> None:
+        """Its zeros used to read as an idle Region and pull the fleet's GPU share down."""
+        reading = RegionRead(
+            "us-east-1",
+            data={
+                "status": "unhealthy",
+                "message": "Health check error: listing pods failed",
+                "resource_utilization": dict.fromkeys(
+                    (
+                        "cpu_percent",
+                        "memory_percent",
+                        "gpu_percent",
+                        "gpu_allocatable",
+                        "gpu_requested",
+                    )
+                ),
+                "active_jobs": None,
+            },
+        )
+        frame = frames.regions_frame(
+            topology(workload_regions=("us-east-1", "us-west-2")),
+            fleet_status_document(),
+            [reading, metrics_read("us-west-2")],
+        )
+        east, west = frame.to_dict("records")
+        assert east["health"] == "unhealthy"
+        assert east["error"] == "Health check error: listing pods failed"
+        for key in ("cpu", "memory", "gpu", "gpu_allocatable", "gpu_requested", "active_jobs"):
+            assert pd.isna(east[key]), key
+        assert west["error"] == "" and west["active_jobs"] == 2
 
     def test_project_name_selects_the_regional_stack(self) -> None:
         fleet = {
@@ -1379,6 +1410,79 @@ class TestCapacityFrames:
         frame = frames.recommendation_frame({})
         assert frame.empty
         assert list(frame.columns)[:2] == ["rank", "region"]
+
+    def test_a_ranked_region_without_gpu_nodes_has_no_gpu_use(self) -> None:
+        """Its 0% is no idle GPU; one whose counts were not read keeps its share."""
+        result = {
+            "region": "us-east-1",
+            "all_regions": [
+                {"region": "us-east-1", "gpu_utilization": 0.0, "total_gpus": 0},
+                {"region": "us-west-2", "gpu_utilization": 0.0, "total_gpus": 4},
+                {"region": "eu-west-1", "gpu_utilization": 30.0, "total_gpus": None},
+            ],
+        }
+        frame = frames.recommendation_frame(result)
+        east, west, ireland = frame.to_dict("records")
+        assert pd.isna(east["gpu_utilization"])
+        assert (west["gpu_utilization"], ireland["gpu_utilization"]) == (0.0, 30.0)
+
+
+class TestMissingReading:
+    """Why a health monitor that answered sent no cluster reading."""
+
+    NULLS = dict.fromkeys(("cpu_percent", "memory_percent", "gpu_percent"))
+
+    @pytest.mark.parametrize(
+        ("reading", "expected"),
+        [
+            pytest.param(None, "", id="no-answer"),
+            pytest.param(RegionRead("us-east-1", error="timed out"), "", id="failed-request"),
+            pytest.param(metrics_read("us-east-1"), "", id="a-reading"),
+            pytest.param(
+                RegionRead(
+                    "us-east-1",
+                    data={"resource_utilization": NULLS | {"memory_percent": 0}},
+                ),
+                "",
+                id="one-value-is-a-reading",
+            ),
+            pytest.param(
+                RegionRead(
+                    "us-east-1",
+                    data={"resource_utilization": NULLS, "message": "Health check error: x failed"},
+                ),
+                "Health check error: x failed",
+                id="nulls-with-the-reason",
+            ),
+            pytest.param(
+                RegionRead("us-east-1", data={"resource_utilization": NULLS, "message": None}),
+                "The health monitor sent no cluster reading",
+                id="nulls-without-a-reason",
+            ),
+            pytest.param(
+                RegionRead("us-east-1", data={}),
+                "The health monitor sent no cluster reading",
+                id="no-utilization-object",
+            ),
+        ],
+    )
+    def test_missing_reading(self, reading: RegionRead | None, expected: str) -> None:
+        assert frames.missing_reading(reading) == expected
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (3, 3),
+            (2.0, 2),
+            (True, None),
+            (-1, None),
+            (math.nan, None),
+            (math.inf, None),
+            ("4", None),
+        ],
+    )
+    def test_whole_numbers(self, value: object, expected: int | None) -> None:
+        assert frames._whole(value) == expected
 
 
 class TestInferenceFrames:

@@ -524,16 +524,22 @@ class HealthMonitor:
             return self._unhealthy("Health check error: the health status could not be computed")
 
     def _unhealthy(self, message: str) -> HealthStatus:
+        """An ``unhealthy`` status that holds no cluster reading.
+
+        Its utilization and counts are None, never zeros: a zero would be
+        served by ``/api/v1/metrics`` and published to CloudWatch as an idle
+        cluster, and ``gco capacity`` would rank the Region as the emptiest.
+        """
         return HealthStatus(
             cluster_id=self.cluster_id,
             region=self.region,
             timestamp=datetime.now(UTC),
             status="unhealthy",
-            resource_utilization=ResourceUtilization(cpu=0.0, memory=0.0, gpu=0.0),
+            resource_utilization=None,
             thresholds=self.thresholds,
-            active_jobs=0,
-            pending_pods=0,
-            pending_requested=RequestedResources(cpu_vcpus=0.0, memory_gb=0.0, gpus=0),
+            active_jobs=None,
+            pending_pods=None,
+            pending_requested=None,
             message=message,
         )
 
@@ -836,11 +842,15 @@ async def main() -> None:
             try:
                 health_status = await health_monitor.get_health_status()
                 print(f"Health Status: {health_status.status}")
-                print(f"CPU: {health_status.resource_utilization.cpu:.1f}%")
-                print(f"Memory: {health_status.resource_utilization.memory:.1f}%")
-                print(f"GPU: {health_status.resource_utilization.gpu:.1f}%")
-                print(f"Active Jobs: {health_status.active_jobs}")
-                print(f"Pending Pods: {health_status.pending_pods}")
+                utilization = health_status.resource_utilization
+                if utilization is None:
+                    print("No cluster reading")
+                else:
+                    print(f"CPU: {utilization.cpu:.1f}%")
+                    print(f"Memory: {utilization.memory:.1f}%")
+                    print(f"GPU: {utilization.gpu:.1f}%")
+                    print(f"Active Jobs: {health_status.active_jobs}")
+                    print(f"Pending Pods: {health_status.pending_pods}")
                 if health_status.pending_requested:
                     print(
                         f"Pending Requested CPU: {health_status.pending_requested.cpu_vcpus:.1f} vCPUs"

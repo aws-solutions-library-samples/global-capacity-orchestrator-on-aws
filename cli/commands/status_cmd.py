@@ -159,10 +159,12 @@ def _render_capacity(data: dict[str, Any]) -> list[str]:
     for region, entry in data.get("by_region", {}).items():
         signals = ", ".join(entry.get("unavailable_signals", []))
         missing = f"  (unavailable: {signals})" if signals else ""
+        # A Region without GPU nodes reads 0% GPU, which is no idle GPU.
+        gpu = "none" if entry.get("total_gpus") == 0 else f"{entry.get('gpu_utilization', 0.0):.1f}"
         lines.append(
             f"{region:<15}  queue {entry.get('queue_depth', 0):<4} "
             f"running {entry.get('running_jobs', 0):<4} "
-            f"gpu {entry.get('gpu_utilization', 0.0):<5.1f} "
+            f"gpu {gpu:<5} "
             f"cpu {entry.get('cpu_utilization', 0.0):<5.1f} "
             f"telemetry {entry.get('telemetry_status')}{missing}"
         )

@@ -777,12 +777,16 @@ def test_region_capacity_reports_gpu_telemetry_missing_when_the_fallback_is_empt
         "CPU telemetry returned no datapoints",
     ]
     # Only the GPU signal has a fallback: an empty CPU series is not re-read.
+    # The GPU counts are read last, and an empty allocatable series ends it.
     assert _queried_metrics(cloudwatch) == [
         "node_gpu_utilization",
         "ClusterGpuUtilization",
         "node_cpu_utilization",
         "ActiveJobs",
+        "ClusterGpuAllocatable",
     ]
+    assert (capacity.total_gpus, capacity.available_gpus) == (None, None)
+    assert capacity.without_gpu_nodes is False
 
 
 @pytest.mark.parametrize(

@@ -184,17 +184,33 @@ class HealthMonitorMetrics(MetricsPublisher):
         super().__init__("GCO/HealthMonitor", cluster_name, region)
 
     def publish_resource_utilization(
-        self, cpu_percent: float, memory_percent: float, gpu_percent: float, active_jobs: int
+        self,
+        cpu_percent: float,
+        memory_percent: float,
+        gpu_percent: float,
+        active_jobs: int,
+        gpu_allocatable: int | None = None,
+        gpu_requested: int | None = None,
     ) -> bool:
         """
-        Publish resource utilization metrics
+        Publish resource utilization metrics.
+
+        ``ClusterGpuUtilization`` is 0 both without GPU nodes and with idle
+        GPUs. The counts behind it, ``ClusterGpuAllocatable`` and
+        ``ClusterGpuRequested``, tell the two apart and are published when
+        both were counted.
         """
-        metrics = [
+        metrics: list[dict[str, Any]] = [
             {"name": "ClusterCpuUtilization", "value": cpu_percent, "unit": "Percent"},
             {"name": "ClusterMemoryUtilization", "value": memory_percent, "unit": "Percent"},
             {"name": "ClusterGpuUtilization", "value": gpu_percent, "unit": "Percent"},
             {"name": "ActiveJobs", "value": active_jobs, "unit": "Count"},
         ]
+        if gpu_allocatable is not None and gpu_requested is not None:
+            metrics += [
+                {"name": "ClusterGpuAllocatable", "value": gpu_allocatable, "unit": "Count"},
+                {"name": "ClusterGpuRequested", "value": gpu_requested, "unit": "Count"},
+            ]
 
         return self.put_metrics_batch(metrics)
 
