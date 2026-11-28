@@ -22,7 +22,7 @@ Usage:
 try:
     from gco._version import __version__
 except ImportError:
-    __version__ = "9.3.0"
+    __version__ = "9.4.0"
 
 from .analytics_user_mgmt import (
     authenticate_with_password,
