@@ -43,6 +43,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import signal
 import site
@@ -61,7 +62,7 @@ from functools import lru_cache
 from pathlib import Path
 from threading import Event, Lock, RLock, Thread, current_thread, local, main_thread
 from types import FrameType
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, NamedTuple, TypedDict
 
 from botocore.exceptions import ClientError
 
@@ -75,8 +76,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-24T19:46:24Z
-# Generated from Git commit: a485a5d0ad8125308ec467e859e3214edc5594a4
+# Generated at (UTC): 2026-11-28T06:16:26Z
+# Generated from Git commit: 086c9d1e1079a1ca870dd71ad2751b77405d8f9a
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -125,8 +126,16 @@ _CDK_SCHEMA_MISMATCH_MARKER = "Cloud assembly schema version mismatch"
 _CDK_LIBRARY_LOOKUP_LOCK = Lock()
 _INFERENCE_STREAMING_PACKAGE_FILES = ("index.mjs", "package.json", "package-lock.json")
 _KUBECTL_PACKAGE_INPUTS = ("handler.py", "requirements.txt", "manifests")
+#: The lock of the complete Python dependency graph, at the project root. The
+#: kubectl-applier-simple and helm-installer builds install their
+#: requirements.txt constrained by it, as the service images do, so it is an
+#: input of both and a change to it rebuilds them.
+_REQUIREMENTS_LOCK = "requirements-lock.txt"
 _LAMBDA_BUILD_MANIFEST = ".gco-build-manifest.json"
 _LAMBDA_BUILD_MANIFEST_VERSION = 1
+#: A CloudFormation stack name: a letter, then letters, digits and hyphens, at
+#: most 128 characters in all. Every line ``cdk list`` prints must be one.
+_CLOUDFORMATION_STACK_NAME = re.compile(r"[A-Za-z][-A-Za-z0-9]{0,127}")
 _LAMBDA_SOURCE_IGNORED_DIRECTORIES = frozenset({"__pycache__", ".mypy_cache", ".pytest_cache"})
 _LAMBDA_SOURCE_IGNORED_FILES = frozenset({".DS_Store"})
 #: The caches the stacks leave out of every zipped Lambda source directory,
@@ -224,6 +233,9 @@ class _CdkAssetSpec:
     source_directory: str
     build_directory: str
     source_inputs: tuple[str, ...] | None
+    #: Files outside the source directory, relative to the project root, that
+    #: the build also reads. They are part of the source digest.
+    project_inputs: tuple[str, ...] = ()
 
     def paths(self, project_root: Path) -> tuple[Path, Path]:
         lambda_dir = project_root / "lambda"
@@ -235,12 +247,14 @@ _KUBECTL_CDK_ASSET = _CdkAssetSpec(
     source_directory="kubectl-applier-simple",
     build_directory="kubectl-applier-simple-build",
     source_inputs=_KUBECTL_PACKAGE_INPUTS,
+    project_inputs=(_REQUIREMENTS_LOCK,),
 )
 _HELM_CDK_ASSET = _CdkAssetSpec(
     name="helm-installer",
     source_directory="helm-installer",
     build_directory="helm-installer-build",
     source_inputs=None,
+    project_inputs=(_REQUIREMENTS_LOCK,),
 )
 _INFERENCE_STREAMING_CDK_ASSET = _CdkAssetSpec(
     name="inference-streaming-proxy",
@@ -333,6 +347,50 @@ def _asset_tree_digest(
     except OSError, UnicodeError:
         return None
     return digest.hexdigest()
+
+
+class _AssetInputDigests(NamedTuple):
+    """What one asset build was made from, as its completion manifest records it.
+
+    ``source`` digests the asset's own source selection and is recorded as
+    ``source_digest``, exactly as earlier releases record and compare it.
+    ``project`` digests the files outside the source directory that the build
+    also reads (``_CdkAssetSpec.project_inputs``) and is recorded as
+    ``project_digest``; it is None for an asset that reads none.
+
+    Keeping the two apart keeps a build this release publishes current for an
+    earlier release's CLI, which reads only ``source_digest``. ``gco upgrade``
+    needs that: the earlier release's CLI prepares the packages before each CDK
+    command, then this release's app prepares them again while it synthesizes.
+    Had the two disagreed about which build is current, each would rebuild the
+    other's build on every command.
+    """
+
+    source: str
+    project: str | None
+
+
+def _asset_input_digests(
+    source_dir: Path,
+    *,
+    source_inputs: tuple[str, ...] | None,
+    project_inputs: tuple[str, ...] = (),
+) -> _AssetInputDigests | None:
+    """Hash everything one asset is built from: its source selection and project inputs.
+
+    ``source_dir`` is ``<project root>/lambda/<name>`` (``_CdkAssetSpec.paths``),
+    and ``project_inputs`` are relative to that project root. A missing or
+    unreadable input gives ``None``, like a missing source file.
+    """
+    source_digest = _asset_tree_digest(source_dir, source_inputs=source_inputs)
+    if source_digest is None:
+        return None
+    if not project_inputs:
+        return _AssetInputDigests(source_digest, None)
+    project_digest = _asset_tree_digest(source_dir.parent.parent, source_inputs=project_inputs)
+    if project_digest is None:
+        return None
+    return _AssetInputDigests(source_digest, project_digest)
 
 
 def _read_build_manifest(build_dir: Path) -> dict[str, Any] | None:
@@ -538,8 +596,14 @@ def normalize_staged_asset_modes(assembly_directory: str | Path) -> list[str]:
     return corrected
 
 
-def _write_build_manifest(build_dir: Path, source_digest: str) -> None:
-    """Write the completion marker only after the staged build is complete."""
+def _write_build_manifest(
+    build_dir: Path, source_digest: str, project_digest: str | None = None
+) -> None:
+    """Write the completion marker only after the staged build is complete.
+
+    ``project_digest`` is written only for an asset with project inputs (see
+    :class:`_AssetInputDigests`).
+    """
     build_digest = _asset_tree_digest(build_dir)
     if build_digest is None:
         raise RuntimeError(f"Unable to hash completed Lambda asset {build_dir.name}")
@@ -548,6 +612,8 @@ def _write_build_manifest(build_dir: Path, source_digest: str) -> None:
         "source_digest": source_digest,
         "build_digest": build_digest,
     }
+    if project_digest is not None:
+        manifest["project_digest"] = project_digest
     manifest_path = build_dir / _LAMBDA_BUILD_MANIFEST
     with manifest_path.open("x", encoding="utf-8") as handle:
         json.dump(manifest, handle, sort_keys=True, separators=(",", ":"))
@@ -565,16 +631,23 @@ def _asset_build_is_fresh_unlocked(
     build_dir: Path,
     *,
     source_inputs: tuple[str, ...] | None,
+    project_inputs: tuple[str, ...] = (),
 ) -> bool:
     manifest = _read_build_manifest(build_dir)
     if manifest is None or manifest.get("schema_version") != _LAMBDA_BUILD_MANIFEST_VERSION:
         return False
-    source_digest = _asset_tree_digest(source_dir, source_inputs=source_inputs)
+    inputs = _asset_input_digests(
+        source_dir, source_inputs=source_inputs, project_inputs=project_inputs
+    )
     build_digest = _asset_tree_digest(build_dir)
+    # A manifest without project_digest (an earlier release's build of an
+    # asset that now has project inputs) is stale; one for an asset without
+    # project inputs has none and needs none.
     return (
-        source_digest is not None
+        inputs is not None
         and build_digest is not None
-        and manifest.get("source_digest") == source_digest
+        and manifest.get("source_digest") == inputs.source
+        and manifest.get("project_digest") == inputs.project
         and manifest.get("build_digest") == build_digest
         and _asset_tree_is_world_readable(build_dir)
     )
@@ -906,6 +979,7 @@ def _published_while_waiting(
     build_dir: Path,
     *,
     source_inputs: tuple[str, ...] | None,
+    project_inputs: tuple[str, ...] = (),
 ) -> Callable[[], bool]:
     """Return a check that another process published a fresh ``build_dir``.
 
@@ -934,6 +1008,7 @@ def _published_while_waiting(
                     source_dir,
                     build_dir,
                     source_inputs=source_inputs,
+                    project_inputs=project_inputs,
                 )
             finally:
                 _release_file_lock(probe_file)
@@ -946,12 +1021,14 @@ def _asset_build_is_fresh(
     build_dir: Path,
     *,
     source_inputs: tuple[str, ...] | None,
+    project_inputs: tuple[str, ...] = (),
 ) -> bool:
     with _lambda_asset_lock(build_dir, exclusive=False):
         return _asset_build_is_fresh_unlocked(
             source_dir,
             build_dir,
             source_inputs=source_inputs,
+            project_inputs=project_inputs,
         )
 
 
@@ -999,6 +1076,7 @@ def _prepare_lambda_asset(
     source_inputs: tuple[str, ...] | None,
     display_name: str,
     builder: Callable[[Path], None],
+    project_inputs: tuple[str, ...] = (),
 ) -> bool:
     """Build and atomically publish an asset when its completion proof is stale.
 
@@ -1013,8 +1091,15 @@ def _prepare_lambda_asset(
     another publisher's build is fresh: the pytest sessions that then hold
     shared locks for their whole run would otherwise keep the exclusive lock
     from it until the timeout.
+
+    ``project_inputs`` are the files outside ``source_dir``, relative to the
+    project root, that ``builder`` also reads (``_CdkAssetSpec.project_inputs``).
+    The completion manifest records them with the source selection, so a
+    change to one makes the build stale.
     """
-    if _asset_build_is_fresh(source_dir, build_dir, source_inputs=source_inputs):
+    if _asset_build_is_fresh(
+        source_dir, build_dir, source_inputs=source_inputs, project_inputs=project_inputs
+    ):
         return False
     with _lambda_asset_lock(
         build_dir,
@@ -1023,41 +1108,53 @@ def _prepare_lambda_asset(
             source_dir,
             build_dir,
             source_inputs=source_inputs,
+            project_inputs=project_inputs,
         ),
     ) as locked:
         if not locked:
             return False
         _recover_interrupted_asset_publish(build_dir)
-        source_digest = _asset_tree_digest(source_dir, source_inputs=source_inputs)
-        if source_digest is None:
+        inputs = _asset_input_digests(
+            source_dir, source_inputs=source_inputs, project_inputs=project_inputs
+        )
+        if inputs is None:
             raise RuntimeError(f"{display_name} source inputs are incomplete or unreadable")
         if _asset_build_is_fresh_unlocked(
             source_dir,
             build_dir,
             source_inputs=source_inputs,
+            project_inputs=project_inputs,
         ):
             return False
 
-        print(f"  Building {display_name}...")
+        # Progress goes to stderr: this runs inside the CDK app too, whose
+        # stdout `cdk list` reports as one stack name per line.
+        print(f"  Building {display_name}...", file=sys.stderr)
         staging_dir = Path(
             tempfile.mkdtemp(prefix=f".{build_dir.name}.staging-", dir=build_dir.parent)
         )
         try:
             builder(staging_dir)
             _normalize_asset_modes(staging_dir)
-            if _asset_tree_digest(source_dir, source_inputs=source_inputs) != source_digest:
+            if (
+                _asset_input_digests(
+                    source_dir, source_inputs=source_inputs, project_inputs=project_inputs
+                )
+                != inputs
+            ):
                 raise RuntimeError(f"{display_name} sources changed while packaging")
-            _write_build_manifest(staging_dir, source_digest)
+            _write_build_manifest(staging_dir, inputs.source, inputs.project)
             if not _asset_build_is_fresh_unlocked(
                 source_dir,
                 staging_dir,
                 source_inputs=source_inputs,
+                project_inputs=project_inputs,
             ):
                 raise RuntimeError(f"{display_name} completion manifest verification failed")
             _publish_staged_asset(staging_dir, build_dir)
         finally:
             _remove_asset_tree(staging_dir)
-        print(f"  {display_name} built successfully")
+        print(f"  {display_name} built successfully", file=sys.stderr)
         return True
 
 
@@ -1116,7 +1213,8 @@ def _check_lambda_zip_size(root: Path, *, display_name: str, remedy: str) -> Non
     )
     if total > limit:
         raise RuntimeError(f"{measurement} Lambda rejects a larger package: {remedy}.")
-    print(f"  Warning: {measurement}")
+    # stderr, like the build progress: this runs inside the CDK app too.
+    print(f"  Warning: {measurement}", file=sys.stderr)
 
 
 def _stderr_tail(stderr: str | bytes | None) -> str:
@@ -1468,6 +1566,98 @@ class StackInfo:
         }
 
 
+#: Statuses an add-on status record carries when its phase or chart succeeded:
+#: the Helm installer's ``installed`` and ``uninstalled``, the kubectl
+#: applier's ``applied`` and ``deleted`` (its gateway-teardown phase), and
+#: ``validated``, which both validators write.
+ADDON_HEALTHY_STATUSES = frozenset(
+    {"installed", "uninstalled", "absent", "applied", "deleted", "validated"}
+)
+#: The status a convergence phase or a Helm chart records when it failed.
+ADDON_FAILED_STATUS = "failed"
+#: The status :func:`read_addon_status` gives an active teardown fence.
+ADDON_TEARDOWN_STATUS = "teardown-active"
+# SSM parameters under /<project>/addons/<region>/ that are not status records.
+_ADDON_BOOKKEEPING_PARAMS = frozenset({"_input", "_execution"})
+# Parts of a replay input too large for one parameter (_input.<digest>.<k>).
+_ADDON_INPUT_PART_PREFIX = "_input."
+# The teardown provider's fence: its value is the teardown execution name.
+_ADDON_TEARDOWN_FENCE = "_teardown"
+
+
+@dataclass(frozen=True)
+class AddonRecord:
+    """The recorded outcome of one convergence phase or Helm chart in a Region."""
+
+    name: str
+    status: str
+    message: str
+    updated_at: datetime | None = None
+
+    @property
+    def healthy(self) -> bool:
+        return self.status in ADDON_HEALTHY_STATUSES
+
+
+def _addon_updated_at(value: object) -> datetime | None:
+    """A record's ``updated_at`` (Unix seconds) as an aware UTC datetime, else None."""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        with suppress(ValueError, OverflowError, OSError):
+            return datetime.fromtimestamp(value, tz=UTC)
+    return None
+
+
+def read_addon_status(project: str, region: str) -> list[AddonRecord]:
+    """Read one Region's add-on status records from SSM, sorted by name.
+
+    After a regional deploy, the kubectl applier's passes, the Helm charts and
+    the validators each record their outcome as JSON under
+    ``/<project>/addons/<region>/<name>``. Both ``gco stacks addons status``
+    and the ``addons`` section of ``gco status`` read them here, with one
+    (paginated) ``GetParametersByPath`` listing. The replay input and the
+    execution record are skipped, an active teardown fence reads as
+    ``teardown-active``, and a value that is not a JSON object reads as
+    ``unknown``. A healthy record keeps the first 80 characters of its message;
+    any other keeps all of it, since for a failed phase that is the list of
+    resources that did not apply. A failed read raises.
+    """
+    import boto3
+
+    paginator = boto3.client("ssm", region_name=region).get_paginator("get_parameters_by_path")
+    parameters = [
+        parameter
+        for page in paginator.paginate(Path=f"/{project}/addons/{region}/", Recursive=False)
+        for parameter in page.get("Parameters", [])
+    ]
+    records: list[AddonRecord] = []
+    for parameter in parameters:
+        name = str(parameter["Name"]).rsplit("/", 1)[-1]
+        value = str(parameter.get("Value", ""))
+        if name in _ADDON_BOOKKEEPING_PARAMS or name.startswith(_ADDON_INPUT_PART_PREFIX):
+            continue
+        if name == _ADDON_TEARDOWN_FENCE:
+            # Not JSON, so it used to read as an "unknown" chart; an active
+            # fence means the add-ons are being (or were) torn down.
+            records.append(AddonRecord(name, ADDON_TEARDOWN_STATUS, f"execution {value}"))
+            continue
+        try:
+            data = json.loads(value)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            data = {"status": "unknown", "message": value}
+        status = str(data.get("status", "unknown"))
+        message = str(data.get("message", ""))
+        # Healthy rows stay one line; a failure keeps its full message, since
+        # the list of failed resources is the part needed to debug it.
+        if status in ADDON_HEALTHY_STATUSES:
+            message = message[:80]
+        records.append(
+            AddonRecord(name, status, message, _addon_updated_at(data.get("updated_at")))
+        )
+    return sorted(records, key=lambda record: record.name)
+
+
 def _safe_rmtree(path: Path) -> None:
     """Remove a directory tree, handling broken symlinks on macOS.
 
@@ -1635,6 +1825,7 @@ def cdk_asset_consumer(project_root: str | Path) -> Iterator[None]:
                     source_dir,
                     build_dir,
                     source_inputs=spec.source_inputs,
+                    project_inputs=spec.project_inputs,
                 )
             ]
             if stale_assets:
@@ -1810,6 +2001,7 @@ class StackManager:
             source_dir,
             build_dir,
             source_inputs=_KUBECTL_CDK_ASSET.source_inputs,
+            project_inputs=_KUBECTL_CDK_ASSET.project_inputs,
         )
 
     @staticmethod
@@ -1819,6 +2011,7 @@ class StackManager:
             source_dir,
             build_dir,
             source_inputs=_HELM_CDK_ASSET.source_inputs,
+            project_inputs=_HELM_CDK_ASSET.project_inputs,
         )
 
     @staticmethod
@@ -2151,7 +2344,12 @@ class StackManager:
         self._build_inference_streaming_proxy_lambda()
 
     def _build_kubectl_lambda(self) -> None:
-        """Build the kubectl-applier-simple Lambda package."""
+        """Build the kubectl-applier-simple Lambda package.
+
+        pip installs ``requirements.txt`` constrained by the project's
+        ``requirements-lock.txt``, so the indirect dependencies are the locked
+        ones too. The lock is read where it is and not copied into the package.
+        """
         source_dir, build_dir = _KUBECTL_CDK_ASSET.paths(self.project_root)
         requirements = source_dir / "requirements.txt"
         if not source_dir.is_dir() or not requirements.is_file():
@@ -2172,6 +2370,8 @@ class StackManager:
                         "install",
                         "-r",
                         str(requirements),
+                        "-c",
+                        str(self.project_root / _REQUIREMENTS_LOCK),
                         "-t",
                         str(staging_dir),
                         "--upgrade",
@@ -2208,10 +2408,16 @@ class StackManager:
             source_inputs=_KUBECTL_CDK_ASSET.source_inputs,
             display_name=display_name,
             builder=build,
+            project_inputs=_KUBECTL_CDK_ASSET.project_inputs,
         )
 
     def _build_helm_installer_lambda(self) -> None:
-        """Build the complete helm-installer Lambda Docker context."""
+        """Build the complete helm-installer Lambda Docker context.
+
+        The context is the source directory plus a copy of the project's
+        ``requirements-lock.txt``, which the Dockerfile's pip install is
+        constrained by.
+        """
         source_dir, build_dir = _HELM_CDK_ASSET.paths(self.project_root)
         if not source_dir.is_dir():
             return
@@ -2223,6 +2429,7 @@ class StackManager:
                 ignore=shutil.ignore_patterns(*_LAMBDA_SOURCE_COPY_IGNORE_PATTERNS),
                 dirs_exist_ok=True,
             )
+            shutil.copy2(self.project_root / _REQUIREMENTS_LOCK, staging_dir / _REQUIREMENTS_LOCK)
 
         _prepare_lambda_asset(
             source_dir,
@@ -2230,6 +2437,7 @@ class StackManager:
             source_inputs=_HELM_CDK_ASSET.source_inputs,
             display_name="helm-installer Lambda package",
             builder=build,
+            project_inputs=_HELM_CDK_ASSET.project_inputs,
         )
 
     def _build_inference_streaming_proxy_lambda(self) -> None:
@@ -2671,7 +2879,18 @@ class StackManager:
         result = self._run_cdk(["list", "--no-ci"], capture_output=True)
         if result.returncode != 0:
             raise RuntimeError(f"Failed to list stacks: {result.stderr}")
-        return [s.strip() for s in result.stdout.strip().split("\n") if s.strip()]
+        names = [s.strip() for s in result.stdout.strip().split("\n") if s.strip()]
+        # The CDK app shares that stdout, so a line it printed would be taken
+        # for a stack and deployed, destroyed or described. Refuse it here,
+        # before any of that starts.
+        stray = [name for name in names if not _CLOUDFORMATION_STACK_NAME.fullmatch(name)]
+        if stray:
+            raise RuntimeError(
+                "cdk list printed lines that are not CloudFormation stack names, so the CDK "
+                f"app wrote them to its stdout: {', '.join(repr(line) for line in stray[:5])}. "
+                "Send the app's own output to stderr."
+            )
+        return names
 
     def synth(self, stack_name: str | None = None, quiet: bool = True) -> str:
         """Synthesize CloudFormation templates from source-current assets."""
@@ -4917,25 +5136,33 @@ class StackManager:
         return {}
 
     def get_stack_status(self, stack_name: str, region: str) -> StackInfo | None:
-        """Get detailed stack status from CloudFormation."""
+        """Get detailed stack status from CloudFormation.
+
+        Returns None only when CloudFormation reports that the stack does not
+        exist. Every other failure (access denied, throttling, missing
+        credentials, the network) raises, so a caller never mistakes a read
+        it could not make for an absent stack.
+        """
         import boto3
 
         cf = boto3.client("cloudformation", region_name=region)
         try:
             response = cf.describe_stacks(StackName=stack_name)
-            if response["Stacks"]:
-                stack = response["Stacks"][0]
-                return StackInfo(
-                    name=stack["StackName"],
-                    status=stack["StackStatus"],
-                    region=region,
-                    created_time=stack.get("CreationTime"),
-                    updated_time=stack.get("LastUpdatedTime"),
-                    outputs={o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])},
-                    tags={t["Key"]: t["Value"] for t in stack.get("Tags", [])},
-                )
-        except Exception as e:
-            logger.debug("Failed to get stack status for %s in %s: %s", stack_name, region, e)
+        except ClientError as e:
+            if self._stack_missing(e):
+                return None
+            raise
+        if response["Stacks"]:
+            stack = response["Stacks"][0]
+            return StackInfo(
+                name=stack["StackName"],
+                status=stack["StackStatus"],
+                region=region,
+                created_time=stack.get("CreationTime"),
+                updated_time=stack.get("LastUpdatedTime"),
+                outputs={o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])},
+                tags={t["Key"]: t["Value"] for t in stack.get("Tags", [])},
+            )
         return None
 
     def deploy_orchestrated(

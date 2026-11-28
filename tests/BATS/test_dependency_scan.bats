@@ -1398,10 +1398,11 @@ EOF
 }
 
 @test "is_full_git_commit_sha: rejects short hashes and mutable refs" {
-    ! is_full_git_commit_sha "0123456789abcdef"
-    ! is_full_git_commit_sha "main"
-    ! is_full_git_commit_sha "stable"
-    ! is_full_git_commit_sha "v1.2.3"
+    local value
+    for value in "0123456789abcdef" "main" "stable" "v1.2.3"; do
+        run is_full_git_commit_sha "$value"
+        [ "$status" -ne 0 ]
+    done
 }
 
 # ── extract_k8s_version ─────────────────────────────────────────────────────
@@ -1442,10 +1443,10 @@ EOF
     # direct-dep drift.
     run extract_direct_python_deps "pyproject.toml"
     [ "$status" -eq 0 ]
-    ! [[ "$output" =~ (^|$'\n')attrs($|$'\n') ]]
-    ! [[ "$output" =~ (^|$'\n')cattrs($|$'\n') ]]
-    ! [[ "$output" =~ (^|$'\n')rsa($|$'\n') ]]
-    ! [[ "$output" =~ (^|$'\n')typeguard($|$'\n') ]]
+    [[ ! "$output" =~ (^|$'\n')attrs($|$'\n') ]]
+    [[ ! "$output" =~ (^|$'\n')cattrs($|$'\n') ]]
+    [[ ! "$output" =~ (^|$'\n')rsa($|$'\n') ]]
+    [[ ! "$output" =~ (^|$'\n')typeguard($|$'\n') ]]
 }
 
 @test "extract_direct_python_deps: strips self-reference (gco-cli[dev])" {
@@ -2938,7 +2939,7 @@ github_api_fixture() {
     GH_TOKEN=gho_secondary run github_api_get "https://api.github.com/repos/helm/helm/tags?per_page=100"
     [ "$status" -eq 0 ]
     grep -qx 'gho_secondary https://api.github.com/repos/helm/helm/tags?per_page=100' "$FAKE_GITHUB_CALLS"
-    ! grep -q '^anonymous' "$FAKE_GITHUB_CALLS"
+    [ "$(grep -c '^anonymous' "$FAKE_GITHUB_CALLS")" -eq 0 ]
     rm -rf "$GITHUB_API_DIR"
 }
 

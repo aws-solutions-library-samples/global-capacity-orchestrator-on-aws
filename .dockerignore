@@ -9,6 +9,12 @@
 !pyproject.toml
 !requirements-lock.txt
 !dockerfiles/
+# The TLS certificate manager image builds from the repository root too, so
+# its pip install can be constrained by requirements-lock.txt (see its image
+# asset in gco/stacks/api_gateway_global_stack.py). The service images leave
+# these files out of their own contexts with their CDK excludes.
+!lambda/tls-certificate-manager/handler.py
+!lambda/tls-certificate-manager/requirements.txt
 
 # Re-exclude generated/cache dirs inside the allowed paths. The tests import
 # the dockerfiles/ build helpers too, so their bytecode would otherwise change

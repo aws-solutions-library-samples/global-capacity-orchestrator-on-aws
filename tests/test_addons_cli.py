@@ -22,6 +22,9 @@ Covered:
   replayed end to end and its parts kept out of ``addons status``; a missing
   part, a wrong part count, an altered part and a malformed header refused
   before anything starts.
+* ``read_addon_status``, the reader ``gco status`` shares: records sorted by
+  name, each one's health, and ``updated_at`` read as a UTC time only when it
+  is Unix seconds.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import json
 import os
 import re
 import zlib
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import boto3
@@ -657,3 +661,88 @@ def test_a_part_that_cannot_be_read_is_named() -> None:
         ValueError, match=re.escape("part 1, /p/_input.dddddddddddddddd.1, could not be read")
     ):
         _read_addon_replay_input(ssm, "/p/_input")
+
+
+# ---------------------------------------------------------------------------
+# read_addon_status: the reader gco status shares
+# ---------------------------------------------------------------------------
+
+
+def _listing(*parameters: dict[str, str]) -> MagicMock:
+    """An SSM client whose ``GetParametersByPath`` listing returns ``parameters``."""
+    ssm = MagicMock(name="ssm")
+    ssm.get_paginator.return_value.paginate.return_value = [{"Parameters": list(parameters)}]
+    return ssm
+
+
+class TestReadAddonStatus:
+    """``gco status`` reads the same records, so their time and health come from here."""
+
+    @pytest.mark.parametrize(
+        ("updated_at", "expected"),
+        [
+            (1786440665, datetime(2026, 8, 11, 9, 31, 5, tzinfo=UTC)),
+            (1786440665.5, datetime(2026, 8, 11, 9, 31, 5, 500000, tzinfo=UTC)),
+            # Only Unix seconds, as the applier and the Helm worker write them.
+            (True, None),
+            ("2026-08-11T09:31:05Z", None),
+            (1e20, None),
+        ],
+        ids=["seconds", "fractional", "boolean", "text", "out-of-range"],
+    )
+    def test_updated_at_is_a_utc_time_when_it_is_unix_seconds(self, updated_at, expected):
+        from cli.stacks import read_addon_status
+
+        value = {"status": "applied", "message": "ok", "updated_at": updated_at}
+        ssm = _listing({"Name": "/gco/addons/us-east-1/base-manifests", "Value": json.dumps(value)})
+        with patch("boto3.client", return_value=ssm) as client:
+            [record] = read_addon_status("gco", "us-east-1")
+
+        client.assert_called_once_with("ssm", region_name="us-east-1")
+        assert record.updated_at == expected
+
+    def test_a_record_without_updated_at_has_no_time(self):
+        from cli.stacks import read_addon_status
+
+        ssm = _listing({"Name": "/gco/addons/us-east-1/keda", "Value": '{"status": "installed"}'})
+        with patch("boto3.client", return_value=ssm):
+            [record] = read_addon_status("gco", "us-east-1")
+
+        assert (record.name, record.status, record.message, record.updated_at) == (
+            "keda",
+            "installed",
+            "",
+            None,
+        )
+        assert record.healthy
+
+    def test_records_come_sorted_by_name_with_only_successes_healthy(self):
+        from cli.stacks import AddonRecord, read_addon_status
+
+        ssm = _listing(
+            {"Name": "/gco/addons/us-east-1/volcano", "Value": '{"status": "failed"}'},
+            {"Name": "/gco/addons/us-east-1/_teardown", "Value": "teardown-abc123"},
+            {"Name": "/gco/addons/us-east-1/base-manifests", "Value": '{"status": "applied"}'},
+        )
+        with patch("boto3.client", return_value=ssm):
+            records = read_addon_status("gco", "us-east-1")
+
+        assert records == [
+            AddonRecord("_teardown", "teardown-active", "execution teardown-abc123"),
+            AddonRecord("base-manifests", "applied", ""),
+            AddonRecord("volcano", "failed", ""),
+        ]
+        assert [record.healthy for record in records] == [False, True, False]
+
+    def test_a_finished_gateway_teardown_is_healthy(self):
+        """The applier records ``deleted`` when its gateway-teardown phase succeeds."""
+        from cli.stacks import read_addon_status
+
+        value = {"phase": "gateway-teardown", "status": "deleted", "message": "deleted=3"}
+        ssm = _listing(
+            {"Name": "/gco/addons/us-east-1/gateway-teardown", "Value": json.dumps(value)}
+        )
+        with patch("boto3.client", return_value=ssm):
+            [record] = read_addon_status("gco", "us-east-1")
+
+        assert (record.status, record.healthy) == ("deleted", True)

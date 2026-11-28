@@ -53,8 +53,8 @@ from gco.services.leader_lease import (
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-21T20:42:53Z
-# Generated from Git commit: 1d908f3fa649c16f69e32c2af36f5992f62d94d7
+# Generated at (UTC): 2026-11-27T16:40:18Z
+# Generated from Git commit: 2014e250f29ab01970d4ed077f00d1ad92f61adb
 # Flowchart(s) generated from this file:
 #   * ``HealthMonitor.get_health_status`` -> ``diagrams/code_diagrams/gco/services/health_monitor.HealthMonitor_get_health_status.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/health_monitor.HealthMonitor_get_health_status.png``)
@@ -119,6 +119,13 @@ def _job_namespaces_from_env() -> frozenset[str]:
     """The job namespaces, as the manifest processor's ``ALLOWED_NAMESPACES`` lists them."""
     raw = os.environ.get("ALLOWED_NAMESPACES", "gco-jobs,default")
     return frozenset(ns.strip() for ns in raw.split(",") if ns.strip())
+
+
+def _gpu_percent(allocatable: int, requested: int) -> float:
+    """``requested`` GPUs as a percentage of ``allocatable`` ones; ``0.0`` when there are none."""
+    if allocatable > 0:
+        return (requested / allocatable) * 100
+    return 0.0
 
 
 class HealthMonitor:
@@ -279,10 +286,15 @@ class HealthMonitor:
         try:
             nodes = list(node_list.items)
             pods = list(pod_list.items)
+            # The counts travel with the percentage: it reads 0.0 both for a
+            # cluster without GPU nodes and for idle GPUs.
+            gpu_allocatable, gpu_requested = self._gpu_counts(nodes, pods)
             resource_utilization = ResourceUtilization(
                 cpu=self._calculate_cpu_utilization(node_metrics, nodes),
                 memory=self._calculate_memory_utilization(node_metrics, nodes),
-                gpu=self._calculate_gpu_utilization(nodes, pods),
+                gpu=_gpu_percent(gpu_allocatable, gpu_requested),
+                gpu_allocatable=gpu_allocatable,
+                gpu_requested=gpu_requested,
             )
             active_jobs, pending_pods = self._get_pod_counts(pods)
             pending_requested = self._calculate_pending_requested_resources(pods)
@@ -384,13 +396,8 @@ class HealthMonitor:
         """A memory quantity in bytes (any form the API server accepts); empty is 0."""
         return parse_memory_bytes(memory_str)
 
-    def _calculate_gpu_utilization(self, nodes: list[Any], pods: list[Any]) -> float:
-        """GPUs requested by running pods as a percentage of allocatable GPUs.
-
-        Can exceed 100, for example while a device plugin restarts and nodes
-        briefly report fewer allocatable GPUs than running pods hold. ``0.0``
-        when no node has GPUs.
-        """
+    def _gpu_counts(self, nodes: list[Any], pods: list[Any]) -> tuple[int, int]:
+        """``(allocatable, requested)``: GPUs the nodes offer and GPUs running pods request."""
         total_gpu_capacity = 0
         for node in nodes:
             allocatable = present(node.status, "node.status").allocatable or {}
@@ -405,9 +412,16 @@ class HealthMonitor:
                             container.resources.requests.get("nvidia.com/gpu")
                         )
 
-        if total_gpu_capacity > 0:
-            return (total_gpu_requested / total_gpu_capacity) * 100
-        return 0.0
+        return total_gpu_capacity, total_gpu_requested
+
+    def _calculate_gpu_utilization(self, nodes: list[Any], pods: list[Any]) -> float:
+        """GPUs requested by running pods as a percentage of allocatable GPUs.
+
+        Can exceed 100, for example while a device plugin restarts and nodes
+        briefly report fewer allocatable GPUs than running pods hold. ``0.0``
+        when no node has GPUs; :meth:`_gpu_counts` tells that apart from idle GPUs.
+        """
+        return _gpu_percent(*self._gpu_counts(nodes, pods))
 
     def _get_pod_counts(self, pods: list[Any]) -> tuple[int, int]:
         """``(active_jobs, pending_pods)`` from one pod list.
@@ -510,16 +524,22 @@ class HealthMonitor:
             return self._unhealthy("Health check error: the health status could not be computed")
 
     def _unhealthy(self, message: str) -> HealthStatus:
+        """An ``unhealthy`` status that holds no cluster reading.
+
+        Its utilization and counts are None, never zeros: a zero would be
+        served by ``/api/v1/metrics`` and published to CloudWatch as an idle
+        cluster, and ``gco capacity`` would rank the Region as the emptiest.
+        """
         return HealthStatus(
             cluster_id=self.cluster_id,
             region=self.region,
             timestamp=datetime.now(UTC),
             status="unhealthy",
-            resource_utilization=ResourceUtilization(cpu=0.0, memory=0.0, gpu=0.0),
+            resource_utilization=None,
             thresholds=self.thresholds,
-            active_jobs=0,
-            pending_pods=0,
-            pending_requested=RequestedResources(cpu_vcpus=0.0, memory_gb=0.0, gpus=0),
+            active_jobs=None,
+            pending_pods=None,
+            pending_requested=None,
             message=message,
         )
 
@@ -822,11 +842,15 @@ async def main() -> None:
             try:
                 health_status = await health_monitor.get_health_status()
                 print(f"Health Status: {health_status.status}")
-                print(f"CPU: {health_status.resource_utilization.cpu:.1f}%")
-                print(f"Memory: {health_status.resource_utilization.memory:.1f}%")
-                print(f"GPU: {health_status.resource_utilization.gpu:.1f}%")
-                print(f"Active Jobs: {health_status.active_jobs}")
-                print(f"Pending Pods: {health_status.pending_pods}")
+                utilization = health_status.resource_utilization
+                if utilization is None:
+                    print("No cluster reading")
+                else:
+                    print(f"CPU: {utilization.cpu:.1f}%")
+                    print(f"Memory: {utilization.memory:.1f}%")
+                    print(f"GPU: {utilization.gpu:.1f}%")
+                    print(f"Active Jobs: {health_status.active_jobs}")
+                    print(f"Pending Pods: {health_status.pending_pods}")
                 if health_status.pending_requested:
                     print(
                         f"Pending Requested CPU: {health_status.pending_requested.cpu_vcpus:.1f} vCPUs"

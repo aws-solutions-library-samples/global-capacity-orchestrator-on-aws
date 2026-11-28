@@ -3,37 +3,43 @@
 Covers region topology resolution, each section gatherer against its mocked
 manager, the boundary that converts an escaping exception into a degraded
 section, and the overall verdict. Managers are patched at their factory
-import sites and payloads use the real ``StackInfo`` and ``RegionCapacity``
-dataclasses so field drift breaks these tests. No network or credentials
-are used.
+import sites and payloads use the real ``StackInfo``, ``RegionCapacity`` and
+``AddonRecord`` dataclasses so field drift breaks these tests. The add-ons
+section is also read once through the real SSM reader against a fake
+paginator. No network or credentials are used.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from botocore.exceptions import ClientError
 
-from cli.capacity.multi_region import RegionCapacity
+from cli.aws_client import APIRequestError
+from cli.capacity.multi_region import MultiRegionCapacityChecker, RegionCapacity
 from cli.config import GCOConfig
 from cli.costs import CostSummary, ResourceCost
-from cli.stacks import StackInfo
+from cli.stacks import AddonRecord, StackInfo
 from cli.status import (
+    ADDON_FINDING_MESSAGE_CHARS,
     HEALTH_HEALTHY,
     HEALTH_IN_PROGRESS,
     HEALTH_NOT_DEPLOYED,
     HEALTH_UNHEALTHY,
+    HEALTH_UNKNOWN,
     OVERALL_DEGRADED,
     OVERALL_OK,
     REGION_SOURCE_CDK_JSON,
     REGION_SOURCE_FLAG,
+    SECTION_ADDONS,
     SECTION_CAPACITY,
     SECTION_JOBS,
     SECTION_ORDER,
@@ -51,6 +57,7 @@ from cli.status import (
     Finding,
     Section,
     _derive_overall,
+    _gather_addons,
     _gather_capacity,
     _gather_costs,
     _gather_inference,
@@ -60,6 +67,7 @@ from cli.status import (
     _gather_stacks,
     derive_findings,
     gather_fleet_status,
+    one_line,
     resolve_regions,
 )
 
@@ -164,6 +172,33 @@ def _stats_payload() -> dict[str, Any]:
     }
 
 
+_ADDONS_UPDATED = datetime(2026, 8, 11, 9, 31, 5, tzinfo=UTC)
+
+#: What the kubectl applier records when the base pass cannot apply the
+#: admission policy, as it did live in every Region.
+_BASE_PASS_FAILURE = (
+    "04-resource-quotas.yaml:ValidatingAdmissionPolicy/gco-jobs-container-gpu-limit,"
+    "04-resource-quotas.yaml:ValidatingAdmissionPolicyBinding/gco-jobs-container-gpu-limit"
+)
+
+
+def _addon(name: str, status: str, message: str = "ok") -> AddonRecord:
+    return AddonRecord(name=name, status=status, message=message, updated_at=_ADDONS_UPDATED)
+
+
+def _converged(_project: str, _region: str) -> list[AddonRecord]:
+    """A Region whose add-ons all converged, as the SSM reader returns it."""
+    return [
+        _addon("base-manifests", "applied", "applied=41 expected=41 skipped=0"),
+        _addon("keda", "installed", "keda installed"),
+        _addon("manifest-validation", "validated", "validated=41 expected=41"),
+    ]
+
+
+def _base_pass_failed(_project: str, _region: str) -> list[AddonRecord]:
+    return [_addon("base-manifests", "failed", _BASE_PASS_FAILURE)]
+
+
 @contextmanager
 def _fleet_boundaries(cdk_regions: dict[str, Any] | None) -> Iterator[SimpleNamespace]:
     """Patch every AWS-facing factory the orchestrator can reach."""
@@ -189,9 +224,11 @@ def _fleet_boundaries(cdk_regions: dict[str, Any] | None) -> Iterator[SimpleName
         return_value={"endpoint": "https://eks.example", "public": True, "private": True},
     )
     list_pools = MagicMock(name="list_cluster_nodepools", return_value=[_nodepool_payload()])
+    read_addons = MagicMock(name="read_addon_status", side_effect=_converged)
     with (
         patch("cli.status._load_cdk_json", return_value=cdk_regions or {}),
         patch("cli.stacks.get_stack_manager", return_value=stack_manager),
+        patch("cli.stacks.read_addon_status", read_addons),
         patch("cli.jobs.get_job_manager", return_value=job_manager),
         patch("cli.aws_client.get_aws_client", return_value=aws_client),
         patch("cli.capacity.get_multi_region_capacity_checker", return_value=checker),
@@ -210,6 +247,7 @@ def _fleet_boundaries(cdk_regions: dict[str, Any] | None) -> Iterator[SimpleName
             cost_tracker=cost_tracker,
             describe_access=describe_access,
             list_pools=list_pools,
+            read_addons=read_addons,
         )
 
 
@@ -336,6 +374,288 @@ def test_stacks_section_classifies_absent_and_in_progress_stacks() -> None:
     assert expected["test-gco-global"]["updated_time"] is None
 
 
+def _client_error(code: str, message: str) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": message}}, "DescribeStacks")
+
+
+def test_stacks_section_reports_an_unreadable_stack_instead_of_an_absent_one() -> None:
+    config = _config()
+    present = {
+        "test-gco-global",
+        "test-gco-api-gateway",
+        "test-gco-monitoring",
+        "test-gco-us-east-1",
+    }
+
+    def describe(name: str, region: str) -> StackInfo | None:
+        if name == "test-gco-us-west-2":
+            raise _client_error("AccessDenied", "not authorized to DescribeStacks")
+        if name == "test-gco-analytics":
+            raise _client_error("Throttling", "Rate exceeded")
+        return _stack_info(name, region) if name in present else None
+
+    manager = MagicMock()
+    manager.get_stack_status.side_effect = describe
+
+    with patch("cli.stacks.get_stack_manager", return_value=manager):
+        section = _gather_stacks(config, _REGIONS_DATA, _WORKLOAD)
+
+    # Five expected stacks and five optional ones were read; two reads failed.
+    assert section.status == STATUS_PARTIAL
+    assert section.reason == "2 of 10 stacks could not be read"
+    expected = {entry["name"]: entry for entry in section.data["expected"]}
+    assert expected["test-gco-us-west-2"] == {
+        "name": "test-gco-us-west-2",
+        "region": "us-west-2",
+        "status": None,
+        "health": HEALTH_UNKNOWN,
+        "updated_time": None,
+    }
+    assert expected["test-gco-us-east-1"]["health"] == HEALTH_HEALTHY
+    # An unreadable optional stack is listed (it may exist); absent ones are not.
+    assert [(entry["name"], entry["health"]) for entry in section.data["optional"]] == [
+        ("test-gco-analytics", HEALTH_UNKNOWN)
+    ]
+    assert len(section.errors) == 2
+    assert section.errors[0].startswith("test-gco-us-west-2 in us-west-2: ClientError: ")
+    assert "AccessDenied" in section.errors[0]
+    assert section.errors[1].startswith("test-gco-analytics in us-east-2: ClientError: ")
+    assert "Throttling" in section.errors[1]
+
+
+def test_stacks_section_is_an_error_when_no_stack_can_be_read() -> None:
+    config = _config()
+    manager = MagicMock()
+    manager.get_stack_status.side_effect = RuntimeError("Unable to locate credentials")
+
+    with patch("cli.stacks.get_stack_manager", return_value=manager):
+        section = _gather_stacks(config, _REGIONS_DATA, ["us-east-1"])
+
+    assert section.status == STATUS_ERROR
+    assert section.reason == "no stack could be read"
+    assert {entry["health"] for entry in section.data["expected"]} == {HEALTH_UNKNOWN}
+    assert len(section.errors) == manager.get_stack_status.call_count == 7
+    assert all("RuntimeError: Unable to locate credentials" in error for error in section.errors)
+    # Each expected stack becomes a "could not be read" warning, never "not deployed".
+    messages = [finding.message for finding in derive_findings({SECTION_STACKS: section})]
+    assert messages == [
+        f"{entry['name']} could not be read in {entry['region']}"
+        for entry in section.data["expected"]
+    ]
+
+
+# ---------------------------------------------------------------------------
+# addons section
+# ---------------------------------------------------------------------------
+
+
+def _ssm_listing(parameters: dict[str, list[dict[str, Any]]]) -> MagicMock:
+    """A ``boto3.client`` whose SSM client lists ``parameters[region]`` in two pages."""
+
+    def client(service: str, region_name: str) -> MagicMock:
+        assert service == "ssm"
+        listed = parameters[region_name]
+        ssm = MagicMock(name=f"ssm-{region_name}")
+        paginator = ssm.get_paginator.return_value
+        paginator.paginate.return_value = [
+            {"Parameters": listed[:2]},
+            {"Parameters": listed[2:]},
+        ]
+        return ssm
+
+    return MagicMock(name="boto3.client", side_effect=client)
+
+
+def _parameter(region: str, name: str, value: Any) -> dict[str, str]:
+    text = value if isinstance(value, str) else json.dumps(value)
+    return {"Name": f"/test-gco/addons/{region}/{name}", "Value": text}
+
+
+def test_addons_section_reads_each_region_once_with_the_addons_command_reader() -> None:
+    updated = int(_ADDONS_UPDATED.timestamp())
+    listing = _ssm_listing(
+        {
+            "us-east-1": [
+                _parameter("us-east-1", "_input", "eJzLSM3JyQcABiwCFQ=="),
+                _parameter("us-east-1", "_execution", {"started_at": updated}),
+                _parameter(
+                    "us-east-1",
+                    "base-manifests",
+                    {
+                        "phase": "base-manifests",
+                        "status": "failed",
+                        "message": _BASE_PASS_FAILURE,
+                        "updated_at": updated,
+                    },
+                ),
+                _parameter("us-east-1", "keda", {"status": "installed", "message": "k" * 120}),
+            ],
+            "us-west-2": [
+                _parameter("us-west-2", "base-manifests", {"status": "applied", "message": "ok"}),
+                _parameter("us-west-2", "_teardown", "teardown-abc123"),
+            ],
+        }
+    )
+
+    with patch("boto3.client", listing):
+        section = _gather_addons(_config(), _WORKLOAD)
+
+    # One SSM client per Region; the next test checks what each one lists.
+    assert sorted(c.kwargs["region_name"] for c in listing.call_args_list) == _WORKLOAD
+    assert section.status == STATUS_OK
+    assert section.reason is None and section.errors == []
+    assert section.data == {
+        "by_region": {
+            "us-east-1": {
+                "readable": True,
+                "addons": [
+                    {
+                        "name": "base-manifests",
+                        "status": "failed",
+                        "health": HEALTH_UNHEALTHY,
+                        "message": _BASE_PASS_FAILURE,
+                        "updated_at": "2026-08-11T09:31:05+00:00",
+                    },
+                    {
+                        # A healthy record's message is cut to one line, as
+                        # gco stacks addons status prints it.
+                        "name": "keda",
+                        "status": "installed",
+                        "health": HEALTH_HEALTHY,
+                        "message": "k" * 80,
+                        "updated_at": None,
+                    },
+                ],
+            },
+            "us-west-2": {
+                "readable": True,
+                "addons": [
+                    {
+                        "name": "_teardown",
+                        "status": "teardown-active",
+                        "health": HEALTH_IN_PROGRESS,
+                        "message": "execution teardown-abc123",
+                        "updated_at": None,
+                    },
+                    {
+                        "name": "base-manifests",
+                        "status": "applied",
+                        "health": HEALTH_HEALTHY,
+                        "message": "ok",
+                        "updated_at": None,
+                    },
+                ],
+            },
+        }
+    }
+
+
+def test_addons_section_lists_one_path_per_region() -> None:
+    clients: dict[str, MagicMock] = {}
+
+    def client(service: str, region_name: str) -> MagicMock:
+        ssm = clients[region_name] = MagicMock(name=f"ssm-{region_name}")
+        ssm.get_paginator.return_value.paginate.return_value = [{"Parameters": []}]
+        return ssm
+
+    with patch("boto3.client", side_effect=client):
+        _gather_addons(_config(), _WORKLOAD)
+
+    for region in _WORKLOAD:
+        ssm = clients[region]
+        ssm.get_paginator.assert_called_once_with("get_parameters_by_path")
+        ssm.get_paginator.return_value.paginate.assert_called_once_with(
+            Path=f"/test-gco/addons/{region}/", Recursive=False
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "health"),
+    [
+        ("installed", HEALTH_HEALTHY),
+        ("uninstalled", HEALTH_HEALTHY),
+        ("absent", HEALTH_HEALTHY),
+        ("applied", HEALTH_HEALTHY),
+        ("validated", HEALTH_HEALTHY),
+        # The applier's gateway-teardown phase, when it succeeded.
+        ("deleted", HEALTH_HEALTHY),
+        ("failed", HEALTH_UNHEALTHY),
+        ("teardown-active", HEALTH_IN_PROGRESS),
+        ("unknown", HEALTH_UNKNOWN),
+    ],
+)
+def test_addons_section_classifies_each_status_as_the_addons_command_does(
+    status: str, health: str
+) -> None:
+    with patch("cli.stacks.read_addon_status", return_value=[_addon("keda", status)]):
+        section = _gather_addons(_config(), ["us-east-1"])
+
+    [record] = section.data["by_region"]["us-east-1"]["addons"]
+    assert record["health"] == health
+    assert record["status"] == status
+    assert record["updated_at"] == "2026-08-11T09:31:05+00:00"
+
+
+def test_addons_section_without_any_record_yet_is_empty() -> None:
+    with patch("cli.stacks.read_addon_status", return_value=[]):
+        section = _gather_addons(_config(), _WORKLOAD)
+
+    assert section.status == STATUS_EMPTY
+    assert section.data == {
+        "by_region": {
+            "us-east-1": {"readable": True, "addons": []},
+            "us-west-2": {"readable": True, "addons": []},
+        }
+    }
+    assert derive_findings({SECTION_ADDONS: section}) == []
+
+
+def test_addons_section_with_records_in_only_some_regions_is_ok() -> None:
+    def read(project: str, region: str) -> list[AddonRecord]:
+        return _converged(project, region) if region == "us-east-1" else []
+
+    with patch("cli.stacks.read_addon_status", side_effect=read):
+        section = _gather_addons(_config(), _WORKLOAD)
+
+    assert section.status == STATUS_OK
+    assert section.data["by_region"]["us-west-2"] == {"readable": True, "addons": []}
+
+
+def test_addons_section_an_unreadable_region_costs_only_itself() -> None:
+    def read(project: str, region: str) -> list[AddonRecord]:
+        if region == "us-west-2":
+            raise _client_error("AccessDeniedException", "not authorized")
+        return _base_pass_failed(project, region)
+
+    with patch("cli.stacks.read_addon_status", side_effect=read):
+        section = _gather_addons(_config(), _WORKLOAD)
+
+    assert section.status == STATUS_PARTIAL
+    assert section.reason == "add-on status could not be read in 1 of 2 regions"
+    [error] = section.errors
+    assert error.startswith("us-west-2: ClientError: ")
+    assert "not authorized" in error
+    assert section.data["by_region"]["us-west-2"] == {"readable": False, "addons": []}
+    # The Region that was read still reports its failed base pass.
+    assert [f.message for f in derive_findings({SECTION_ADDONS: section})] == [
+        "base-manifests failed in us-east-1: "
+        + one_line(_BASE_PASS_FAILURE, ADDON_FINDING_MESSAGE_CHARS)
+    ]
+
+
+def test_addons_section_is_an_error_when_no_region_can_be_read() -> None:
+    with patch("cli.stacks.read_addon_status", side_effect=RuntimeError("Unable to locate creds")):
+        section = _gather_addons(_config(), _WORKLOAD)
+
+    assert section.status == STATUS_ERROR
+    assert section.reason == "add-on status could not be read in any region"
+    assert section.errors == [
+        "us-east-1: RuntimeError: Unable to locate creds",
+        "us-west-2: RuntimeError: Unable to locate creds",
+    ]
+    assert all(not entry["readable"] for entry in section.data["by_region"].values())
+
+
 # ---------------------------------------------------------------------------
 # queue section
 # ---------------------------------------------------------------------------
@@ -435,9 +755,88 @@ def test_jobs_section_surfaces_totals_and_scan_completeness() -> None:
     assert section.data["source"] == "central job queue"
     # A single attempt: a status snapshot reports a failing route honestly
     # rather than retrying past the section timeout.
+    # Each read is a single attempt: the section decides any retry against its
+    # own budget instead of the client retrying past the section timeout.
     client.call_api.assert_called_once_with(
         method="GET", path="/api/v1/queue/stats", region=None, max_attempts=1
     )
+
+
+def _jobs_clock(monkeypatch: pytest.MonkeyPatch, *readings: float) -> None:
+    """Give ``_gather_jobs`` these monotonic readings: its start, then after a failed attempt."""
+    monkeypatch.setattr("cli.status.time", SimpleNamespace(monotonic=iter(readings).__next__))
+
+
+@pytest.mark.parametrize("status_code", [429, 502, 503, 504])
+def test_jobs_section_retries_a_transient_answer_once_within_the_budget(
+    monkeypatch: pytest.MonkeyPatch, status_code: int
+) -> None:
+    # A cold Lambda behind API Gateway answers the first call after idle
+    # with a 5xx; 14 s in, a second attempt as slow still fits in 30 s.
+    _jobs_clock(monkeypatch, 0.0, 14.0)
+    client = MagicMock()
+    client.call_api.side_effect = [APIRequestError(status_code, "cold start"), _stats_payload()]
+
+    with patch("cli.aws_client.get_aws_client", return_value=client):
+        section = _gather_jobs(_config(), None)
+
+    assert section.status == STATUS_OK
+    assert section.data["totals"] == {"total": 4, "queued": 3, "running": 1}
+    assert (
+        client.call_api.call_args_list
+        == [call(method="GET", path="/api/v1/queue/stats", region=None, max_attempts=1)] * 2
+    )
+
+
+def test_jobs_section_reports_a_transient_answer_that_left_no_room_to_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 16 s in, a second attempt as slow would overrun the 30 s section budget.
+    _jobs_clock(monkeypatch, 0.0, 16.0)
+    client = MagicMock()
+    client.call_api.side_effect = APIRequestError(504, "Endpoint request timed out")
+
+    with (
+        patch("cli.aws_client.get_aws_client", return_value=client),
+        pytest.raises(APIRequestError, match="Endpoint request timed out"),
+    ):
+        _gather_jobs(_config(), None)
+
+    client.call_api.assert_called_once()
+
+
+@pytest.mark.parametrize("status_code", [400, 403, 500])
+def test_jobs_section_never_retries_an_answer_the_client_would_not(
+    monkeypatch: pytest.MonkeyPatch, status_code: int
+) -> None:
+    _jobs_clock(monkeypatch, 0.0, 0.5)
+    client = MagicMock()
+    client.call_api.side_effect = APIRequestError(status_code, "refused")
+
+    with (
+        patch("cli.aws_client.get_aws_client", return_value=client),
+        pytest.raises(APIRequestError, match="refused"),
+    ):
+        _gather_jobs(_config(), None)
+
+    client.call_api.assert_called_once()
+
+
+def test_jobs_section_retries_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    _jobs_clock(monkeypatch, 0.0, 1.0)
+    client = MagicMock()
+    client.call_api.side_effect = [
+        APIRequestError(502, "first"),
+        APIRequestError(502, "second"),
+    ]
+
+    with (
+        patch("cli.aws_client.get_aws_client", return_value=client),
+        pytest.raises(APIRequestError, match="second"),
+    ):
+        _gather_jobs(_config(), None)
+
+    assert client.call_api.call_count == 2
 
 
 def test_jobs_section_pins_the_requested_region() -> None:
@@ -570,6 +969,27 @@ def test_capacity_section_never_calls_the_checker_when_no_stack_exists() -> None
     )
 
 
+def test_capacity_section_unreachable_region_names_every_signal_the_checker_reads() -> None:
+    # The zero running_jobs of an unreachable region is not a reading: the
+    # entry names the `jobs` signal unavailable, exactly as the checker does
+    # for a region without a regional stack.
+    config = _config()
+    aws_client = MagicMock()
+    aws_client.get_regional_stack.return_value = None
+    with patch("cli.aws_client.get_aws_client", return_value=aws_client):
+        no_stack = MultiRegionCapacityChecker(config).get_region_capacity("us-east-1")
+
+    with patch("cli.capacity.get_multi_region_capacity_checker", MagicMock()):
+        section = _gather_capacity(
+            config, _WORKLOAD, _WORKLOAD, _probe(config, _WORKLOAD, present=False)
+        )
+
+    assert no_stack.telemetry_status == STATUS_UNAVAILABLE
+    for entry in section.data["by_region"].values():
+        assert entry["unavailable_signals"] == no_stack.unavailable_signals
+        assert "jobs" in entry["unavailable_signals"]
+
+
 def test_capacity_section_never_calls_the_checker_without_configured_regions() -> None:
     config = _config()
     factory = MagicMock()
@@ -695,9 +1115,70 @@ def test_gather_assembles_every_section_in_order() -> None:
     assert doc.project_name == "test-gco"
     assert doc.sections[SECTION_REGIONS].status == STATUS_OK
     assert doc.sections[SECTION_STACKS].status == STATUS_OK
+    assert doc.sections[SECTION_ADDONS].status == STATUS_OK
     assert doc.sections[SECTION_QUEUE].status == STATUS_OK
     parsed = datetime.fromisoformat(doc.generated_at)
     assert parsed.utcoffset() is not None
+
+
+def test_gather_reads_add_on_status_by_default_once_per_workload_region() -> None:
+    with _fleet_boundaries(_CDK_REGIONS) as boundaries:
+        gather_fleet_status(boundaries.config)
+
+    assert sorted(c.args for c in boundaries.read_addons.call_args_list) == [
+        ("test-gco", "us-east-1"),
+        ("test-gco", "us-west-2"),
+    ]
+
+
+def test_gather_reads_add_on_status_only_in_the_flag_region() -> None:
+    with _fleet_boundaries(_CDK_REGIONS) as boundaries:
+        doc = gather_fleet_status(boundaries.config, region="us-west-2")
+
+    boundaries.read_addons.assert_called_once_with("test-gco", "us-west-2")
+    assert list(doc.sections[SECTION_ADDONS].data["by_region"]) == ["us-west-2"]
+
+
+def test_gather_a_failed_add_on_convergence_degrades_an_otherwise_healthy_fleet() -> None:
+    """Live, the base pass failed in every Region and gco status still read OK.
+
+    The stacks were all ``UPDATE_COMPLETE``, because a failed convergence never
+    fails the regional stack, and the document had no add-on section.
+    """
+    with _fleet_boundaries(_CDK_REGIONS) as boundaries:
+        boundaries.read_addons.side_effect = _base_pass_failed
+        doc = gather_fleet_status(boundaries.config)
+
+    assert doc.sections[SECTION_STACKS].status == STATUS_OK
+    assert doc.sections[SECTION_ADDONS].status == STATUS_OK
+    assert doc.overall == OVERALL_DEGRADED
+    assert doc.degraded == [SECTION_ADDONS]
+    quoted = one_line(_BASE_PASS_FAILURE, ADDON_FINDING_MESSAGE_CHARS)
+    assert doc.findings == [
+        Finding(
+            severity=SEVERITY_ERROR,
+            section=SECTION_ADDONS,
+            message=f"base-manifests failed in {region}: {quoted}",
+        )
+        for region in _WORKLOAD
+    ]
+
+
+def test_a_failed_base_pass_no_longer_prints_nothing_looks_wrong(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from cli.commands.status_cmd import _render_table
+
+    with _fleet_boundaries(_CDK_REGIONS) as boundaries:
+        boundaries.read_addons.side_effect = _base_pass_failed
+        _render_table(gather_fleet_status(boundaries.config))
+
+    output = capsys.readouterr().out
+    assert "Fleet status: DEGRADED" in output
+    assert "degraded sections: addons" in output
+    assert "nothing looks wrong" not in output
+    assert "  [error] addons: base-manifests failed in us-east-1: 04-resource-quotas.yaml" in output
+    assert "addons [ok]  ·  gco stacks addons status --all-regions" in output
 
 
 def test_gather_never_calls_the_all_region_stack_scan() -> None:
@@ -711,17 +1192,43 @@ def test_gather_never_calls_the_all_region_stack_scan() -> None:
     scan.assert_not_called()
 
 
+def test_gather_an_unreadable_regional_stack_gates_only_its_own_region() -> None:
+    def describe(name: str, region: str) -> StackInfo:
+        if name == "test-gco-us-west-2":
+            raise _client_error("Throttling", "Rate exceeded")
+        return _stack_info(name, region)
+
+    with _fleet_boundaries(_CDK_REGIONS) as boundaries:
+        boundaries.stack_manager.get_stack_status.side_effect = describe
+        doc = gather_fleet_status(boundaries.config)
+
+    # us-east-1's queue is still read; us-west-2 is skipped, not misread.
+    assert boundaries.job_manager.get_queue_status.call_args_list == [call("us-east-1")]
+    queue = doc.sections[SECTION_QUEUE]
+    assert queue.status == STATUS_PARTIAL
+    assert list(queue.data["by_region"]) == ["us-east-1"]
+    stacks = doc.sections[SECTION_STACKS]
+    assert stacks.status == STATUS_PARTIAL
+    west = next(e for e in stacks.data["expected"] if e["name"] == "test-gco-us-west-2")
+    assert west["health"] == HEALTH_UNKNOWN
+    assert any(
+        finding.message == "test-gco-us-west-2 could not be read in us-west-2"
+        for finding in doc.findings
+    )
+
+
 def test_gather_short_circuits_per_region_sections_when_regions_unresolved() -> None:
     with _fleet_boundaries(None) as boundaries:
         doc = gather_fleet_status(boundaries.config)
 
-    for name in (SECTION_STACKS, SECTION_QUEUE, SECTION_CAPACITY):
+    for name in (SECTION_STACKS, SECTION_ADDONS, SECTION_QUEUE, SECTION_CAPACITY):
         section = doc.sections[name]
         assert section.status == STATUS_UNAVAILABLE
         assert section.reason is not None
         assert "regions section" in section.reason
     boundaries.stack_manager.get_stack_status.assert_not_called()
     boundaries.job_manager.get_queue_status.assert_not_called()
+    boundaries.read_addons.assert_not_called()
 
 
 def test_gather_overall_is_ok_when_only_skipped_sections_remain() -> None:
@@ -1150,7 +1657,9 @@ def test_finding_error_for_unavailable_region_telemetry() -> None:
     ]
 
 
-def test_finding_warn_for_an_absent_expected_stack_says_not_readable() -> None:
+def test_finding_warn_for_an_absent_expected_stack_says_not_deployed() -> None:
+    # not-deployed now means CloudFormation said the stack does not exist; an
+    # unreadable stack is `unknown` (next test).
     sections = {
         SECTION_STACKS: _stacks_section(
             [_stack_finding_entry("test-gco-monitoring", "us-east-2", None, HEALTH_NOT_DEPLOYED)]
@@ -1161,7 +1670,25 @@ def test_finding_warn_for_an_absent_expected_stack_says_not_readable() -> None:
 
     assert len(findings) == 1
     assert findings[0].severity == SEVERITY_WARN
-    assert findings[0].message == "test-gco-monitoring is absent or not readable in us-east-2"
+    assert findings[0].message == "test-gco-monitoring is not deployed in us-east-2"
+
+
+def test_finding_warn_for_an_unreadable_expected_stack_says_it_could_not_be_read() -> None:
+    sections = {
+        SECTION_STACKS: _stacks_section(
+            [_stack_finding_entry("test-gco-monitoring", "us-east-2", None, HEALTH_UNKNOWN)]
+        )
+    }
+
+    findings = derive_findings(sections)
+
+    assert findings == [
+        Finding(
+            severity=SEVERITY_WARN,
+            section=SECTION_STACKS,
+            message="test-gco-monitoring could not be read in us-east-2",
+        )
+    ]
 
 
 def test_finding_warn_for_a_dead_letter_queue_with_messages() -> None:
@@ -1362,12 +1889,173 @@ def test_findings_are_empty_for_a_clean_document() -> None:
 def test_findings_skip_sections_with_no_data() -> None:
     sections = {
         SECTION_STACKS: Section(name=SECTION_STACKS, status=STATUS_UNAVAILABLE),
+        SECTION_ADDONS: Section(name=SECTION_ADDONS, status=STATUS_UNAVAILABLE),
         SECTION_QUEUE: Section(name=SECTION_QUEUE, status=STATUS_UNAVAILABLE),
         SECTION_CAPACITY: Section(name=SECTION_CAPACITY, status=STATUS_UNAVAILABLE),
         SECTION_JOBS: Section(name=SECTION_JOBS, status=STATUS_UNAVAILABLE),
     }
 
     assert derive_findings(sections) == []
+
+
+def _addons_section(by_region: dict[str, list[dict[str, Any]] | None]) -> Section:
+    """An ``addons`` section; a Region given None could not be read."""
+    return Section(
+        name=SECTION_ADDONS,
+        status=STATUS_OK,
+        data={
+            "by_region": {
+                region: {"readable": records is not None, "addons": records or []}
+                for region, records in by_region.items()
+            }
+        },
+    )
+
+
+def _addon_entry(name: str, status: str, health: str, message: str = "") -> dict[str, Any]:
+    return {
+        "name": name,
+        "status": status,
+        "health": health,
+        "message": message,
+        "updated_at": None,
+    }
+
+
+def test_finding_error_for_a_failed_add_on_quotes_its_message_shortened() -> None:
+    sections = {
+        SECTION_ADDONS: _addons_section(
+            {
+                "us-east-1": [
+                    _addon_entry("base-manifests", "failed", HEALTH_UNHEALTHY, _BASE_PASS_FAILURE)
+                ]
+            }
+        )
+    }
+
+    [finding] = derive_findings(sections)
+
+    assert len(_BASE_PASS_FAILURE) > ADDON_FINDING_MESSAGE_CHARS
+    assert finding == Finding(
+        severity=SEVERITY_ERROR,
+        section=SECTION_ADDONS,
+        message=(
+            "base-manifests failed in us-east-1: "
+            f"{_BASE_PASS_FAILURE[: ADDON_FINDING_MESSAGE_CHARS - 1]}…"
+        ),
+    )
+
+
+def test_finding_for_a_failed_add_on_without_a_message_names_only_where() -> None:
+    sections = {
+        SECTION_ADDONS: _addons_section(
+            {"us-west-2": [_addon_entry("keda", "failed", HEALTH_UNHEALTHY)]}
+        )
+    }
+
+    assert [f.message for f in derive_findings(sections)] == ["keda failed in us-west-2"]
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        (
+            _addon_entry(
+                "_teardown", "teardown-active", HEALTH_IN_PROGRESS, "execution teardown-abc123"
+            ),
+            "_teardown is teardown-active in us-east-1: execution teardown-abc123",
+        ),
+        (
+            _addon_entry("volcano", "unknown", HEALTH_UNKNOWN, "not\n  json"),
+            "volcano is unknown in us-east-1: not json",
+        ),
+    ],
+    ids=["in-progress", "unknown"],
+)
+def test_finding_warn_for_an_add_on_neither_healthy_nor_failed(
+    entry: dict[str, Any], message: str
+) -> None:
+    sections = {SECTION_ADDONS: _addons_section({"us-east-1": [entry]})}
+
+    assert derive_findings(sections) == [
+        Finding(severity=SEVERITY_WARN, section=SECTION_ADDONS, message=message)
+    ]
+
+
+def test_findings_ignore_healthy_add_ons_and_regions_without_records() -> None:
+    sections = {
+        SECTION_ADDONS: _addons_section(
+            {
+                "us-east-1": [
+                    _addon_entry("base-manifests", "applied", HEALTH_HEALTHY, "applied=41"),
+                    _addon_entry("keda", "installed", HEALTH_HEALTHY),
+                ],
+                "us-west-2": [],
+                "eu-west-1": None,
+            }
+        )
+    }
+
+    assert derive_findings(sections) == []
+
+
+def test_add_on_findings_come_right_after_the_stack_findings() -> None:
+    sections = {
+        SECTION_STACKS: _stacks_section(
+            [
+                _stack_finding_entry(
+                    "test-gco-us-west-2", "us-west-2", "UPDATE_ROLLBACK_COMPLETE", HEALTH_UNHEALTHY
+                ),
+                _stack_finding_entry(
+                    "test-gco-us-east-1", "us-east-1", "UPDATE_IN_PROGRESS", HEALTH_IN_PROGRESS
+                ),
+            ]
+        ),
+        SECTION_ADDONS: _addons_section(
+            {
+                "us-east-1": [
+                    _addon_entry("_teardown", "teardown-active", HEALTH_IN_PROGRESS),
+                    _addon_entry("base-manifests", "failed", HEALTH_UNHEALTHY),
+                ]
+            }
+        ),
+        SECTION_CAPACITY: Section(
+            name=SECTION_CAPACITY,
+            status=STATUS_OK,
+            data={"by_region": {"us-east-1": {"telemetry_status": STATUS_UNAVAILABLE}}},
+        ),
+        SECTION_QUEUE: Section(
+            name=SECTION_QUEUE, status=STATUS_OK, data={"by_region": {"us-east-1": {"dlq": 2}}}
+        ),
+    }
+
+    findings = derive_findings(sections)
+
+    assert [(f.severity, f.section) for f in findings] == [
+        (SEVERITY_ERROR, SECTION_STACKS),
+        (SEVERITY_ERROR, SECTION_ADDONS),
+        (SEVERITY_ERROR, SECTION_CAPACITY),
+        (SEVERITY_WARN, SECTION_STACKS),
+        (SEVERITY_WARN, SECTION_ADDONS),
+        (SEVERITY_WARN, SECTION_QUEUE),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "shortened"),
+    [
+        ("applied=41 expected=41", 40, "applied=41 expected=41"),
+        ("helm: timed out\n\twaiting  for keda", 80, "helm: timed out waiting for keda"),
+        ("x" * 12, 10, "x" * 9 + "…"),
+        # The cut never leaves a space before the ellipsis.
+        ("abcd efgh", 6, "abcd…"),
+    ],
+)
+def test_one_line_collapses_whitespace_and_cuts_long_text(
+    text: str, limit: int, shortened: str
+) -> None:
+    assert one_line(text, limit) == shortened
+    assert len(one_line(text, limit)) <= limit
 
 
 # ---------------------------------------------------------------------------

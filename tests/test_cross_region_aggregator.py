@@ -1004,3 +1004,139 @@ class TestClientInputValidation:
         assert result["statusCode"] == 400
         assert json.loads(result["body"]) == {"error": "Request body must be a JSON object"}
         bulk_delete.assert_not_called()
+
+
+class TestRegionalErrorMessage:
+    """A Region's failure carries the regional API's message, made safe to repeat.
+
+    It used to read "HTTP 403" whatever the Region said, so a caller could
+    not tell an IAM denial from a missing route. API Gateway's own messages
+    quote request material (the signature-mismatch message quotes the
+    canonical request, security token included; the malformed-signature
+    one ends with the Authorization header) and name accounts, roles and API
+    IDs in ARNs, none of which the aggregate answer may repeat.
+    """
+
+    _ENDPOINT = "https://abc123.execute-api.us-west-2.amazonaws.com/prod"
+
+    @classmethod
+    def _error(cls, status: int, data: object) -> str:
+        mock_http = MagicMock()
+        mock_http.request.return_value = MagicMock(status=status, data=data)
+        with patch.object(handler, "http", mock_http):
+            result = handler.query_region("us-west-2", cls._ENDPOINT, "/api/v1/jobs")
+        assert result["_status"] == "error"
+        return str(result["_error"])
+
+    @pytest.mark.parametrize(
+        ("status", "body", "expected"),
+        [
+            (
+                404,
+                {"detail": "Job 'train' not found in namespace 'team-a'"},
+                "HTTP 404: Job 'train' not found in namespace 'team-a'",
+            ),
+            (
+                502,
+                {"error": "Backend TLS verification failed"},
+                "HTTP 502: Backend TLS verification failed",
+            ),
+            (
+                403,
+                {"message": "Missing Authentication Token"},
+                "HTTP 403: Missing Authentication Token",
+            ),
+            # IAM authorization: the message names the role and the API in ARNs.
+            (
+                403,
+                {
+                    "Message": (
+                        "User: arn:aws:sts::123456789012:assumed-role/example-role/example "
+                        "is not authorized to perform: execute-api:Invoke on resource: "
+                        "arn:aws:execute-api:us-west-2:123456789012:abc123/prod/GET/api/v1/jobs"
+                    )
+                },
+                "HTTP 403: User: <arn> is not authorized to perform: execute-api:Invoke "
+                "on resource: <arn>",
+            ),
+            # The GCO API's own message comes first.
+            (
+                400,
+                {"error": "limit is too large", "message": "Bad Request"},
+                "HTTP 400: limit is too large",
+            ),
+            (
+                403,
+                {"message": "The access key AKIAIOSFODNN7EXAMPLE is not valid"},
+                "HTTP 403: The access key <access-key-id> is not valid",
+            ),
+            (400, {"error": "bad\u001b[31m value\tthere"}, "HTTP 400: bad [31m value there"),
+            # Nothing usable: the status alone.
+            (422, {"detail": [{"loc": ["query", "limit"], "msg": "not an integer"}]}, "HTTP 422"),
+            (500, {"error": "   "}, "HTTP 500"),
+            (500, {"other": "value"}, "HTTP 500"),
+            (500, ["not", "an", "object"], "HTTP 500"),
+        ],
+    )
+    def test_message_from_a_json_body(self, status, body, expected):
+        assert self._error(status, json.dumps(body).encode("utf-8")) == expected
+
+    def test_a_signature_mismatch_keeps_only_its_first_line(self):
+        message = (
+            "The request signature we calculated does not match the signature you provided. "
+            "Check your AWS Secret Access Key and signing method.\n\n"
+            "The Canonical String for this request should have been\n'GET\n/prod/api/v1/jobs\n\n"
+            "host:abc123.execute-api.us-west-2.amazonaws.com\nx-amz-date:20260101T000000Z\n"
+            "x-amz-security-token:EXAMPLE-SESSION-TOKEN\n'"
+        )
+
+        error = self._error(403, json.dumps({"message": message}).encode("utf-8"))
+
+        assert error == (
+            "HTTP 403: The request signature we calculated does not match the signature you "
+            "provided. Check your AWS Secret Access Key and signing method."
+        )
+        assert "EXAMPLE-SESSION-TOKEN" not in error
+
+    def test_the_authorization_header_api_gateway_quotes_is_dropped(self):
+        message = (
+            "Authorization header requires 'Signature' parameter. Authorization=AWS4-HMAC-SHA256 "
+            "Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-west-2/execute-api/aws4_request"
+        )
+
+        error = self._error(403, json.dumps({"message": message}).encode("utf-8"))
+
+        assert error == "HTTP 403: Authorization header requires 'Signature' parameter."
+
+    def test_a_long_message_is_cut(self):
+        error = self._error(500, json.dumps({"error": "x" * 1000}).encode("utf-8"))
+
+        assert error == "HTTP 500: " + "x" * 297 + "..."
+
+    @pytest.mark.parametrize(
+        "data", [b"<html><body>502 Bad Gateway</body></html>", b"", b"\xff\xfe", None]
+    )
+    def test_a_body_without_json_is_the_status_alone(self, data):
+        assert self._error(502, data) == "HTTP 502"
+
+    def test_the_aggregate_names_each_failed_region_with_its_message(self):
+        handler._cached_endpoints = {
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+            "us-west-2": self._ENDPOINT,
+        }
+
+        def answer(method, url, **kwargs):
+            if "east123" in url:
+                return MagicMock(status=200, data=b'{"jobs": [], "count": 0, "total": 0}')
+            return MagicMock(status=503, data=b'{"error": "Service unavailable"}')
+
+        mock_http = MagicMock()
+        mock_http.request.side_effect = answer
+        event = {"httpMethod": "GET", "path": "/api/v1/global/jobs"}
+
+        with patch.object(handler, "http", mock_http):
+            result = handler.lambda_handler(event, None)
+
+        assert json.loads(result["body"])["errors"] == [
+            {"region": "us-west-2", "error": "HTTP 503: Service unavailable"}
+        ]

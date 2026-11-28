@@ -160,6 +160,18 @@ class TestReadAdminCredentials:
         with pytest.raises(ValueError, match=re.escape("Invalid namespace 'Bad NS'")):
             mum.read_grafana_admin_credentials(namespace="Bad NS")
 
+    @pytest.mark.parametrize(
+        ("arguments", "message"),
+        [
+            ({"namespace": f"{mum.DEFAULT_NAMESPACE}\n"}, "Invalid namespace"),
+            ({"secret_name": f"{mum.DEFAULT_ADMIN_SECRET}\n"}, "Invalid secret name"),
+        ],
+    )
+    def test_rejects_a_trailing_newline(self, arguments: dict[str, str], message: str) -> None:
+        # ``$`` also matches before a final newline; both checks are fullmatches.
+        with pytest.raises(ValueError, match=message):
+            mum.read_grafana_admin_credentials(**arguments)
+
     def test_reads_through_the_context_and_tunnel_with_a_timeout(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -21,9 +21,10 @@ from gco.job_admission import (
     DEFAULT_ALLOWED_KINDS,
     DEFAULT_TRUSTED_DOCKERHUB_ORGS,
     DEFAULT_TRUSTED_REGISTRIES,
+    WORKLOAD_KINDS,
     JobValidationPolicy,
+    admit_manifest,
     check_resource_caps,
-    check_security_context,
     check_tolerations,
     hyperpod_routing,
     parse_cpu_millicores,
@@ -125,27 +126,28 @@ class TestPolicyDocumentRoundTrip:
 
 
 class TestDelegationIsFaithful:
-    """The instance methods must be pure pass-throughs after the extraction."""
+    """The REST service returns the shared sequence's verdict, unchanged."""
 
     @pytest.mark.parametrize(
-        "manifest",
+        ("manifest", "fragment"),
         [
-            _gpu_job(1, tolerations=[{"key": "nvidia.com/gpu", "operator": "Exists"}]),
-            _gpu_job(1),
-            _gpu_job(999),
+            (_gpu_job(1, tolerations=[{"key": "nvidia.com/gpu", "operator": "Exists"}]), None),
+            (_gpu_job(1), "nvidia.com/gpu=true:NoSchedule"),
+            (_gpu_job(999), "GPU 999 exceeds max 16"),
         ],
         ids=["tolerated", "missing-toleration", "over-cap"],
     )
-    def test_methods_and_functions_agree(self, processor, manifest) -> None:
-        policy = processor.job_validation_policy()
-
-        assert processor._validate_resource_limits(manifest) == check_resource_caps(
-            manifest, policy
+    def test_the_service_returns_admit_manifest(self, processor, manifest, fragment) -> None:
+        verdict = admit_manifest(
+            manifest,
+            processor.job_validation_policy(),
+            runtime_class_exists=processor.runtime_class_exists,
         )
-        assert processor._validate_security_context(manifest) == check_security_context(
-            manifest, policy
-        )
-        assert processor._validate_tolerations(manifest) == check_tolerations(manifest)
+        assert processor.validate_manifest(manifest) == verdict
+        if fragment is None:
+            assert verdict == (True, None)
+        else:
+            assert verdict[0] is False and fragment in (verdict[1] or "")
 
     def test_policy_reflects_attributes_mutated_after_construction(self, processor) -> None:
         """The policy is rebuilt per call, so a late attribute change is honored.
@@ -155,9 +157,89 @@ class TestDelegationIsFaithful:
         effective_job_validation_policy() reported the new one.
         """
         processor.max_gpu_per_manifest = 0
-        ok, message = processor._validate_resource_limits(_gpu_job(1))
+        ok, message = processor.validate_manifest(_gpu_job(1))
         assert ok is False
-        assert "GPU 1 exceeds max 0" in message
+        assert "GPU 1 exceeds max 0" in (message or "")
+
+    def test_an_error_building_the_policy_is_a_refusal(self, processor) -> None:
+        """Outside the sequence too, an exception refuses rather than admits."""
+        with patch.object(processor, "job_validation_policy", side_effect=RuntimeError("boom")):
+            assert processor.validate_manifest(_gpu_job(1)) == (False, "Validation error: boom")
+
+
+def _admit(manifest: dict[str, Any], **changes: Any) -> tuple[bool, str | None]:
+    """admit_manifest under the shipped policy with *changes*, every RuntimeClass present."""
+    policy = JobValidationPolicy.from_cdk_context({})._replace(**changes)
+    return admit_manifest(manifest, policy, runtime_class_exists=lambda name: True)
+
+
+class TestAdmitManifest:
+    """The one admission sequence: its order, its switches and its failure mode."""
+
+    def test_validation_disabled_admits_anything(self) -> None:
+        assert _admit({"kind": "Secret"}, validation_enabled=False) == (True, None)
+
+    def test_the_first_failing_check_is_the_verdict(self) -> None:
+        manifest = _gpu_job(999)
+        manifest["metadata"]["namespace"] = "kube-system"
+        assert _admit(manifest) == (
+            False,
+            "Namespace 'kube-system' not allowed. Allowed namespaces: ['gco-jobs']",
+        )
+
+    def test_the_default_namespace_applies_only_without_metadata_namespace(self) -> None:
+        manifest = _gpu_job(1, tolerations=[{"key": "nvidia.com/gpu", "operator": "Exists"}])
+        del manifest["metadata"]["namespace"]
+        policy = JobValidationPolicy.from_cdk_context({"allowed_namespaces": ["team-a"]})
+        present = lambda name: True  # noqa: E731
+        assert admit_manifest(
+            manifest, policy, runtime_class_exists=present, default_namespace="team-a"
+        ) == (True, None)
+        assert admit_manifest(manifest, policy, runtime_class_exists=present) == (
+            False,
+            "Namespace 'gco-jobs' not allowed. Allowed namespaces: ['team-a']",
+        )
+
+    @pytest.mark.parametrize("kind", WORKLOAD_KINDS)
+    def test_a_workload_without_a_pod_spec_is_refused(self, kind: str) -> None:
+        manifest = {"apiVersion": "v1", "kind": kind, "metadata": {"name": "w"}, "spec": {}}
+        assert _admit(manifest, allowed_kinds=frozenset(WORKLOAD_KINDS)) == (
+            False,
+            f"{kind} manifest must contain a valid pod spec",
+        )
+
+    @pytest.mark.parametrize("kind", ["ConfigMap", "Service", "TrainJob"])
+    def test_kinds_without_their_own_pod_spec_are_not_held_to_one(self, kind: str) -> None:
+        manifest = {"apiVersion": "v1", "kind": kind, "metadata": {"name": "w"}, "spec": {}}
+        assert _admit(manifest) == (True, None)
+
+    def test_the_toleration_rule_follows_its_switch(self) -> None:
+        assert _admit(_gpu_job(1))[0] is False
+        assert _admit(_gpu_job(1), require_accelerator_toleration=False) == (True, None)
+
+    def test_a_missing_sandbox_runtime_class_is_refused(self) -> None:
+        manifest = _gpu_job(0)
+        manifest["spec"]["template"]["spec"]["runtimeClassName"] = "isolated-sandbox"
+        policy = JobValidationPolicy.from_cdk_context({})
+        ok, message = admit_manifest(manifest, policy, runtime_class_exists=lambda name: False)
+        assert ok is False
+        assert (message or "").startswith(
+            "Nitro Sandbox validation failed: RuntimeClass isolated-sandbox does not exist"
+        )
+
+    def test_an_exception_is_a_refusal(self) -> None:
+        ok, message = _admit({"apiVersion": "v1", "kind": "Job", "metadata": None})
+        assert ok is False
+        assert (message or "").startswith("Validation error: argument of type 'NoneType'")
+
+    def test_the_logged_exception_cannot_forge_a_log_line(self, caplog) -> None:
+        with (
+            patch("gco.job_admission.check_resource_caps", side_effect=RuntimeError("bad\nforged")),
+            caplog.at_level("ERROR", logger="gco.job_admission"),
+        ):
+            verdict = _admit(_gpu_job(1))
+        assert verdict == (False, "Validation error: bad\nforged")
+        assert "Error validating manifest: bad\\nforged" in caplog.text
 
 
 class TestCdkContextSource:
@@ -384,7 +466,7 @@ class TestHyperpodRouting:
         manifest = self._queued(_gpu_job())
         assert hyperpod_routing(manifest, [manifest["spec"]["template"]["spec"]]) == "queue"
         assert check_tolerations(manifest) == (True, None)
-        assert processor._validate_tolerations(manifest) == (True, None)
+        assert processor.validate_manifest(manifest) == (True, None)
 
     def test_another_queue_is_held_to_the_accelerator_rule(self) -> None:
         manifest = _gpu_job()
@@ -505,7 +587,7 @@ class TestHyperpodRouting:
         assert check_tolerations(manifest) == (True, None)
         monkeypatch.delenv("REQUIRE_ACCELERATOR_TOLERATION", raising=False)
         qp = importlib.reload(qp)
-        assert qp.validate_manifest(manifest) == (True, "")
+        assert qp.validate_manifest(manifest) == (True, None)
         assert manifest_placement([manifest]).routing == "selector"
 
         # Routed, so the HyperPod taint is what it must tolerate.
@@ -554,8 +636,7 @@ class TestHyperpodRouting:
 
         monkeypatch.delenv("REQUIRE_ACCELERATOR_TOLERATION", raising=False)
         qp = importlib.reload(qp)
-        # The SQS path spells "valid" as (True, "") where the REST path says
-        # (True, None); the verdicts and the rejection text must agree.
+        # The verdicts and the rejection text must agree.
         queued = self._queued(_gpu_job())
         assert qp.validate_manifest(queued)[0] is True
         assert check_tolerations(queued)[0] is True
@@ -595,7 +676,7 @@ class TestTrainJobTolerationsAreMergedLikeTrainer:
 
     @staticmethod
     def _verdicts(monkeypatch, manifest: dict[str, Any]) -> tuple[tuple[bool, Any], ...]:
-        """(REST, SQS) verdicts; the SQS path spells "valid" as (True, "")."""
+        """(REST toleration check, SQS consumer) verdicts."""
         import importlib
 
         import gco.services.queue_processor as qp
@@ -603,8 +684,7 @@ class TestTrainJobTolerationsAreMergedLikeTrainer:
         monkeypatch.delenv("REQUIRE_ACCELERATOR_TOLERATION", raising=False)
         qp = importlib.reload(qp)
         rest = check_tolerations(manifest)
-        sqs = qp.validate_manifest(manifest)
-        return rest, (sqs[0], sqs[1] or None)
+        return rest, qp.validate_manifest(manifest)
 
     def test_a_later_patch_replaces_the_gpu_toleration(self, monkeypatch) -> None:
         manifest = self._trainjob(

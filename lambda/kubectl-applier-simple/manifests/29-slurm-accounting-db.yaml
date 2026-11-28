@@ -118,11 +118,12 @@ spec:
       terminationGracePeriodSeconds: 60
       # The placement every non-worker Slurm pod shares
       # (gco.slurm_config.PLATFORM_POD_NODE_SELECTOR / PLATFORM_POD_AFFINITY):
-      # on-demand, amd64, and never an accelerator pool. The gco-jobs
-      # LimitRange defaults containers to nvidia.com/gpu: 0, which admission
-      # turns into a toleration of the GPU taint, and Karpenter then placed
-      # the Slurm controller on a g4dn; workload-type is the label every GCO
-      # accelerator and job pool carries and the general-purpose pool lacks.
+      # on-demand, amd64, and never an accelerator pool, whatever the pod
+      # tolerates. A GPU toleration once placed the Slurm controller on a
+      # g4dn (the gco-jobs LimitRange then defaulted containers to
+      # nvidia.com/gpu: 0, which admission turned into that toleration);
+      # workload-type is the label every GCO accelerator and job pool carries
+      # and the general-purpose pool lacks.
       nodeSelector:
         kubernetes.io/os: linux
         kubernetes.io/arch: amd64

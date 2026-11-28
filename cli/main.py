@@ -30,6 +30,7 @@ from .commands import (
     costs,
     crossplane,
     dag,
+    dashboard,
     deps,
     examples,
     files,
@@ -202,6 +203,7 @@ def cli(
 cli.add_command(autopilot)
 cli.add_command(jobs)
 cli.add_command(dag)
+cli.add_command(dashboard)
 cli.add_command(deps)
 cli.add_command(queue)
 cli.add_command(release)

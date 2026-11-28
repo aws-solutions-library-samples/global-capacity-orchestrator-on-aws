@@ -13,6 +13,7 @@ from .config_cmd import config_cmd
 from .costs_cmd import costs
 from .crossplane_cmd import crossplane
 from .dag_cmd import dag
+from .dashboard_cmd import dashboard
 from .deps_cmd import deps
 from .examples_cmd import examples
 from .files_cmd import files
@@ -46,6 +47,7 @@ __all__ = [
     "costs",
     "crossplane",
     "dag",
+    "dashboard",
     "deps",
     "examples",
     "files",

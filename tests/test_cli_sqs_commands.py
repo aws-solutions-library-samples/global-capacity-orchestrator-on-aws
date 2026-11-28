@@ -327,8 +327,11 @@ class TestQueueStatusCommand:
             mock_aws.return_value = mock_client
 
             result = runner.invoke(cli, ["jobs", "queue-status", "--all-regions"])
-            assert result.exit_code == 0
-            assert "us-east-1" in result.output
+            # The answering region is printed, the failed one named on stderr,
+            # and the command fails: a region it could not read is not empty.
+            assert result.exit_code == 1
+            assert "us-east-1" in result.stdout
+            assert "us-west-2: Region unavailable" in result.stderr
 
 
 class TestCapacityStatusCommand:

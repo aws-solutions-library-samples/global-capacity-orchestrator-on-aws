@@ -637,7 +637,7 @@ run_demo() {
     done
     [[ "$output" != *"Refusing to publish"* ]]
     # No corpus, so no semantic query was attempted.
-    ! grep -q '^vector search' "$GCO_CALLS"
+    [ "$(grep -c '^vector search' "$GCO_CALLS")" -eq 0 ]
     [[ "$output" == *"Demo Complete"* ]]
 }
 
@@ -669,7 +669,7 @@ CASES
     run_demo GCO_DEMO_GUARDED_RECORDING=1 FAKE_GCO_FAIL="vector ingest"
     [ "$status" -eq 1 ]
     [[ "$output" == *"Vector store did not run"* ]]
-    ! grep -q '^vector search' "$GCO_CALLS"
+    [ "$(grep -c '^vector search' "$GCO_CALLS")" -eq 0 ]
 
     : > "$GCO_CALLS"
     : > "$KUBECTL_CALLS"
@@ -699,7 +699,7 @@ CASES
     [[ "$output" == *"Waiting for pod to be ready (attempt 49/50)"* ]]
     [[ "$output" == *"Endpoint did not become Kubernetes-ready within the bounded wait."* ]]
     [[ "$output" == *"Inference generation failed; refusing to publish a false-success recording."* ]]
-    ! grep -q '^inference invoke' "$GCO_CALLS"
+    [ "$(grep -c '^inference invoke' "$GCO_CALLS")" -eq 0 ]
     grep -q '^inference delete demo-llm -y$' "$GCO_CALLS"
 }
 

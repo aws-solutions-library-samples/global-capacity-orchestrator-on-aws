@@ -432,6 +432,20 @@ class TestManaged:
         assert managed["slurmdbd_custom_settings"] == {"PurgeJobAfter": "90days"}
         assert managed["cgroup_custom_settings"] == {"ConstrainCores": "yes"}
 
+    def test_a_trailing_newline_is_refused_where_the_value_is_not_stripped(self) -> None:
+        # ``$`` also matches before a final newline, so these checks are fullmatches.
+        # (Names, ids, instance types and zones are stripped before their checks.)
+        _validate(
+            _managed(
+                login={"ami": "ami-0123456789abcdef0"},
+                slurm_custom_settings={"MaxJobCount": 20000},
+            )
+        )
+        with pytest.raises(pc.PcsConfigError, match=r"login\.ami must be"):
+            _validate(_managed(login={"ami": "ami-0123456789abcdef0\n"}))
+        with pytest.raises(pc.PcsConfigError, match=r"is not a Slurm parameter name"):
+            _validate(_managed(slurm_custom_settings={"MaxJobCount\n": 20000}))
+
     def test_accounting_keeps_the_job_comment(self) -> None:
         """slurmdbd stores the API's ``gco:<caller>`` comment only under job_comment.
 

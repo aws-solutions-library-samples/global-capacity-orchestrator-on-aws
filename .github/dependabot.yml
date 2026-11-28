@@ -25,10 +25,10 @@
 # two contracts require: lint:actions:pinning wants every reference to one
 # action repository on one SHA (`github/codeql-action/init` and `/analyze`
 # once arrived as #287/#284), and tests/test_python_base_image_consistency.py
-# wants one python tag across Dockerfile.dev and the service Dockerfiles (a
-# bump used to arrive as one PR for "/" and another for "/dockerfiles"). Split
-# across PRs, neither half can pass CI, which is why each ecosystem sits whole
-# inside one group.
+# wants one python tag across the root images (Dockerfile.dev,
+# Dockerfile.dashboard) and the service Dockerfiles (a bump used to arrive as
+# one PR for "/" and another for "/dockerfiles"). Split across PRs, neither
+# half can pass CI, which is why each ecosystem sits whole inside one group.
 #
 # The trade-off is that one bad update holds back the batch. Hold it back with
 # an `ignore` entry here, where the rule stays reviewable; Dependabot re-runs
@@ -143,8 +143,9 @@ updates:
       - "dependencies"
       - "live-validation-required"
 
-  # Base images: the service images, the dev container (Dockerfile.dev at the
-  # repository root), and both Lambda container images.
+  # Base images: the service images, the dev container and the dashboard
+  # (Dockerfile.dev and Dockerfile.dashboard at the repository root), and both
+  # Lambda container images.
   #
   # Only patch releases of the Python bases flow (3.14.8 -> 3.14.9). A new
   # series (3.14 -> 3.15) moves .python-version, pyproject's requires-python,

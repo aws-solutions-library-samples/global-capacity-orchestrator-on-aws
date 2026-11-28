@@ -198,7 +198,7 @@ KUBECTL
     grep -Fxq 'eks create-access-entry --cluster-name research-eu-west-1 --region eu-west-1 --principal-arn arn:aws:iam::123456789012:user/developer' "$AWS_CALLS"
     grep -Fxq 'eks associate-access-policy --cluster-name research-eu-west-1 --region eu-west-1 --principal-arn arn:aws:iam::123456789012:user/developer --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy --access-scope type=cluster' "$AWS_CALLS"
     # The Account lookup is only needed to rebuild a role ARN.
-    ! grep -q -- '--query Account' "$AWS_CALLS"
+    [ "$(grep -c -- '--query Account' "$AWS_CALLS")" -eq 0 ]
     grep -Fxq 'get nodes' "$KUBECTL_CALLS"
     [[ "$output" == *"Setup complete! You can now use kubectl with cluster: research-eu-west-1"* ]]
 }

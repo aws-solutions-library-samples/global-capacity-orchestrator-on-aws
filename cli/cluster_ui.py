@@ -190,7 +190,7 @@ def read_secret_key(
     read fails, or the key is absent (the message never carries the value).
     """
     for label, value in (("namespace", namespace), ("Secret name", name)):
-        if not _NAME_RE.match(value):
+        if not _NAME_RE.fullmatch(value):
             raise ValueError(f"Invalid {label} {value!r}")
     cmd = [
         "kubectl",

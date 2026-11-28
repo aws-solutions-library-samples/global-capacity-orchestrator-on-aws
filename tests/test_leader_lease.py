@@ -7,6 +7,8 @@ its record unchanged for the lease duration on its own monotonic clock (never
 by comparing ``renewTime`` with the local wall clock), a timestamp-less holder
 may be replaced at once, a racing writer (HTTP 409) loses the cycle, every
 failure fails closed, and each attempt reports whether it acquired or renewed.
+That expiry rule is ``LeaseObserver``, which the inference monitor's own
+election applies too.
 The second half covers how the webhook dispatcher consumes it — standbys
 never deliver, a new leader re-seeds its cache before delivering (including
 after a loss it never observed), and a dispatcher built without a Lease keeps
@@ -28,6 +30,7 @@ from gco.services.leader_lease import (
     LEASE_REQUEST_TIMEOUT,
     LeaseElector,
     LeaseIdentity,
+    LeaseObserver,
     LeaseOutcome,
     lease_duration_from_env,
 )
@@ -241,6 +244,79 @@ class TestLeaseElector:
         with caplog.at_level("WARNING"):
             assert _elector(label="ALB-sync").try_acquire(api) is LeaseOutcome.NOT_HELD
         assert "ALB-sync Lease check failed (non-fatal): socket closed" in caplog.text
+
+
+class TestLeaseObserver:
+    """The expiry rule for a hold this replica does not own."""
+
+    def test_an_unchanged_record_expires_after_the_duration(self):
+        clock = FakeClock()
+        observer = LeaseObserver(clock)
+        # A renewTime an hour behind our wall clock changes nothing.
+        spec = _lease("other-replica", datetime.now(UTC) - timedelta(hours=1)).spec
+
+        assert observer.expired(spec, 90) is False
+        clock.now += 89
+        assert observer.expired(spec, 90) is False
+        clock.now += 1
+        assert observer.expired(spec, 90) is True
+
+    def test_a_renewal_restarts_the_timer(self):
+        clock = FakeClock()
+        observer = LeaseObserver(clock)
+        spec = _lease("other-replica", datetime.now(UTC)).spec
+        observer.observe(spec)
+        clock.now += 90
+        spec.renew_time += timedelta(seconds=1)
+
+        assert observer.expired(spec, 90) is False
+        clock.now += 90
+        assert observer.expired(spec, 90) is True
+
+    @pytest.mark.parametrize(
+        "field", ["holder_identity", "acquire_time", "lease_transitions", "lease_duration_seconds"]
+    )
+    def test_any_record_field_counts_as_a_change(self, field):
+        clock = FakeClock()
+        observer = LeaseObserver(clock)
+        spec = _lease("other-replica", datetime.now(UTC)).spec
+        observer.observe(spec)
+        clock.now += 90
+        setattr(spec, field, "rewritten")
+
+        assert observer.expired(spec, 90) is False
+
+    def test_a_record_without_renew_time_has_expired_already(self):
+        observer = LeaseObserver(FakeClock())
+
+        assert observer.expired(_lease("wedged-replica", None).spec, 90) is True
+
+
+def test_the_elector_and_the_inference_monitor_share_one_expiry_rule():
+    """Neither election keeps a copy of the rule: both defer to LeaseObserver."""
+    from gco.services.inference_monitor import InferenceMonitor
+
+    with (
+        patch("gco.services.inference_monitor.config.load_incluster_config"),
+        patch("gco.services.inference_monitor.client.AppsV1Api"),
+        patch("gco.services.inference_monitor.client.CoreV1Api"),
+        patch("gco.services.inference_monitor.client.NetworkingV1Api"),
+        patch("gco.services.inference_monitor.client.DiscoveryV1Api"),
+    ):
+        monitor = InferenceMonitor("cluster", "us-east-1", MagicMock())
+    # A foreign record renewed just now and seen for the first time: live by
+    # the rule, so each election taking it proves it asked the observer.
+    renewed = datetime.now(UTC)
+
+    with (
+        patch.object(LeaseObserver, "expired", return_value=True) as expired,
+        patch("gco.services.inference_monitor.client.CoordinationV1Api") as coordination,
+    ):
+        coordination.return_value.read_namespaced_lease.return_value = _lease("other", renewed)
+        assert _elector().try_acquire(_api(_lease("other", renewed))) is LeaseOutcome.ACQUIRED
+        assert monitor._try_acquire_lease("inference-monitor-leader", "monitor-a") is True
+
+    assert expired.call_count == 2
 
 
 class TestLeaseRelease:

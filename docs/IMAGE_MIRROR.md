@@ -154,6 +154,7 @@ The copy step needs no change — it mirrors whatever `collect_source_refs()` re
 - **Pull-path only.** The mirror changes only *where* images are pulled from. Volcano's behavior, versions, and configuration are unchanged.
 - **Per-region.** ECR is regional, so the mirror runs once per target region. `deploy-all` mirrors each region in `cdk.json`'s `regional` block; a single-region deploy mirrors just that region.
 - **Idempotent and cheap to repeat.** Already-mirrored tags are skipped (`skip_existing`), so a steady-state deploy adds only a couple of ECR lookups.
+- **Outlives teardown.** The mirror creates its repositories outside CloudFormation, so `gco stacks destroy` and `gco stacks destroy-all` leave them, and the next deploy reuses them without copying again. Delete them with `aws ecr delete-repository --force` once no deployment in the Region needs them. A [live release validation](LIVE_RELEASE_VALIDATION.md#cleanup-retained-resources-and-recovery) run records them in its baseline in whichever Regions they are, so they do not block the run.
 
 ## Troubleshooting
 

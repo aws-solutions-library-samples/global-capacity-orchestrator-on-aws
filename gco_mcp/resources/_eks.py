@@ -7,8 +7,8 @@ import re
 import boto3
 
 from cli.config import get_config
+from gco.aws_names import is_aws_region_name
 
-_REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 _PARTITION_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _PROJECT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 _ACCOUNT_ID_RE = re.compile(r"^[0-9]{12}$")
@@ -17,7 +17,7 @@ _MAX_REGION_LENGTH = 32
 
 def is_valid_region(region: str) -> bool:
     """Return whether ``region`` has the bounded AWS region shape GCO accepts."""
-    return len(region) <= _MAX_REGION_LENGTH and _REGION_RE.fullmatch(region) is not None
+    return len(region) <= _MAX_REGION_LENGTH and is_aws_region_name(region)
 
 
 def eks_context_for_region(region: str, project_name: str | None = None) -> str:

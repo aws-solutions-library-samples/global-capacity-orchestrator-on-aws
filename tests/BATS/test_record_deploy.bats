@@ -539,7 +539,7 @@ run_recorder() {
     [[ "$output" == *"GIF published: ${FIXTURE}/demo/deploy.gif"* ]]
     grep -q '000000000000' "$FIXTURE/demo/deploy.cast"
     grep -q 'REDACTED_AWS_ACCESS_KEY_ID' "$FIXTURE/demo/deploy.cast"
-    ! grep -q '123456789012' "$FIXTURE/demo/deploy.cast"
+    [ "$(grep -c '123456789012' "$FIXTURE/demo/deploy.cast")" -eq 0 ]
     [ "$(cat "$FIXTURE/demo/deploy.gif")" = "rendered gif" ]
     [ -z "$(compgen -G "$FIXTURE/demo/.deploy-recording.*" || true)" ]
     [ ! -e "$FIXTURE/.git/gco-legacy-recording.lock" ]

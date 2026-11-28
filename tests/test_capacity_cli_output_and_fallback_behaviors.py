@@ -804,6 +804,77 @@ def test_spot_prices_empty_result_in_table_mode_prints_only_the_warning() -> Non
     assert "No spot price data" in result.stderr
 
 
+def _spot_price(window_days: int) -> object:
+    from cli.capacity.models import SpotPriceInfo
+
+    return SpotPriceInfo(
+        instance_type="g5.xlarge",
+        availability_zone="us-east-1a",
+        current_price=0.5,
+        avg_price_7d=0.45,
+        min_price_7d=0.4,
+        max_price_7d=0.6,
+        price_stability=0.9,
+        window_days=window_days,
+    )
+
+
+@pytest.mark.parametrize("days", [7, 30])
+def test_spot_prices_table_headers_name_the_window(days: int) -> None:
+    """The headers read AVG_PRICE_7D whatever --days asked for."""
+    checker = MagicMock()
+    checker.get_spot_price_history.return_value = [_spot_price(days)]
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(
+            capacity,
+            ["spot-prices", "-i", "g5.xlarge", "-r", "us-east-1", "-d", str(days)],
+            obj=_config(),
+        )
+
+    assert result.exit_code == 0, result.output
+    header, _rule, row = result.stdout.splitlines()
+    assert header.split() == [
+        "AVAILABILITY_ZONE",
+        "CURRENT_PRICE",
+        f"AVG_PRICE_{days}D",
+        f"MIN_PRICE_{days}D",
+        f"MAX_PRICE_{days}D",
+        "PRICE_STABILITY",
+    ]
+    assert row.split() == ["us-east-1a", "$0.5000", "$0.4500", "$0.4000", "$0.6000", "0.9000"]
+    checker.get_spot_price_history.assert_called_once_with("g5.xlarge", "us-east-1", days)
+
+
+def test_spot_prices_json_keeps_the_field_names_and_states_the_window() -> None:
+    from cli.main import cli
+
+    checker = MagicMock()
+    checker.get_spot_price_history.return_value = [_spot_price(30)]
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "-o",
+                "json",
+                "capacity",
+                "spot-prices",
+                "-i",
+                "g5.xlarge",
+                "-r",
+                "us-east-1",
+                "-d",
+                "30",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    [price] = json.loads(result.stdout)
+    assert price["avg_price_7d"] == 0.45
+    assert price["min_price_7d"] == 0.4
+    assert price["max_price_7d"] == 0.6
+    assert price["window_days"] == 30
+
+
 # ---------------------------------------------------------------------------
 # Instance-type aliases reach AWS expanded
 # ---------------------------------------------------------------------------

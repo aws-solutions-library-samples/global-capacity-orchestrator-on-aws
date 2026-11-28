@@ -7,8 +7,9 @@ once each, that concurrent callers share one refresh, that a failed read is
 never reported as healthy (the last complete reading stands in for up to 60
 seconds, after which the status is unhealthy and names the failed read), that
 utilization above 100% (over-commit) is a legal reading judged against the
-thresholds instead of a validation error, and that ``active_jobs`` counts Jobs,
-not pods, in the job namespaces.
+thresholds instead of a validation error, that a reading carries its
+allocatable and requested GPU counts (no GPU nodes and idle GPUs both read 0%),
+and that ``active_jobs`` counts Jobs, not pods, in the job namespaces.
 """
 
 from __future__ import annotations
@@ -309,6 +310,77 @@ class TestOverCommitIsALegalReading:
         assert status.status == "unhealthy"
         assert status.resource_utilization.gpu == 200.0
         assert status.message == "Threshold violations: GPU: 200.0% > 60%"
+
+
+class TestGpuCounts:
+    """The reading carries its GPU counts, which the percentage alone cannot tell apart."""
+
+    @pytest.mark.parametrize(
+        ("nodes", "pods", "counts", "percent"),
+        [
+            ([_node("n1"), _node("n2")], [_pod("web", "gco-jobs", "Running")], (0, 0), 0.0),
+            ([_node("n1", gpus=4)], [_pod("wait", "gco-jobs", "Pending", gpus=2)], (4, 0), 0.0),
+            (
+                [_node("g1", gpus=1), _node("g2", gpus=1), _node("n1")],
+                [
+                    _pod("serve-0", "gco-inference", "Running", gpus=1),
+                    _pod("serve-1", "gco-inference", "Running", gpus=1),
+                ],
+                (2, 2),
+                100.0,
+            ),
+        ],
+        ids=["no-gpu-nodes", "idle-gpus", "every-gpu-requested"],
+    )
+    @pytest.mark.asyncio
+    async def test_allocatable_and_requested_gpus_come_with_the_percentage(
+        self,
+        nodes: list[V1Node],
+        pods: list[V1Pod],
+        counts: tuple[int, int],
+        percent: float,
+    ):
+        monitor = _monitor()
+        _serve(monitor, nodes=nodes, pods=pods)
+
+        utilization = (await monitor.get_health_status()).resource_utilization
+
+        assert (utilization.gpu_allocatable, utilization.gpu_requested) == counts
+        assert utilization.gpu == percent
+        # The helper the reading shares agrees with it.
+        assert monitor._calculate_gpu_utilization(nodes, pods) == percent
+
+    @pytest.mark.asyncio
+    async def test_a_status_without_a_reading_has_no_utilization_or_counts(self):
+        """Zeros there would describe an idle cluster nobody measured."""
+        monitor = _monitor()
+        _serve(monitor, nodes=[_node("g1", gpus=1)])
+        monitor.core_v1.list_node.side_effect = TimeoutError("read timed out")
+
+        status = await monitor.get_health_status()
+
+        assert status.status == "unhealthy"
+        assert status.message == "Health check error: listing nodes failed"
+        assert status.resource_utilization is None
+        assert (status.active_jobs, status.pending_pods, status.pending_requested) == (
+            None,
+            None,
+            None,
+        )
+        assert status.get_threshold_violations() == []
+        assert status.is_healthy() is False
+
+    @pytest.mark.asyncio
+    async def test_a_reading_that_cannot_be_judged_has_no_utilization_either(self):
+        from gco.models import RequestedResources, ResourceUtilization
+
+        monitor = _monitor()
+        reading = (ResourceUtilization(1.0, 1.0, 0.0), -1, 0, RequestedResources(0.0, 0.0, 0))
+        with patch.object(monitor, "get_cluster_metrics", return_value=reading):
+            status = await monitor.get_health_status()
+
+        assert status.resource_utilization is None
+        assert status.active_jobs is None
 
 
 class TestActiveJobs:

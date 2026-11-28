@@ -2229,8 +2229,10 @@ class TestQueueStatusCommand:
             mock_aws.return_value = mock_client
 
             result = runner.invoke(cli, ["jobs", "queue-status", "--all-regions"])
-            assert result.exit_code == 0
+            # Every discovered region failed: each is named and the command fails.
+            assert result.exit_code == 1
             assert "No queue status" in result.output
+            assert "us-east-1: Queue not found" in result.stderr
 
     def test_queue_status_error(self):
         """Test queue-status with error."""

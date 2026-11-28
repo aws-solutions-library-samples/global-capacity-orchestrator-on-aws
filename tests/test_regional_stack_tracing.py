@@ -10,8 +10,9 @@ Covers everything ``GCORegionalStack`` synthesizes for the cdk.json
   roles, with cdk-nag reasons that say why it is ``Resource: *``;
 * the one-directional CloudWatch Transaction Search custom resource (its
   Lambda, least-privilege role, provider log group and acknowledgments);
-* the CloudWatch Observability add-on's Application Signals exclusions,
-  validated against the add-on's configuration schema;
+* the CloudWatch Observability add-on's Application Signals exclusions and
+  its DCGM exporter's NVIDIA node affinity, validated against the add-on's
+  configuration schema;
 * the opt-in ``xray`` interface VPC endpoint.
 
 Stacks synthesize against ``MockConfigLoader`` with Docker image assets and
@@ -42,6 +43,14 @@ _REGION = "us-east-1"
 _IMAGE_URI = f"{_ACCOUNT}.dkr.ecr.{_REGION}.amazonaws.com/test:latest"
 _TRACED_ROLES = ("HealthMonitorRole", "ManifestProcessorRole", "InferenceProxyRole")
 _XRAY_ACTIONS = {"xray:PutTraceSegments", "xray:PutSpans"}
+#: GCO's own DCGM exporter DaemonSet, which picks NVIDIA nodes the same way.
+_DCGM_EXPORTER_MANIFEST = (
+    Path(__file__).resolve().parent.parent
+    / "lambda"
+    / "kubectl-applier-simple"
+    / "manifests"
+    / "50-dcgm-exporter.yaml"
+)
 
 #: Excerpt of the ``describe-addon-configuration`` schema of
 #: amazon-cloudwatch-observability v7.0.0-eksbuild.1 (the pinned
@@ -77,7 +86,6 @@ _ADDON_SCHEMA_EXCERPT: dict[str, Any] = {
                 "agents",
                 "applicationSignals",
                 "containerInsights",
-                "dcgmExporter",
                 "kubeStateMetrics",
                 "neuronMonitor",
                 "nodeExporter",
@@ -94,6 +102,14 @@ _ADDON_SCHEMA_EXCERPT: dict[str, Any] = {
             "type": "object",
             "additionalProperties": False,
             "properties": {"enabled": {"type": "boolean"}, "fluentBit": {}},
+        },
+        "dcgmExporter": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "affinity": {"type": ["object", "null"]},
+                **{key: {} for key in ("enabled", "nodeSelector", "resources", "tolerations")},
+            },
         },
         "manager": {
             "type": "object",
@@ -611,11 +627,50 @@ class TestCloudWatchObservabilityAddon:
             self._configuration(resources)
         )
 
-    def test_schema_excerpt_rejects_a_misspelled_path(self):
+    @pytest.mark.parametrize(
+        "configuration",
+        [
+            {"manager": {"applicationSignals": {"autoMonitor": {"excludes": {}}}}},
+            {"dcgmExporter": {"afinity": {}}},
+        ],
+        ids=["auto-monitor-exclude", "dcgm-exporter-affinity"],
+    )
+    def test_schema_excerpt_rejects_a_misspelled_path(self, configuration):
         with pytest.raises(jsonschema.ValidationError):
-            jsonschema.Draft201909Validator(_ADDON_SCHEMA_EXCERPT).validate(
-                {"manager": {"applicationSignals": {"autoMonitor": {"excludes": {}}}}}
-            )
+            jsonschema.Draft201909Validator(_ADDON_SCHEMA_EXCERPT).validate(configuration)
+
+    def test_dcgm_exporter_runs_on_every_nvidia_gpu_node(self, tracing_on):
+        """The add-on's DCGM exporter selects NVIDIA nodes by label, not by instance type.
+
+        The add-on's default affinity is an instance-type allowlist frozen at
+        each add-on release, so a GPU family newer than the release got no
+        Container Insights GPU series. EKS Auto Mode labels every NVIDIA node
+        with its GPU manufacturer, and GCO's own exporter selects on that label.
+        """
+        _stack, resources = tracing_on
+        dcgm = self._configuration(resources)["dcgmExporter"]
+        assert dcgm == {"affinity": rs.GCORegionalStack._NVIDIA_GPU_NODE_AFFINITY}
+        required = dcgm["affinity"]["nodeAffinity"][
+            "requiredDuringSchedulingIgnoredDuringExecution"
+        ]
+        (term,) = required["nodeSelectorTerms"]
+        assert term["matchExpressions"] == [
+            {
+                "key": "eks.amazonaws.com/instance-gpu-manufacturer",
+                "operator": "In",
+                "values": ["nvidia"],
+            },
+            {"key": "eks.amazonaws.com/compute-type", "operator": "NotIn", "values": ["fargate"]},
+        ]
+
+        (daemonset,) = [
+            doc
+            for doc in yaml.safe_load_all(_DCGM_EXPORTER_MANIFEST.read_text(encoding="utf-8"))
+            if doc and doc["kind"] == "DaemonSet"
+        ]
+        selector = daemonset["spec"]["template"]["spec"]["nodeSelector"]
+        manufacturer = term["matchExpressions"][0]
+        assert selector == {manufacturer["key"]: manufacturer["values"][0]}
 
     def test_exclusions_do_not_depend_on_tracing(self, tracing_off):
         _stack, resources = tracing_off

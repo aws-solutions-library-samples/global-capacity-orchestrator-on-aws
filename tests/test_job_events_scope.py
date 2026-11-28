@@ -549,6 +549,19 @@ class TestPodNameRecords:
         result = _collect(core, batch_v1=_batch("Indexed"))
         assert result["scope"]["pods"] == ["trainer-0-a1b2c", "trainer-12-d3e4f", "trainer-g5h6j"]
 
+    def test_a_pod_name_with_a_trailing_newline_is_not_the_jobs(self) -> None:
+        # The name check is a fullmatch: ``$`` alone also matches before a final newline.
+        core = FakeCoreV1(
+            job_events=[],
+            pods=[],
+            pod_events=[
+                _event("Pod", "trainer-a1b2c", "Started", ""),
+                _event("Pod", "trainer-d3e4f\n", "Started", ""),
+            ],
+        )
+        result = _collect(core)
+        assert result["scope"]["pods"] == ["trainer-a1b2c"]
+
     def test_scheduled_record_that_does_not_parse_adds_no_node(self) -> None:
         core = FakeCoreV1(
             job_events=[],

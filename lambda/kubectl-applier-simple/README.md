@@ -53,7 +53,7 @@ The handler's `_SUPPORTED_MANIFEST_KINDS` is the authoritative list:
 - **Gateway API and AWS Load Balancer Controller:** GatewayClass, Gateway, HTTPRoute, LoadBalancerConfiguration, TargetGroupConfiguration
 - **Karpenter:** NodePool (the shipped pools reference EKS Auto Mode's built-in `default` NodeClass) and self-managed Karpenter's EC2NodeClass, which GCO's Auto Mode clusters don't serve
 - **cert-manager:** ClusterIssuer (cluster-scoped), Issuer, Certificate — GCO's internal CA chain and its TLS leaves
-- **Admission policy:** ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding (both cluster-scoped) — the issuance fence on the internal CA (`08-internal-ca-issuance.yaml`)
+- **Admission policy:** ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding (both cluster-scoped) — the per-container GPU cap on `gco-jobs` pods (`04-resource-quotas.yaml`), the issuance fence on the internal CA (`08-internal-ca-issuance.yaml`) and the tenant write fence (`09-tenant-write-fence.yaml`)
 - **Prometheus Operator:** ServiceMonitor, PodMonitor
 - **KEDA:** ScaledJob, ScaledObject
 - **Kueue:** ClusterQueue, LocalQueue, ResourceFlavor
@@ -100,6 +100,7 @@ mkdir -p lambda/kubectl-applier-simple-build
 cp lambda/kubectl-applier-simple/handler.py lambda/kubectl-applier-simple/requirements.txt lambda/kubectl-applier-simple-build/
 cp -r lambda/kubectl-applier-simple/manifests lambda/kubectl-applier-simple-build/
 python3 -m pip install -r lambda/kubectl-applier-simple/requirements.txt \
+  -c requirements-lock.txt \
   -t lambda/kubectl-applier-simple-build/ --upgrade \
   --platform manylinux2014_x86_64 --only-binary=:all:
 ```

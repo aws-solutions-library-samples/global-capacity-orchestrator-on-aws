@@ -146,6 +146,22 @@ server from your own IDE instead (Cursor, Kiro, Claude Desktop), the
 [MCP server README](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/gco_mcp/README.md)
 has the copy-paste configuration for each client.
 
+## Prefer a browser?
+
+```bash
+gco dashboard start   # serves the dashboard on localhost:8501 and prints its link
+```
+
+The dashboard is a local web UI over the same calls the CLI makes: every
+Region on one map with its health and load, Jobs and the central queue,
+inference endpoints with a chat playground, capacity, prices and costs. It
+runs on your machine with your AWS credentials. Open the link it prints,
+which carries the access token; through the dev container's `gco` function
+it serves in that terminal until you press Ctrl-C. The
+[Dashboard guide](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/DASHBOARD.md)
+covers the pages, the security model, and running it in a container of its
+own.
+
 ## 6. Tear down
 
 ```bash

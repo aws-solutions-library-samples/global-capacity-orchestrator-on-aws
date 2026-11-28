@@ -39,6 +39,34 @@ from ..ownership.vpc_endpoints import (
 _BASELINE_EFS_ACCEPTANCE_STATE_KEY = "baseline_accepted_efs_automatic_backup_recovery_points"
 
 
+def _is_ecr_repository_arn(arn: object) -> bool:
+    parts = str(arn).split(":", 5)
+    return len(parts) == 6 and parts[2] == "ecr" and parts[5].startswith("repository/")
+
+
+def _baseline_ecr_regions(ctx: RunContext, project_inventory: dict[str, Any]) -> list[str]:
+    """The topology's Regions, then every other Region already holding a project repository.
+
+    ``gco stacks destroy-all`` leaves the image mirror's repositories
+    (``<project>/dockerhub/...``) in place, because ``gco images mirror``
+    creates them outside CloudFormation, so an account that once ran a fleet
+    in other Regions keeps them there. Baselining those Regions' ECR accepts
+    the leftovers the way a topology Region's repositories are accepted:
+    final-inventory requires each one unchanged. Without it the clean-account
+    gate refused the account until the repositories were deleted by hand.
+    """
+    regions = list(_topology_regions(ctx))
+    for region, resources in sorted((project_inventory.get("regional") or {}).items()):
+        if region in regions:
+            continue
+        if resources.get("ecr_repositories") or any(
+            _is_ecr_repository_arn(record.get("arn"))
+            for record in resources.get("tagged_resources") or []
+        ):
+            regions.append(region)
+    return regions
+
+
 def action_baseline(ctx: RunContext) -> dict[str, Any]:
     """Capture protected stacks/ECR and Transaction Search state; reject project leftovers.
 
@@ -66,13 +94,6 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
     enabled_regions = ctx.checkpoint.state.get("enabled_regions")
     if not enabled_regions:
         raise RuntimeError("Preflight did not record enabled AWS Regions")
-    baseline = capture_baseline(
-        ctx.session,
-        enabled_regions=enabled_regions,
-        ecr_regions=_topology_regions(ctx),
-        protected_stack_names=ctx.settings.protected_stack_names,
-    )
-
     project_inventory = collect_project_resources(
         ctx.session,
         enabled_regions=enabled_regions,
@@ -81,6 +102,13 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
         seed_region=ctx.config.global_region,
         validation_run_id=ctx.settings.run_id,
     )
+    baseline = capture_baseline(
+        ctx.session,
+        enabled_regions=enabled_regions,
+        ecr_regions=_baseline_ecr_regions(ctx, project_inventory),
+        protected_stack_names=ctx.settings.protected_stack_names,
+    )
+
     disallowed_inventory = _strip_baseline_ecr(project_inventory, baseline)
     disallowed_inventory, accepted_efs_backups = (
         _strip_accepted_efs_automatic_backup_recovery_points(

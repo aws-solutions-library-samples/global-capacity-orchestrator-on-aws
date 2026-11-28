@@ -1530,7 +1530,11 @@ class TestKubernetesCallsRunOffTheEventLoop:
         processor.batch_v1 = MagicMock()
         processor.custom_objects = MagicMock()
         processor.node_v1 = MagicMock()
+        processor.admission_v1 = MagicMock()
         empty = SimpleNamespace(items=[])
+        gpu_cap_policy = SimpleNamespace(
+            metadata=SimpleNamespace(annotations={"gco.io/container-max-gpu": "8"})
+        )
         for api, method, answer in (
             ("core_v1", "list_namespace", lambda *a, **k: empty),
             ("core_v1", "list_namespaced_pod", lambda *a, **k: SimpleNamespace(items=[pod])),
@@ -1560,6 +1564,11 @@ class TestKubernetesCallsRunOffTheEventLoop:
                 },
             ),
             ("node_v1", "read_runtime_class", lambda *a, **k: object()),
+            (
+                "admission_v1",
+                "read_validating_admission_policy",
+                lambda *a, **k: gpu_cap_policy,
+            ),
         ):
             getattr(getattr(processor, api), method).side_effect = responds(
                 f"{api}.{method}", answer
@@ -1716,7 +1725,11 @@ class TestKubernetesCallsRunOffTheEventLoop:
                 "/api/v1/policy",
                 None,
                 200,
-                {"core_v1.list_namespaced_resource_quota", "core_v1.list_namespaced_limit_range"},
+                {
+                    "core_v1.list_namespaced_resource_quota",
+                    "core_v1.list_namespaced_limit_range",
+                    "admission_v1.read_validating_admission_policy",
+                },
             ),
         ],
     )

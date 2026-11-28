@@ -119,7 +119,8 @@ GCO uses exact-pinned Python dependencies in `pyproject.toml` with a committed t
 |-------|----------------------------|------------------|
 | Core | `pip install -e .` | CLI and service runtime deps (boto3, click, requests, httpx2, the OpenTelemetry roots, etc.) |
 | CDK | `pip install -e ".[cdk]"` | AWS CDK, cdk-nag, constructs (for stack synthesis) |
-| Dev | `pip install -e ".[dev]"` | Everything: CDK + lint + typecheck + test + security |
+| Dev | `pip install -e ".[dev]"` | Everything: CDK + dashboard + diagrams + lint + typecheck + test + security + docs |
+| Dashboard | `pip install -e ".[dashboard]"` | Streamlit, Altair, pydeck and pandas for the local web dashboard (`gco dashboard serve`; `gco dashboard start` installs them in its own image, `Dockerfile.dashboard`) |
 | MCP | `pip install -e ".[mcp]"` | FastMCP server |
 | Image: health monitor | Docker reads `[image-health-monitor]` | Direct runtime roots for `gco.services.health_api` and its TLS sidecar, including uvloop + httptools for uvicorn, httpx2, and the OpenTelemetry tracing roots |
 | Image: manifest processor | Docker reads `[image-manifest-processor]` | Direct runtime roots for the manifest API, its TLS sidecar, and the Grafana rotator, including uvloop + httptools for uvicorn, httpx2, and the OpenTelemetry tracing roots |
@@ -131,6 +132,8 @@ GCO uses exact-pinned Python dependencies in `pyproject.toml` with a committed t
 HTTP clients use [`httpx2`](https://pypi.org/project/httpx2/), the maintained successor fork of `httpx` with the same API (Starlette 1.6's `TestClient` prefers it). The Mooncake PD proxy, which runs on the upstream vLLM image, falls back to that image's `httpx`. The four traced images carry the OpenTelemetry API and SDK, the OTLP protobuf encoder, the FastAPI and httpx instrumentations, and `protobuf`; the inference-monitor and queue-processor images do not trace and ship none of it. No Brotli package is installed, because no GCO client has to decode Brotli: the services GCO calls do not compress their responses with it, and the two relaying proxies (inference proxy, PD proxy) pass bytes through untouched and forward only the caller's `Accept-Encoding`. Every other client keeps httpx2's default `Accept-Encoding` (`gzip, deflate, zstd`); zstd decoding needs no extra package on Python 3.14, whose standard library ships `compression.zstd`.
 
 CDK dependencies are in a separate `[cdk]` extras group so operators who only use the CLI don't need to install the full CDK toolchain. The six `image-*` groups are build metadata and the single source of direct dependency pins for production service images: each Dockerfile extracts only its own group with `tomllib`, constrains it with `requirements-lock.txt`, and deletes the generated requirements file in the same layer. Do not add per-image requirements files or install `.[image-*]` inside production images, because either approach introduces extra dependencies or another synchronization surface.
+
+The three Lambda builds that install packages (the `kubectl-applier-simple` package and the `helm-installer` and `tls-certificate-manager` images) keep their direct pins in their own `requirements.txt` and install it constrained by `requirements-lock.txt` in the same way, so the lock also fixes every indirect dependency they deploy. Every package those files pin must be in the lock at the same version (`tests/test_dependency_pin_consistency.py`), and a lock change rebuilds all three; see [lambda/README.md](lambda/README.md#build).
 
 #### Node.js Dependency Graphs
 

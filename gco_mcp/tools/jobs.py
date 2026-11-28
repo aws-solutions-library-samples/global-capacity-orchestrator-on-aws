@@ -368,7 +368,7 @@ def get_job_validation_policy(region: str) -> str:
     submit time. Returns the per-manifest cpu/memory/gpu caps,
     allowed_namespaces, allowed_kinds, trusted_registries, the pod-security
     block_* flags, and the namespace's live ResourceQuota / LimitRange
-    ceilings.
+    ceilings and per-container GPU cap.
 
     This reads the deployed cluster, not a local cdk.json. The two diverge
     whenever a stack was deployed from a different checkout, and CDK augments
@@ -376,7 +376,9 @@ def get_job_validation_policy(region: str) -> str:
     the effective allowlist is strictly larger than the configured one.
 
     A manifest must clear all three layers: the front-door policy, the
-    per-container LimitRange, and the aggregate ResourceQuota.
+    per-container ceilings (the LimitRange for CPU and memory, the
+    gco-jobs-container-gpu-limit admission policy for GPUs), and the
+    aggregate ResourceQuota.
 
     Args:
         region: AWS region (e.g. us-east-1).
@@ -440,7 +442,9 @@ def queue_status(region: str | None = None) -> str:
     """View SQS queue status (pending, in-flight, DLQ counts).
 
     Args:
-        region: Specific region, or omit for all regions.
+        region: Specific region, or omit for all regions; a region that cannot
+            be read is named in ``error`` and fails the call, with the other
+            regions' statuses returned under ``output``.
     """
     args = ["jobs", "queue-status"]
     if region:

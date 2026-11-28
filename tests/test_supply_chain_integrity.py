@@ -393,6 +393,88 @@ def test_dev_container_installs_the_project_against_the_lock() -> None:
     assert "COPY pyproject.toml requirements-lock.txt ./" in _read("Dockerfile.dev")
 
 
+def _pip_install_arguments(run: str) -> list[list[str]]:
+    """The arguments of every ``pip install`` command in one joined RUN instruction.
+
+    The instruction is split as the shell splits it, so a quoted message that
+    mentions pip install is not a command, and each command's arguments end
+    at the first shell operator.
+    """
+    lexer = shlex.shlex(run, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+    installs: list[list[str]] = []
+    for index in range(len(tokens) - 1):
+        if tokens[index : index + 2] != ["pip", "install"]:
+            continue
+        arguments: list[str] = []
+        for token in tokens[index + 2 :]:
+            if set(token) <= set("();<>|&"):
+                break
+            arguments.append(token)
+        installs.append(arguments)
+    return installs
+
+
+def test_lambda_images_install_their_requirements_against_the_lock() -> None:
+    """Each Lambda image constrains its one pip install with requirements-lock.txt.
+
+    requirements.txt pins only a Lambda's direct dependencies. Installed alone,
+    every transitive one resolved to whatever PyPI served at build time, which
+    is neither the graph the lock records nor the one its scans cover. The
+    lock is copied next to requirements.txt, into the working directory the
+    install runs in, before that install.
+    """
+    dockerfiles = sorted(
+        path
+        for path in (ROOT / "lambda").glob("*/Dockerfile")
+        if not path.parent.name.endswith("-build")
+    )
+    assert [path.parent.name for path in dockerfiles] == [
+        "helm-installer",
+        "tls-certificate-manager",
+    ]
+    for path in dockerfiles:
+        content = path.read_text(encoding="utf-8")
+        installs = [
+            arguments
+            for run in _dockerfile_run_instructions(content)
+            for arguments in _pip_install_arguments(run)
+        ]
+        assert len(installs) == 1, f"{path}: {installs}"
+        (arguments,) = installs
+        requirements = [
+            arguments[i + 1] for i, a in enumerate(arguments) if a in {"-r", "--requirement"}
+        ]
+        constraints = [
+            arguments[i + 1] for i, a in enumerate(arguments) if a in {"-c", "--constraint"}
+        ]
+        assert requirements == ["requirements.txt"], path
+        assert constraints == ["requirements-lock.txt"], path
+        lines = content.splitlines()
+        copies = [
+            number
+            for number, line in enumerate(lines)
+            if re.fullmatch(
+                r"COPY (?:lambda/[a-z0-9-]+/)?requirements\.txt requirements-lock\.txt \./", line
+            )
+        ]
+        install = next(
+            number
+            for number, line in enumerate(lines)
+            if "pip install" in line and not line.lstrip().startswith("#")
+        )
+        assert len(copies) == 1, f"{path} does not copy the lock next to requirements.txt"
+        assert copies[0] < install, path
+
+    assert _pip_install_arguments("if pip install -r a.txt -c b.txt; then break; fi") == [
+        ["-r", "a.txt", "-c", "b.txt"]
+    ]
+    assert (
+        _pip_install_arguments('echo "pip install failed" >&2; python -m pip uninstall pip') == []
+    )
+
+
 def test_retried_artifact_uploads_overwrite_only_their_own_first_attempt() -> None:
     """Retries overwrite, so no two uploads in one workflow may share a name.
 
@@ -872,6 +954,67 @@ def test_kind_cluster_e2e_dry_runs_the_inference_deployments_the_monitor_renders
     assert '= "3"' in run
     assert order.index("Apply namespaces + RBAC") < order.index(name)
     assert order.index(name) < order.index("Apply ResourceQuotas and LimitRanges")
+
+
+def test_kind_cluster_e2e_proves_the_gco_jobs_gpu_cap_with_extended_resource_toleration() -> None:
+    """04-resource-quotas.yaml in an API server that runs ExtendedResourceToleration.
+
+    Regression: the gco-jobs LimitRange defaulted every container to
+    ``nvidia.com/gpu: 0``, which ExtendedResourceToleration (on in EKS, off in a
+    stock kube-apiserver) turned into a toleration of the GPU node taint, so
+    CPU-only Jobs ran on GPU nodes. kind never showed it: the plugin was off and
+    the step expected the zero defaults. The kind config now enables the plugin,
+    and the step proves, once a dry run shows the policy enforced, that the GPU
+    cap policy refuses a pod over the substituted cap (4) with its own message
+    and admits one at it, which carries the toleration (so the plugin is on);
+    then that a defaulted CPU-only pod gets CPU and memory defaults and no GPU
+    toleration. tests/test_resource_quota_manifest.py evaluates the policy
+    offline; the message the step greps for is the one it renders.
+    """
+    from tests.test_resource_quota_manifest import _container, _pod, _review
+
+    kind_config = yaml.safe_load(_read(".github/kind/kind-calico.yaml"))
+    (patch,) = kind_config["kubeadmConfigPatches"]
+    cluster_configuration = yaml.safe_load(patch)
+    assert cluster_configuration["kind"] == "ClusterConfiguration"
+    assert cluster_configuration["apiServer"]["extraArgs"] == {
+        "enable-admission-plugins": "NodeRestriction,ExtendedResourceToleration"
+    }
+
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    steps = workflow["jobs"]["integration-kind-cluster-e2e"]["steps"]
+    kind_step = next(
+        step for step in steps if str(step.get("uses", "")).startswith("helm/kind-action")
+    )
+    assert kind_step["with"]["config"] == ".github/kind/kind-calico.yaml"
+    run = next(
+        step["run"] for step in steps if step.get("name") == "Apply ResourceQuotas and LimitRanges"
+    )
+
+    assert "-e 's|{{LIMIT_MAX_GPU}}|4|g'" in run
+    assert "policy=\"ValidatingAdmissionPolicy 'gco-jobs-container-gpu-limit'\"" in run
+    (denied,) = re.findall(r'denied="([^"]+)"', run)
+    (message,) = _review(_pod(_container(limits={"nvidia.com/gpu": "5"})), cap="4")
+    assert message.startswith(denied)
+    checks = [
+        "kubectl get validatingadmissionpolicy gco-jobs-container-gpu-limit",
+        "kubectl get validatingadmissionpolicybinding gco-jobs-container-gpu-limit",
+        "for gpus in 5 4; do",
+        'nvidia.com/gpu: "${gpus}"',
+        'kubectl create --dry-run=server -f "${work}/pod-5.yaml"',
+        'echo "::error::the API server never enforced gco-jobs-container-gpu-limit"',
+        'if ! grep -qF "${denied}" "${work}/over.err"; then',
+        'kubectl create --dry-run=server -o json -f "${work}/pod-4.yaml"',
+        'gpu = {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}',
+        "kubectl -n gco-jobs run limitrange-default-probe",
+        '"limits": {"cpu": "1", "memory": "4Gi"},',
+        '"requests": {"cpu": "100m", "memory": "256Mi"},',
+        'if t.get("key") == "nvidia.com/gpu"]',
+    ]
+    positions = [run.index(fragment) for fragment in checks]
+    assert positions == sorted(positions)
+    # The old defaults are gone from the expectation as well as the manifest.
+    assert '"nvidia.com/gpu": "0"' not in run
 
 
 def test_kind_cluster_e2e_runs_the_platform_on_internal_ca_tls() -> None:

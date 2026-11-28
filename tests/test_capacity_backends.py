@@ -212,6 +212,34 @@ def test_hyperpod_cluster_described_with_gpu_pool(sagemaker_clients: _Clients) -
     assert capacity.errors == []
 
 
+def test_hyperpod_instance_type_with_a_trailing_newline_is_never_looked_up(
+    sagemaker_clients: _Clients,
+) -> None:
+    # The type check is a fullmatch: ``$`` alone also matches before a final newline.
+    sagemaker_clients["sagemaker"].add_response(
+        "describe_cluster",
+        _describe_cluster(
+            "InService",
+            [_group("plain", "ml.g5.8xlarge", 1, 1), _group("newline", "ml.g5.8xlarge\n", 1, 1)],
+        ),
+        {"ClusterName": _HP_CLUSTER},
+    )
+    asked: list[str] = []
+
+    def gpus(instance_type: str) -> int | None:
+        asked.append(instance_type)
+        return 1
+
+    capacity = hyperpod_capacity(
+        _REGION,
+        {"HyperpodClusterName": _HP_CLUSTER},
+        client_factory=sagemaker_clients.factory,
+        gpus_per_instance=gpus,
+    )
+    assert asked == ["ml.g5.8xlarge"]
+    assert [group.gpus for group in capacity.instance_groups] == [1, None]
+
+
 def test_hyperpod_cluster_not_at_target_is_not_healthy(sagemaker_clients: _Clients) -> None:
     sagemaker_clients["sagemaker"].add_response(
         "describe_cluster",

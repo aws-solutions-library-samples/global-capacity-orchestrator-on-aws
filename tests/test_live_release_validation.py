@@ -1406,6 +1406,8 @@ class TestDeterministicTopologyReadiness:
                         "cpu_percent": 12.5,
                         "memory_percent": 33.0,
                         "gpu_percent": 0,
+                        "gpu_allocatable": 0,
+                        "gpu_requested": 0,
                     },
                     "thresholds": {
                         "cpu_threshold": 80,
@@ -6276,6 +6278,17 @@ class TestStripExpiredTableStreams:
         ownership_streams._strip_expired_table_streams(ctx, inventory)
         assert inventory == snapshot
 
+    def test_a_stream_arn_with_a_trailing_newline_is_untouched(self):
+        # The ARN check is a fullmatch: ``$`` alone also matches before a final newline.
+        ctx, dynamodb, _streams = self._clients(table_exists=False)
+        entry = {"arn": f"{self._STREAM_ARN}\n", "tags": {}}
+        residual, accepted = ownership_streams._strip_expired_table_streams(
+            ctx, self._inventory(entry)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+        dynamodb.describe_table.assert_not_called()
+
 
 class TestStripDeletedVolumes:
     """``_strip_deleted_volumes`` — Tagging API lag on the PCS nodes' root volumes.
@@ -6440,6 +6453,17 @@ class TestStripDeletedVolumes:
         snapshot = json.loads(json.dumps(inventory))
         ownership_ebs_volumes._strip_deleted_volumes(ctx, inventory)
         assert inventory == snapshot
+
+    def test_a_volume_arn_with_a_trailing_newline_is_untouched(self):
+        # The ARN check is a fullmatch: ``$`` alone also matches before a final newline.
+        ctx, ec2 = self._ctx(state=None)
+        entry = {"arn": f"{self._ARN}\n", "tags": {}}
+        residual, accepted = ownership_ebs_volumes._strip_deleted_volumes(
+            ctx, self._inventory(entry)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+        ec2.describe_volumes.assert_not_called()
 
 
 class TestStripDeletedVpcEndpoints:
@@ -6608,6 +6632,17 @@ class TestStripDeletedVpcEndpoints:
         ownership_vpc_endpoints._strip_deleted_vpc_endpoints(ctx, inventory)
         assert inventory == snapshot
 
+    def test_an_endpoint_arn_with_a_trailing_newline_is_untouched(self):
+        # The ARN check is a fullmatch: ``$`` alone also matches before a final newline.
+        ctx, ec2 = self._ctx(state=None)
+        entry = {"arn": f"{self._ARN}\n", "tags": {}}
+        residual, accepted = ownership_vpc_endpoints._strip_deleted_vpc_endpoints(
+            ctx, self._inventory(entry)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+        ec2.describe_vpc_endpoints.assert_not_called()
+
 
 class TestStripDeletedHyperpodClusters:
     """``_strip_deleted_hyperpod_clusters`` — Tagging API lag on a deleted HyperPod cluster.
@@ -6656,6 +6691,17 @@ class TestStripDeletedHyperpodClusters:
         ctx.session = MagicMock()
         ctx.session.client.return_value = sagemaker
         return ctx, sagemaker
+
+    def test_a_cluster_arn_with_a_trailing_newline_is_untouched(self):
+        # The ARN check is a fullmatch: ``$`` alone also matches before a final newline.
+        ctx, sagemaker = self._ctx(status=None)
+        entry = {"arn": f"{self._ARN}\n", "tags": {}}
+        residual, accepted = ownership_hyperpod_clusters._strip_deleted_hyperpod_clusters(
+            ctx, self._inventory(entry)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+        sagemaker.describe_cluster.assert_not_called()
 
     def test_not_found_cluster_is_stripped_with_evidence(self):
         ctx, sagemaker = self._ctx(status=None)

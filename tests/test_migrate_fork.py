@@ -349,12 +349,25 @@ def test_upstream_target_is_rejected(migrate: Any) -> None:
 
 @pytest.mark.parametrize(
     ("owner", "repo"),
-    [("bad owner", "repo"), ("owner", "bad repo"), ("-", "repo"), ("owner", "")],
+    [
+        ("bad owner", "repo"),
+        ("owner", "bad repo"),
+        ("-", "repo"),
+        ("owner", ""),
+        # ``$`` also matches before a final newline; both checks are fullmatches.
+        ("owner\n", "repo"),
+        ("owner", "repo\n"),
+    ],
 )
 def test_invalid_names_are_rejected(migrate: Any, owner: str, repo: str) -> None:
     args = migrate.argparse.Namespace(repo_url=None, owner=owner, repo=repo)
     with pytest.raises(SystemExit):
         migrate.parse_target(args)
+
+
+def test_valid_owner_and_repo_flags_are_returned(migrate: Any) -> None:
+    args = migrate.argparse.Namespace(repo_url=None, owner="owner", repo="repo")
+    assert migrate.parse_target(args) == ("owner", "repo")
 
 
 def test_dry_run_reports_the_repository_and_writes_nothing(migrate: Any) -> None:

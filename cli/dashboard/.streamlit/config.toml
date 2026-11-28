@@ -1,0 +1,131 @@
+# The GCO dashboard's Streamlit configuration.
+#
+# Streamlit reads this file because it sits next to the entrypoint (app.py).
+# `gco dashboard serve` also passes the security-relevant [server], [browser]
+# and [client] settings as command-line flags (cli/dashboard/server.py), so a
+# config.toml in the directory you start it from cannot loosen them.
+#
+# The theme is the project logo's palette (images/README.md): deep orange on
+# the logo's ink in dark mode, the same orange darkened on white in light mode.
+# Fonts are Streamlit's bundled ones, so the page makes no font requests.
+
+[theme]
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "8px"
+buttonRadius = "8px"
+baseFontSize = 14
+baseFontWeight = 400
+codeFontSize = "13px"
+headingFontSizes = ["30px", "22px", "17px", "15px", "14px", "12px"]
+headingFontWeights = [700, 650, 600, 600, 600, 500]
+metricValueFontSize = "1.85rem"
+metricValueFontWeight = 650
+linkUnderline = false
+paddingTop = "1.25rem"
+paddingBottom = "3rem"
+
+[theme.light]
+primaryColor = "#E8491A"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6FA"
+codeBackgroundColor = "#F1F4F9"
+textColor = "#171B26"
+linkColor = "#C93D12"
+borderColor = "#D5DBE5"
+codeTextColor = "#2B3345"
+greenColor = "#059669"
+redColor = "#DC2626"
+yellowColor = "#D97706"
+orangeColor = "#E8491A"
+blueColor = "#2563EB"
+violetColor = "#7C3AED"
+grayColor = "#64748B"
+chartCategoricalColors = [
+    "#E8491A",
+    "#0D9488",
+    "#2563EB",
+    "#DB2777",
+    "#D97706",
+    "#7C3AED",
+    "#059669",
+    "#DC2626",
+]
+chartSequentialColors = [
+    "#FFF4EF",
+    "#FFE3D6",
+    "#FFC7AE",
+    "#FFA582",
+    "#FF8459",
+    "#FF6E42",
+    "#F4511F",
+    "#D63F12",
+    "#A9320E",
+    "#7A240A",
+]
+dataframeBorderColor = "#D5DBE5"
+dataframeHeaderBackgroundColor = "#EEF1F6"
+dataframeHeaderTextColor = "#171B26"
+
+[theme.dark]
+primaryColor = "#FF6E42"
+backgroundColor = "#0B0F17"
+secondaryBackgroundColor = "#141A26"
+codeBackgroundColor = "#121826"
+textColor = "#E8ECF3"
+linkColor = "#FF8A65"
+borderColor = "#252D3D"
+codeTextColor = "#C9D1DE"
+greenColor = "#34D399"
+redColor = "#F87171"
+yellowColor = "#FBBF24"
+orangeColor = "#FF6E42"
+blueColor = "#60A5FA"
+violetColor = "#A78BFA"
+grayColor = "#94A3B8"
+chartCategoricalColors = [
+    "#FF6E42",
+    "#2DD4BF",
+    "#60A5FA",
+    "#F472B6",
+    "#FBBF24",
+    "#A78BFA",
+    "#34D399",
+    "#F87171",
+]
+chartSequentialColors = [
+    "#2A1208",
+    "#4A1D0C",
+    "#6E2A10",
+    "#963914",
+    "#BF4A18",
+    "#E85C24",
+    "#FF6E42",
+    "#FF8E6B",
+    "#FFB399",
+    "#FFD9CC",
+]
+dataframeBorderColor = "#252D3D"
+dataframeHeaderBackgroundColor = "#171E2C"
+dataframeHeaderTextColor = "#F2F4F7"
+
+[theme.sidebar]
+paddingTop = "1rem"
+paddingBottom = "1.5rem"
+
+[theme.light.sidebar]
+backgroundColor = "#F7F8FB"
+secondaryBackgroundColor = "#EEF1F6"
+borderColor = "#D5DBE5"
+
+[theme.dark.sidebar]
+backgroundColor = "#080B12"
+secondaryBackgroundColor = "#141A26"
+borderColor = "#1E2533"
+
+[runner]
+magicEnabled = false
+
+[client]
+showErrorLinks = false
+toolbarMode = "viewer"

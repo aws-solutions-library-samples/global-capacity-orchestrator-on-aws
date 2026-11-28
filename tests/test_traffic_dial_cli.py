@@ -102,6 +102,19 @@ class TestDiscovery:
         with pytest.raises(TrafficDialError, match="No Global Accelerator endpoint groups"):
             dial_manager.discover_endpoint_groups()
 
+    def test_a_name_with_a_trailing_newline_is_not_an_endpoint_group(self, manager):
+        # The name check is a fullmatch: ``$`` alone also matches before a final newline.
+        dial_manager, ssm, _ = manager
+        ssm.get_parameters_by_path.side_effect = None
+        ssm.get_parameters_by_path.return_value = {
+            "Parameters": [
+                {"Name": "/gco/endpoint-group-us-east-1-arn", "Value": EAST_ARN},
+                {"Name": "/gco/endpoint-group-us-west-2-arn\n", "Value": WEST_ARN},
+            ]
+        }
+
+        assert dial_manager.discover_endpoint_groups() == {"us-east-1": EAST_ARN}
+
     def test_read_overrides_parses_only_override_parameters(self, manager):
         dial_manager, ssm, _ = manager
         _registry_pages(ssm, overrides=[("us-west-2", "20")])

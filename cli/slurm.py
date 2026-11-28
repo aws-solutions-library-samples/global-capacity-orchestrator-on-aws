@@ -70,7 +70,7 @@ def slurm_time_window(since: str | None, start: str | None, end: str | None) -> 
         raise SlurmCliError("pass either --since or --start, not both")
     params: dict[str, str] = {}
     if since:
-        match = _DURATION_RE.match(since.strip().lower())
+        match = _DURATION_RE.fullmatch(since.strip().lower())
         if match is None:
             raise SlurmCliError(
                 f"invalid --since {since!r}: use a count and unit such as 30m, 24h, 7d or 2w"
@@ -88,7 +88,7 @@ def slurm_time_window(since: str | None, start: str | None, end: str | None) -> 
 
 def _slurm_time(value: str, flag: str) -> str:
     text = value.strip()
-    if not _SLURM_TIME_RE.match(text):
+    if not _SLURM_TIME_RE.fullmatch(text):
         raise SlurmCliError(
             f"invalid {flag} {value!r}: use YYYY-MM-DD[THH:MM[:SS]], HH:MM, an epoch, "
             "or Slurm's relative form such as now-2days"
@@ -541,7 +541,7 @@ def login_exec_command(
 
 def validate_remote_path(path: str) -> str:
     """An absolute path the login pod may read (``cat`` / ``tail``), with no shell metacharacters."""
-    if not _SAFE_PATH_RE.match(path) or ".." in path.split("/"):
+    if not _SAFE_PATH_RE.fullmatch(path) or ".." in path.split("/"):
         raise SlurmCliError(
             f"refusing to read {path!r}: expected an absolute path on the login pod"
         )

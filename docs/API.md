@@ -383,7 +383,7 @@ Full detail, including response shapes, is in
 |--------|----------|-------------|-----------------------|-------------|
 | GET | `/api/v1/health` | `health-monitor` | Yes | Cluster health; `200` healthy, `503` unhealthy |
 | GET | `/api/v1/status` | `manifest-processor` | Yes | Service status, resource limits, queue-worker state |
-| GET | `/api/v1/policy` | `manifest-processor` | Yes | The region's effective job validation policy plus live namespace ResourceQuota / LimitRange ceilings |
+| GET | `/api/v1/policy` | `manifest-processor` | Yes | The region's effective job validation policy plus live namespace ResourceQuota / LimitRange ceilings and the per-container GPU cap |
 | GET | `/healthz` | each service | No | Liveness probe |
 | GET | `/readyz` | each service | No | Readiness probe |
 | GET | `/metrics` | each service | No | Prometheus exposition |
@@ -2443,10 +2443,10 @@ Service directly or scraped by the cluster's Prometheus.
 | Endpoint | Service | Auth | Purpose |
 |----------|---------|------|---------|
 | `GET /api/v1/health` | `health-monitor` | None | `200` when the cluster is healthy, `503` otherwise. Global Accelerator health check target |
-| `GET /api/v1/metrics` | `health-monitor` | HMAC envelope | CPU / memory / GPU utilization (percent of allocatable; can exceed 100 when the cluster is over-committed), configured thresholds, active job count (Jobs in the job namespaces with a pending or running pod), threshold violations |
+| `GET /api/v1/metrics` | `health-monitor` | HMAC envelope | CPU / memory / GPU utilization (percent of allocatable; can exceed 100 when the cluster is over-committed) and the GPU counts behind the GPU percentage (see below), configured thresholds, active job count (Jobs in the job namespaces with a pending or running pod), threshold violations |
 | `GET /api/v1/status` | `health-monitor` | HMAC envelope | Monitor initialization, background task state, webhook dispatcher counters |
 | `GET /api/v1/status` | `manifest-processor` | HMAC envelope | Resource limits, allowed namespaces, template/webhook counts, central queue worker health |
-| `GET /api/v1/policy` | `manifest-processor` | HMAC envelope | The effective job validation policy this region enforces — per-manifest cpu/memory/gpu caps, `allowed_namespaces`, `allowed_kinds`, `allowed_api_versions`, `trusted_registries`, `trusted_dockerhub_orgs`, `require_accelerator_toleration`, `yaml_max_depth`, the eight `manifest_security_policy.block_*` flags, and each allowed namespace's live ResourceQuota / LimitRange ceilings. `503` until the processor is initialized |
+| `GET /api/v1/policy` | `manifest-processor` | HMAC envelope | The effective job validation policy this region enforces — per-manifest cpu/memory/gpu caps, `allowed_namespaces`, `allowed_kinds`, `allowed_api_versions`, `trusted_registries`, `trusted_dockerhub_orgs`, `require_accelerator_toleration`, `yaml_max_depth`, the eight `manifest_security_policy.block_*` flags, and each allowed namespace's live ResourceQuota / LimitRange ceilings and per-container GPU cap. `503` until the processor is initialized |
 | `GET /healthz` | all three | None | Liveness. Always `200` when the process is up |
 | `GET /readyz` | all three | None | Readiness. `503` until dependencies are initialized; the manifest processor also reports `503` if its central queue worker has stopped |
 | `GET /metrics` | all three | None | Prometheus exposition for the in-cluster scrape |
@@ -2454,9 +2454,43 @@ Service directly or scraped by the cluster's Prometheus.
 `/healthz`, `/readyz`, `/metrics`, and `/api/v1/health` are the only paths that
 bypass the HMAC envelope; see [Authentication](#authentication).
 
+The `resource_utilization` object of `/api/v1/metrics`:
+
+```json
+"resource_utilization": {
+  "cpu_percent": 6.21,
+  "memory_percent": 40.5,
+  "gpu_percent": 100.0,
+  "gpu_allocatable": 1,
+  "gpu_requested": 1
+}
+```
+
+`gpu_percent` is the GPUs running pods request as a percentage of the GPUs the
+nodes report as allocatable, so it is `0` both for a cluster with no GPU nodes
+and for one whose GPUs are all free. `gpu_allocatable` and `gpu_requested` are
+those two counts, which tell the cases apart: `0` and `0` without GPU nodes,
+`4` and `0` for four idle GPUs. Health monitors deployed before the counts
+existed leave both out.
+
+A status that holds no cluster reading, the `unhealthy` status reported when a
+read fails and no recent reading can stand in (see below), has no utilization:
+every `resource_utilization` value and `active_jobs` are `null`,
+`threshold_violations` is empty, and `message` names the failed read. A zero
+there would describe an idle cluster nobody measured.
+
 The health monitor also publishes resource utilization and health status to
 CloudWatch every 30 seconds independently of these endpoints, which is how
-dashboards and alarms are fed. See the [Monitoring Guide](MONITORING.md).
+dashboards and alarms are fed: `ClusterCpuUtilization`,
+`ClusterMemoryUtilization`, `ClusterGpuUtilization`, `ActiveJobs`, the GPU
+counts `ClusterGpuAllocatable` and `ClusterGpuRequested`, `ClusterHealthy` and
+`ThresholdViolations` (namespace `GCO/HealthMonitor`, dimensions `ClusterName`
+and `Region`). A status without a cluster reading publishes only the last two,
+so the utilization series have a gap rather than zeros, and once its last
+datapoints are five minutes old `gco capacity` reads the Region's running
+jobs (and its GPU allocation, where Container Insights has no GPU series) as
+unavailable instead of idle. See the
+[Monitoring Guide](MONITORING.md).
 
 Each refresh reads metrics-server once and lists the nodes and pods once;
 requests that arrive while a refresh runs share it. If one of those reads
@@ -2498,24 +2532,42 @@ deployed policy for two independent reasons:
   the services' default list (`gco/job_admission.py`
   `DEFAULT_TRUSTED_REGISTRIES`) rather than from ECR alone.
 
-Because both the REST manifest processor and the SQS queue processor read the
-same environment variables, this endpoint describes both submission paths —
-neither is a bypass of the other.
+The SQS queue processor reads the same environment variables into the same
+policy and judges a manifest with the same admission code
+(`gco.job_admission.admit_manifest`), so this endpoint describes both
+submission paths and neither is a bypass of the other. The exception is
+`validation_enabled`: only the REST service reads it, and the queue processor
+always validates.
 
 Three layers govern admission, and the response reports all three:
 
 | Layer | Where it comes from | Response key |
 |-------|--------------------|--------------|
 | Front-door policy — per-manifest caps, namespace/kind/registry allowlists, pod-security flags | `cdk.json::job_validation_policy`, baked into the service's container env at deploy | `policy` |
-| Per-container ceilings | the namespace's `LimitRange` | `cluster_enforcement.<ns>.limit_ranges` |
+| Per-container ceilings | CPU and memory: the namespace's `LimitRange`. GPUs: the `gco-jobs-container-gpu-limit` ValidatingAdmissionPolicy, which covers `gco-jobs` | `cluster_enforcement.<ns>.limit_ranges`, `cluster_enforcement.<ns>.admission_policies` |
 | Aggregate ceilings | the namespace's `ResourceQuota` | `cluster_enforcement.<ns>.resource_quotas` |
 
 A manifest must clear all three. Reporting only the first would be misleading:
-a job can pass the front-door cap and still be rejected by the `LimitRange`.
-Layers 2 and 3 are read live from the Kubernetes API and degrade to
+a job can pass the front-door cap and still be rejected by a per-container
+ceiling. Layers 2 and 3 are read live from the Kubernetes API and degrade to
 `{"status": "unavailable", "reason": "..."}` per namespace rather than failing
 the whole response, so a missing layer is always explicit rather than inferred
 from an absent key.
+
+The GPU cap is an admission policy because a `LimitRange` GPU entry, even
+`nvidia.com/gpu: 0`, gives every pod in the namespace a toleration of the GPU
+node taint (the ExtendedResourceToleration admission plugin), so CPU-only jobs
+would land on GPU nodes. The policy carries its cap in the
+`gco.io/container-max-gpu` annotation, and the response reports it as:
+
+```json
+"admission_policies": {
+  "gco-jobs-container-gpu-limit": {"container_max": {"nvidia.com/gpu": "8"}}
+}
+```
+
+`admission_policies` is empty in a namespace the policy does not cover, or
+when the policy does not exist.
 
 Caps appear in the units the validator actually compares in
 (`max_cpu_millicores`, `max_memory_bytes`, `max_gpu_count`) alongside the raw
@@ -2527,7 +2579,7 @@ to know which one it is holding.
 checks the manifests against the first layer, the front-door policy of the
 region that receives them, and applies nothing. It is not a full admission
 preview: the manifests never reach the Kubernetes API server, so the
-`LimitRange` and `ResourceQuota` layers are not evaluated. `gco jobs
+per-container and `ResourceQuota` layers are not evaluated. `gco jobs
 submit-direct --dry-run` is a client-side `kubectl --dry-run=client` parse
 that consults none of the three.
 

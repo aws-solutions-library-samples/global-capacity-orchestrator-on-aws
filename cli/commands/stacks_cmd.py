@@ -1141,7 +1141,7 @@ _CIDR_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$")
 
 def _valid_cidr(value: str) -> bool:
     """True for a syntactically valid IPv4 CIDR (octets 0-255, prefix 0-32)."""
-    match = _CIDR_RE.match(value)
+    match = _CIDR_RE.fullmatch(value)
     if not match:
         return False
     octets = [int(part) for part in match.groups()[:4]]
@@ -3142,92 +3142,50 @@ def addons_status(config: Any, region: Any, all_regions: bool) -> None:
         sys.exit(1)
 
 
-# Terminal states the installer, kubectl applier and validators record when a
-# phase succeeded ("validated" is what both release/manifest validators write).
-_ADDON_HEALTHY_STATUSES = frozenset({"installed", "uninstalled", "absent", "applied", "validated"})
-# SSM parameters under /<project>/addons/<region>/ that are not status records.
-_ADDON_BOOKKEEPING_PARAMS = frozenset({"_input", "_execution"})
-# Parts of a replay input too large for one parameter (_input.<digest>.<k>).
-_ADDON_INPUT_PART_PREFIX = "_input."
-# The teardown provider's fence: its value is the teardown execution name.
-_ADDON_TEARDOWN_FENCE = "_teardown"
-
-
 def _addons_status_one(
     formatter: Any, project: str, region: str, *, table: bool = True
 ) -> tuple[list[dict[str, Any]], bool]:
     """Read one Region's add-on status records, printing them in table mode.
 
     Returns the Region's ``{region, name, status, message}`` rows and whether
-    it is healthy: readable, with every row in a healthy state.
+    it is healthy: readable, with every row in a healthy state. The records
+    come from :func:`cli.stacks.read_addon_status`, which ``gco status`` also
+    reads them with.
     """
-    import json
-
-    import boto3
+    from ..stacks import read_addon_status
 
     prefix = f"/{project}/addons/{region}/"
 
     try:
-        ssm = boto3.client("ssm", region_name=region)
-        params: list[dict[str, Any]] = []
-        paginator = ssm.get_paginator("get_parameters_by_path")
-        for page in paginator.paginate(Path=prefix, Recursive=False):
-            params.extend(page.get("Parameters", []))
+        records = read_addon_status(project, region)
     except Exception as e:
         message = f"Failed to read add-on status from SSM: {e}"
         formatter.print_error(f"[{region}] {message}")
         return [{"region": region, "name": None, "status": "error", "message": message}], False
 
-    rows = []
-    for p in params:
-        name = p["Name"].rsplit("/", 1)[-1]
-        # _input (replay input), its parts and _execution (orchestrator run
-        # metadata) are bookkeeping, not add-on status records.
-        if name in _ADDON_BOOKKEEPING_PARAMS or name.startswith(_ADDON_INPUT_PART_PREFIX):
-            continue
-        if name == _ADDON_TEARDOWN_FENCE:
-            # Not JSON, so it used to read as an "unknown" chart; an active
-            # fence means the add-ons are being (or were) torn down.
-            rows.append((name, "teardown-active", f"execution {p.get('Value', '')}"))
-            continue
-        try:
-            data = json.loads(p["Value"])
-        except ValueError:
-            data = {"status": "unknown", "message": p.get("Value", "")}
-        if not isinstance(data, dict):
-            data = {"status": "unknown", "message": p.get("Value", "")}
-        status = str(data.get("status", "unknown"))
-        message = str(data.get("message", ""))
-        # Healthy rows stay one line; a failure keeps its full message, since
-        # the list of failed resources is the part needed to debug it.
-        if status in _ADDON_HEALTHY_STATUSES:
-            message = message[:80]
-        rows.append((name, status, message))
-
-    rows.sort()
-    records = [
-        {"region": region, "name": name, "status": status, "message": message}
-        for name, status, message in rows
+    rows = [
+        {"region": region, "name": record.name, "status": record.status, "message": record.message}
+        for record in records
     ]
-    healthy = all(status in _ADDON_HEALTHY_STATUSES for _name, status, _message in rows)
+    healthy = all(record.healthy for record in records)
     if not table:
-        return records, healthy
+        return rows, healthy
 
-    if not rows:
+    if not records:
         formatter.print_info(
             f"[{region}] No add-on status recorded under {prefix} yet. "
             "The installer writes status as charts are processed."
         )
-        return records, healthy
+        return rows, healthy
 
     formatter.print_info(f"Add-on status for {project} in {region}:")
-    for name, status, message in rows:
-        line = f"  {name:<28} {status:<12} {message}"
-        if status in _ADDON_HEALTHY_STATUSES:
+    for record in records:
+        line = f"  {record.name:<28} {record.status:<12} {record.message}"
+        if record.healthy:
             formatter.print_success(line)
         else:
             formatter.print_error(line)
-    return records, healthy
+    return rows, healthy
 
 
 @addons_cmd.command("install")

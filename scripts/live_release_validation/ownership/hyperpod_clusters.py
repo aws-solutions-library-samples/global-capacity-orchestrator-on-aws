@@ -58,7 +58,7 @@ def _strip_deleted_hyperpod_clusters(
         kept: list[dict[str, Any]] = []
         for entry in resources.get("tagged_resources", []):
             arn = str(entry.get("arn") or "")
-            match = _HYPERPOD_CLUSTER_ARN.match(arn)
+            match = _HYPERPOD_CLUSTER_ARN.fullmatch(arn)
             if (
                 match is None
                 or match.group("region") != region

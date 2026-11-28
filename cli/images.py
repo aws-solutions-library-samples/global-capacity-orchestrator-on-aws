@@ -52,8 +52,8 @@ from .config import GCOConfig, _load_cdk_json, get_config
 from .costs import PROJECT_TAG_KEY, project_tag_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T14:17:34Z
-# Generated from Git commit: d0db0066b3e8f603134a252ab3753efd40d90493
+# Generated at (UTC): 2026-11-27T20:35:51Z
+# Generated from Git commit: 6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef
 # Flowchart(s) generated from this file:
 #   * ``ImageManager.build`` -> ``diagrams/code_diagrams/cli/images.ImageManager_build.html``
 #     (PNG: ``diagrams/code_diagrams/cli/images.ImageManager_build.png``)
@@ -209,7 +209,7 @@ class ImageManager:
 
     def _validate_tag(self, tag: str) -> str:
         """Validate an image tag against ``_TAG_RE``."""
-        if not _TAG_RE.match(tag):
+        if not _TAG_RE.fullmatch(tag):
             raise ValueError(
                 f"Invalid image tag: {tag!r}. Expected alphanumerics, dots, "
                 "dashes, and underscores; max 128 chars."

@@ -992,6 +992,40 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["ARCHITECTURE", "ANALYTICS"],
     },
+    "DASHBOARD": {
+        "summary": (
+            "gco dashboard: a local Streamlit web UI for the whole fleet (every "
+            "Region on a map, Jobs, the central queue, inference endpoints with a "
+            "chat playground, capacity, prices, costs, policies and an API "
+            "console) that runs on your machine with your AWS credentials."
+        ),
+        "topics": [
+            "cli",
+            "jobs",
+            "queue",
+            "inference",
+            "capacity",
+            "cost",
+            "multi-region",
+            "monitoring",
+            "security",
+        ],
+        "keywords": [
+            "dashboard",
+            "web ui",
+            "streamlit",
+            "gco dashboard start",
+            "gco dashboard serve",
+            "fleet map",
+            "chat playground",
+            "api console",
+            "access token",
+            "loopback",
+            "dashboard container",
+            "cost explorer",
+        ],
+        "related": ["CLI", "API", "INFERENCE", "COST_MONITORING"],
+    },
     "DISTRIBUTED_TRAINING": {
         "summary": (
             "Multi-node distributed training through the Kubeflow Trainer v2 "

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import builtins
 import sys
-from datetime import UTC
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -651,6 +653,162 @@ def test_region_capacity_reads_the_newest_utilization_datapoint() -> None:
         capacity = checker.get_region_capacity("us-east-1")
     assert capacity.gpu_utilization == 90.0
     assert capacity.cpu_utilization == 40.0
+
+
+_T0 = datetime(2026, 11, 24, 10, 0, tzinfo=UTC)
+_CPU_SERIES = [{"Timestamp": _T0, "Average": 40.0}]
+_ACTIVE_JOBS_SERIES = [{"Timestamp": _T0, "Maximum": 3.0}]
+
+
+def _metrics(**series: list[dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    """A ``get_metric_statistics`` double answering each MetricName from ``series``."""
+
+    def statistics(MetricName: str, **_kwargs: Any) -> dict[str, Any]:
+        return {"Datapoints": series.get(MetricName, [])}
+
+    return statistics
+
+
+def _region_capacity_with(
+    statistics: Callable[..., dict[str, Any]],
+) -> tuple[RegionCapacity, MagicMock]:
+    """``get_region_capacity`` for a Region whose CloudWatch answers ``statistics``.
+
+    The stack's job queue holds 2 messages, so the queue signal is always read.
+    """
+    checker = _multi_region_checker()
+    stack = SimpleNamespace(stack_name="gco-us-east-1", cluster_name="gco-us-east-1")
+    cloudformation = MagicMock()
+    cloudformation.describe_stacks.return_value = {
+        "Stacks": [{"Outputs": [{"OutputKey": "JobQueueUrl", "OutputValue": "https://sqs/q"}]}]
+    }
+    sqs = MagicMock()
+    sqs.get_queue_attributes.return_value = {"Attributes": {"ApproximateNumberOfMessages": "2"}}
+    cloudwatch = MagicMock()
+    cloudwatch.get_metric_statistics.side_effect = statistics
+    clients = {"cloudformation": cloudformation, "sqs": sqs, "cloudwatch": cloudwatch}
+    checker._session.client.side_effect = lambda service, **_kwargs: clients[service]
+    aws_client = MagicMock()
+    aws_client.get_regional_stack.return_value = stack
+    with patch("cli.aws_client.get_aws_client", return_value=aws_client):
+        capacity = checker.get_region_capacity("us-east-1")
+    return capacity, cloudwatch
+
+
+def _queried_metrics(cloudwatch: MagicMock) -> list[str]:
+    return [call.kwargs["MetricName"] for call in cloudwatch.get_metric_statistics.call_args_list]
+
+
+@pytest.mark.parametrize(
+    ("insights", "allocation", "expected"),
+    [
+        pytest.param(
+            [{"Timestamp": _T0, "Average": 55.0}],
+            [{"Timestamp": _T0, "Average": 25.0}],
+            55.0,
+            id="container-insights-wins",
+        ),
+        pytest.param(
+            [],
+            [
+                {"Timestamp": _T0, "Average": 10.0},
+                {"Timestamp": _T0 + timedelta(minutes=1), "Average": 37.5},
+                {"Average": 99.0},  # no timestamp: sorts oldest
+            ],
+            37.5,
+            id="newest-allocation-share",
+        ),
+        # A cluster without GPU nodes publishes 0: a reading, not a gap.
+        pytest.param([], [{"Timestamp": _T0, "Average": 0}], 0.0, id="zero-is-a-reading"),
+    ],
+)
+def test_region_capacity_falls_back_to_the_health_monitor_gpu_allocation(
+    insights: list[dict[str, Any]], allocation: list[dict[str, Any]], expected: float
+) -> None:
+    """Without a Container Insights GPU series the GPU signal is still read.
+
+    A cluster with no GPU nodes, or GPU nodes the add-on's DCGM exporter does
+    not run on, has no ``node_gpu_utilization`` series; the GPU signal then
+    comes from the health monitor's ``ClusterGpuUtilization`` share, so the
+    Region's telemetry is complete rather than degraded.
+    """
+    capacity, cloudwatch = _region_capacity_with(
+        _metrics(
+            node_gpu_utilization=insights,
+            node_cpu_utilization=_CPU_SERIES,
+            ActiveJobs=_ACTIVE_JOBS_SERIES,
+            ClusterGpuUtilization=allocation,
+        )
+    )
+
+    assert capacity.gpu_utilization == expected
+    assert isinstance(capacity.gpu_utilization, float)
+    assert capacity.telemetry_status == "complete"
+    assert capacity.unavailable_signals == []
+    assert capacity.telemetry_errors == []
+    # queue 2 * 10 + GPU + 3 running jobs * 5, with no missing-signal penalty.
+    assert capacity.recommendation_score == 20 + expected + 15
+    fallback = [
+        call.kwargs
+        for call in cloudwatch.get_metric_statistics.call_args_list
+        if call.kwargs["MetricName"] == "ClusterGpuUtilization"
+    ]
+    if insights:
+        assert fallback == []
+        return
+    (query,) = fallback
+    assert query["Namespace"] == "GCO/HealthMonitor"
+    assert query["Dimensions"] == [
+        {"Name": "ClusterName", "Value": "gco-us-east-1"},
+        {"Name": "Region", "Value": "us-east-1"},
+    ]
+    assert (query["Period"], query["Statistics"]) == (60, ["Average"])
+    assert query["EndTime"] - query["StartTime"] == timedelta(minutes=5)
+
+
+def test_region_capacity_reports_gpu_telemetry_missing_when_the_fallback_is_empty_too() -> None:
+    capacity, cloudwatch = _region_capacity_with(_metrics(ActiveJobs=_ACTIVE_JOBS_SERIES))
+
+    assert capacity.gpu_utilization == 0.0
+    assert capacity.unavailable_signals == ["gpu", "cpu"]
+    assert capacity.telemetry_status == "partial"
+    assert capacity.telemetry_errors == [
+        "GPU telemetry returned no datapoints",
+        "CPU telemetry returned no datapoints",
+    ]
+    # Only the GPU signal has a fallback: an empty CPU series is not re-read.
+    # The GPU counts are read last, and an empty allocatable series ends it.
+    assert _queried_metrics(cloudwatch) == [
+        "node_gpu_utilization",
+        "ClusterGpuUtilization",
+        "node_cpu_utilization",
+        "ActiveJobs",
+        "ClusterGpuAllocatable",
+    ]
+    assert (capacity.total_gpus, capacity.available_gpus) == (None, None)
+    assert capacity.without_gpu_nodes is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [_client_error("AccessDenied", "GetMetricStatistics"), RuntimeError("throttled")],
+    ids=["client-error", "unexpected"],
+)
+def test_region_capacity_counts_a_failed_fallback_read_against_gpu_only(
+    error: Exception,
+) -> None:
+    answer = _metrics(node_cpu_utilization=_CPU_SERIES, ActiveJobs=_ACTIVE_JOBS_SERIES)
+
+    def statistics(MetricName: str, **kwargs: Any) -> dict[str, Any]:
+        if MetricName == "ClusterGpuUtilization":
+            raise error
+        return answer(MetricName=MetricName, **kwargs)
+
+    capacity, _cloudwatch = _region_capacity_with(statistics)
+
+    assert capacity.unavailable_signals == ["gpu"]
+    assert (capacity.cpu_utilization, capacity.running_jobs) == (40.0, 3)
+    assert capacity.telemetry_errors == [f"GPU telemetry failed: {error}"]
 
 
 def test_region_errors_names_the_failures_of_the_latest_sweep() -> None:

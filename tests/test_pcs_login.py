@@ -217,6 +217,20 @@ class TestFindLoginNode:
             pcs_login.find_login_node("nowhere", _STACK, client_factory=clients.factory)
         assert clients.requests == []
 
+    def test_a_region_with_a_trailing_newline_fails_before_any_call(
+        self, clients: _Clients
+    ) -> None:
+        # ``$`` also matches before a final newline; the check is a fullmatch.
+        with pytest.raises(PcsLoginError, match=r"invalid AWS region 'us-east-1\\n'"):
+            pcs_login.find_login_node(f"{_REGION}\n", _STACK, client_factory=clients.factory)
+        assert clients.requests == []
+
+    def test_an_instance_id_with_a_trailing_newline_is_refused(self, clients: _Clients) -> None:
+        clients.expect_outputs(MANAGED_OUTPUTS)
+        clients.expect_instances([_instance(f"{_INSTANCE}\n", "2026-10-01T10:00:00")])
+        with pytest.raises(PcsLoginError, match=r"unexpected login instance id"):
+            pcs_login.find_login_node(_REGION, _STACK, client_factory=clients.factory)
+
 
 class TestSessionCommands:
     def test_shell_as_the_identity(self) -> None:
@@ -234,7 +248,7 @@ class TestSessionCommands:
             json.dumps({"command": ["sudo -iu ec2-user"]}),
         ]
 
-    @pytest.mark.parametrize("user", ["", "Bad User", "root;id", "1000", "a" * 33])
+    @pytest.mark.parametrize("user", ["", "Bad User", "root;id", "1000", "a" * 33, "ec2-user\n"])
     def test_a_non_posix_user_is_refused(self, user: str) -> None:
         with pytest.raises(PcsLoginError, match="not a POSIX user name"):
             pcs_login.shell_command(NODE, user=user)

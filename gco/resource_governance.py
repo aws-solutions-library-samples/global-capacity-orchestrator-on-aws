@@ -2,9 +2,10 @@
 
 Three enforcement layers govern job resources and must tell one story: the
 manifest/queue processors cap what a single submitted manifest may total,
-the gco-jobs ``LimitRange`` caps each container, and the namespace
-``ResourceQuota`` caps the aggregate. The values below are the single source
-of truth for all three, shared by:
+the gco-jobs ``LimitRange`` (CPU, memory) and the
+``gco-jobs-container-gpu-limit`` ValidatingAdmissionPolicy (GPUs) cap each
+container, and the namespace ``ResourceQuota`` caps the aggregate. The values
+below are the single source of truth for all three, shared by:
 
 - the regional stack (substitutes them into ``04-resource-quotas.yaml`` and
   validates cdk.json overrides against the layering invariant at synth),
@@ -23,11 +24,27 @@ names for synth-side callers.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from decimal import ROUND_CEILING
 from types import MappingProxyType
 
 from gco.k8s_quantity import parse_quantity
+
+#: The namespace the ResourceQuota, the LimitRange and the GPU cap policy
+#: govern (04-resource-quotas.yaml).
+GOVERNED_NAMESPACE = "gco-jobs"
+
+#: The cluster-scoped ValidatingAdmissionPolicy that caps each container's
+#: ``nvidia.com/gpu`` in :data:`GOVERNED_NAMESPACE`, and the annotation on it
+#: that carries the cap for ``GET /api/v1/policy``. The cap cannot live in the
+#: LimitRange: any GPU entry there makes every pod tolerate the GPU node taint.
+CONTAINER_GPU_LIMIT_POLICY = "gco-jobs-container-gpu-limit"
+CONTAINER_MAX_GPU_ANNOTATION = "gco.io/container-max-gpu"
+
+#: ``container_max_gpu`` as the policy needs it: a whole number from 0 to 999
+#: in plain digits (see :func:`validated_resource_quota`).
+_PLAIN_GPU_CAP = re.compile(r"[0-9]{1,3}")
 
 DEFAULT_RESOURCE_QUOTA: Mapping[str, str] = MappingProxyType(
     {
@@ -38,8 +55,9 @@ DEFAULT_RESOURCE_QUOTA: Mapping[str, str] = MappingProxyType(
         "max_memory": "4096Gi",
         "max_gpu": "32",
         "max_pods": "50",
-        # Per-container ceilings (LimitRange max): one full accelerator-node
-        # slice — p5.48xlarge / trn2.48xlarge expose 192 vCPUs, 2 TiB memory,
+        # Per-container ceilings (the LimitRange max for CPU and memory, the
+        # GPU cap policy for GPUs): one full accelerator-node slice —
+        # p5.48xlarge / trn2.48xlarge expose 192 vCPUs, 2 TiB memory,
         # and 8 GPUs, and one-pod-per-node is the standard unit of
         # distributed training. Anything smaller rejects the platform's own
         # EFA training example at pod admission (observed live: example-job
@@ -75,7 +93,7 @@ DEFAULT_MANIFEST_RESOURCE_CAPS: Mapping[str, object] = MappingProxyType(
         # cluster: two full accelerator-node slices, i.e. the canonical
         # two-node distributed-training manifest
         # (examples/efa-distributed-training.yaml). Layering invariant,
-        # validated at synth: container_max_* (LimitRange) <= per-manifest
+        # validated at synth: container_max_* (per container) <= per-manifest
         # cap <= max_* (namespace ResourceQuota) on every dimension — the
         # front door must never reject a manifest whose pods the namespace
         # would admit, and must never accept one it cannot possibly run.
@@ -124,11 +142,21 @@ RESOURCE_QUOTA_INVARIANTS = (
 def validated_resource_quota(raw: object) -> dict[str, str]:
     """Merge the ``resource_quota`` context over defaults and validate it.
 
-    The values are substituted verbatim into the gco-jobs ResourceQuota and
-    LimitRange manifests, where a typo or an incoherent pair (a per-container
-    ceiling that exceeds the namespace ceiling) previously deployed silently
-    and only surfaced as pods being forbidden at admission — with the reason
-    visible in namespace events alone. Fail the synth instead.
+    The values are substituted verbatim into the gco-jobs ResourceQuota,
+    LimitRange and GPU cap policy manifests, where a typo or an incoherent
+    pair (a per-container ceiling that exceeds the namespace ceiling)
+    previously deployed silently and only surfaced as pods being forbidden at
+    admission — with the reason visible in namespace events alone. Fail the
+    synth instead.
+
+    ``container_max_gpu`` becomes an integer literal in the CEL of the
+    :data:`CONTAINER_GPU_LIMIT_POLICY` policy, so it must be a whole number in
+    plain digits, the one form CEL reads as an integer: the API server refuses
+    a policy whose CEL does not compile (``1k``), and ``8.0`` would be a
+    double. It must also be below 1000: the policy admits a container's GPU
+    count only as plain digits, and the API server writes a multiple of 1000
+    as ``1k``, ``2k`` and so on, so a larger cap could refuse a pod that is
+    within it.
 
     The one merge both readers share: the regional stack renders the
     result into the manifests, and ``ConfigLoader`` validates it and checks
@@ -138,8 +166,9 @@ def validated_resource_quota(raw: object) -> dict[str, str]:
 
     Raises:
         ValueError: If the context is not a mapping, carries an unknown key,
-            a value that does not parse as a Kubernetes quantity, or a
-            per-container ceiling exceeding its namespace ceiling.
+            a value that does not parse as a Kubernetes quantity, a
+            ``container_max_gpu`` that is not a whole number from 0 to 999, or
+            a per-container ceiling exceeding its namespace ceiling.
     """
     if not isinstance(raw, dict):
         raise ValueError(
@@ -166,12 +195,19 @@ def validated_resource_quota(raw: object) -> dict[str, str]:
             ) from exc
         if parsed[key] < 0:
             raise ValueError(f"resource_quota.{key}={value!r} must not be negative")
+    if not _PLAIN_GPU_CAP.fullmatch(merged["container_max_gpu"]):
+        raise ValueError(
+            f"resource_quota.container_max_gpu={merged['container_max_gpu']!r} must be a whole "
+            f"number of GPUs from 0 to 999 written in plain digits, such as "
+            f"{DEFAULT_RESOURCE_QUOTA['container_max_gpu']!r}: the {CONTAINER_GPU_LIMIT_POLICY} "
+            "admission policy compares each container's GPU count with it"
+        )
     for container_key, namespace_key in RESOURCE_QUOTA_INVARIANTS:
         if parsed[container_key] > parsed[namespace_key]:
             raise ValueError(
                 f"resource_quota.{container_key}={merged[container_key]!r} exceeds "
                 f"resource_quota.{namespace_key}={merged[namespace_key]!r}: a container "
-                "that passes the LimitRange could never be admitted by the namespace "
+                "within the per-container ceiling could never be admitted by the namespace "
                 "ResourceQuota"
             )
     return merged

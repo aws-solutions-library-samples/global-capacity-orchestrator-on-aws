@@ -23,6 +23,12 @@ So the deployment-dependent checks take a :class:`JobValidationPolicy` instead
 of ``self``, and ``ManifestProcessor`` builds one from its own attributes and
 delegates. There is one implementation of each rule, and the offline and
 multi-region callers exercise the same code the cluster does.
+
+The two services go one step further and share the sequence as well as the
+rules: :func:`admit_manifest` runs the checks in order and words each refusal,
+and both the REST service and the SQS queue processor return its verdict. The
+SQS consumer once ran its own copy of every check, and a copy that drifts on
+that path admits a manifest the REST path refuses.
 """
 
 from __future__ import annotations
@@ -40,9 +46,14 @@ from gco.hyperpod_config import (
 from gco.k8s_quantity import cpu_millicores, device_count, memory_bytes
 from gco.keep_warm import (
     KEEP_WARM_GPU_RESOURCE,
+    KEEP_WARM_INSTANCE_FAMILIES,
+    KEEP_WARM_INSTANCE_LABELS,
     KEEP_WARM_LABEL,
     KEEP_WARM_TOLERATION,
     KEEP_WARM_VALUE,
+    NodeSelectorRequirement,
+    affinity_selects_keep_warm,
+    keep_warm_affinity_conflicts,
     keep_warm_selector_conflicts,
 )
 from gco.services.structured_logging import sanitize_log_value
@@ -56,8 +67,7 @@ logger = logging.getLogger(__name__)
 # pool's gco.aws/keep-warm taint, one that names no resource), so a job
 # requesting one of these resources must carry a matching toleration or it
 # will never schedule.
-# Taint key == resource key for all three. Kept in sync with the mirror in
-# gco/services/queue_processor.py::ACCELERATOR_TAINTS.
+# Taint key == resource key for all three.
 ACCELERATOR_TAINTS = ("nvidia.com/gpu", "aws.amazon.com/neuron", "vpc.amazonaws.com/efa")
 # The Kueue label that routes a workload to a LocalQueue. A Job labelled for
 # the HyperPod queue (gco.hyperpod_config.HYPERPOD_LOCAL_QUEUE) is admitted onto
@@ -235,8 +245,9 @@ def _collect_embedded_pod_specs(
 def extract_trainjob_pod_specs(manifest: dict[str, Any]) -> TrainJobPodSpecs:
     """Decompose a TrainJob manifest into validatable pod-spec views.
 
-    Shared by the REST and SQS submission paths (the queue processor imports
-    this) so TrainJob validation semantics cannot drift between them.
+    Every check that judges a TrainJob reads it through this decomposition, so
+    both submission paths, which run those checks through :func:`admit_manifest`,
+    see the same pods.
     """
     spec = manifest.get("spec")
     spec = spec if isinstance(spec, dict) else {}
@@ -277,8 +288,7 @@ def trainjob_validation_pod_specs(manifest: dict[str, Any]) -> list[dict[str, An
 def _iter_all_containers(pod_spec: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """All (container_type, container) pairs incl. init and ephemeral containers."""
     result: list[tuple[str, dict[str, Any]]] = []
-    # `or []`: a null list is valid in a manifest (and the SQS gate's twin,
-    # queue_processor._iter_containers, already read it as empty).
+    # `or []`: a null list is valid in a manifest.
     for container in pod_spec.get("containers") or []:
         result.append(("container", container))
     for container in pod_spec.get("initContainers") or []:
@@ -421,7 +431,6 @@ def _toleration_matches(tolerations: list[dict[str, Any]], taint_key: str) -> bo
     A toleration matches when its ``key`` equals *taint_key*, its effect is
     empty (matches all effects) or ``NoSchedule``, and it either uses
     ``operator: Exists`` or ``operator: Equal`` with ``value: "true"``.
-    Kept in sync with the mirror in queue_processor._toleration_matches.
     """
     for tol in tolerations:
         if not isinstance(tol, dict) or tol.get("key") != taint_key:
@@ -440,12 +449,12 @@ def _toleration_matches(tolerations: list[dict[str, Any]], taint_key: str) -> bo
 # ---------------------------------------------------------------------------
 # Quantity parsing
 # ---------------------------------------------------------------------------
-# The gate, the CLI's pre-check (cli/job_policy.py) and the SQS consumer's gate
-# all read quantities through gco.k8s_quantity, which accepts what the API
-# server accepts: a string or a YAML/JSON number, any SI or binary suffix, a
-# decimal exponent. The narrower parsers these replaced refused `cpu: 1` as a
-# YAML number and every decimal CPU, so a manifest the API server takes was
-# rejected at the front door. The pre-check and the gate agree at one
+# The gate both submission paths run (admit_manifest) and the CLI's pre-check
+# (cli/job_policy.py) read quantities through gco.k8s_quantity, which accepts
+# what the API server accepts: a string or a YAML/JSON number, any SI or binary
+# suffix, a decimal exponent. The narrower parsers these replaced refused
+# `cpu: 1` as a YAML number and every decimal CPU, so a manifest the API server
+# takes was rejected at the front door. The pre-check and the gate agree at one
 # version; a CLI newer than a region's deployment can still call a manifest
 # admissible that the older gate refuses, one more reason the pre-check is
 # advisory.
@@ -488,9 +497,8 @@ def resource_totals(
 
     Regular, init and ephemeral containers all count, each view weighted by
     its replica multiplier (see :func:`weighted_pod_specs`). A container's
-    limit is used where it sets one, else its request. Shared by the REST
-    gate (:func:`check_resource_caps`) and the SQS consumer's gate, so the two
-    front doors cannot count the same manifest differently.
+    limit is used where it sets one, else its request. Read by
+    :func:`check_resource_caps`, the cap check both front doors run.
 
     Raises:
         ValueError: naming the container and field, when a quantity is not one
@@ -612,6 +620,9 @@ class JobValidationPolicy(NamedTuple):
 
     ``from_processor_attributes``
         what a live ManifestProcessor enforces right now. Authoritative.
+        The SQS queue processor builds the same policy from the same
+        environment variables
+        (``queue_processor.job_validation_policy_from_environment``).
 
     ``from_policy_document``
         the body of ``GET /api/v1/policy`` from a deployed region. Also
@@ -1338,9 +1349,16 @@ def _manifest_name(manifest: dict[str, Any]) -> str:
 
 
 def selects_keep_warm(pod_spec: dict[str, Any]) -> bool:
-    """Whether a pod spec's ``nodeSelector`` sends it to the keep-warm pool."""
+    """Whether a pod spec sends its pods to the keep-warm pool.
+
+    Its ``nodeSelector`` selects ``gco.aws/keep-warm=true``, or its required
+    node affinity lets it run on keep-warm nodes only
+    (:func:`gco.keep_warm.affinity_selects_keep_warm`).
+    """
     selector = pod_spec.get("nodeSelector")
-    return isinstance(selector, dict) and str(selector.get(KEEP_WARM_LABEL)) == KEEP_WARM_VALUE
+    if isinstance(selector, dict) and str(selector.get(KEEP_WARM_LABEL)) == KEEP_WARM_VALUE:
+        return True
+    return affinity_selects_keep_warm(pod_spec.get("affinity"))
 
 
 def _keep_warm_selector_conflicts(selector: dict[str, Any]) -> list[str]:
@@ -1356,10 +1374,50 @@ def _keep_warm_selector_conflicts(selector: dict[str, Any]) -> list[str]:
     return conflicts
 
 
+#: How a refusal names a node affinity expression, by operator.
+_NODE_REQUIREMENT_TEXT = {
+    "In": "{key} in {values}",
+    "NotIn": "{key} not in {values}",
+    "Exists": "{key} to exist",
+    "DoesNotExist": "{key} not to exist",
+    "Gt": "{key} > {operand}",
+    "Lt": "{key} < {operand}",
+}
+
+
+def _describe_affinity_conflicts(unsatisfiable: list[list[NodeSelectorRequirement]]) -> str:
+    """What the terms :func:`gco.keep_warm.keep_warm_affinity_conflicts` returned ask for.
+
+    Each term's failing expressions joined with "and", the terms joined with
+    "; or", then the pool's instance families when an expression names an
+    instance type or family.
+    """
+    terms = []
+    for term in unsatisfiable:
+        expressions = []
+        for key, operator, values in term:
+            listed = f"[{', '.join(values)}]"
+            expressions.append(
+                _NODE_REQUIREMENT_TEXT[operator].format(
+                    key=key, values=listed, operand=values[0] if len(values) == 1 else listed
+                )
+            )
+        terms.append(" and ".join(expressions) or "an empty term, which matches no node")
+    text = "; or ".join(terms) + ", which no keep-warm node carries"
+    if any(
+        requirement.key in KEEP_WARM_INSTANCE_LABELS
+        for term in unsatisfiable
+        for requirement in term
+    ):
+        families = ", ".join(sorted(KEEP_WARM_INSTANCE_FAMILIES))
+        text += f" (the pool's instance families are {families})"
+    return text
+
+
 def _keep_warm_refusal(
     kind: Any, name: str, pod_spec: dict[str, Any], requested: set[str]
 ) -> tuple[bool, str | None]:
-    """The verdict on a pod spec that selects the pool (so its ``nodeSelector`` is a mapping)."""
+    """The verdict on a pod spec that selects the pool (:func:`selects_keep_warm`)."""
     tolerations = pod_spec.get("tolerations")
     if not _toleration_matches(
         tolerations if isinstance(tolerations, list) else [], KEEP_WARM_LABEL
@@ -1370,13 +1428,23 @@ def _keep_warm_refusal(
             f"for the {KEEP_WARM_LABEL}={KEEP_WARM_VALUE}:NoSchedule taint, so it would never "
             "schedule; add one, or submit with --keep-warm, which adds both",
         )
-    conflicts = _keep_warm_selector_conflicts(pod_spec["nodeSelector"])
+    # A pod that selects the pool by node affinity alone may have no nodeSelector.
+    selector = pod_spec.get("nodeSelector")
+    conflicts = _keep_warm_selector_conflicts(selector if isinstance(selector, dict) else {})
     if conflicts:
         return (
             False,
             f"{kind} {name} selects {KEEP_WARM_LABEL}={KEEP_WARM_VALUE} and "
             f"{', '.join(conflicts)}, which no keep-warm node carries, so it would never "
             "schedule; drop one or the other (docs/GPU_KEEP_WARM.md)",
+        )
+    unsatisfiable = keep_warm_affinity_conflicts(pod_spec.get("affinity"))
+    if unsatisfiable:
+        return (
+            False,
+            f"{kind} {name} selects {KEEP_WARM_LABEL}={KEEP_WARM_VALUE} but requires "
+            f"{_describe_affinity_conflicts(unsatisfiable)}, so it would never schedule; "
+            "drop one or the other (docs/GPU_KEEP_WARM.md)",
         )
     if KEEP_WARM_GPU_RESOURCE not in requested:
         return (
@@ -1394,13 +1462,50 @@ def _labelled_for_hyperpod_queue(manifest: dict[str, Any]) -> bool:
     return isinstance(labels, dict) and labels.get(KUEUE_QUEUE_NAME_LABEL) == HYPERPOD_LOCAL_QUEUE
 
 
+def _keep_warm_trainjob_templates(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """A TrainJob's pod templates (:func:`_trainjob_pod_templates`) with their node affinity.
+
+    Strategic merge patches ``affinity`` field by field, but
+    ``nodeSelectorTerms`` has no merge key, so a replicated job requires the
+    node affinity of the last patch naming it that sets one. The patches are
+    walked as :func:`_trainjob_pod_templates` walks them, one entry per
+    replicated job in the order it first appears, so the two lists line up.
+    """
+    spec = manifest.get("spec")
+    patches = spec.get("runtimePatches") if isinstance(spec, dict) else None
+    required_by_job: dict[str, Any] = {}
+    for patch in patches if isinstance(patches, list) else []:
+        replicated_jobs = _nested(
+            patch, "trainingRuntimeSpec", "template", "spec", "replicatedJobs"
+        )
+        for job in replicated_jobs if isinstance(replicated_jobs, list) else []:
+            if not isinstance(job, dict):
+                continue
+            name = str(job.get("name"))
+            affinity = _nested(job, "template", "spec", "template", "spec", "affinity")
+            required = _nested(
+                affinity, "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution"
+            )
+            if required is not None or name not in required_by_job:
+                required_by_job[name] = required
+    templates = _trainjob_pod_templates(manifest)
+    for template, required in zip(templates, required_by_job.values(), strict=True):
+        if required is not None:
+            template["affinity"] = {
+                "nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": required}
+            }
+    return templates
+
+
 def check_keep_warm(manifest: dict[str, Any]) -> tuple[bool, str | None]:
     """Reject a manifest that selects the keep-warm pool but could not use it.
 
     Runs on every submission path, so a manifest written by hand is held to
-    what ``--keep-warm`` produces. Only pods that select the pool's label are
-    judged; tolerating its taint alone (as DaemonSets that tolerate every
-    taint do) is not selecting it.
+    what ``--keep-warm`` produces. Only pods that select the pool are judged
+    (:func:`selects_keep_warm`): by its label in their ``nodeSelector``, or by
+    a required node affinity every term of which requires the label.
+    Tolerating its taint alone (as DaemonSets that tolerate every taint do) is
+    not selecting it.
 
     * A Deployment or StatefulSet: its pods never finish, so the node would
       never be reclaimed.
@@ -1409,23 +1514,25 @@ def check_keep_warm(manifest: dict[str, Any]) -> tuple[bool, str | None]:
     * A node selector that also names a label value no keep-warm node
       carries (another NodePool, workload type or architecture, an instance
       type outside the pool's families, SageMaker HyperPod's capacity
-      provider), or the HyperPod Kueue queue, whose flavor sends the pods to
-      HyperPod nodes: the pod would stay Pending.
+      provider), a required node affinity none of whose terms a keep-warm node
+      satisfies (:func:`gco.keep_warm.keep_warm_affinity_conflicts`), or the
+      HyperPod Kueue queue, whose flavor sends the pods to HyperPod nodes: the
+      pod would stay Pending.
     * No ``nvidia.com/gpu`` request: the pool runs NVIDIA GPU nodes only, and
       a pod without a GPU would hold one for nothing.
 
     A TrainJob is judged on the pod templates its runtime patches set, merged
-    as Kubeflow Trainer merges them (:func:`_trainjob_pod_templates`), with
-    the GPU request taken from any of its pod-spec views (``spec.trainer``
-    carries it). A DaemonSet may select the pool without a GPU: its pods run
-    beside the workload on every node.
+    as Kubeflow Trainer merges them (:func:`_keep_warm_trainjob_templates`),
+    with the GPU request taken from any of its pod-spec views
+    (``spec.trainer`` carries it). A DaemonSet may select the pool without a
+    GPU: its pods run beside the workload on every node.
     """
     kind = manifest.get("kind")
     name = _manifest_name(manifest)
     if kind == "TrainJob":
         selecting = [
             template
-            for template in _trainjob_pod_templates(manifest)
+            for template in _keep_warm_trainjob_templates(manifest)
             if selects_keep_warm(template)
         ]
         views = trainjob_validation_pod_specs(manifest)
@@ -1468,8 +1575,10 @@ def apply_keep_warm(manifests: list[dict[str, Any]]) -> None:
     transport including ``submit-direct``, which skips server-side admission:
     another kind, a pod template whose node selector names a label value no
     keep-warm node carries (another NodePool, a non-amd64 architecture, an
-    instance type outside the pool's families), a pod without an
-    ``nvidia.com/gpu`` request, or a submission with nothing to place.
+    instance type outside the pool's families) or whose required node affinity
+    no keep-warm node satisfies, a pod without an ``nvidia.com/gpu`` request,
+    or a submission with nothing to place. The node affinity and the GPU
+    request are judged by :func:`check_keep_warm`, on the placed manifest.
     """
     placed = 0
     for manifest in manifests:
@@ -1506,3 +1615,126 @@ def apply_keep_warm(manifests: list[dict[str, Any]]) -> None:
         raise ValueError(
             "--keep-warm found nothing to place: none of the manifests is a Job, CronJob or Pod"
         )
+
+
+# ---------------------------------------------------------------------------
+# The admission sequence both submission paths run
+# ---------------------------------------------------------------------------
+
+#: Kinds whose pods come from a pod spec in the manifest itself. Every check
+#: above judges such a manifest by that pod spec, so one of these kinds without
+#: a pod spec :func:`extract_pod_spec` can find is refused: admitting it would
+#: admit pods no check has read.
+WORKLOAD_KINDS = ("Job", "CronJob", "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Pod")
+
+
+def admit_manifest(
+    manifest: dict[str, Any],
+    policy: JobValidationPolicy,
+    *,
+    runtime_class_exists: Callable[[str], bool],
+    default_namespace: str | None = None,
+) -> tuple[bool, str | None]:
+    """Judge one submitted manifest: the admission both submission paths run.
+
+    ``ManifestProcessor.validate_manifest`` (the REST service) and
+    ``queue_processor.validate_manifest`` (the SQS consumer) both return this
+    verdict, so the two front doors apply the same checks in the same order and
+    word a refusal the same way. The first check that fails is the verdict:
+
+    1. nesting no deeper than ``policy.yaml_max_depth`` (:func:`within_nesting_depth`)
+    2. ``apiVersion``, ``kind`` and ``metadata`` present, then ``metadata.name``
+    3. the namespace in ``policy.allowed_namespaces``: ``metadata.namespace``,
+       else *default_namespace*, else ``gco-jobs``
+    4. the kind in ``policy.allowed_kinds`` (:func:`validate_resource_kind`)
+    5. a pod spec :func:`extract_pod_spec` can find, for a kind in
+       :data:`WORKLOAD_KINDS`
+    6. :func:`check_resource_caps`
+    7. :func:`check_tolerations`, when ``policy.require_accelerator_toleration``
+    8. :func:`check_security_context`
+    9. :func:`check_sandbox`, then :func:`check_sandbox_runtime_class`, which
+       asks *runtime_class_exists*
+    10. :func:`check_keep_warm`
+    11. :func:`validate_image_sources`
+
+    With ``policy.validation_enabled`` false every manifest is admitted. A
+    manifest malformed enough to make a check raise is refused with
+    ``Validation error:`` and the exception, never admitted.
+
+    Returns:
+        ``(True, None)``, or ``(False, reason)``.
+    """
+    if not policy.validation_enabled:
+        return True, None
+    try:
+        return _admission_verdict(manifest, policy, runtime_class_exists, default_namespace)
+    except Exception as error:
+        logger.error("Error validating manifest: %s", sanitize_log_value(str(error)))
+        return False, f"Validation error: {error!s}"
+
+
+def _admission_verdict(
+    manifest: dict[str, Any],
+    policy: JobValidationPolicy,
+    runtime_class_exists: Callable[[str], bool],
+    default_namespace: str | None,
+) -> tuple[bool, str | None]:
+    """The checks of :func:`admit_manifest`, in its order; a malformed manifest may raise."""
+    if not within_nesting_depth(manifest, policy.yaml_max_depth):
+        return False, f"Manifest exceeds maximum nesting depth of {policy.yaml_max_depth} levels"
+
+    for field in ("apiVersion", "kind", "metadata"):
+        if field not in manifest:
+            return False, f"Missing required field: {field}"
+    metadata = manifest["metadata"]
+    if "name" not in metadata:
+        return False, "Missing metadata.name field"
+
+    namespace = metadata.get("namespace", default_namespace or "gco-jobs")
+    if namespace not in policy.allowed_namespaces:
+        # Sorted, as the kind refusal lists its allowlist: the set's own order
+        # differs between processes.
+        return (
+            False,
+            f"Namespace '{namespace}' not allowed. "
+            f"Allowed namespaces: {sorted(policy.allowed_namespaces)}",
+        )
+
+    ok, message = validate_resource_kind(manifest, policy.allowed_kinds)
+    if not ok:
+        return False, message
+    kind = manifest["kind"]
+    if kind in WORKLOAD_KINDS and extract_pod_spec(manifest) is None:
+        return False, f"{kind} manifest must contain a valid pod spec"
+
+    # Every manifest is held to the caps, whatever its kind: a bare Pod runs on
+    # the same nodes as a Job's template, and a manifest with no pod spec sums
+    # to zero.
+    ok, message = check_resource_caps(manifest, policy)
+    if not ok:
+        return False, message
+
+    if policy.require_accelerator_toleration:
+        ok, message = check_tolerations(manifest)
+        if not ok:
+            return False, message
+
+    ok, message = check_security_context(manifest, policy)
+    if not ok:
+        return False, f"Security context validation failed: {message}"
+
+    ok, message = check_sandbox(manifest)
+    if ok:
+        ok, message = check_sandbox_runtime_class(manifest, runtime_class_exists)
+    if not ok:
+        return False, f"Nitro Sandbox validation failed: {message}"
+
+    ok, message = check_keep_warm(manifest)
+    if not ok:
+        return False, f"Keep-warm validation failed: {message}"
+
+    return validate_image_sources(
+        manifest,
+        trusted_registries=policy.trusted_registries,
+        trusted_dockerhub_orgs=policy.trusted_dockerhub_orgs,
+    )

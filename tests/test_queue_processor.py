@@ -5,9 +5,9 @@ Covers manifest validation (namespace allowlist, security policy toggles,
 image registry allowlist, resource caps), SA-token auto-mount injection,
 and SQS message processing. Includes structural parity checks that fail
 loudly if the REST manifest processor gains a security toggle the SQS
-path doesn't mirror. An autouse fixture scrubs BLOCK_* env vars before
-every test so cross-file ordering can't leak state into the module's
-import-time constants.
+policy does not read. An autouse fixture scrubs BLOCK_* env vars before
+every test so cross-file ordering can't leak state into the policy the
+module reads at import time.
 """
 
 from __future__ import annotations
@@ -136,7 +136,7 @@ def _env(monkeypatch, _scrub_qp_env):
 class TestValidateManifest:
     def test_valid_job(self):
         qp = _reload()
-        assert qp.validate_manifest(_job()) == (True, "")
+        assert qp.validate_manifest(_job()) == (True, None)
 
     def test_missing_kind(self):
         qp = _reload()
@@ -155,8 +155,10 @@ class TestValidateManifest:
 
     def test_no_metadata(self):
         qp = _reload()
-        ok, r = qp.validate_manifest({"apiVersion": "v1", "kind": "Job"})
-        assert not ok and "name" in r
+        assert qp.validate_manifest({"apiVersion": "v1", "kind": "Job"}) == (
+            False,
+            "Missing required field: metadata",
+        )
 
     def test_disallowed_namespace(self):
         qp = _reload()
@@ -201,7 +203,7 @@ class TestValidateManifest:
         monkeypatch.setenv("ALLOWED_KINDS", "")
         qp = _reload()
 
-        assert not qp.ALLOWED_KINDS
+        assert not qp.JOB_VALIDATION_POLICY.allowed_kinds
         valid, reason = qp.validate_manifest(_job())
         assert valid is False
         assert "not allowed" in reason
@@ -210,10 +212,11 @@ class TestValidateManifest:
         monkeypatch.setenv("ALLOWED_NAMESPACES", "")
         qp = _reload()
 
-        assert not qp.ALLOWED_NAMESPACES
-        valid, reason = qp.validate_manifest(_job())
-        assert valid is False
-        assert "not in allowed list" in reason
+        assert not qp.JOB_VALIDATION_POLICY.allowed_namespaces
+        assert qp.validate_manifest(_job()) == (
+            False,
+            "Namespace 'gco-jobs' not allowed. Allowed namespaces: []",
+        )
 
     def test_privileged_blocked(self):
         qp = _reload()
@@ -324,18 +327,18 @@ class TestNestingDepth:
         qp = _reload()
         with patch("gco.services.manifest_processor.config"):
             rest = ManifestProcessor("c", "us-east-1", {"allowed_namespaces": ["gco-jobs"]})
-        assert qp.YAML_MAX_DEPTH == rest.yaml_max_depth == 50
+        assert qp.JOB_VALIDATION_POLICY.yaml_max_depth == rest.yaml_max_depth == 50
 
         deep = self._deep_job(60)
         expected = "Manifest exceeds maximum nesting depth of 50 levels"
         assert qp.validate_manifest(deep) == (False, expected)
         assert rest.validate_manifest(deep) == (False, expected)
-        assert qp.validate_manifest(self._deep_job(40)) == (True, "")
+        assert qp.validate_manifest(self._deep_job(40)) == (True, None)
 
     def test_yaml_max_depth_sets_the_limit(self, monkeypatch):
         monkeypatch.setenv("YAML_MAX_DEPTH", "8")
         qp = _reload()
-        assert qp.validate_manifest(self._deep_job(4)) == (True, "")
+        assert qp.validate_manifest(self._deep_job(4)) == (True, None)
         assert qp.validate_manifest(self._deep_job(6)) == (
             False,
             "Manifest exceeds maximum nesting depth of 8 levels",
@@ -943,29 +946,7 @@ class TestFinalReceiveFailureRecording:
 # suffix) while the module previously did a bare int() on that env var.
 # Similarly, MAX_CPU_PER_MANIFEST is set as "10" (meaning 10 cores = 10000
 # millicores) but bare int() would treat it as 10 millicores. These tests
-# pin the parsing helpers so the same bug can't come back.
-
-
-class TestParseCpuString:
-    """Validates: queue_processor._parse_cpu_string correctly converts
-    Kubernetes-style CPU strings to millicores (regression for deploy-time
-    crash when MAX_CPU_PER_MANIFEST='10' was read as 10 millicores)."""
-
-    def test_millicore_suffix(self):
-        qp = _reload()
-        assert qp._parse_cpu_string("500m") == 500
-
-    def test_whole_cores(self):
-        qp = _reload()
-        assert qp._parse_cpu_string("10") == 10000  # 10 cores = 10000 millicores
-
-    def test_single_core(self):
-        qp = _reload()
-        assert qp._parse_cpu_string("1") == 1000
-
-    def test_empty_returns_zero(self):
-        qp = _reload()
-        assert qp._parse_cpu_string("") == 0
+# pin the parsed policy so the same bug can't come back.
 
 
 class TestSqsGateAcceptsWhatTheApiServerAccepts:
@@ -994,7 +975,7 @@ class TestSqsGateAcceptsWhatTheApiServerAccepts:
     )
     def test_admits(self, resources):
         qp = _reload()
-        assert qp.validate_manifest(self._with_resources(resources)) == (True, "")
+        assert qp.validate_manifest(self._with_resources(resources)) == (True, None)
 
     def test_a_pebibyte_is_parsed_and_capped(self):
         qp = _reload()
@@ -1027,74 +1008,35 @@ class TestSqsGateAcceptsWhatTheApiServerAccepts:
         assert ok is False
         assert "is not a whole number of devices" in reason
 
-    def test_the_cap_parsers_take_numbers(self):
-        qp = _reload()
-        assert qp._parse_cpu_string(0.5) == 500
-        assert qp._parse_memory_string(1024) == 1024
-
-
-class TestParseMemoryString:
-    """Validates: queue_processor._parse_memory_string correctly converts
-    Kubernetes-style memory strings to bytes (regression for deploy-time
-    crash when MAX_MEMORY_PER_MANIFEST='32Gi' raised ValueError)."""
-
-    def test_gi_suffix(self):
-        qp = _reload()
-        assert qp._parse_memory_string("32Gi") == 32 * 1024**3
-
-    def test_mi_suffix(self):
-        qp = _reload()
-        assert qp._parse_memory_string("256Mi") == 256 * 1024**2
-
-    def test_ki_suffix(self):
-        qp = _reload()
-        assert qp._parse_memory_string("1024Ki") == 1024 * 1024
-
-    def test_ti_suffix(self):
-        qp = _reload()
-        assert qp._parse_memory_string("1Ti") == 1024**4
-
-    def test_decimal_g(self):
-        qp = _reload()
-        assert qp._parse_memory_string("2G") == 2 * 1000**3
-
-    def test_bare_bytes(self):
-        qp = _reload()
-        assert qp._parse_memory_string("34359738368") == 34359738368
-
-    def test_empty_returns_zero(self):
-        qp = _reload()
-        assert qp._parse_memory_string("") == 0
-
 
 class TestCdkJsonEnvValues:
-    """Regression tests pinning queue-processor module-level constants
+    """Regression tests pinning the queue processor's policy caps
     against the exact values shipped in cdk.json.
 
     cdk.json stores these as Kubernetes-style strings (e.g. "32Gi", "10")
     and injects them verbatim into the queue-processor pod env via the
     kubectl-applier manifest. The module MUST be able to parse them at
     import time, otherwise the pod crash-loops and no SQS messages are
-    consumed. Do not regress the parsing helpers.
+    consumed. Do not regress the parsing.
     """
 
     def test_cdk_default_memory_value_parses(self, monkeypatch):
         # Matches cdk.json::job_validation_policy.resource_quotas.max_memory_per_manifest
         monkeypatch.setenv("MAX_MEMORY_PER_MANIFEST", "32Gi")
         qp = _reload()
-        assert qp.MAX_MEMORY == 32 * 1024**3
+        assert qp.JOB_VALIDATION_POLICY.max_memory_bytes == 32 * 1024**3
 
     def test_cdk_default_cpu_value_parses(self, monkeypatch):
         # Matches cdk.json::job_validation_policy.resource_quotas.max_cpu_per_manifest
         monkeypatch.setenv("MAX_CPU_PER_MANIFEST", "10")
         qp = _reload()
         # "10" means 10 cores → 10000 millicores
-        assert qp.MAX_CPU == 10_000
+        assert qp.JOB_VALIDATION_POLICY.max_cpu_millicores == 10_000
 
     def test_cdk_default_gpu_value_parses(self, monkeypatch):
         monkeypatch.setenv("MAX_GPU_PER_MANIFEST", "4")
         qp = _reload()
-        assert qp.MAX_GPU == 4
+        assert qp.JOB_VALIDATION_POLICY.max_gpu_count == 4
 
     def test_module_imports_with_cdk_defaults(self, monkeypatch):
         """Importing the module with the literal cdk.json defaults must
@@ -1104,9 +1046,9 @@ class TestCdkJsonEnvValues:
         monkeypatch.setenv("MAX_GPU_PER_MANIFEST", "4")
         # Should not raise ValueError
         qp = _reload()
-        assert qp.MAX_CPU > 0
-        assert qp.MAX_MEMORY > 0
-        assert qp.MAX_GPU > 0
+        assert qp.JOB_VALIDATION_POLICY.max_cpu_millicores > 0
+        assert qp.JOB_VALIDATION_POLICY.max_memory_bytes > 0
+        assert qp.JOB_VALIDATION_POLICY.max_gpu_count > 0
 
     def test_module_imports_with_various_sizes(self, monkeypatch):
         """Extended set of realistic operator-customizable values that
@@ -1120,8 +1062,12 @@ class TestCdkJsonEnvValues:
             monkeypatch.setenv("MAX_CPU_PER_MANIFEST", cpu)
             monkeypatch.setenv("MAX_MEMORY_PER_MANIFEST", mem)
             qp = _reload()
-            assert qp.MAX_CPU > 0, f"CPU {cpu!r} parsed to {qp.MAX_CPU}"
-            assert qp.MAX_MEMORY > 0, f"Memory {mem!r} parsed to {qp.MAX_MEMORY}"
+            assert qp.JOB_VALIDATION_POLICY.max_cpu_millicores > 0, (
+                f"CPU {cpu!r} parsed to {qp.JOB_VALIDATION_POLICY.max_cpu_millicores}"
+            )
+            assert qp.JOB_VALIDATION_POLICY.max_memory_bytes > 0, (
+                f"Memory {mem!r} parsed to {qp.JOB_VALIDATION_POLICY.max_memory_bytes}"
+            )
 
 
 class TestCdkJsonContract:
@@ -1147,24 +1093,9 @@ class TestCdkJsonContract:
 
         # Must not raise — this is the contract.
         qp = _reload()
-        assert qp.MAX_CPU > 0
-        assert qp.MAX_MEMORY > 0
-        assert qp.MAX_GPU > 0
-
-    def test_cdk_json_manifest_processor_defaults_parse(self, monkeypatch):
-        """Same values via the same shared section — pinned separately so
-        a future drift between MP_* and QP_* placeholder wiring gets
-        caught here."""
-        import json
-        from pathlib import Path
-
-        cdk_json = json.loads((Path(__file__).resolve().parent.parent / "cdk.json").read_text())
-        quotas = cdk_json["context"]["job_validation_policy"]["resource_quotas"]
-
-        qp = _reload()
-        # These helpers should handle whatever operators configure.
-        assert qp._parse_cpu_string(str(quotas["max_cpu_per_manifest"])) > 0
-        assert qp._parse_memory_string(str(quotas["max_memory_per_manifest"])) > 0
+        assert qp.JOB_VALIDATION_POLICY.max_cpu_millicores > 0
+        assert qp.JOB_VALIDATION_POLICY.max_memory_bytes > 0
+        assert qp.JOB_VALIDATION_POLICY.max_gpu_count > 0
 
 
 # ── Security check parity with manifest_processor (regression tests) ─────
@@ -1243,7 +1174,7 @@ def _job_with_init_container(image, init_privileged=False, init_gpu=0):
 
 class TestImageRegistryAllowlist:
     """The queue processor must reject images from registries outside the
-    configured allowlist, matching manifest_processor._validate_image_sources."""
+    configured allowlist, with the REST path's check (validate_image_sources)."""
 
     def test_official_dockerhub_image_allowed(self, monkeypatch):
         monkeypatch.setenv("TRUSTED_REGISTRIES", "nvcr.io,public.ecr.aws")
@@ -1307,8 +1238,8 @@ class TestImageRegistryAllowlist:
         ok, err = qp.validate_manifest(_job_with_image("evil.example.com/malicious:latest"))
         assert not ok
         assert "untrusted" in err.lower()
-        assert "nvcr.io" in qp.TRUSTED_REGISTRIES
-        assert "nvidia" in qp.TRUSTED_DOCKERHUB_ORGS
+        assert "nvcr.io" in qp.JOB_VALIDATION_POLICY.trusted_registries
+        assert "nvidia" in qp.JOB_VALIDATION_POLICY.trusted_dockerhub_orgs
 
     def test_init_container_image_rejected(self, monkeypatch):
         """initContainers carry real risk (they run with pod privileges
@@ -1338,7 +1269,7 @@ class TestInitContainerSecurityChecks:
 
 class TestResourceAccountingMatchesManifestProcessor:
     """The queue_processor must sum resources across all container kinds,
-    matching manifest_processor._validate_resource_limits exactly."""
+    as the REST path's check_resource_caps does."""
 
     def test_init_container_cpu_counted_against_budget(self, monkeypatch):
         """A 20-core init container must be caught by a 10-core cap even
@@ -1394,15 +1325,13 @@ class TestResourceAccountingMatchesManifestProcessor:
 
 
 class TestQueueProcessorMirrorsManifestProcessor:
-    """Structural test: the queue_processor must apply the same set of
-    security checks as the manifest_processor service. If either side
-    gains a new check, this test file needs a counterpart to keep the
-    two in lockstep.
+    """Structural test: the queue_processor applies the manifest_processor
+    service's checks. Both run gco.job_admission.admit_manifest; the full
+    parity suite is tests/test_job_submission_validation.py.
     """
 
     def test_all_listed_checks_are_implemented(self):
-        """Sanity: the checks enumerated in the queue_processor docstring
-        actually correspond to code paths that reject bad input."""
+        """Sanity: the namespace and security checks reject bad input."""
         qp = _reload()
         # Each of these inputs targets one of the documented checks; they
         # should all be rejected. If any is accepted, a check went missing.
@@ -1948,7 +1877,7 @@ class TestEnvBoolParser:
 
 
 class TestSecurityPolicyParityWithManifestProcessor:
-    """The queue_processor must mirror EVERY toggle the manifest_processor
+    """The queue_processor must read EVERY toggle the manifest_processor
     exposes. This prevents drift when a new toggle is added to one side
     but forgotten on the other — the SQS path would silently accept
     submissions the REST path rejects (or vice versa).
@@ -1968,17 +1897,25 @@ class TestSecurityPolicyParityWithManifestProcessor:
         "BLOCK_RUN_AS_ROOT",
     }
 
-    def test_queue_processor_exposes_every_expected_toggle(self):
-        """Every toggle listed in EXPECTED_TOGGLES must exist as a
-        module-level constant in queue_processor so the KEDA ScaledJob
-        manifest has something to populate."""
-        qp = _reload()
-        missing = {name for name in self.EXPECTED_TOGGLES if not hasattr(qp, name)}
-        assert not missing, (
-            f"queue_processor is missing security-policy toggles {missing}. "
-            "Add them to queue_processor.py and wire them in "
-            "regional_stack.py + post-helm-sqs-consumer.yaml."
+    def test_queue_processor_reads_every_expected_toggle(self, monkeypatch):
+        """Every toggle listed in EXPECTED_TOGGLES sets its own flag in the
+        queue_processor's policy, so the variable the KEDA ScaledJob
+        manifest populates is the one admission reads."""
+        from gco.manifest_security_policy import MANIFEST_SECURITY_POLICY_DEFAULTS
+
+        default = _reload().JOB_VALIDATION_POLICY.security
+        assert default == dict(MANIFEST_SECURITY_POLICY_DEFAULTS)
+        assert set(default) == {name.lower() for name in self.EXPECTED_TOGGLES}, (
+            "queue_processor.job_validation_policy_from_environment must read every "
+            "security-policy toggle; wire a new one in regional_stack.py and "
+            "post-helm-sqs-consumer.yaml too."
         )
+        for name in sorted(self.EXPECTED_TOGGLES):
+            flipped = not default[name.lower()]
+            monkeypatch.setenv(name, "true" if flipped else "false")
+            security = _reload().JOB_VALIDATION_POLICY.security
+            monkeypatch.delenv(name)
+            assert security == {**default, name.lower(): flipped}, name
 
     def test_manifest_processor_has_matching_attribute_for_each_toggle(self):
         """Every toggle the queue_processor exposes must have a matching
@@ -2082,11 +2019,11 @@ class TestTrainJobValidation:
         ok, reason = qp.validate_manifest(
             _trainjob(resources_per_node={"requests": {"cpu": "500m", "memory": "512Mi"}})
         )
-        assert (ok, reason) == (True, "")
+        assert (ok, reason) == (True, None)
 
     def test_trainjob_kind_allowed_by_default(self):
         qp = _reload()
-        assert "TrainJob" in qp.ALLOWED_KINDS
+        assert "TrainJob" in qp.JOB_VALIDATION_POLICY.allowed_kinds
 
     def test_untrusted_trainer_image_rejected(self):
         qp = _reload()
@@ -2176,11 +2113,11 @@ class TestTrainJobValidation:
             ],
         )
         # The toggle stays opt-in: the default policy admits the patch.
-        assert _reload().validate_manifest(manifest) == (True, "")
+        assert _reload().validate_manifest(manifest) == (True, None)
         monkeypatch.setenv("BLOCK_RUN_AS_ROOT", "true")
         assert _reload().validate_manifest(manifest) == (
             False,
-            "running as root (runAsUser: 0) is not permitted",
+            "Security context validation failed: running as root (runAsUser: 0) is not permitted",
         )
 
     def test_privileged_in_runtime_patch_rejected(self):

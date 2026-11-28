@@ -179,7 +179,7 @@ gco stacks addons status -r us-east-1
 gco status
 ```
 
-`gco status` gathers the stacks, queue depth, jobs, capacity and inference endpoints of every Region into one report. Add `--watch 10` to keep it refreshing.
+`gco status` gathers the stacks, add-on convergence, queue depth, jobs, capacity and inference endpoints of every Region into one report. Add `--watch 10` to keep it refreshing.
 
 ### Submit a job through SQS
 

@@ -199,7 +199,8 @@ class TestSpawnAdmission:
 
     @pytest.mark.parametrize(
         "bad_slot",
-        [None, "", "has space", "-leading", "a" * 65, "tab\tname", 7],
+        # "worker-1\n": ``$`` also matches before a final newline; the check is a fullmatch.
+        [None, "", "has space", "-leading", "a" * 65, "tab\tname", 7, "worker-1\n"],
     )
     def test_rejects_bad_slot(self, bad_slot: Any) -> None:
         """Slots become file names and audit keys, so the charset is tight."""

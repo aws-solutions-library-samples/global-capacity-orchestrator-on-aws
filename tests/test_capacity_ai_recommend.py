@@ -546,6 +546,8 @@ def test_gather_sizes_each_lookup_and_keeps_the_ranking_to_the_analyzed_regions(
         "running_jobs": None,
         "gpu_utilization": 12.0,
         "cpu_utilization": 4.0,
+        "total_gpus": None,
+        "available_gpus": None,
     }
     multi.recommend_region_for_job.assert_called_once_with(
         instance_type="p5.48xlarge", gpu_count=16

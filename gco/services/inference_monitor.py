@@ -70,12 +70,12 @@ from gco.models.inference_models import (
 )
 from gco.services.inference_store import InferenceEndpointStore, endpoint_object_names
 from gco.services.k8s_client import BoundedApiClient, k8s_api_timeout_from_env
-from gco.services.leader_lease import LEASE_REQUEST_TIMEOUT
+from gco.services.leader_lease import LEASE_REQUEST_TIMEOUT, LeaseObserver
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-18T16:59:04Z
-# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
+# Generated at (UTC): 2026-11-27T20:35:51Z
+# Generated from Git commit: 6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint_authorized`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.png``)
@@ -558,6 +558,11 @@ PASS_STALL_INTERVALS = 10
 # Reconcile intervals the leader Lease lasts without a renewal (45 s at the
 # default 15 s interval).
 LEASE_DURATION_INTERVALS = 3
+
+# The leader election Lease in the monitor's namespace. The manifests
+# pre-create it (02-rbac.yaml), and the monitor's Role may only get and update
+# this one Lease, so the monitor never creates it.
+LEADER_LEASE_NAME = "inference-monitor-leader"
 
 # How long a leader pass pauses between two endpoints so the event loop can run
 # the SIGTERM handler (see InferenceMonitor._stop_requested_at_safe_point).
@@ -1521,6 +1526,8 @@ class InferenceMonitor:
 
     Polls DynamoDB for desired endpoint state and reconciles with
     the actual Kubernetes resources in the local cluster.
+
+    ``lease_clock`` is the monotonic clock that times leader Lease holds.
     """
 
     def __init__(
@@ -1530,6 +1537,8 @@ class InferenceMonitor:
         store: InferenceEndpointStore,
         namespace: str = "gco-inference",
         reconcile_interval: int = 15,
+        *,
+        lease_clock: Callable[[], float] = time.monotonic,
     ):
         self.cluster_id = cluster_id
         self.region = region
@@ -1588,6 +1597,16 @@ class InferenceMonitor:
         self._lease_holder: str | None = None
         self._leader_epoch: str | None = None
         self._leadership_lost = threading.Event()
+        # Holds are timed on ``lease_clock``; a holder's renewTime is never
+        # compared with this process's wall clock. This process's own hold
+        # lapses one Lease duration after its last acquire or renew write that
+        # succeeded, stamped when the write was sent (so never later than
+        # another replica can first see the record); None while it holds
+        # nothing. Any other record lapses once the observer has seen it
+        # unchanged for the duration the record declares.
+        self._lease_clock = lease_clock
+        self._lease_written_at: float | None = None
+        self._lease_observer = LeaseObserver(lease_clock)
         self._active_authority: ReconcileAuthority | None = None
         # Every endpoint record's name in the current pass's snapshot, used to
         # tell whether an unlabelled object's name is another endpoint's too.
@@ -1643,7 +1662,7 @@ class InferenceMonitor:
         )
 
         pod_name = os.environ.get("HOSTNAME", f"monitor-{id(self)}")
-        lease_name = "inference-monitor-leader"
+        lease_name = LEADER_LEASE_NAME
         self._lease_name = lease_name
         self._lease_holder = pod_name
 
@@ -1695,16 +1714,42 @@ class InferenceMonitor:
         annotations = getattr(metadata, "annotations", None)
         return dict(annotations) if isinstance(annotations, dict) else {}
 
-    def _lease_is_expired(self, lease: Any, now: datetime) -> bool:
-        renew_time = getattr(getattr(lease, "spec", None), "renew_time", None)
-        if renew_time is None:
-            return True
-        if renew_time.tzinfo is None:
-            renew_time = renew_time.replace(tzinfo=UTC)
-        duration = getattr(lease.spec, "lease_duration_seconds", None)
+    def _lease_duration_seconds(self) -> int:
+        """How long this process's hold lasts without a renewal."""
+        return self.reconcile_interval * LEASE_DURATION_INTERVALS
+
+    def _recorded_lease_duration(self, spec: Any) -> int:
+        """The duration a Lease record declares, or this process's own if it declares none."""
+        duration = getattr(spec, "lease_duration_seconds", None)
         if not isinstance(duration, int) or isinstance(duration, bool) or duration <= 0:
-            duration = self.reconcile_interval * LEASE_DURATION_INTERVALS
-        return bool((now - renew_time).total_seconds() >= int(duration))
+            return self._lease_duration_seconds()
+        return duration
+
+    def _own_hold_lapsed(self) -> bool:
+        """Whether this process holds nothing, or its last successful write is a Lease duration old."""
+        written_at = self._lease_written_at
+        if written_at is None:
+            return True
+        return self._lease_clock() - written_at >= self._lease_duration_seconds()
+
+    def _hold_lapsed(self, spec: Any, holder: str, observed_epoch: str | None) -> bool:
+        """Whether the hold the Lease records has lapsed, as far as this process can tell.
+
+        A record this process wrote for its current epoch lapses with its own
+        hold. Any other record (another replica's, or one an earlier process
+        with this holder name left) lapses once this process has seen it
+        unchanged for the duration it declares, or at once if it has no
+        renewTime.
+        """
+        own_record = (
+            spec.holder_identity == holder
+            and self._leader_epoch is not None
+            and self._lease_written_at is not None
+            and (not observed_epoch or observed_epoch == self._leader_epoch)
+        )
+        if own_record:
+            return self._own_hold_lapsed()
+        return self._lease_observer.expired(spec, self._recorded_lease_duration(spec))
 
     def _stamp_lease_epoch(self, lease: Any, epoch: str) -> None:
         metadata = getattr(lease, "metadata", None)
@@ -1716,19 +1761,24 @@ class InferenceMonitor:
         metadata.annotations = annotations
 
     def _try_acquire_lease(self, lease_name: str, holder: str) -> bool:
-        """Acquire/renew a Lease and establish one stable acquisition epoch."""
+        """Acquire/renew a Lease and establish one stable acquisition epoch.
+
+        The Lease is pre-created by the manifests; while it is missing no
+        replica reconciles. Whether a hold has lapsed is decided by
+        :meth:`_hold_lapsed`, never from the holder's renewTime.
+        """
         coordination_v1 = client.CoordinationV1Api(self.api_client)
         now = datetime.now(UTC)
-        lease_duration = self.reconcile_interval * LEASE_DURATION_INTERVALS
         try:
             lease = coordination_v1.read_namespaced_lease(
                 lease_name, self.namespace, _request_timeout=self._k8s_timeout
             )
             spec = present(lease.spec, "lease.spec")
+            self._lease_observer.observe(spec)
             current_holder = spec.holder_identity
-            expired = self._lease_is_expired(lease, now)
             annotations = self._lease_annotations(lease)
             observed_epoch = annotations.get(_LEADER_EPOCH_ANNOTATION)
+            expired = self._hold_lapsed(spec, holder, observed_epoch)
 
             if current_holder == holder and not expired:
                 # Adopt the persisted epoch after a harmless local restart of
@@ -1743,6 +1793,7 @@ class InferenceMonitor:
             elif current_holder in (None, "") or expired:
                 epoch = secrets.token_hex(32)
                 self._leader_epoch = epoch
+                self._lease_written_at = None
                 spec.holder_identity = holder
                 spec.acquire_time = now
                 transitions = getattr(spec, "lease_transitions", None)
@@ -1752,44 +1803,28 @@ class InferenceMonitor:
                 return False
 
             spec.renew_time = now
-            spec.lease_duration_seconds = lease_duration
+            spec.lease_duration_seconds = self._lease_duration_seconds()
             self._stamp_lease_epoch(lease, epoch)
+            written_at = self._lease_clock()
             coordination_v1.replace_namespaced_lease(
                 lease_name, self.namespace, lease, _request_timeout=self._k8s_timeout
             )
+            self._lease_written_at = written_at
+            self._lease_observer.observe(spec)
             self._lease_name = lease_name
             self._lease_holder = holder
             self._leadership_lost.clear()
             return True
         except ApiException as error:
             if error.status == 404:
-                epoch = secrets.token_hex(32)
-                lease = client.V1Lease(
-                    metadata=client.V1ObjectMeta(
-                        name=lease_name,
-                        namespace=self.namespace,
-                        annotations={_LEADER_EPOCH_ANNOTATION: epoch},
-                    ),
-                    spec=client.V1LeaseSpec(
-                        holder_identity=holder,
-                        lease_duration_seconds=lease_duration,
-                        acquire_time=now,
-                        renew_time=now,
-                        lease_transitions=0,
-                    ),
+                logger.warning(
+                    "Leader Lease %s/%s does not exist; the manifests create it "
+                    "(02-rbac.yaml), and reconciliation waits until it does",
+                    self.namespace,
+                    lease_name,
                 )
-                try:
-                    coordination_v1.create_namespaced_lease(
-                        self.namespace, lease, _request_timeout=self._k8s_timeout
-                    )
-                except ApiException:
-                    return False
-                self._leader_epoch = epoch
-                self._lease_name = lease_name
-                self._lease_holder = holder
-                self._leadership_lost.clear()
-                logger.info("Created leader lease as %s", holder)
-                return True
+                self._leadership_lost.set()
+                return False
             if error.status == 409:
                 logger.info("Lost leader Lease optimistic-concurrency race")
                 self._leadership_lost.set()
@@ -1799,7 +1834,11 @@ class InferenceMonitor:
             return False
 
     def _renew_current_lease(self) -> bool:
-        """Renew only the exact holder/epoch currently owned by this process."""
+        """Renew only the exact holder/epoch currently owned by this process.
+
+        A hold that has gone a full Lease duration without a successful write
+        is never renewed: another replica may already have taken the Lease.
+        """
         lease_name = self._lease_name
         holder = self._lease_holder
         epoch = self._leader_epoch
@@ -1815,13 +1854,15 @@ class InferenceMonitor:
             if (
                 spec.holder_identity != holder
                 or self._lease_annotations(lease).get(_LEADER_EPOCH_ANNOTATION) != epoch
-                or self._lease_is_expired(lease, now)
+                or self._own_hold_lapsed()
             ):
                 return False
             spec.renew_time = now
+            written_at = self._lease_clock()
             coordination_v1.replace_namespaced_lease(
                 lease_name, self.namespace, lease, _request_timeout=self._k8s_timeout
             )
+            self._lease_written_at = written_at
             return True
         except Exception:
             logger.warning("Leader Lease renewal failed", exc_info=True)
@@ -1873,7 +1914,7 @@ class InferenceMonitor:
             renewal.join(timeout=max(1.0, float(self.reconcile_interval)))
 
     def _assert_current_leadership(self) -> None:
-        """Fail closed before mutation when the persisted Lease epoch changed."""
+        """Fail closed before mutation when the persisted Lease epoch changed or the hold lapsed."""
         if self._leadership_lost.is_set():
             raise ReconcileFencedError("leader Lease was lost")
         # Direct method-level unit tests do not enter start(); production does.
@@ -1890,10 +1931,13 @@ class InferenceMonitor:
         if (
             present(lease.spec, "lease.spec").holder_identity != self._lease_holder
             or self._lease_annotations(lease).get(_LEADER_EPOCH_ANNOTATION) != self._leader_epoch
-            or self._lease_is_expired(lease, datetime.now(UTC))
         ):
             self._leadership_lost.set()
             raise ReconcileFencedError("leader Lease holder or epoch changed")
+        # Checked after the read, which can take up to the API timeout.
+        if self._own_hold_lapsed():
+            self._leadership_lost.set()
+            raise ReconcileFencedError("leader Lease hold lapsed without a renewal")
 
     def _release_lease(self) -> None:
         """Give up the leader Lease this process holds, so the standby takes over at once.
@@ -1911,6 +1955,7 @@ class InferenceMonitor:
             return
         self._leadership_lost.set()
         self._leader_epoch = None
+        self._lease_written_at = None
         coordination_v1 = client.CoordinationV1Api(self.api_client)
         try:
             lease = coordination_v1.read_namespaced_lease(

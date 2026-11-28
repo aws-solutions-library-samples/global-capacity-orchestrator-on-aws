@@ -57,8 +57,9 @@ server and a tenant destination); what an `Application` syncs from this
 repository, a kro ResourceGraphDefinition composes or a Crossplane
 Composition renders lands in a workload namespace and pulls from trusted
 image sources; every gco-jobs workload — including those — fits the deployed
-resource governance (per-container `LimitRange` ceilings, per-manifest
-caps, and the namespace `ResourceQuota`, evaluated against the same
+resource governance (the per-container ceilings of the `LimitRange` and the
+GPU cap admission policy, the per-manifest caps, and the namespace
+`ResourceQuota`, evaluated against the same
 defaults the stack deploys — a manifest that admission would reject
 forever fails here in seconds instead of burning a live timeout); and the
 spec registry, the `examples/` directory, and the `gco_mcp`
@@ -103,7 +104,7 @@ overlap instead of serializing. `--max-parallel N` throttles the pool
 (`1` restores serial execution) and may differ between a run and its
 resume. While peers hold namespace quota, `exceeded quota` admission
 rejections are expected and retried by Kubernetes; only permanent
-rejections (for example a container over the `LimitRange` ceiling) fail an
+rejections (for example a container over the `LimitRange` or GPU cap) fail an
 example immediately instead of waiting out its timeout.
 
 ## How Each Example Runs

@@ -224,7 +224,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `get_job_logs` | Get logs from a job. |
 | `get_job_metrics` | Get CPU and memory usage for all pods in a job. |
 | `get_job_pods` | Get pod details, placement, and container status for a job. Each pod carries the instance type and capacity type of the node it landed on; each exited container carries its exit code and its `startedAt` and `finishedAt` times. |
-| `get_job_validation_policy` | Get the job validation policy a region actually enforces, as deployed — per-manifest caps, namespace/kind/registry allowlists, pod-security flags, and the live `LimitRange` / `ResourceQuota` ceilings. Reads the cluster, not a local `cdk.json`. |
+| `get_job_validation_policy` | Get the job validation policy a region actually enforces, as deployed — per-manifest caps, namespace/kind/registry allowlists, pod-security flags, and the live `LimitRange` / `ResourceQuota` ceilings and per-container GPU cap. Reads the cluster, not a local `cdk.json`. |
 | `get_pod_logs` | Get a bounded log tail from one specific pod belonging to a job. |
 | `list_jobs` | List jobs across GCO clusters. |
 | `queue_status` | View [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) queue status (pending, in-flight, DLQ counts). |

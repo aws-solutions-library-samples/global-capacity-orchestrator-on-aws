@@ -117,5 +117,5 @@ Helm's server-side apply never conflicts with the autoscaler's field ownership
 
 ## Dependencies
 
-- `boto3`, `pyyaml`, `urllib3` (see `requirements.txt`)
+- `boto3`, `pyyaml`, `urllib3` (see `requirements.txt`), installed constrained by the repository's `requirements-lock.txt`, which `gco stacks deploy` copies into the `lambda/helm-installer-build/` context the image is built from
 - Helm v4.3.1, kubectl v1.37.2 (installed in Docker image)

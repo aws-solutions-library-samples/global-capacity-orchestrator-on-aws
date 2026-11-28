@@ -28,6 +28,11 @@ cycle. The outcome says whether the attempt renewed a hold this replica
 already had or acquired the Lease anew; an acquisition can follow another
 replica's tenure that this one never saw, so a caller that caches state
 derived from its duty rebuilds it on :attr:`LeaseOutcome.ACQUIRED`.
+
+The expiry rule itself is :class:`LeaseObserver`. The inference monitor runs
+its own election on the pre-created ``inference-monitor-leader`` Lease,
+because it also fences reconciliation on an epoch the Lease carries, and
+judges every record it did not write with a :class:`LeaseObserver` too.
 """
 
 from __future__ import annotations
@@ -107,6 +112,43 @@ def _lease_record(spec: Any) -> tuple[Any, ...]:
     )
 
 
+class LeaseObserver:
+    """When this replica first saw a Lease's current record, on its own monotonic clock.
+
+    A holder renews by rewriting the record (its ``renewTime`` changes on
+    every renewal), so a record this replica has seen unchanged for the lease
+    duration belongs to a holder that stopped renewing. :meth:`expired`
+    applies that rule to a hold this replica does not own. ``clock`` must be
+    monotonic. An observer is not thread-safe: use it from one thread, or
+    under the caller's own lock as :class:`LeaseElector` does.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        # The Lease record as last observed, and when it first appeared (on ``clock``).
+        self._record: tuple[Any, ...] | None = None
+        self._first_seen_at = 0.0
+
+    def observe(self, spec: Any) -> None:
+        """Note the record ``spec`` carries, restarting the timer when it changed."""
+        record = _lease_record(spec)
+        if record != self._record:
+            self._record = record
+            self._first_seen_at = self._clock()
+
+    def expired(self, spec: Any, duration_seconds: float) -> bool:
+        """Whether the hold ``spec`` records has lapsed, for a replica that does not own it.
+
+        Observes ``spec`` first. The hold lapses once this replica has seen
+        the same record for ``duration_seconds``. A record without a
+        ``renewTime`` cannot be renewing, so its hold has lapsed already.
+        """
+        self.observe(spec)
+        if spec.renew_time is None:
+            return True
+        return self._clock() - self._first_seen_at >= duration_seconds
+
+
 class LeaseElector:
     """This replica's side of one Lease election, remembered between attempts.
 
@@ -127,10 +169,8 @@ class LeaseElector:
         self.identity = identity
         self.label = label
         self.request_timeout = request_timeout
-        self._clock = clock
-        # The Lease record as last read or written, and when (on ``clock``).
-        self._observed_record: tuple[Any, ...] | None = None
-        self._observed_at = 0.0
+        # The Lease record as last read or written, and when it first appeared.
+        self._observer = LeaseObserver(clock)
         # Attempts run in worker threads; one at a time per elector.
         self._lock = threading.Lock()
 
@@ -167,15 +207,9 @@ class LeaseElector:
                     "Could not release the %s Lease (it will expire): %s", self.label, exc
                 )
                 return False
-            self._observe(spec)
+            self._observer.observe(spec)
             logger.info("Released %s leader Lease held by %s", self.label, identity.holder)
             return True
-
-    def _observe(self, spec: Any) -> None:
-        record = _lease_record(spec)
-        if record != self._observed_record:
-            self._observed_record = record
-            self._observed_at = self._clock()
 
     def _try_acquire(self, coordination_v1: Any) -> LeaseOutcome:
         identity = self.identity
@@ -187,14 +221,13 @@ class LeaseElector:
                 _request_timeout=self.request_timeout,
             )
             spec = lease.spec
-            self._observe(spec)
+            self._observer.observe(spec)
             current_holder = spec.holder_identity
             lease_duration = spec.lease_duration_seconds or identity.duration_seconds
 
-            if current_holder not in (None, "", identity.holder):
-                unchanged_for = self._clock() - self._observed_at
-                if spec.renew_time is not None and unchanged_for < lease_duration:
-                    return LeaseOutcome.NOT_HELD
+            held_by_another = current_holder not in (None, "", identity.holder)
+            if held_by_another and not self._observer.expired(spec, lease_duration):
+                return LeaseOutcome.NOT_HELD
 
             acquiring = current_holder != identity.holder
             renewed_at = datetime.now(UTC)
@@ -217,7 +250,7 @@ class LeaseElector:
                     logger.debug("Lost %s Lease race to another replica", label)
                     return LeaseOutcome.NOT_HELD
                 raise
-            self._observe(spec)
+            self._observer.observe(spec)
 
             if acquiring:
                 logger.info("Acquired %s leader Lease as %s", label, identity.holder)

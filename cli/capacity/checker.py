@@ -13,7 +13,8 @@ weighted region scoring.
 
 Data Sources:
     - EC2 GetSpotPlacementScores: likelihood of getting spot capacity (1-10 score)
-    - EC2 DescribeSpotPriceHistory: current and historical spot prices (7-day window)
+    - EC2 DescribeSpotPriceHistory: current and historical spot prices (7-day
+      window unless a caller asks for another)
     - AWS Price List GetProducts: Linux on-demand prices (through us-east-1)
     - EC2 DescribeInstanceTypes: full compute characteristics — vCPU/cores/threads,
       memory, every accelerator class, EFA and network limits, local NVMe and EBS,
@@ -38,8 +39,8 @@ Key Classes:
 Output Models (defined in models.py):
     - CapacityEstimate: availability, confidence, wait estimate, hourly price,
       and a recommendation for one capacity type (spot or on-demand)
-    - SpotPriceInfo: one AZ's current spot price with its 7-day average, min,
-      max, and stability
+    - SpotPriceInfo: one AZ's current spot price with its average, min, max,
+      and stability over the window it records in ``window_days``
     - InstanceTypeInfo: every compute characteristic EC2 reports for a type
 
 Instance-type characteristics are always resolved live. A checked-in
@@ -71,6 +72,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from cli.config import GCOConfig, get_config
+from gco.services.structured_logging import sanitize_log_value
 
 from . import blocks
 from .models import (
@@ -447,13 +449,16 @@ class CapacityChecker:
             response = ec2.describe_instance_types(InstanceTypes=[canonical])
         except ClientError as e:
             logger.debug(
-                "Failed to describe instance type %s in %s: %s", canonical, target_region, e
+                "Failed to describe instance type %s in %s: %s",
+                sanitize_log_value(canonical),
+                target_region,
+                e,
             )
             return None
         except Exception as e:
             logger.warning(
                 "Unexpected error getting instance info for %s in %s: %s",
-                canonical,
+                sanitize_log_value(canonical),
                 target_region,
                 e,
             )
@@ -463,7 +468,7 @@ class CapacityChecker:
         if not records:
             logger.debug(
                 "Instance type %s is not offered in %s (it may exist in another region)",
-                canonical,
+                sanitize_log_value(canonical),
                 target_region,
             )
             return None
@@ -661,7 +666,7 @@ class CapacityChecker:
             logger.debug(
                 "instance pool catalog (scripts/accelerator_catalog.py) is unavailable; "
                 "treating %s as unpooled and skipping Spot Placement Scores",
-                instance_type,
+                sanitize_log_value(instance_type),
             )
             return None
         pool = lookup(instance_type)
@@ -699,7 +704,7 @@ class CapacityChecker:
             logger.info(
                 "no instance pool contains %s; skipping the Spot Placement Score request "
                 "(a single-type request returns misleadingly low scores)",
-                instance_type,
+                sanitize_log_value(instance_type),
             )
             return {}
         pool_name, members = pool
@@ -733,7 +738,7 @@ class CapacityChecker:
                     "pool %s (%s) in %s: the account has queried too many distinct SPS "
                     "configurations in the rolling 24h window",
                     pool_name,
-                    instance_type,
+                    sanitize_log_value(instance_type),
                     region,
                 )
                 raise SpotPlacementConfigLimitError(
@@ -746,7 +751,10 @@ class CapacityChecker:
             raise
         except Exception as e:
             logger.warning(
-                "Failed to get spot placement scores for %s in %s: %s", instance_type, region, e
+                "Failed to get spot placement scores for %s in %s: %s",
+                sanitize_log_value(instance_type),
+                region,
+                e,
             )
             return {}
 
@@ -813,6 +821,7 @@ class CapacityChecker:
                         min_price_7d=min_price,
                         max_price_7d=max_price,
                         price_stability=stability,
+                        window_days=days,
                     )
                 )
 
@@ -866,11 +875,17 @@ class CapacityChecker:
 
         except ClientError as e:
             logger.warning(
-                "Failed to get on-demand price for %s in %s: %s", instance_type, region, e
+                "Failed to get on-demand price for %s in %s: %s",
+                sanitize_log_value(instance_type),
+                region,
+                e,
             )
         except Exception as e:
             logger.warning(
-                "Unexpected error getting pricing for %s in %s: %s", instance_type, region, e
+                "Unexpected error getting pricing for %s in %s: %s",
+                sanitize_log_value(instance_type),
+                region,
+                e,
             )
 
         return None
@@ -1747,19 +1762,25 @@ class CapacityChecker:
                 # once; EC2 refusing the window is a debug line, not a warning,
                 # but it is no longer silent.
                 logger.debug(
-                    "Capacity block trend query rejected for %s in %s: %s", instance_type, region, e
+                    "Capacity block trend query rejected for %s in %s: %s",
+                    sanitize_log_value(instance_type),
+                    region,
+                    e,
                 )
             elif kind == "other":
                 logger.warning(
                     "Capacity block trend query failed for %s in %s: %s",
-                    instance_type,
+                    sanitize_log_value(instance_type),
                     region,
                     e,
                 )
             return 0.0
         except BotoCoreError as e:
             logger.warning(
-                "Capacity block trend query failed for %s in %s: %s", instance_type, region, e
+                "Capacity block trend query failed for %s in %s: %s",
+                sanitize_log_value(instance_type),
+                region,
+                e,
             )
             return 0.0
 

@@ -2296,11 +2296,20 @@ class TestHealthAndMetricsPayloads:
         return {
             "region": "us-east-1",
             "cluster_id": "gco-live-us-east-1",
-            "resource_utilization": {"cpu_percent": 1, "memory_percent": 2.5, "gpu_percent": 0},
+            "resource_utilization": {
+                "cpu_percent": 1,
+                "memory_percent": 2.5,
+                "gpu_percent": 0,
+                "gpu_allocatable": 0,
+                "gpu_requested": 0,
+            },
             "thresholds": {"cpu_threshold": 80},
             "active_jobs": 0,
             **overrides,
         }
+
+    def _utilization(self, **overrides: Any) -> dict[str, Any]:
+        return {**self._metrics()["resource_utilization"], **overrides}
 
     def test_metrics_payload_guards(self) -> None:
         ctx = self._ctx()
@@ -2323,6 +2332,65 @@ class TestHealthAndMetricsPayloads:
             validate(ctx, self._metrics(thresholds=[]), endpoint_region=None)
         with pytest.raises(RuntimeError, match="active_jobs is not a non-negative integer: True"):
             validate(ctx, self._metrics(active_jobs=True), endpoint_region=None)
+
+    def test_metrics_payload_must_hold_a_cluster_reading(self) -> None:
+        """A monitor whose cluster reads fail serves every value null."""
+        nulls = dict.fromkeys(
+            ("cpu_percent", "memory_percent", "gpu_percent", "gpu_allocatable", "gpu_requested")
+        )
+        payload = self._metrics(
+            resource_utilization=nulls,
+            active_jobs=None,
+            message="Health check error: listing pods failed",
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="holds no cluster reading: 'Health check error: listing pods failed'",
+        ):
+            checks_topology._validate_metrics_payload(self._ctx(), payload, endpoint_region=None)
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"gpu_allocatable": None}, "gpu_allocatable is not a non-negative integer: None"),
+            ({"gpu_allocatable": -1}, "gpu_allocatable is not a non-negative integer: -1"),
+            ({"gpu_requested": True}, "gpu_requested is not a non-negative integer: True"),
+            ({"gpu_requested": 1.0}, "gpu_requested is not a non-negative integer: 1.0"),
+            (
+                {"gpu_allocatable": 4, "gpu_requested": 1, "gpu_percent": 30.0},
+                r"gpu_percent 30.0 is not the share its counts give \(1 of 4 GPUs requested: 25.0\)",
+            ),
+            (
+                {"gpu_allocatable": 0, "gpu_requested": 0, "gpu_percent": 50.0},
+                r"gpu_percent 50.0 is not the share its counts give \(0 of 0 GPUs requested: 0.0\)",
+            ),
+        ],
+    )
+    def test_metrics_payload_gpu_counts_must_back_the_share(
+        self, overrides: dict[str, Any], message: str
+    ) -> None:
+        payload = self._metrics(resource_utilization=self._utilization(**overrides))
+        with pytest.raises(RuntimeError, match=message):
+            checks_topology._validate_metrics_payload(self._ctx(), payload, endpoint_region=None)
+
+    @pytest.mark.parametrize(
+        "counts",
+        [
+            {"gpu_allocatable": 4, "gpu_requested": 1, "gpu_percent": 25.0},
+            # Served rounded to two decimals.
+            {"gpu_allocatable": 3, "gpu_requested": 1, "gpu_percent": 33.33},
+            # Over-commit while a device plugin restarts is a real reading.
+            {"gpu_allocatable": 1, "gpu_requested": 2, "gpu_percent": 200.0},
+        ],
+    )
+    def test_metrics_payload_accepts_counts_that_give_the_share(
+        self, counts: dict[str, Any]
+    ) -> None:
+        payload = self._metrics(resource_utilization=self._utilization(**counts))
+        assert (
+            checks_topology._validate_metrics_payload(self._ctx(), payload, endpoint_region=None)
+            == payload
+        )
 
 
 def _warmup_sample(**overrides: Any) -> dict[str, Any]:

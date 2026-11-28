@@ -67,6 +67,7 @@ Click command definitions that wire CLI flags to the business logic above.
 | `costs_cmd.py` | `gco costs ...` |
 | `crossplane_cmd.py` | `gco crossplane status`, `open`, `screenshot` |
 | `dag_cmd.py` | `gco dag ...` |
+| `dashboard_cmd.py` | `gco dashboard start`, `serve`, `status`, `open`, `logs`, `stop` |
 | `deps_cmd.py` | `gco deps scan` |
 | `examples_cmd.py` | `gco examples ...` |
 | `files_cmd.py` | `gco files ...` |
@@ -105,8 +106,28 @@ GPU capacity checking, region recommendation, and AI-powered advisory.
 | `models.py` | Data models for capacity responses |
 | `multi_region.py` | Cross-region capacity aggregation and comparison, including the HyperPod- and PCS-only rankings |
 | `placement.py` | What a manifest asks of a Region (HyperPod routing, GPUs requested), read by `gco jobs submit-sqs --auto-region` |
+| `runai.py` | Read-only GPU capacity from an NVIDIA Run:ai control plane (`gco capacity runai`): node pools' free and whole GPUs, GPU models matched to EC2 families, project quota headroom |
 | `traffic_dial.py` | Manual Global Accelerator traffic-dial controls (`gco capacity traffic-dial show`, `set`, `clear`) |
 | `training_plans.py` | SageMaker Training Plan offering search and account listing (`gco capacity find-training-plans`, `training-plans`): the reserved capacity HyperPod instance groups launch into |
+
+### dashboard/
+
+The local web dashboard behind `gco dashboard` ([guide](../docs/DASHBOARD.md)): a Streamlit app that reaches the fleet through the same managers and API client as the commands. Streamlit, Altair, pydeck and pandas come from the optional `dashboard` extra; no module imports Streamlit at package import, so `gco` loads `server.py` and `container.py` without it.
+
+| File | Description |
+|------|-------------|
+| `app.py` | Streamlit entrypoint: page set-up, the access-token check, the sidebar and the navigation |
+| `app_pages/` | One two-line script per page, which renders its view (Streamlit runs these by path) |
+| `views/` | One module per page (`overview`, `jobs`, `queue`, `inference`, `capacity`, `costs`, `platform`, `console`), each with a `render()` |
+| `data.py` | `FleetData`, the dashboard's only path to AWS and the GCO API; no Streamlit |
+| `ui.py` | Cached `load_*` readers, error cards, confirmations, toasts, the sidebar, the access-token gate and shared widgets |
+| `frames.py` | API answers to pandas DataFrames |
+| `charts.py` | DataFrames to Altair charts, the pydeck world map and the topology diagram |
+| `submit.py` | The job submission dialog the Jobs and Queue pages share |
+| `server.py` | Starts Streamlit with locked-down settings (`gco dashboard serve` and the image's `CMD`) and probes its health |
+| `container.py` | The dashboard container (`gco dashboard start`, `stop`, `status`, `logs`): builds `Dockerfile.dashboard`, runs it locked down, and keeps the state file `~/.gco/dashboard.json` |
+| `brand.py`, `regions.py` | Colours and the icon; Region names and map coordinates |
+| `assets/`, `.streamlit/` | The offline world map, derived from the public-domain 1:110m land polygons of [Natural Earth](https://www.naturalearthdata.com/), and the light and dark themes |
 
 ## Installation
 

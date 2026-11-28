@@ -238,7 +238,9 @@ def test_same_holder_with_matching_persisted_epoch_renews_lease() -> None:
         metadata=SimpleNamespace(annotations={"gco.io/leader-epoch": "epoch-1"}),
         spec=SimpleNamespace(
             holder_identity="pod-a",
+            acquire_time=None,
             renew_time=datetime.now(UTC),
+            lease_transitions=1,
             lease_duration_seconds=30,
         ),
     )
@@ -249,6 +251,8 @@ def test_same_holder_with_matching_persisted_epoch_renews_lease() -> None:
         assert monitor._try_acquire_lease("lease", "pod-a") is True
 
     api.replace_namespaced_lease.assert_called_once()
+    assert monitor._leader_epoch == "epoch-1"
+    assert lease.spec.lease_transitions == 1
 
 
 def test_lease_renewal_loop_can_complete_successful_iteration_before_stop() -> None:

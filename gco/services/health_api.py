@@ -182,13 +182,22 @@ async def background_health_monitor() -> None:
             # probes and the API.
             if health_metrics and current_health_status:
                 try:
-                    await asyncio.to_thread(
-                        health_metrics.publish_resource_utilization,
-                        cpu_percent=current_health_status.resource_utilization.cpu,
-                        memory_percent=current_health_status.resource_utilization.memory,
-                        gpu_percent=current_health_status.resource_utilization.gpu,
-                        active_jobs=current_health_status.active_jobs,
-                    )
+                    utilization = current_health_status.resource_utilization
+                    active_jobs = current_health_status.active_jobs
+                    # A status without a cluster reading publishes no
+                    # utilization, leaving a gap in each series: a zero would
+                    # chart an idle cluster, and ``gco capacity`` would rank
+                    # the Region as the emptiest instead of as unmeasured.
+                    if utilization is not None and active_jobs is not None:
+                        await asyncio.to_thread(
+                            health_metrics.publish_resource_utilization,
+                            cpu_percent=utilization.cpu,
+                            memory_percent=utilization.memory,
+                            gpu_percent=utilization.gpu,
+                            active_jobs=active_jobs,
+                            gpu_allocatable=utilization.gpu_allocatable,
+                            gpu_requested=utilization.gpu_requested,
+                        )
                     # Also publish health status
                     threshold_violations = (
                         current_health_status.get_threshold_violations()
@@ -288,6 +297,35 @@ async def health_check() -> JSONResponse:
         )
 
 
+#: The keys of ``/api/v1/metrics``'s ``resource_utilization`` object.
+UTILIZATION_KEYS = (
+    "cpu_percent",
+    "memory_percent",
+    "gpu_percent",
+    "gpu_allocatable",
+    "gpu_requested",
+)
+
+
+def _utilization_document(status: HealthStatus) -> dict[str, Any]:
+    """``resource_utilization`` as ``/api/v1/metrics`` serves it.
+
+    Every value is null in a status without a cluster reading. ``gpu_percent``
+    is 0 with no GPU nodes and with idle GPUs alike; the counts (null when not
+    counted) tell the two apart.
+    """
+    utilization = status.resource_utilization
+    if utilization is None:
+        return dict.fromkeys(UTILIZATION_KEYS)
+    return {
+        "cpu_percent": round(utilization.cpu, 2),
+        "memory_percent": round(utilization.memory, 2),
+        "gpu_percent": round(utilization.gpu, 2),
+        "gpu_allocatable": utilization.gpu_allocatable,
+        "gpu_requested": utilization.gpu_requested,
+    }
+
+
 @app.get("/api/v1/metrics")
 async def get_metrics() -> dict[str, Any]:
     """
@@ -307,11 +345,7 @@ async def get_metrics() -> dict[str, Any]:
             "region": current_health_status.region,
             "timestamp": current_health_status.timestamp.isoformat(),
             "status": current_health_status.status,
-            "resource_utilization": {
-                "cpu_percent": round(current_health_status.resource_utilization.cpu, 2),
-                "memory_percent": round(current_health_status.resource_utilization.memory, 2),
-                "gpu_percent": round(current_health_status.resource_utilization.gpu, 2),
-            },
+            "resource_utilization": _utilization_document(current_health_status),
             "thresholds": {
                 "cpu_threshold": current_health_status.thresholds.cpu_threshold,
                 "memory_threshold": current_health_status.thresholds.memory_threshold,

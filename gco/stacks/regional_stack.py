@@ -207,8 +207,8 @@ from gco.stacks.lambda_assets import lambda_source_code
 from gco.stacks.pcs_cluster import PcsCluster
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-24T22:25:50Z
-# Generated from Git commit: afbf93e626d691e7aa49495693b396b7ec7188ac
+# Generated at (UTC): 2026-11-27T20:35:51Z
+# Generated from Git commit: 6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -461,6 +461,9 @@ _SERVICE_IMAGE_COMMON_EXCLUDES = (
     "cli/**",
     "gco/stacks/**",
     "dockerfiles/README.md",
+    # .dockerignore keeps the TLS certificate manager's files for that
+    # image's root-context build; no service image copies them.
+    "lambda/**",
 )
 
 
@@ -629,8 +632,9 @@ def _validated_manifest_caps(raw: object, resource_quota: dict[str, str]) -> dic
 
     Three layers govern job resources and must tell one story: the
     manifest/queue processors cap what a single submitted manifest may total
-    (these values), the LimitRange caps each container, and the namespace
-    ResourceQuota caps the aggregate. Enforce
+    (these values), the LimitRange (CPU, memory) and the GPU cap admission
+    policy cap each container, and the namespace ResourceQuota caps the
+    aggregate. Enforce
     ``container_max_* <= *_per_manifest <= max_*`` at synth so the front door
     never rejects a manifest whose pods the namespace would admit and never
     accepts one that can never run — previously the defaults disagreed
@@ -672,7 +676,7 @@ def _validated_manifest_caps(raw: object, resource_quota: dict[str, str]) -> dic
                 f"job_validation_policy.resource_quotas.{manifest_key}="
                 f"{merged[manifest_key]!r} is below resource_quota.{container_key}="
                 f"{resource_quota[container_key]!r}: the front door would reject a "
-                "manifest whose single container the LimitRange admits"
+                "manifest whose single container the per-container ceiling admits"
             )
         if parsed[manifest_key] > namespace_value:
             raise ValueError(
@@ -2499,6 +2503,37 @@ class GCORegionalStack(Stack):
         {"key": KEEP_WARM_LABEL, "operator": "Exists", "effect": "NoSchedule"},
     ]
 
+    # Where the CloudWatch add-on's DCGM exporter runs: every node with an
+    # NVIDIA GPU. The add-on's own default is an instance-type allowlist frozen
+    # at each add-on release, so a GPU family newer than the release (g7 on
+    # v7.0.0) got no Container Insights GPU series at all, and KEDA's GPU
+    # autoscaling, the CloudWatch GPU widgets and the capacity checks read
+    # nothing there. EKS Auto Mode labels every NVIDIA node with its GPU
+    # manufacturer whichever NodePool launched it; GCO's own DCGM exporter
+    # (manifests/50-dcgm-exporter.yaml) selects on the same label.
+    _NVIDIA_GPU_NODE_AFFINITY: ClassVar[dict[str, Any]] = {
+        "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [
+                    {
+                        "matchExpressions": [
+                            {
+                                "key": "eks.amazonaws.com/instance-gpu-manufacturer",
+                                "operator": "In",
+                                "values": ["nvidia"],
+                            },
+                            {
+                                "key": "eks.amazonaws.com/compute-type",
+                                "operator": "NotIn",
+                                "values": ["fargate"],
+                            },
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+
     def _create_pod_identity_agent_addon(self) -> None:
         """Create EKS Pod Identity Agent add-on.
 
@@ -2691,6 +2726,7 @@ class GCORegionalStack(Stack):
                 "containerLogs": {
                     "enabled": True,
                 },
+                "dcgmExporter": {"affinity": self._NVIDIA_GPU_NODE_AFFINITY},
                 # Application Signals auto-monitor injects ADOT
                 # auto-instrumentation into matching workloads. The GCO API
                 # services already export their own OpenTelemetry spans and
@@ -4873,12 +4909,16 @@ class GCORegionalStack(Stack):
         )
 
         # Resource governance for gco-jobs namespace: ResourceQuota caps aggregate
-        # resource consumption across the namespace, LimitRange caps per-container
-        # maxima. Values come from cdk.json `resource_quota` context merged
+        # resource consumption across the namespace, the LimitRange caps
+        # per-container CPU and memory, and the gco-jobs-container-gpu-limit
+        # admission policy caps per-container GPUs (LIMIT_MAX_GPU is a CEL
+        # integer literal there and the cap its annotation reports). Values
+        # come from cdk.json `resource_quota` context merged
         # over gco.stacks.constants.DEFAULT_RESOURCE_QUOTA (per-container
         # maxima sized to one full accelerator-node slice) and validated at
-        # synth: every value must parse as a Kubernetes quantity and the
-        # container maxima must fit inside the namespace ceilings.
+        # synth: every value must parse as a Kubernetes quantity, the GPU cap
+        # must be a whole number from 0 to 999, and the container maxima must
+        # fit inside the namespace ceilings.
         resource_quota = _validated_resource_quota(
             self.node.try_get_context("resource_quota") or {}
         )

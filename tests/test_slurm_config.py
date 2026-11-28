@@ -316,7 +316,8 @@ class TestConfMaps:
         with pytest.raises(sc.SlurmConfigError, match=r"helm\.slurm\.slurm_conf must be an object"):
             _validate(_on(slurm_conf="MaxJobCount=1"))
 
-    @pytest.mark.parametrize("key", ["Max Jobs", "1abc", "", "a" * 65, "Key-Name"])
+    # "MaxJobCount\n": ``$`` also matches before a final newline; the check is a fullmatch.
+    @pytest.mark.parametrize("key", ["Max Jobs", "1abc", "", "a" * 65, "Key-Name", "MaxJobCount\n"])
     def test_keys_must_be_parameter_names(self, key: str) -> None:
         with pytest.raises(
             sc.SlurmConfigError, match=r"is not a Slurm configuration parameter name"
@@ -365,7 +366,10 @@ class TestPartitions:
         with pytest.raises(sc.SlurmConfigError, match=r"partitions\.cpu must be an object"):
             _validate(_on(partitions={"cpu": "big"}))
 
-    @pytest.mark.parametrize("name", ["Cpu", "-gpu", "gpu_", "a" * 33, "1gpu", "gpu-", "gp.u"])
+    # "gpu\n": ``$`` also matches before a final newline; the check is a fullmatch.
+    @pytest.mark.parametrize(
+        "name", ["Cpu", "-gpu", "gpu_", "a" * 33, "1gpu", "gpu-", "gp.u", "gpu\n"]
+    )
     def test_partition_name_must_be_a_short_dns_label(self, name: str) -> None:
         with pytest.raises(sc.SlurmConfigError, match=r"invalid partition name"):
             _validate(_on(partitions={name: _partition()}))
@@ -502,7 +506,8 @@ class TestPartitions:
         config = _validate(_on(partitions={"cpu": {"max_time": value}}))
         assert config["partitions"]["cpu"]["max_time"] == value.strip()
 
-    @pytest.mark.parametrize("features", ["fast", [1], ["bad feature"], ["ok", "-x"]])
+    # ["fast\n"]: ``$`` also matches before a final newline; the check is a fullmatch.
+    @pytest.mark.parametrize("features", ["fast", [1], ["bad feature"], ["ok", "-x"], ["fast\n"]])
     def test_features_must_be_feature_names(self, features: object) -> None:
         with pytest.raises(
             sc.SlurmConfigError, match=r"features must be a list of Slurm feature names"
@@ -581,9 +586,12 @@ class TestDeploymentCoherence:
             _validate(_on(partitions={"cpu": {field: value}}))
 
     def test_more_gpus_than_the_container_ceiling(self) -> None:
+        # The GPU ceiling is the gco-jobs-container-gpu-limit admission policy,
+        # not the LimitRange, whose GPU entry let every pod onto GPU nodes.
         with pytest.raises(
             sc.SlurmConfigError,
-            match=r"partitions\.gpu\.gpus=9 exceeds resource_quota\.container_max_gpu",
+            match=r"partitions\.gpu\.gpus=9 exceeds resource_quota\.container_max_gpu='8': "
+            r"the GPU cap admission policy would reject every worker pod",
         ):
             _validate(_on(partitions={"gpu": {"gpus": 9}}))
 
@@ -677,8 +685,10 @@ class TestChartValues:
         assert controller["podSpec"]["affinity"] == sc.PLATFORM_POD_AFFINITY
 
     def test_every_non_worker_pod_stays_off_accelerator_pools(self, values: dict[str, Any]) -> None:
-        """Regression: the controller landed on a g4dn (LimitRange gpu:0 default +
-        ExtendedResourceToleration) and do-not-disrupt pinned it there."""
+        """Regression: the controller landed on a g4dn (the old LimitRange gpu:0
+        default + ExtendedResourceToleration) and do-not-disrupt pinned it there.
+        The LimitRange names no GPU now; the placement keeps these pods off the
+        accelerator pools whatever else gives them a GPU toleration."""
         pods = {
             "controller": values["controller"]["podSpec"],
             "restapi": values["restapi"]["podSpec"],

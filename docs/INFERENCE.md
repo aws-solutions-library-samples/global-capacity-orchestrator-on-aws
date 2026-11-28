@@ -215,7 +215,14 @@ container that syncs model weights from S3 to regional EFS.
 
 One monitor pod per Region reconciles at a time, holding the
 `inference-monitor-leader` Lease (three reconcile intervals long, renewed every
-interval while a pass runs); the other replica stands by. Every Kubernetes call
+interval while a pass runs); the other replica stands by. The manifests create
+that Lease (`02-rbac.yaml`), and the monitor may only read and update it; while
+it is missing, no replica reconciles and both log a warning. The standby takes
+the Lease only after seeing its record unchanged for a full Lease duration, and
+the leader stops mutating one Lease duration after its last successful renewal.
+Both are timed on the pod's own monotonic clock, never by comparing the
+record's `renewTime` with the pod's wall clock, so a pod whose clock runs ahead
+cannot take a Lease that is still being renewed. Every Kubernetes call
 the monitor makes is bounded by `K8S_API_TIMEOUT` (default 30 seconds per
 attempt), and a pass that finishes no endpoint for ten reconcile intervals
 (150 seconds at the default 15) stops renewing the Lease, so a wedged leader

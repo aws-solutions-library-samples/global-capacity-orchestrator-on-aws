@@ -28,7 +28,7 @@ def _get_manager() -> Any:
 
 def _inference_resource(endpoint_name: str) -> str:
     """Return the stored spec for ``endpoint_name`` as JSON."""
-    if not _ENDPOINT_NAME_RE.match(endpoint_name):
+    if not _ENDPOINT_NAME_RE.fullmatch(endpoint_name):
         return json.dumps(
             {
                 "error": "invalid endpoint_name",

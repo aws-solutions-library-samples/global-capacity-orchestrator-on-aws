@@ -1,7 +1,8 @@
 """CEL for the ValidatingAdmissionPolicy tests, compiled and run by cel-expr-python.
 
-The admission policies' own expressions (``08-internal-ca-issuance.yaml``,
-``09-tenant-write-fence.yaml``) run here for
+The admission policies' own expressions (``04-resource-quotas.yaml``'s GPU
+cap, ``08-internal-ca-issuance.yaml``, ``09-tenant-write-fence.yaml``) run here
+for ``tests/test_resource_quota_manifest.py``,
 ``tests/test_internal_tls_manifests.py`` and ``tests/test_tenant_write_fence.py``
 through cel-expr-python, the CEL project's Python binding of cel-cpp, pinned in
 the ``test`` extra. The environment is CEL's standard library with one

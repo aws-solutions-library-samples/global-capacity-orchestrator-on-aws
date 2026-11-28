@@ -15,6 +15,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from cli.config import GCOConfig, get_config
+from gco.services.structured_logging import sanitize_log_value
 
 from . import blocks
 from .backends import (
@@ -47,6 +48,20 @@ _OLDEST_TIMESTAMP = datetime.min.replace(tzinfo=UTC)
 #: namespaces with a pending or running pod) every 30 seconds.
 _ACTIVE_JOBS_NAMESPACE = "GCO/HealthMonitor"
 _ACTIVE_JOBS_METRIC = "ActiveJobs"
+#: The same monitor's share of the cluster's allocatable GPUs that pods have
+#: requested. It is published for every cluster (0 when the cluster has no GPU
+#: nodes), so it stands in when Container Insights has no GPU utilization
+#: series: a cluster with no GPU nodes, or GPU nodes the CloudWatch add-on's
+#: DCGM exporter does not run on.
+_GPU_ALLOCATION_METRIC = "ClusterGpuUtilization"
+#: The GPU counts behind that share, from the same monitor: the GPUs the nodes
+#: report as allocatable and the GPUs running pods request. The share is 0 both
+#: without GPU nodes and with idle GPUs; the counts tell the two apart.
+_GPU_ALLOCATABLE_METRIC = "ClusterGpuAllocatable"
+_GPU_REQUESTED_METRIC = "ClusterGpuRequested"
+#: Why a Region without GPU nodes is still a fit for GPU work. It scores as
+#: uncontended (0% GPU use): EKS Auto Mode launches GPU nodes when a pod asks.
+NO_GPU_NODES_REASON = "no GPU nodes running (Auto Mode launches them on demand)"
 #: The regional API route the PCS ranking reads Slurm's queue from.
 _SLURM_STATUS_PATH = "/api/v1/slurm/status"
 
@@ -80,6 +95,13 @@ class RegionCapacity:
     ``queue_depth`` is the Region's SQS job queue backlog. ``running_jobs`` is
     the health monitor's ``ActiveJobs`` metric: Jobs in the job namespaces
     with a pending or running pod (the ``jobs`` signal).
+
+    ``total_gpus`` and ``available_gpus`` are the health monitor's GPU counts:
+    the GPUs the nodes report as allocatable, and those no running pod has
+    requested. Both are None when the counts were not read (a monitor that
+    predates them publishes none). They are not scored; ``total_gpus == 0``
+    says the Region has no GPU nodes, so its 0% ``gpu_utilization`` is no
+    idle GPU (see :attr:`without_gpu_nodes`).
     """
 
     region: str
@@ -88,8 +110,8 @@ class RegionCapacity:
     running_jobs: int = 0
     gpu_utilization: float = 0.0
     cpu_utilization: float = 0.0
-    available_gpus: int = 0
-    total_gpus: int = 0
+    available_gpus: int | None = None
+    total_gpus: int | None = None
     avg_wait_time_seconds: int = 0
     recommendation_score: float = 0.0
     telemetry_status: str = "unknown"
@@ -100,6 +122,11 @@ class RegionCapacity:
     hyperpod: HyperpodCapacity | None = None
     #: The Region's AWS PCS cluster, read only when the ``pcs`` backend is asked for.
     pcs: PcsCapacity | None = None
+
+    @property
+    def without_gpu_nodes(self) -> bool:
+        """Whether the health monitor counted no allocatable GPU in the Region."""
+        return self.total_gpus == 0
 
 
 class MultiRegionCapacityChecker:
@@ -218,6 +245,11 @@ class MultiRegionCapacityChecker:
                         Statistics=["Average"],
                     )
                     datapoints = response.get("Datapoints", [])
+                    allocation = (
+                        None
+                        if datapoints or signal != "gpu"
+                        else self._gpu_allocation(cloudwatch, stack.cluster_name, region)
+                    )
                     if datapoints:
                         # CloudWatch returns datapoints unordered; read the
                         # newest, as the running-job reading below does.
@@ -226,6 +258,9 @@ class MultiRegionCapacityChecker:
                             key=lambda point: point.get("Timestamp") or _OLDEST_TIMESTAMP,
                         )
                         setattr(capacity, attribute, newest["Average"])
+                        available[signal] = True
+                    elif allocation is not None:
+                        capacity.gpu_utilization = allocation
                         available[signal] = True
                     else:
                         capacity.telemetry_errors.append(
@@ -268,6 +303,12 @@ class MultiRegionCapacityChecker:
                 logger.warning("Unexpected error getting running-job metrics for %s: %s", region, e)
                 capacity.telemetry_errors.append(f"Running-job telemetry failed: {e}")
 
+            counts = self._gpu_counts(cloudwatch, stack.cluster_name, region)
+            if counts is not None:
+                allocatable, requested = counts
+                capacity.total_gpus = allocatable
+                capacity.available_gpus = max(allocatable - requested, 0)
+
         capacity.unavailable_signals = [
             signal for signal, is_available in available.items() if not is_available
         ]
@@ -305,6 +346,65 @@ class MultiRegionCapacityChecker:
                 ),
             )
         return capacity
+
+    @staticmethod
+    def _gpu_allocation(cloudwatch: Any, cluster_name: str, region: str) -> float | None:
+        """The health monitor's newest GPU allocation share for the cluster, or None."""
+        end = datetime.now(UTC)
+        response = cloudwatch.get_metric_statistics(
+            Namespace=_ACTIVE_JOBS_NAMESPACE,
+            MetricName=_GPU_ALLOCATION_METRIC,
+            Dimensions=[
+                {"Name": "ClusterName", "Value": cluster_name},
+                {"Name": "Region", "Value": region},
+            ],
+            StartTime=end - timedelta(minutes=5),
+            EndTime=end,
+            Period=60,
+            Statistics=["Average"],
+        )
+        datapoints = response.get("Datapoints", [])
+        if not datapoints:
+            return None
+        newest = max(datapoints, key=lambda point: point.get("Timestamp") or _OLDEST_TIMESTAMP)
+        return float(newest["Average"])
+
+    @staticmethod
+    def _gpu_counts(cloudwatch: Any, cluster_name: str, region: str) -> tuple[int, int] | None:
+        """The health monitor's newest ``(allocatable, requested)`` GPU counts, or None.
+
+        None when either series has no datapoint in the last five minutes (a
+        monitor that predates the counts publishes neither) or a read fails.
+        The counts are not a scored signal, so a missing one leaves the
+        telemetry status and errors alone.
+        """
+        end = datetime.now(UTC)
+        counts: list[int] = []
+        for metric_name in (_GPU_ALLOCATABLE_METRIC, _GPU_REQUESTED_METRIC):
+            try:
+                response = cloudwatch.get_metric_statistics(
+                    Namespace=_ACTIVE_JOBS_NAMESPACE,
+                    MetricName=metric_name,
+                    Dimensions=[
+                        {"Name": "ClusterName", "Value": cluster_name},
+                        {"Name": "Region", "Value": region},
+                    ],
+                    StartTime=end - timedelta(minutes=5),
+                    EndTime=end,
+                    Period=60,
+                    Statistics=["Maximum"],
+                )
+                datapoints = response.get("Datapoints", [])
+                if not datapoints:
+                    return None
+                newest = max(
+                    datapoints, key=lambda point: point.get("Timestamp") or _OLDEST_TIMESTAMP
+                )
+                counts.append(max(round(newest["Maximum"]), 0))
+            except Exception as e:
+                logger.debug("Failed to get %s for %s: %s", metric_name, region, e)
+                return None
+        return counts[0], counts[1]
 
     def _ml_gpu_lookup(self, region: str) -> Callable[[str], int | None]:
         """GPUs per node of an ``ml.*`` type, from EC2's description of its EC2 twin.
@@ -463,7 +563,9 @@ class MultiRegionCapacityChecker:
                 reasons.append(f"low queue depth ({best.queue_depth})")
 
         if "gpu" not in best.unavailable_signals:
-            if best.gpu_utilization < 50:
+            if best.without_gpu_nodes:
+                reasons.append(NO_GPU_NODES_REASON)
+            elif best.gpu_utilization < 50:
                 reasons.append(f"{100 - best.gpu_utilization:.0f}% GPU available")
             elif best.gpu_utilization < 80:
                 reasons.append(f"moderate GPU utilization ({best.gpu_utilization:.0f}%)")
@@ -482,6 +584,8 @@ class MultiRegionCapacityChecker:
             "score": best.recommendation_score,
             "queue_depth": best.queue_depth,
             "gpu_utilization": best.gpu_utilization,
+            "total_gpus": best.total_gpus,
+            "available_gpus": best.available_gpus,
             "running_jobs": best.running_jobs,
             "telemetry_status": best.telemetry_status,
             "telemetry_errors": best.telemetry_errors or None,
@@ -491,6 +595,8 @@ class MultiRegionCapacityChecker:
                     "score": c.recommendation_score,
                     "queue_depth": c.queue_depth,
                     "gpu_utilization": c.gpu_utilization,
+                    "total_gpus": c.total_gpus,
+                    "available_gpus": c.available_gpus,
                     "telemetry_status": c.telemetry_status,
                 }
                 for c in sorted_capacities
@@ -554,7 +660,10 @@ class MultiRegionCapacityChecker:
                     spot_score = placement_scores.get("regional", 0) / 10.0  # Normalize to 0-1
             except Exception as e:
                 logger.debug(
-                    "Failed to get spot placement score for %s in %s: %s", instance_type, region, e
+                    "Failed to get spot placement score for %s in %s: %s",
+                    sanitize_log_value(instance_type),
+                    region,
+                    e,
                 )
 
             try:
@@ -566,7 +675,10 @@ class MultiRegionCapacityChecker:
                     spot_price_ratio = avg_spot / on_demand_price
             except Exception as e:
                 logger.debug(
-                    "Failed to get spot pricing for %s in %s: %s", instance_type, region, e
+                    "Failed to get spot pricing for %s in %s: %s",
+                    sanitize_log_value(instance_type),
+                    region,
+                    e,
                 )
 
             # Capacity Block trend — compares near-term vs far-term offering
@@ -594,6 +706,8 @@ class MultiRegionCapacityChecker:
                     "score": weighted_score,
                     "queue_depth": cap.queue_depth,
                     "gpu_utilization": cap.gpu_utilization,
+                    "total_gpus": cap.total_gpus,
+                    "available_gpus": cap.available_gpus,
                     "running_jobs": cap.running_jobs,
                     "spot_placement_score": spot_score,
                     "spot_target_instances": spot_target_instances,
@@ -646,14 +760,13 @@ class MultiRegionCapacityChecker:
             elif best["queue_depth"] < 5:
                 reasons.append(f"low queue depth ({best['queue_depth']})")
 
-        if (
-            "gpu"
-            not in next(
-                cap.unavailable_signals for cap in capacities if cap.region == best["region"]
-            )
-            and best["gpu_utilization"] < 50
+        if "gpu" not in next(
+            cap.unavailable_signals for cap in capacities if cap.region == best["region"]
         ):
-            reasons.append(f"{100 - best['gpu_utilization']:.0f}% GPU available")
+            if best["total_gpus"] == 0:
+                reasons.append(NO_GPU_NODES_REASON)
+            elif best["gpu_utilization"] < 50:
+                reasons.append(f"{100 - best['gpu_utilization']:.0f}% GPU available")
 
         if "jobs" not in next(
             cap.unavailable_signals for cap in capacities if cap.region == best["region"]
@@ -676,6 +789,8 @@ class MultiRegionCapacityChecker:
             "score": best["score"],
             "queue_depth": best["queue_depth"],
             "gpu_utilization": best["gpu_utilization"],
+            "total_gpus": best["total_gpus"],
+            "available_gpus": best["available_gpus"],
             "running_jobs": best["running_jobs"],
             "instance_type": instance_type,
             "scoring_method": "weighted",

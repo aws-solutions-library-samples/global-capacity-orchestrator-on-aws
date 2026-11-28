@@ -17,7 +17,8 @@ def action_policy(ctx: RunContext) -> dict[str, Any]:
 
     ``GET /api/v1/policy`` answers "will this cluster admit the job I am about
     to pay to run" in three layers: the front-door per-manifest caps, the
-    per-container ``LimitRange``, and the namespace aggregate ``ResourceQuota``.
+    per-container ceilings (the ``LimitRange`` for CPU and memory, the GPU cap
+    admission policy for GPUs), and the namespace aggregate ``ResourceQuota``.
 
     The cluster-read layers are fail-soft by design, and the degraded response
     is an HTTP 200 carrying a per-namespace ``status`` field. Every

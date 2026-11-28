@@ -78,6 +78,8 @@ def _steady_monitor() -> tuple[im.InferenceMonitor, dict[str, Any], MagicMock]:
         store.get_endpoint.return_value = endpoint
         monitor = im.InferenceMonitor("cluster", REGION, store)
     monitor._lease_name, monitor._lease_holder, monitor._leader_epoch = "lease", "me", "E"
+    # The leader's own hold, written just now on its monotonic Lease clock.
+    monitor._lease_written_at = monitor._lease_clock()
     sidecar = im.build_endpoint_tls_proxy(8000, "ep-tls-proxy")
 
     def deployment(name: str, namespace: str, **_kwargs: Any) -> MagicMock:

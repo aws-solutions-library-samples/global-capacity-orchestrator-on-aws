@@ -13,17 +13,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from gco.aws_names import is_aws_region_name
+
 logger = logging.getLogger(__name__)
 
 # EKS cluster names: 1-100 chars, alphanumeric and hyphens only.
-# AWS region names: e.g. us-east-1, ap-southeast-2, eu-central-1.
 _CLUSTER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]{0,99}$")
-_REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 
 
 def _validate_cluster_name(cluster_name: str) -> None:
     """Raise ValueError if cluster_name contains characters outside the EKS naming rules."""
-    if not _CLUSTER_NAME_RE.match(cluster_name):
+    if not _CLUSTER_NAME_RE.fullmatch(cluster_name):
         raise ValueError(
             f"Invalid cluster name {cluster_name!r}: must be 1-100 alphanumeric/hyphen characters"
         )
@@ -31,7 +31,7 @@ def _validate_cluster_name(cluster_name: str) -> None:
 
 def _validate_region(region: str) -> None:
     """Raise ValueError if region does not match the standard AWS region pattern."""
-    if not _REGION_RE.match(region):
+    if not is_aws_region_name(region):
         raise ValueError(f"Invalid AWS region {region!r}: expected format like 'us-east-1'")
 
 
@@ -263,9 +263,9 @@ def build_port_forward_command(
     :func:`update_kubeconfig` returned; it supplies the cluster's credentials
     and CA even when ``server`` overrides the endpoint.
     """
-    if not _NAMESPACE_RE.match(namespace):
+    if not _NAMESPACE_RE.fullmatch(namespace):
         raise ValueError(f"Invalid namespace {namespace!r}")
-    if not _PF_TARGET_RE.match(target):
+    if not _PF_TARGET_RE.fullmatch(target):
         raise ValueError(
             f"Invalid port-forward target {target!r}: expected kind/name "
             "(svc|service|pod|deploy|deployment)"
@@ -279,7 +279,7 @@ def build_port_forward_command(
             raise ValueError(f"Invalid --server {server!r}: must start with https://")
         cmd += ["--server", server]
     if tls_server_name is not None:
-        if not re.match(r"^[a-zA-Z0-9.\-]{1,255}$", tls_server_name):
+        if not re.fullmatch(r"^[a-zA-Z0-9.\-]{1,255}$", tls_server_name):
             raise ValueError(f"Invalid --tls-server-name {tls_server_name!r}")
         cmd += ["--tls-server-name", tls_server_name]
     return cmd + kubectl_context_flags(context)

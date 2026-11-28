@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +162,44 @@ class TestValidation:
     def test_malformed_blocks_fail_by_name(self, raw: object, match: str) -> None:
         with pytest.raises(hp.HyperpodConfigError, match=match):
             _validate(raw)
+
+    @pytest.mark.parametrize(
+        ("block", "value", "match"),
+        [
+            (
+                lambda v: {"cluster_name": v},
+                "gco-hyperpod",
+                r"hyperpod\.cluster_name must be 1-63",
+            ),
+            (
+                lambda v: {"instance_groups": [{"name": v}]},
+                "gpu",
+                r"instance_groups\[0\]\.name must be 1-63",
+            ),
+            (
+                lambda v: {"instance_groups": [{"instance_type": v}]},
+                "ml.g5.8xlarge",
+                r"instance_type must be a SageMaker HyperPod instance type",
+            ),
+            (
+                lambda v: {"instance_groups": [{"training_plan_arn": v}]},
+                "arn:aws:sagemaker:us-east-1:123456789012:training-plan/plan",
+                r"training_plan_arn must be a SageMaker training-plan ARN",
+            ),
+            (
+                lambda v: {"availability_zone": v},
+                "us-east-1a",
+                r"hyperpod\.availability_zone must be an Availability Zone",
+            ),
+        ],
+    )
+    def test_a_trailing_newline_is_refused(
+        self, block: Callable[[str], dict[str, Any]], value: str, match: str
+    ) -> None:
+        """``$`` also matches before a final newline, so each check is a fullmatch."""
+        _validate(block(value))
+        with pytest.raises(hp.HyperpodConfigError, match=match):
+            _validate(block(f"{value}\n"))
 
     @pytest.mark.parametrize("quantity", ["4Ki", "1.5Ti", "2e3", " 64 "])
     def test_queue_quotas_take_any_api_server_quantity(self, quantity: str) -> None:

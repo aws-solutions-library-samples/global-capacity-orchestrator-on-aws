@@ -4,9 +4,9 @@ Extended tests for gco/services/health_api.py.
 Covers the async lifespan context manager (successful startup and
 failure propagation), the stale-status refresh logic where the API
 reruns the health monitor when the cached HealthStatus is older
-than two minutes, and associated edge cases around cluster_id/region
-attribute passthrough. Complements test_health_api.py which covers
-the route surface.
+than two minutes, associated edge cases around cluster_id/region
+attribute passthrough, and the GPU counts /api/v1/metrics carries beside
+gpu_percent. Complements test_health_api.py which covers the route surface.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -287,6 +287,48 @@ class TestMetricsEndpointSuccess:
         finally:
             health_api_module.health_monitor = original_monitor
             health_api_module.current_health_status = original_status
+
+    @pytest.mark.parametrize(
+        ("counts", "expected"),
+        [
+            ({"gpu_allocatable": 2, "gpu_requested": 2}, (2, 2)),
+            ({"gpu_allocatable": 0, "gpu_requested": 0}, (0, 0)),
+            ({}, (None, None)),
+        ],
+        ids=["gpus-requested", "no-gpu-nodes", "not-measured"],
+    )
+    @pytest.mark.asyncio
+    async def test_metrics_carry_the_gpu_counts(self, counts, expected):
+        """``gpu_percent`` reads 0 for a cluster without GPUs; the counts say so (null if unknown)."""
+        from gco.models import HealthStatus, ResourceThresholds, ResourceUtilization
+
+        gpu = 100.0 if expected == (2, 2) else 0.0
+        status = HealthStatus(
+            cluster_id="test-cluster",
+            region="us-east-1",
+            timestamp=datetime.now(UTC),
+            status="healthy",
+            resource_utilization=ResourceUtilization(cpu=12.3456, memory=60.0, gpu=gpu, **counts),
+            thresholds=ResourceThresholds(cpu_threshold=80, memory_threshold=85, gpu_threshold=-1),
+            active_jobs=1,
+        )
+
+        import gco.services.health_api as health_api_module
+
+        original_status = health_api_module.current_health_status
+        health_api_module.current_health_status = status
+        try:
+            result = await health_api_module.get_metrics()
+        finally:
+            health_api_module.current_health_status = original_status
+
+        assert result["resource_utilization"] == {
+            "cpu_percent": 12.35,
+            "memory_percent": 60.0,
+            "gpu_percent": gpu,
+            "gpu_allocatable": expected[0],
+            "gpu_requested": expected[1],
+        }
 
 
 class TestMetricsEndpointException:

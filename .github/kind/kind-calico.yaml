@@ -1,12 +1,26 @@
-# kind cluster config used by integration:kind:cluster-e2e.
-# Disables the default kindnet CNI so Calico can be installed on top
-# and actually enforce the NetworkPolicy resources from
+# kind cluster config used by integration:kind:cluster-e2e, cost-pipeline and
+# examples-smoke. Disables the default kindnet CNI so Calico can be installed
+# on top and actually enforce the NetworkPolicy resources from
 # lambda/kubectl-applier-simple/manifests/03-network-policies.yaml.
 # kindnet itself does not enforce NetworkPolicy.
+#
+# The API server also runs the ExtendedResourceToleration admission plugin,
+# which EKS enables and kube-apiserver does not by default: it gives a pod a
+# toleration of the taint of each extended resource it names (nvidia.com/gpu
+# included, even at quantity 0), so a GPU entry in the gco-jobs LimitRange
+# would let every pod onto GPU nodes. cluster-e2e proves the shipped
+# LimitRange gives a defaulted pod no such toleration. NodeRestriction is
+# kubeadm's own default for the flag, kept.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
   disableDefaultCNI: true
   podSubnet: "192.168.0.0/16"
+kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        enable-admission-plugins: NodeRestriction,ExtendedResourceToleration
 nodes:
   - role: control-plane

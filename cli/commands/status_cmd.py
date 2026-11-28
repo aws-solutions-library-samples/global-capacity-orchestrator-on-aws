@@ -12,6 +12,11 @@ from ..config import GCOConfig
 from ..output import get_output_formatter
 from ..status import (
     COST_REFRESH_INTERVAL_SECONDS,
+    HEALTH_HEALTHY,
+    HEALTH_IN_PROGRESS,
+    HEALTH_UNHEALTHY,
+    HEALTH_UNKNOWN,
+    SECTION_ADDONS,
     SECTION_CAPACITY,
     SECTION_COSTS,
     SECTION_INFERENCE,
@@ -24,10 +29,12 @@ from ..status import (
     SEVERITY_ERROR,
     STATUS_EMPTY,
     STATUS_OK,
+    STATUS_PARTIAL,
     WATCH_INTERVAL_FLOOR_SECONDS,
     FleetStatus,
     Section,
     gather_fleet_status,
+    one_line,
 )
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
@@ -40,6 +47,7 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 _DRILL_DOWNS = {
     SECTION_REGIONS: "gco stacks regions list",
     SECTION_STACKS: "gco stacks status <name> --region <region>",
+    SECTION_ADDONS: "gco stacks addons status --all-regions",
     SECTION_QUEUE: "gco jobs queue-status --all-regions",
     SECTION_JOBS: "gco queue stats",
     SECTION_CAPACITY: "gco capacity status",
@@ -64,11 +72,50 @@ def _render_stacks(data: dict[str, Any]) -> list[str]:
     optional = list(data.get("optional", []))
     width = max((len(str(e.get("name"))) for e in entries + optional), default=0)
     for entry, marker in [(e, "") for e in entries] + [(e, "  (optional)") for e in optional]:
-        status_text = entry.get("status") or "-"
+        # A stack whose read failed has no status; "-" would read as absent.
+        unread = entry.get("health") == HEALTH_UNKNOWN
+        status_text = entry.get("status") or ("could not be read" if unread else "-")
         lines.append(
             f"{entry.get('name')!s:<{width}}  {status_text:<25}  "
             f"{entry.get('health')!s:<12}  {entry.get('region')}{marker}"
         )
+    return lines
+
+
+#: How much of an add-on's message its row shows; the drill-down prints all of it.
+_ADDON_MESSAGE_CHARS = 80
+#: The order rows that are not healthy are listed in: failures, then teardowns,
+#: then any other status.
+_ADDON_HEALTH_RANK = {HEALTH_UNHEALTHY: 0, HEALTH_IN_PROGRESS: 1}
+
+
+def _render_addons(data: dict[str, Any]) -> list[str]:
+    """Every add-on that is not healthy, failures first, then one summary line per Region."""
+    by_region = data.get("by_region", {})
+    problems = sorted(
+        (
+            (region, record)
+            for region, entry in by_region.items()
+            for record in entry.get("addons", [])
+            if record.get("health") != HEALTH_HEALTHY
+        ),
+        key=lambda item: _ADDON_HEALTH_RANK.get(item[1].get("health"), 2),
+    )
+    width = max((len(str(record.get("name"))) for _, record in problems), default=0)
+    lines = [
+        f"{region:<15}  {record.get('status')!s:<15}  {record.get('name')!s:<{width}}  "
+        f"{one_line(str(record.get('message') or ''), _ADDON_MESSAGE_CHARS)}".rstrip()
+        for region, record in problems
+    ]
+    for region, entry in by_region.items():
+        records = entry.get("addons", [])
+        if not entry.get("readable", True):
+            lines.append(f"{region:<15}  could not be read")
+        elif not records:
+            lines.append(f"{region:<15}  no add-on status recorded yet")
+        else:
+            healthy = sum(1 for record in records if record.get("health") == HEALTH_HEALTHY)
+            lines.append(f"{region:<15}  {healthy} of {len(records)} healthy")
     return lines
 
 
@@ -112,10 +159,12 @@ def _render_capacity(data: dict[str, Any]) -> list[str]:
     for region, entry in data.get("by_region", {}).items():
         signals = ", ".join(entry.get("unavailable_signals", []))
         missing = f"  (unavailable: {signals})" if signals else ""
+        # A Region without GPU nodes reads 0% GPU, which is no idle GPU.
+        gpu = "none" if entry.get("total_gpus") == 0 else f"{entry.get('gpu_utilization', 0.0):.1f}"
         lines.append(
             f"{region:<15}  queue {entry.get('queue_depth', 0):<4} "
             f"running {entry.get('running_jobs', 0):<4} "
-            f"gpu {entry.get('gpu_utilization', 0.0):<5.1f} "
+            f"gpu {gpu:<5} "
             f"cpu {entry.get('cpu_utilization', 0.0):<5.1f} "
             f"telemetry {entry.get('telemetry_status')}{missing}"
         )
@@ -167,6 +216,7 @@ def _render_nodepools(data: dict[str, Any]) -> list[str]:
 _SECTION_BODIES = {
     SECTION_REGIONS: _render_regions,
     SECTION_STACKS: _render_stacks,
+    SECTION_ADDONS: _render_addons,
     SECTION_QUEUE: _render_queue,
     SECTION_JOBS: _render_jobs,
     SECTION_CAPACITY: _render_capacity,
@@ -177,22 +227,26 @@ _SECTION_BODIES = {
 
 
 def _render_section(section: Section) -> list[str]:
-    """One compact block: heading with status and drill-down, then detail."""
+    """One compact block: heading with status and drill-down, then detail.
+
+    A ``partial`` section shows what it did read, then its reason and errors
+    for the rest, so one unreadable stack or Region does not hide the others.
+    """
     heading = f"{section.name} [{section.status}]"
     drill = _DRILL_DOWNS.get(section.name)
     if drill:
         heading = f"{heading}  ·  {drill}"
     lines = [heading]
 
-    if section.status in (STATUS_OK, STATUS_EMPTY):
+    if section.status in (STATUS_OK, STATUS_EMPTY, STATUS_PARTIAL):
         render_body = _SECTION_BODIES.get(section.name)
         body = render_body(section.data) if render_body else []
         if section.status == STATUS_EMPTY and not body:
             body = ["nothing here — the read succeeded and found no records"]
         lines.extend(f"  {line}" for line in body)
-    else:
-        # Skipped and unavailable sections show their reason instead of
-        # silently vanishing from the summary.
+    if section.status not in (STATUS_OK, STATUS_EMPTY):
+        # Partial, skipped, unavailable and failed sections show their reason
+        # instead of silently vanishing from the summary.
         lines.append(f"  {section.reason or 'no reason recorded'}")
         for error in section.errors[:5]:
             lines.append(f"  error: {error}")
@@ -333,12 +387,13 @@ def status(
 ) -> None:
     """Show fleet-wide deployment status across configured regions.
 
-    Aggregates control-plane state — stacks, queue depth, central job-queue
-    counts, capacity, and inference endpoints — into one document. The jobs
-    section counts only `gco queue submit` records; list every job with
-    `gco jobs list --all-regions`. Every section carries its own status, so
-    a failed read degrades that section instead of hiding the rest. Reads
-    that bill per request or need cluster reachability are opt-in flags.
+    Aggregates control-plane state — stacks and their add-ons, queue depth,
+    central job-queue counts, capacity, and inference endpoints — into one
+    document. The jobs section counts only `gco queue submit` records; list
+    every job with `gco jobs list --all-regions`. Every section carries its
+    own status, so a failed read degrades that section instead of hiding the
+    rest. Reads that bill per request or need cluster reachability are
+    opt-in flags.
 
     Examples:
         gco status

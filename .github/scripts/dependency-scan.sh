@@ -2684,19 +2684,19 @@ CONSISTENCY_COUNT="$(wc -l < "$CONSISTENCY_RESULTS" 2>/dev/null | tr -d ' ')"
 # ---------------------------------------------------------------------------
 # Base-image security epochs (no network)
 #
-# The service images (Debian) and the helm-installer Lambda (AL2023) pull OS
-# security patches at build time behind a hand-bumped ``*_SECURITY_EPOCH``
-# ARG that busts the CI layer cache. Nothing else reminds anyone to move the
-# date, so a stale epoch silently reuses an old upgrade layer. Trivy's
-# container scan is the backstop; this flags an epoch older than the window
-# as the proactive nudge. Only the real Dockerfiles are scanned — the
-# generated ``*-build`` staging copies are skipped.
+# The service and dashboard images (Debian) and the helm-installer Lambda
+# (AL2023) pull OS security patches at build time behind a hand-bumped
+# ``*_SECURITY_EPOCH`` ARG that busts the CI layer cache. Nothing else
+# reminds anyone to move the date, so a stale epoch silently reuses an old
+# upgrade layer. Trivy's container scan is the backstop; this flags an epoch
+# older than the window as the proactive nudge. Only the real Dockerfiles
+# are scanned — the generated ``*-build`` staging copies are skipped.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking base-image security epochs ==="
 
 EPOCH_RESULTS="$(mktemp)"
-EPOCH_FILES=(dockerfiles/Dockerfile.* Dockerfile.dev lambda/helm-installer/Dockerfile)
+EPOCH_FILES=(dockerfiles/Dockerfile.* Dockerfile.dev Dockerfile.dashboard lambda/helm-installer/Dockerfile)
 for df in "${EPOCH_FILES[@]}"; do
   [ -f "$df" ] || continue
   extract_security_epochs "$df" | while IFS='|' read -r epoch_arg epoch_date; do

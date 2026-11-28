@@ -20,6 +20,20 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _api_response(status: int, body: bytes, reason: str | None = None) -> Any:
+    """A ``requests.Response`` as the HTTP client returns one, with its body read."""
+    from http import HTTPStatus
+
+    import requests
+
+    response = requests.Response()
+    response.status_code = status
+    response.reason = HTTPStatus(status).phrase if reason is None else reason
+    response.url = "https://api.example.com/prod/api/v1/x"
+    response._content = body
+    return response
+
+
 def _cache_regional_endpoint(client: Any, region: str) -> None:
     """Install a fresh regional endpoint without CloudFormation discovery."""
     from cli.aws_client import ApiEndpoint
@@ -3100,7 +3114,7 @@ class TestGCOAWSClientGetPodLogs:
                     )
 
     def test_get_pod_logs_error(self):
-        """Test pod logs when API returns error."""
+        """A 404 raises the API's message as an HTTPError carrying the response."""
         import requests
 
         from cli.aws_client import GCOAWSClient
@@ -3115,14 +3129,13 @@ class TestGCOAWSClientGetPodLogs:
             with patch("boto3.Session"):
                 client = GCOAWSClient()
 
-                mock_response = MagicMock()
-                mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError(
-                    "404 Not Found"
+                mock_response = _api_response(
+                    404, b'{"detail": "Pod \'nonexistent-pod\' not found"}'
                 )
 
                 with (
                     patch.object(client, "make_authenticated_request", return_value=mock_response),
-                    pytest.raises(requests.exceptions.HTTPError),
+                    pytest.raises(requests.exceptions.HTTPError) as raised,
                 ):
                     client.get_pod_logs(
                         job_name="test-job",
@@ -3130,6 +3143,9 @@ class TestGCOAWSClientGetPodLogs:
                         namespace="default",
                         region="us-east-1",
                     )
+
+                assert str(raised.value) == "API request failed: Pod 'nonexistent-pod' not found"
+                assert raised.value.response is mock_response
 
 
 class TestGCOAWSClientGetJobLogsErrorPaths:
@@ -3521,6 +3537,25 @@ class TestJobStatusFilterVocabulary:
         path = client.make_authenticated_request.call_args.kwargs["path"]
         assert path == "/api/v1/global/jobs?limit=5&namespace=team%26x%3D1&status=completed"
 
+    def test_global_listing_refusal_carries_the_aggregator_message(self):
+        """A 400 from the aggregator reads as its reason, not "400 Client Error"."""
+        import requests
+
+        from cli.aws_client import APIRequestError
+
+        refused = requests.Response()
+        refused.status_code = 400
+        refused.reason = "Bad Request"
+        refused._content = b'{"error": "limit must be between 1 and 1000"}'
+        client = self._client()
+        client.make_authenticated_request.return_value = refused
+
+        with pytest.raises(APIRequestError, match="limit must be between 1 and 1000") as excinfo:
+            client.get_global_jobs(limit=5000)
+
+        assert excinfo.value.status_code == 400
+        assert str(excinfo.value) == "API request failed: limit must be between 1 and 1000"
+
     @pytest.mark.parametrize(("status", "sent"), [("succeeded", "completed"), ("failed", "failed")])
     def test_bulk_deletes_send_the_server_status(self, status, sent):
         client = self._client()
@@ -3528,3 +3563,262 @@ class TestJobStatusFilterVocabulary:
         assert client.make_authenticated_request.call_args.kwargs["body"]["status"] == sent
         client.bulk_delete_global(status=status)
         assert client.make_authenticated_request.call_args.kwargs["body"]["status"] == sent
+
+
+#: API Gateway's answer when IAM authorization denies the caller, as it sends it.
+_IAM_DENIAL = (
+    "User: arn:aws:sts::123456789012:assumed-role/example-role/example-session is not "
+    "authorized to perform: execute-api:Invoke on resource: "
+    "arn:aws:execute-api:us-east-1:123456789012:abc123/prod/GET/api/v1/jobs"
+)
+
+
+def _client_answering(*responses: Any) -> Any:
+    """A client whose requests get *responses*, in order."""
+    from cli.aws_client import GCOAWSClient
+    from cli.config import GCOConfig
+
+    with patch("cli.aws_client.boto3.Session"):
+        client = GCOAWSClient(GCOConfig())
+    client.make_authenticated_request = MagicMock(side_effect=list(responses))
+    return client
+
+
+class TestApiErrorMessages:
+    """A failed request raises the API's own message, as an ``HTTPError`` too.
+
+    ``call_api`` read only the lowercase ``error``/``message``/``detail``
+    keys, so API Gateway's IAM denial (``{"Message": "User: ... is not
+    authorized ..."}``) read as a bare "403 Forbidden". Thirteen other methods
+    called ``raise_for_status()``, whose message is "403 Client Error:
+    Forbidden for url: ..." whatever the body says. All of them raise
+    :class:`APIRequestError` now, which is still a ``requests.HTTPError``
+    carrying the response for the callers that catch that.
+    """
+
+    def test_call_api_reads_the_iam_denial_message(self):
+        from cli.aws_client import APIRequestError
+
+        client = _client_answering(
+            _api_response(403, json.dumps({"Message": _IAM_DENIAL}).encode())
+        )
+
+        with pytest.raises(APIRequestError) as raised:
+            client.call_api("GET", "/api/v1/jobs", region="us-east-1")
+
+        assert str(raised.value) == f"API request failed: {_IAM_DENIAL}"
+        assert raised.value.status_code == 403
+
+    @pytest.mark.parametrize(
+        ("method", "args", "kwargs"),
+        [
+            ("get_jobs", (), {"region": "us-east-1"}),
+            ("get_job_details", ("train", "team-a"), {"region": "us-east-1"}),
+            ("delete_job", ("train", "team-a"), {"region": "us-east-1"}),
+            ("get_global_jobs", (), {}),
+            ("get_global_health", (), {}),
+            ("get_global_status", (), {}),
+            ("bulk_delete_global", (), {"namespace": "team-a"}),
+            ("get_job_events", ("train", "team-a", "us-east-1"), {}),
+            ("get_job_pods", ("train", "team-a", "us-east-1"), {}),
+            ("get_pod_logs", ("train", "train-0", "team-a", "us-east-1"), {}),
+            ("get_job_metrics", ("train", "team-a", "us-east-1"), {}),
+            ("bulk_delete_jobs", (), {"namespace": "team-a", "region": "us-east-1"}),
+            ("get_health", ("us-east-1",), {}),
+            ("get_job_validation_policy", ("us-east-1",), {}),
+        ],
+    )
+    def test_every_json_read_raises_the_api_message(self, method, args, kwargs):
+        import requests
+
+        from cli.aws_client import APIRequestError
+
+        denied = _api_response(403, json.dumps({"Message": _IAM_DENIAL}).encode())
+        client = _client_answering(denied)
+
+        with pytest.raises(APIRequestError) as raised:
+            getattr(client, method)(*args, **kwargs)
+
+        assert str(raised.value) == f"API request failed: {_IAM_DENIAL}"
+        assert raised.value.status_code == 403
+        # Still what raise_for_status() raised, for the callers that catch it.
+        assert isinstance(raised.value, requests.exceptions.HTTPError)
+        assert raised.value.response is denied
+        assert raised.value.response.status_code == 403
+
+    @pytest.mark.parametrize(
+        ("status", "body", "expected"),
+        [
+            # The first message key wins: the GCO API's own before the gateway's.
+            (400, b'{"error": "bad limit", "Message": "not this"}', "bad limit"),
+            (403, b'{"message": "Missing Authentication Token"}', "Missing Authentication Token"),
+            (404, b'{"detail": "Job \'x\' not found"}', "Job 'x' not found"),
+            (400, b'{"Message": "denied", "errors": ["one", "two"]}', "denied: one; two"),
+            # Not JSON: the text the gateway or the proxy sent.
+            (502, b"<html>Bad Gateway</html>", "<html>Bad Gateway</html>"),
+            # Nothing to read: the status line.
+            (504, b"", "504 Gateway Timeout"),
+            (500, b'{"other": 1}', "500 Internal Server Error"),
+            # JSON that is not an object raised TypeError inside call_api.
+            (500, b"null", "500 Internal Server Error"),
+            (500, b'"internal error"', "500 Internal Server Error"),
+        ],
+    )
+    def test_message_by_body_shape(self, status, body, expected):
+        from cli.aws_client import APIRequestError
+
+        client = _client_answering(_api_response(status, body))
+
+        with pytest.raises(APIRequestError) as raised:
+            client.get_health("us-east-1")
+
+        assert str(raised.value) == f"API request failed: {expected}"
+        assert raised.value.status_code == status
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            ({"Message": _IAM_DENIAL}, _IAM_DENIAL),
+            ({"detail": "Namespace 'team-b' is not allowed"}, "Namespace 'team-b' is not allowed"),
+            ({"error": "first", "message": "second"}, "first"),
+            # No message at all: the status line.
+            ({"success": False}, "403 Forbidden"),
+        ],
+    )
+    def test_a_refused_submission_carries_the_api_message(self, body, expected):
+        """``submit_manifests`` read only ``error`` and ``message`` the same way."""
+        from cli.aws_client import ManifestSubmissionError
+
+        client = _client_answering(_api_response(403, json.dumps(body).encode()))
+
+        with pytest.raises(ManifestSubmissionError) as raised:
+            client.submit_manifests([{"kind": "Job"}], namespace="team-a")
+
+        assert str(raised.value) == expected
+        assert raised.value.status_code == 403
+        assert raised.value.nothing_created() is True
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            # API Gateway's signature mismatch quotes the canonical request,
+            # session token included, after its explanation.
+            (
+                "The request signature we calculated does not match the signature you "
+                "provided. Check your AWS Secret Access Key and signing method.\n\n"
+                "The Canonical String for this request should have been\n'GET\n"
+                "/prod/api/v1/jobs/team-a/train\n\nhost:abc123.execute-api.us-east-1."
+                "amazonaws.com\nx-amz-date:20260101T000000Z\n"
+                "x-amz-security-token:EXAMPLE-SESSION-TOKEN\n'\n\n"
+                "The String-to-Sign should have been\n'AWS4-HMAC-SHA256\n20260101T000000Z'",
+                "The request signature we calculated does not match the signature you "
+                "provided. Check your AWS Secret Access Key and signing method.",
+            ),
+            # A malformed signature: the message ends with the Authorization header.
+            (
+                "Authorization header requires 'Signature' parameter. Authorization="
+                "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/"
+                "execute-api/aws4_request",
+                "Authorization header requires 'Signature' parameter.",
+            ),
+            # Nothing left once the quote goes: the status line.
+            ("Authorization=Bearer example-token", "403 Forbidden"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "send",
+        [
+            lambda client: client.get_job_details("train", "team-a", region="us-east-1"),
+            lambda client: client.submit_manifests([{"kind": "Job"}], namespace="team-a"),
+        ],
+        ids=["json-read", "submission"],
+    )
+    def test_the_request_api_gateway_quotes_is_not_repeated(self, message, expected, send):
+        """The CLI prints the message, and the MCP server returns it to an agent."""
+        from cli.aws_client import APIRequestError, ManifestSubmissionError
+
+        client = _client_answering(_api_response(403, json.dumps({"message": message}).encode()))
+
+        with pytest.raises((APIRequestError, ManifestSubmissionError)) as raised:
+            send(client)
+
+        text = str(raised.value).removeprefix("API request failed: ")
+        assert text == expected
+        assert "EXAMPLE-SESSION-TOKEN" not in text
+        assert "AKIAIOSFODNN7EXAMPLE" not in text
+
+    def test_an_error_built_without_a_response_carries_none(self):
+        import requests
+
+        from cli.aws_client import APIRequestError
+
+        error = APIRequestError(503, "Service Unavailable")
+
+        assert isinstance(error, RuntimeError)
+        assert isinstance(error, requests.exceptions.HTTPError)
+        assert error.response is None
+        assert error.request is None
+        assert error.status_code == 503
+        assert str(error) == "API request failed: Service Unavailable"
+
+
+class TestJobManagerFallbacksOnTheClientsError:
+    """``JobManager`` still reads a 404 off the error the client raises.
+
+    ``get_job`` and ``delete_job`` catch ``requests.exceptions.HTTPError``
+    and read ``e.response.status_code``: a 404 from the batch Job route sends
+    them to the TrainJob route. Driven through the real client with real
+    responses, so a client error type without ``response`` would show here.
+    """
+
+    @staticmethod
+    def _manager(*responses: Any) -> Any:
+        from cli.config import GCOConfig
+        from cli.jobs import JobManager
+
+        with patch("cli.aws_client.boto3.Session"):
+            manager = JobManager(GCOConfig())
+        manager._aws_client = _client_answering(*responses)
+        return manager
+
+    def test_a_job_neither_route_knows_reads_as_absent(self):
+        manager = self._manager(
+            _api_response(404, b"{\"detail\": \"Job 'train' not found in namespace 'team-a'\"}"),
+            _api_response(404, b'{"detail": "Resource not found"}'),
+        )
+
+        assert manager.get_job("train", "team-a", region="us-east-1") is None
+
+        paths = [
+            call.kwargs["path"]
+            for call in manager._aws_client.make_authenticated_request.call_args_list
+        ]
+        assert paths[0] == "/api/v1/jobs/team-a/train"
+        assert paths[1].startswith("/api/v1/manifests/team-a/train?")
+
+    def test_a_denied_lookup_raises_the_api_message_without_the_fallback(self):
+        import requests
+
+        manager = self._manager(_api_response(403, json.dumps({"Message": _IAM_DENIAL}).encode()))
+
+        with pytest.raises(requests.exceptions.HTTPError, match="is not authorized to perform"):
+            manager.get_job("train", "team-a", region="us-east-1")
+
+        assert manager._aws_client.make_authenticated_request.call_count == 1
+
+    def test_deleting_a_job_neither_route_knows_raises_the_batch_routes_404(self):
+        from cli.aws_client import APIRequestError
+
+        manager = self._manager(
+            _api_response(404, b"{\"detail\": \"Job 'train' not found in namespace 'team-a'\"}"),
+            _api_response(200, b'{"resource": {"status": "unchanged"}}'),
+        )
+
+        with pytest.raises(APIRequestError) as raised:
+            manager.delete_job("train", "team-a", region="us-east-1")
+
+        assert str(raised.value) == (
+            "API request failed: Job 'train' not found in namespace 'team-a'"
+        )
+        assert raised.value.response.status_code == 404
+        assert manager._aws_client.make_authenticated_request.call_count == 2

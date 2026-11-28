@@ -228,6 +228,15 @@ class TestInferenceLiveResource:
         parsed = json.loads(content)
         assert parsed["error"] == "invalid endpoint_name"
 
+    def test_inference_resource_rejects_a_trailing_newline(self):
+        # The name check is a fullmatch: ``$`` alone also matches before a final newline.
+        from resources.inference import _inference_resource
+
+        with patch("cli.inference.InferenceManager") as mock:
+            content = _inference_resource("my-llm\n")
+        mock.assert_not_called()
+        assert json.loads(content)["error"] == "invalid endpoint_name"
+
     def test_inference_resource_wraps_manager_exception_as_error_json(self):
         """``InferenceManager.get_endpoint`` raising returns a structured error.
 
@@ -405,6 +414,16 @@ class TestTaskStatusResource:
         content = _read_resource("tasks://gco/has spaces and !!! chars")
         parsed = json.loads(content)
         assert parsed["error"] == "invalid task_id"
+
+    def test_tasks_resource_rejects_a_trailing_newline(self):
+        # The id check is a fullmatch: ``$`` alone also matches before a final newline.
+        from resources.tasks import _task_resource
+
+        tasks_get = AsyncMock()
+        with patch("fastmcp_tasks.handlers.tasks_get", new=tasks_get):
+            content = asyncio.run(_task_resource("abc123\n"))
+        tasks_get.assert_not_awaited()
+        assert json.loads(content) == {"error": "invalid task_id", "value": "abc123\n"}
 
 
 # ---------------------------------------------------------------------------

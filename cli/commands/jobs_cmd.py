@@ -11,7 +11,13 @@ from gco.job_admission import apply_keep_warm, apply_sandbox
 
 from ..cluster_tunnel import unreachable_endpoint_hint, via_ssm_options, via_ssm_route
 from ..config import GCOConfig
-from ..jobs import JobInfo, get_job_manager, resolve_submission_identity
+from ..jobs import (
+    JOBS_PAGE_MAX,
+    JobInfo,
+    get_job_manager,
+    job_status,
+    resolve_submission_identity,
+)
 from ..kubectl_helpers import kubectl_could_not_connect
 from ..output import confirm, format_job_table, get_output_formatter
 from .queue_cmd import keep_warm_option, queue_submit, sandbox_option
@@ -545,7 +551,9 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
 
     Displays the number of pending, in-flight, and failed messages
     in the job queues. With -o json/yaml, --all-regions prints one list of
-    the per-region statuses (empty when no region could be read).
+    the per-region statuses (empty when no region could be read). A region
+    that cannot be read fails the command (exit 1): the other regions are
+    still printed and each unreadable region is named on stderr.
 
     Examples:
         gco jobs queue-status --region us-east-1
@@ -555,6 +563,7 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
     formatter = get_output_formatter(config)
     job_manager = get_job_manager(config)
 
+    unread: list[tuple[str, Exception]] = []
     try:
         if all_regions:
             from ..aws_client import get_aws_client
@@ -569,7 +578,7 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
                     results.append(status)
                 except Exception as e:
                     logger.debug("Failed to get queue status for %s: %s", stack_region, e)
-                    continue
+                    unread.append((stack_region, e))
 
             if not results:
                 formatter.print_warning("No queue status available")
@@ -577,19 +586,21 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
                 # One document in every machine mode: the per-region statuses,
                 # an empty list when no region answered.
                 formatter.print(results)
-                return
-            if not results:
-                return
-
-            # Format as table
-            print("\n  REGION          PENDING  IN-FLIGHT  DELAYED  DLQ")
-            print("  " + "-" * 55)
-            for r in results:
-                dlq = r.get("dlq_messages", 0)
-                print(
-                    f"  {r['region']:<15} {r['messages_available']:>7}  "
-                    f"{r['messages_in_flight']:>9}  {r['messages_delayed']:>7}  {dlq:>3}"
-                )
+            elif results:
+                # Format as table
+                print("\n  REGION          PENDING  IN-FLIGHT  DELAYED  DLQ")
+                print("  " + "-" * 55)
+                for r in results:
+                    dlq = r.get("dlq_messages", 0)
+                    print(
+                        f"  {r['region']:<15} {r['messages_available']:>7}  "
+                        f"{r['messages_in_flight']:>9}  {r['messages_delayed']:>7}  {dlq:>3}"
+                    )
+            # A region that could not be read is not a region with an empty
+            # queue: name it after the others and fail, as `gco jobs list
+            # --all-regions` does.
+            for unread_region, error in unread:
+                formatter.print_error(f"{unread_region}: {error}")
         else:
             target_region = region or config.default_region
             status = job_manager.get_queue_status(target_region)
@@ -597,6 +608,9 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
 
     except Exception as e:
         formatter.print_error(f"Failed to get queue status: {e}")
+        sys.exit(1)
+
+    if unread:
         sys.exit(1)
 
 
@@ -610,7 +624,10 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
     "-l",
     default=50,
     type=click.IntRange(min=1),
-    help="Maximum jobs to return (read across as many API pages as needed)",
+    help=(
+        f"Maximum jobs to return (at most {JOBS_PAGE_MAX} with --all-regions; "
+        "with --region, read across as many API pages as needed)"
+    ),
 )
 @pass_config
 def list_jobs(
@@ -638,6 +655,13 @@ def list_jobs(
         formatter.print_error("You must specify --region or --all-regions")
         formatter.print_info("  Use --region/-r to query a specific cluster")
         formatter.print_info("  Use --all-regions/-a to query all clusters")
+        sys.exit(1)
+
+    # The global API answers in one page and refuses a larger limit (HTTP
+    # 400); the single-Region list reads pages of the same size until --limit.
+    if all_regions and limit > JOBS_PAGE_MAX:
+        formatter.print_error(f"--limit can be at most {JOBS_PAGE_MAX} with --all-regions")
+        formatter.print_info("  Use --region/-r to read more jobs from one cluster")
         sys.exit(1)
 
     unread_regions = False
@@ -676,8 +700,8 @@ def list_jobs(
                         name = job.get("metadata", {}).get("name", "")[:30]
                         ns = job.get("metadata", {}).get("namespace", "")[:14]
                         job_region = job.get("_source_region", "")[:14]
-                        job_status = job.get("computed_status", "unknown")[:10]
-                        print(f"  {name:<30} {ns:<15} {job_region:<15} {job_status}")
+                        verdict = job_status(job)[:10]
+                        print(f"  {name:<30} {ns:<15} {job_region:<15} {verdict}")
 
                 # Print errors if any
                 if result.get("errors"):
@@ -1369,8 +1393,9 @@ def job_policy(config: Any, region: Any) -> None:
     adds the project's own ECR registries to the trusted list at synth time.
 
     Use this before submitting to know whether a manifest will be admitted.
-    Three layers must all pass: the front-door policy, the namespace
-    LimitRange (per container), and the namespace ResourceQuota (aggregate).
+    Three layers must all pass: the front-door policy, the per-container
+    ceilings (the namespace LimitRange for CPU and memory, the GPU cap
+    admission policy for GPUs), and the namespace ResourceQuota (aggregate).
 
     Examples:
         gco jobs policy --region us-east-1
@@ -1433,6 +1458,13 @@ def job_policy(config: Any, region: Any) -> None:
                         maximum = limit.get("max", {})
                         if maximum:
                             print(f"      {limit.get('type', '?')} max: {maximum}")
+                # The GPU cap: a LimitRange GPU entry would make every pod
+                # tolerate the GPU node taint, so an admission policy holds it.
+                for name, caps in sorted(layer.get("admission_policies", {}).items()):
+                    print(f"    {namespace} ValidatingAdmissionPolicy/{name}:")
+                    maximum = caps.get("container_max", {})
+                    if maximum:
+                        print(f"      Container max: {maximum}")
         print()
 
     except Exception as e:
@@ -1479,7 +1511,7 @@ def _render_verdicts(verdicts: Any, *, indent: str = "  ", err: bool = False) ->
             print(f"{indent}    {where}[{issue.check}] {issue.message}", file=out)
         if verdict.enforcement_gaps:
             print(
-                f"{indent}    note: live quota/LimitRange unreadable for "
+                f"{indent}    note: live quota/LimitRange/GPU cap unreadable for "
                 f"{', '.join(verdict.enforcement_gaps)} — only the front-door "
                 f"caps were checked",
                 file=out,

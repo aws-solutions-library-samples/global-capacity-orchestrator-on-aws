@@ -142,7 +142,7 @@ def _derived_log_group_names(
         # carries has the id but not the name, so the name comes from the
         # service identity (describe_cluster, or the group itself once a
         # rolled-back cluster is gone).
-        match = _SAGEMAKER_CLUSTER_ARN.match(physical_id)
+        match = _SAGEMAKER_CLUSTER_ARN.fullmatch(physical_id)
         name = str((service_identity or {}).get("name") or "")
         if match is None or not name or "/" in name:
             return ()
@@ -166,7 +166,7 @@ def _hyperpod_cluster_log_authority_identity(
     service prefix, and the identity is a DELETED tombstone. No group means
     nothing to own.
     """
-    match = _SAGEMAKER_CLUSTER_ARN.match(cluster_arn)
+    match = _SAGEMAKER_CLUSTER_ARN.fullmatch(cluster_arn)
     if (
         match is None
         or match.group("region") != region
@@ -323,7 +323,7 @@ def _validated_owned_log_group_identity(
         # The ARN is this account's and this Region's, and the identity is the
         # service's own answer for it (or the DELETED tombstone a rolled-back
         # create leaves, named from the surviving group).
-        match = _SAGEMAKER_CLUSTER_ARN.match(physical_id)
+        match = _SAGEMAKER_CLUSTER_ARN.fullmatch(physical_id)
         if (
             match is None
             or match.group("region") != region

@@ -1236,6 +1236,11 @@ jobs:
         run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
+      - name: Stage the lock file in the build context
+        # The Dockerfile constrains its pip install with requirements-lock.txt,
+        # which the deployed image gets from cli/stacks.py's copy of this
+        # directory (lambda/helm-installer-build).
+        run: cp requirements-lock.txt lambda/helm-installer/requirements-lock.txt
       - name: Build image
         uses: ./.github/actions/build-image-with-retry
         with:
@@ -1318,7 +1323,9 @@ jobs:
       - name: Build image
         uses: ./.github/actions/build-image-with-retry
         with:
-          context: lambda/tls-certificate-manager
+          # The repository root, as the CDK image asset builds it, so the
+          # Dockerfile can copy requirements-lock.txt.
+          context: .
           file: lambda/tls-certificate-manager/Dockerfile
           tags: tls-certificate-manager:ci
           load: true
@@ -2688,6 +2695,19 @@ jobs:
         # which can make it unschedulable on Kind's already-loaded single node.
         # The gco-service-account SA it governs is already created by the
         # "Apply namespaces + RBAC" step (01-serviceaccounts.yaml).
+        #
+        # The same file carries the per-container GPU cap, the
+        # gco-jobs-container-gpu-limit ValidatingAdmissionPolicy, because the
+        # LimitRange must name no GPU: this API server runs the
+        # ExtendedResourceToleration admission plugin, as EKS does
+        # (.github/kind/kind-calico.yaml), and any GPU default there, even "0",
+        # gives every defaulted pod a toleration of the nvidia.com/gpu taint.
+        # Server-side dry runs, which schedule nothing, prove the cap (a pod
+        # over it is refused with the policy's message, one at it is admitted
+        # and tolerates the taint, so the plugin is on) and then that a
+        # defaulted CPU-only pod gets CPU and memory defaults and no GPU
+        # toleration. tests/test_resource_quota_manifest.py evaluates the same
+        # policy offline.
         run: |
           set -euo pipefail
           sed -e 's|{{QUOTA_MAX_CPU}}|100|g' \
@@ -2701,6 +2721,74 @@ jobs:
             | kubectl apply -f -
           kubectl -n gco-jobs get resourcequota gco-jobs-quota
           kubectl -n gco-jobs get limitrange gco-jobs-limits
+          kubectl get validatingadmissionpolicy gco-jobs-container-gpu-limit
+          kubectl get validatingadmissionpolicybinding gco-jobs-container-gpu-limit
+
+          # Pods for server-side dry runs only: one over the cap of 4 the sed
+          # above substitutes, one at it.
+          work="${RUNNER_TEMP}/gpu-cap"
+          mkdir -p "${work}"
+          for gpus in 5 4; do
+            cat > "${work}/pod-${gpus}.yaml" <<EOF
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: gpu-cap-probe-${gpus}
+            namespace: gco-jobs
+          spec:
+            restartPolicy: Never
+            containers:
+              - name: main
+                image: busybox:1.38.0
+                command: ["true"]
+                resources:
+                  limits:
+                    nvidia.com/gpu: "${gpus}"
+          EOF
+          done
+          policy="ValidatingAdmissionPolicy 'gco-jobs-container-gpu-limit'"
+          denied="container main asks for 5 nvidia.com/gpu in resources.limits; a gco-jobs container may ask for at most 4"
+
+          # A new policy takes a moment to be enforced: wait for a refused dry run.
+          enforced=0
+          for _ in $(seq 1 30); do
+            if ! kubectl create --dry-run=server -f "${work}/pod-5.yaml" \
+                >/dev/null 2>"${work}/over.err" && grep -qF "${policy}" "${work}/over.err"; then
+              enforced=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "${enforced}" -ne 1 ]; then
+            cat "${work}/over.err"
+            echo "::error::the API server never enforced gco-jobs-container-gpu-limit"
+            exit 1
+          fi
+          cat "${work}/over.err"
+          if ! grep -qF "${denied}" "${work}/over.err"; then
+            echo "::error::gco-jobs-container-gpu-limit refused 5 GPUs without its own message"
+            exit 1
+          fi
+
+          # At the cap: admitted, and ExtendedResourceToleration gives it the
+          # GPU toleration, so the plugin is on and the check below means
+          # something.
+          kubectl create --dry-run=server -o json -f "${work}/pod-4.yaml" > "${work}/admitted.json"
+          python3 - "${work}/admitted.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as admitted:
+              tolerations = json.load(admitted)["spec"].get("tolerations") or []
+          gpu = {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+          if gpu not in tolerations:
+              raise SystemExit(
+                  "a pod asking for 4 GPUs got no nvidia.com/gpu toleration, so the API server "
+                  "does not run ExtendedResourceToleration as EKS does; check the kind config: "
+                  f"{tolerations}"
+              )
+          PY
+          echo "gco-jobs-container-gpu-limit refuses 5 GPUs and admits 4"
 
           # Exercise mutating admission without scheduling another pod on the
           # capacity-constrained Kind node. Server-side dry run must receive
@@ -2717,17 +2805,19 @@ jobs:
           import json
           import os
 
-          resources = json.loads(os.environ["DEFAULTED_POD"])["spec"]["containers"][0][
-              "resources"
-          ]
+          spec = json.loads(os.environ["DEFAULTED_POD"])["spec"]
+          resources = spec["containers"][0]["resources"]
           expected = {
-              "limits": {"cpu": "1", "memory": "4Gi", "nvidia.com/gpu": "0"},
-              "requests": {"cpu": "100m", "memory": "256Mi", "nvidia.com/gpu": "0"},
+              "limits": {"cpu": "1", "memory": "4Gi"},
+              "requests": {"cpu": "100m", "memory": "256Mi"},
           }
           if resources != expected:
               raise SystemExit(
                   f"LimitRange admission defaults mismatch: expected={expected}, actual={resources}"
               )
+          gpu = [t for t in spec.get("tolerations") or [] if t.get("key") == "nvidia.com/gpu"]
+          if gpu:
+              raise SystemExit(f"the defaulted CPU-only pod tolerates the GPU taint: {gpu}")
           PY
           echo "ResourceQuota and LimitRange admission defaults verified"
       - name: Deploy the CI SQS emulator in its own namespace

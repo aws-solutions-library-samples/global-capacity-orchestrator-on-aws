@@ -494,8 +494,8 @@ kubectl logs -n gco-system -l app=queue-processor --all-containers \
 ```bash
 # 1. Dry-run the manifest to see the exact error. The region that receives
 #    it checks it against its validation policy and applies nothing; the
-#    LimitRange and ResourceQuota of step 3 are checked only on a real
-#    submission.
+#    per-container ceilings and ResourceQuota of step 3 are checked only on a
+#    real submission.
 gco jobs submit my-job.yaml -n gco-jobs --region us-east-1 --dry-run
 
 # 2. Read what the region ACTUALLY enforces, from the deployed cluster.
@@ -505,7 +505,8 @@ gco jobs submit my-job.yaml -n gco-jobs --region us-east-1 --dry-run
 gco jobs policy --region us-east-1
 
 # 3. Narrow to a specific layer (all three must pass: front-door caps,
-#    per-container LimitRange, aggregate ResourceQuota)
+#    per-container ceilings (LimitRange, GPU cap policy), aggregate
+#    ResourceQuota)
 gco -o json jobs policy -r us-east-1 | jq '.policy.manifest_caps'
 gco -o json jobs policy -r us-east-1 | jq '.policy.allowed_namespaces'
 gco -o json jobs policy -r us-east-1 | jq '.cluster_enforcement'
@@ -527,8 +528,8 @@ gco -o json jobs policy -r us-east-1 | jq '.cluster_enforcement'
 
    Synth enforces `resource_quota.container_max_* <= *_per_manifest <=
    resource_quota.max_*`, so lowering a per-manifest cap below the
-   per-container `LimitRange` ceiling (or raising it above the namespace
-   `ResourceQuota`) fails the deploy; adjust the `resource_quota` context
+   per-container ceiling, or raising it above the namespace
+   `ResourceQuota`, fails the deploy; adjust the `resource_quota` context
    together with the caps (see docs/CUSTOMIZATION.md).
 
    Then: `gco stacks deploy gco-<REGION> -y`

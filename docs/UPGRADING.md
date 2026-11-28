@@ -43,6 +43,10 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Narrower platform service-account RBAC](#narrower-platform-service-account-rbac)
   - [Endpoint and project labels on the monitor's objects](#endpoint-and-project-labels-on-the-monitors-objects)
   - [Training job admission](#training-job-admission)
+  - [The per-container GPU cap is an admission policy](#the-per-container-gpu-cap-is-an-admission-policy)
+  - [One admission for the REST and SQS paths](#one-admission-for-the-rest-and-sqs-paths)
+  - [The inference monitor's leader Lease](#the-inference-monitors-leader-lease)
+  - [Lambda dependencies follow the lock file](#lambda-dependencies-follow-the-lock-file)
   - [Stopped inference endpoints stay stopped](#stopped-inference-endpoints-stay-stopped)
   - [Health readings and the `active_jobs` metric](#health-readings-and-the-active_jobs-metric)
   - [Job status filter and request paths](#job-status-filter-and-request-paths)
@@ -58,6 +62,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [The keep-warm GPU pool](#the-keep-warm-gpu-pool)
   - [Log groups earlier upgrades left behind](#log-groups-earlier-upgrades-left-behind)
   - [CLI exit codes, output and prompts](#cli-exit-codes-output-and-prompts)
+  - [Errors the CLI's Python modules raise](#errors-the-clis-python-modules-raise)
   - [MCP server tools](#mcp-server-tools)
   - [Pre-commit hook for contributors](#pre-commit-hook-for-contributors)
 
@@ -954,6 +959,99 @@ monitor checks before it deletes a stale object
   refuses a manifest nested deeper than the limit (default 50), as the REST
   path already did.
 
+### One admission for the REST and SQS paths
+
+- **The SQS queue consumer judges manifests with the REST service's
+  admission code.** It ran its own copy of every check, and a copy that
+  drifts on that path admits a manifest the REST path refuses. Both now run
+  `gco.job_admission.admit_manifest`: the same checks in the same order, with
+  the same policy read from the same environment variables, so a manifest
+  sent straight to a Region's job queue is held to exactly what
+  `POST /api/v1/manifests` enforces.
+- **BREAKING (scripts that match the queue consumer's errors): its refusals
+  use the REST wording.** The error it records for a refused manifest reads
+  as the REST response does, for example
+  `Namespace 'team-a' not allowed. Allowed namespaces: ['gco-jobs']` instead of
+  `namespace 'team-a' not in allowed list [...]`, and a security refusal is
+  prefixed `Security context validation failed:`.
+- **Both paths refuse a workload without a pod spec.** A Job, CronJob,
+  Deployment, StatefulSet, DaemonSet, ReplicaSet or Pod whose pod spec cannot
+  be found is refused with `<kind> manifest must contain a valid pod spec`,
+  because no check could read its pods. The REST path admitted it and left
+  the API server to refuse the apply. Its namespace refusal also lists the
+  allowed namespaces sorted.
+
+### The inference monitor's leader Lease
+
+- **The manifests create the Lease, and the monitor's RBAC shrinks.** The
+  `inference-monitor-leader` Lease in `gco-inference` is created by
+  `02-rbac.yaml` (45 seconds, the 15-second reconcile interval times three),
+  and `gco-inference-monitor-role` grants only `get` and `update` on it. It
+  granted `create, get, list, watch, patch, update, delete` on every Lease in
+  the namespace, because the monitor created its Lease when it found none. On
+  an in-place update the applier adds labels to the existing Lease and keeps
+  its holder; the label patch can make one in-flight renewal conflict, which
+  ends one reconcile pass early, and the next pass renews.
+- **A replica whose clock runs ahead no longer takes the Lease.** A standby
+  takes the Lease only after seeing it unchanged for the lease duration on its
+  own monotonic clock, as the health monitor's elections and client-go do, and
+  the leader stops mutating one lease duration after its last successful
+  renewal. The holder's `renewTime` was compared with the standby's wall
+  clock, so clock skew could put two replicas in charge until the first
+  noticed.
+- If the Lease is deleted, no replica reconciles, and each logs that the
+  manifests create it, until a redeploy restores it.
+
+### Lambda dependencies follow the lock file
+
+The kubectl-applier Lambda package and the helm installer and TLS certificate
+manager images now install their dependencies constrained by
+`requirements-lock.txt`, as the service images do, so their indirect
+dependencies are the locked versions instead of the newest ones PyPI served
+when they were built. The first deploy after upgrading rebuilds all three and
+updates those functions; after that, a change to `requirements-lock.txt`
+rebuilds them. The TLS certificate manager image now builds from the
+repository root (its asset keeps only its own files and the lock). No
+configuration changes.
+
+### The per-container GPU cap is an admission policy
+
+The gco-jobs `LimitRange` capped each container's GPUs and wrote
+`nvidia.com/gpu: 0` into every container that asked for none. EKS runs the
+ExtendedResourceToleration admission plugin, which gives a pod that names an
+extended resource, at any quantity, a toleration of that resource's taint, so
+CPU-only Jobs in `gco-jobs` tolerated the GPU node taint, ran on GPU nodes,
+and EKS Auto Mode launched GPU instances for them. An in-place redeploy
+changes this:
+
+- **CPU-only pods in `gco-jobs` no longer tolerate the GPU taint.** The
+  `LimitRange` now names CPU and memory only, so a pod created after the
+  redeploy carries no GPU entry it did not ask for, and a CPU-only one
+  schedules on CPU nodes. Pods already running keep their nodes until they
+  finish.
+- **The cap is the `gco-jobs-container-gpu-limit` ValidatingAdmissionPolicy.**
+  Each container and init container of a pod created in `gco-jobs` may ask
+  for at most `resource_quota.container_max_gpu` GPUs (default 8) in its
+  limits and its requests, and a pod over the cap is refused with a message
+  naming the container, its count and the cap. The base pass creates the
+  policy and its binding, and the manifest processor's
+  `gco-manifest-processor-cluster-read` ClusterRole gains `get` on that one
+  policy.
+- **BREAKING (tooling that read the GPU cap from the `LimitRange`): read
+  `admission_policies`.** `GET /api/v1/policy` (and `gco jobs policy`) no
+  longer reports `nvidia.com/gpu` in `cluster_enforcement.gco-jobs.limit_ranges`.
+  The cap is
+  `cluster_enforcement.gco-jobs.admission_policies["gco-jobs-container-gpu-limit"].container_max["nvidia.com/gpu"]`,
+  a string such as `"8"` that the policy carries in its
+  `gco.io/container-max-gpu` annotation
+  ([API.md → Reading the deployed validation policy](API.md#reading-the-deployed-validation-policy)).
+  Other namespaces report an empty `admission_policies`, and a Region that
+  has not been redeployed yet still reports its `LimitRange` GPU maximum.
+- **BREAKING (only if you set it): `resource_quota.container_max_gpu` must be
+  a whole number from 0 to 999 in plain digits.** The policy's CEL compares
+  each container's GPU count with it as an integer, so synth refuses values
+  such as `1k` or `8.0`.
+
 ### Stopped inference endpoints stay stopped
 
 - **BREAKING: changing a stopped endpoint no longer starts it.**
@@ -991,6 +1089,34 @@ monitor checks before it deletes a stale object
   Messages from `GET /api/v1/health` name the read that failed instead of
   carrying the exception text. Clients that matched on either text need the
   new one.
+- **BREAKING (API contract and dashboards): an unhealthy status with no
+  cluster reading reports no utilization.** Once that 60-second window ran
+  out, `GET /api/v1/metrics` answered `0` for `cpu_percent`, `memory_percent`,
+  `gpu_percent` and `active_jobs`, and the monitor published the zeros to
+  `ClusterCpuUtilization`, `ClusterMemoryUtilization`,
+  `ClusterGpuUtilization` and `ActiveJobs`, so the cluster charted as idle
+  and `gco capacity` ranked the Region as the emptiest. The response now
+  carries `null` for every `resource_utilization` value and for
+  `active_jobs`, `threshold_violations` is empty, and `message` names the
+  failed read. Nothing is published to those four metrics until a read
+  succeeds (`ClusterHealthy` still reports 0), so `gco capacity` reads the
+  Region's running jobs, and its GPU allocation where Container Insights has
+  no GPU series, as unavailable and ranks it after the Regions it can read.
+  Clients that sum or average the fields need to skip nulls, and alarms on
+  those metrics should treat missing data as breaching or as missing, not as
+  zero.
+- **New metrics: `ClusterGpuAllocatable` and `ClusterGpuRequested`.** The
+  health monitor publishes the GPU counts behind `ClusterGpuUtilization`
+  (unit `Count`, same namespace and dimensions), which is `0` both without
+  GPU nodes and with idle GPUs. `gco capacity status`, `gco capacity
+  recommend-region`, `gco status`, the capacity advisor and the dashboard
+  read them: a Region without GPU nodes shows `none` instead of `0%`, and
+  its recommendation reason says `no GPU nodes running (Auto Mode launches
+  them on demand)` instead of `100% GPU available`. Placement scoring is
+  unchanged. `RegionCapacity.total_gpus` and `available_gpus`, always `0`
+  before, carry the counts, or `None` until the redeployed monitor has
+  published them; the `capacity` section of the `gco status` document and
+  the recommendation's `all_regions` entries carry them too.
 
 ### Job status filter and request paths
 
@@ -1262,6 +1388,19 @@ window so that short GPU Jobs run back to back reuse it
 - **Admission judges manifests that select the pool.** A manifest that
   selects `gco.aws/keep-warm` but could never run on the pool is refused on
   every submission path. Manifests that don't select it are judged as before.
+- **Admission reads the required node affinity of pods that select the
+  pool.** A manifest that selects `gco.aws/keep-warm` but whose
+  `requiredDuringSchedulingIgnoredDuringExecution` node affinity no keep-warm
+  node satisfies, such as `node.kubernetes.io/instance-type In [p4d.24xlarge]`,
+  is refused on every submission path, by the policy pre-check and by
+  `--keep-warm`, naming what no keep-warm node carries. Terms are judged as
+  the scheduler reads them (ORed, their expressions ANDed), so one term a
+  keep-warm node can meet is enough; preferred terms and labels the pool does
+  not fix are not judged. Such a manifest used to be admitted, and its pods
+  stayed Pending. A pod whose required node affinity requires
+  `gco.aws/keep-warm` in every term now counts as selecting the pool, so it
+  needs the toleration and an `nvidia.com/gpu` request, and it may not be a
+  Deployment or StatefulSet.
 
 ### Log groups earlier upgrades left behind
 
@@ -1307,6 +1446,8 @@ Exit status and options:
 | `gco jobs submit --wait`, `gco jobs submit-direct --wait` | **BREAKING:** exit 3 when the job fails and 4 when `--timeout` expires; a failed job exited 0 and a timeout 1, which now means the job was not submitted or its status could not be read. `--wait` also follows a Kubeflow TrainJob, with the same codes ([CLI.md → `gco jobs submit`](CLI.md#gco-jobs-submit)) | Treat 3 as "ran and failed" and 4 as "still running"; do not resubmit on either |
 | `gco jobs list --region` | Exits 1 when the Region's API read fails (it printed no jobs); `--limit` is honoured across API pages and must be at least 1 | Handle the failure |
 | `gco jobs list --all-regions` | **BREAKING:** exits 1 when the global API reports a Region it could not read; it exited 0. The other Regions' jobs are still printed, and each unread Region is listed under `errors` as `{"region", "error"}` (named on stderr in table mode) | Check the exit status; `errors` names the Regions that are missing |
+| `gco jobs list --all-regions --limit` | A `--limit` above 1000, the global API's page size, is refused before any request (still exit 1) with a message saying so; the request used to reach the API, which refused it, and the command printed `400 Client Error: Bad Request`. Any listing the global API refuses now prints the API's reason | Keep `--limit` at 1000 or less, or list one Region with `--region`, which reads as many pages as `--limit` needs |
+| `gco jobs queue-status --all-regions` | **BREAKING:** exits 1 when a Region's queue cannot be read; it exited 0 and left the Region out. The other Regions are still printed (in `-o json` and `-o yaml` too), and each unread Region is named on stderr | Check the exit status |
 | `gco jobs delete` | **BREAKING:** exits 1 with the API's 404 for a name that is neither a Job nor a TrainJob (with the TrainJob CRD installed it printed "deleted"); a TrainJob delete the cluster refuses is reported instead of "not found" | Check the name |
 | `gco inference promote`, `gco inference rollback`, `gco capacity traffic-dial set` | **BREAKING:** a declined confirmation exits 1 (it exited 0 with "Cancelled") | Pass `-y` where the change is intended |
 | `gco inference configure-store` | **BREAKING:** with no option, exits 1 and changes nothing; with a store block it used to restart the rollout | Pass at least one setting |
@@ -1321,6 +1462,7 @@ Exit status and options:
 | `gco queue list` | `--limit` must be 1-1000, the API's range (exit 2); `--cursor` reads the next page | |
 | `gco stacks access` | Exits 1 when the access entry, the policy association or kubectl is refused (it said the entry "may already exist" and exited 0) | Fix the permission the message names |
 | `gco stacks addons status` | Exits 1 when a Region cannot be read or an add-on is not healthy | |
+| `gco stacks deploy`, `deploy-all`, `destroy`, `destroy-all`, `list`, `gco upgrade` | The Lambda package build progress (`Building ... Lambda package...`, `... built successfully`) and the package-size warning go to stderr; they went to stdout, where the CDK app printed them too and `cdk list` read them as stack names. A `cdk list` line that is not a CloudFormation stack name now stops the command with exit 1 before anything is deployed or destroyed | Read the progress from stderr |
 | `gco images orphans` | **BREAKING:** exits 1, naming the source, when the inference endpoints or a Region's jobs cannot be read; it treated an unreadable source as using no image, so it listed tags in use. It also counts more images as in use: every image an endpoint record names and the images of every unfinished job whatever its age, by tag or by digest, through any Region's replica | Fix the read the message names before deleting anything |
 | `gco images describe` | **BREAKING:** exits 1, with `Tag '<tag>' not found in <name>` on stderr, for a tag the repository does not have; it exited 0 | Treat exit 1 as "no such image" |
 | `gco files access-points` | **BREAKING:** exits 1, with the error on stderr, when the access points cannot be read: access denied, throttling, a malformed ID or a service error. It printed "No access points found" (`[]`) and exited 0. A file system that does not exist still gives `[]` | Fix the permission or ID the message names |
@@ -1353,7 +1495,35 @@ data.
 | `gco jobs submit --check-policy` | The submission document; the policy findings go to stderr |
 | Every command | Datetimes in ISO 8601 at any depth (`2026-01-15T10:30:00+00:00`); those inside job, stack and file records printed as `2026-01-15 10:30:00+00:00` |
 
+The fleet status document (`gco status`):
+
+- **BREAKING (scripts that read `stacks`): a stack `gco status` cannot read
+  is `unknown`.** A `DescribeStacks` call that was denied, throttled or failed
+  on the network read as `not-deployed`, the health of a stack CloudFormation
+  says does not exist. Such a stack is now listed with `health: unknown` and
+  `status: null` and named in the section's `errors`; the `stacks` section is
+  `partial`, or `error` when no stack could be read, so `degraded` names it.
+  The expected-stack finding says `<stack> could not be read in <region>`,
+  and `<stack> is not deployed in <region>` only for a stack that does not
+  exist; both used to say `absent or not readable`. Treat `unknown` as "no
+  answer", not "missing".
+- **New `addons` section.** Each Region's add-on convergence, read from the
+  same SSM records as `gco stacks addons status`: a failed phase or Helm
+  chart (for example `base-manifests failed in us-east-1: ...`) is now an
+  error finding, so `overall` is `degraded` and `--fail-on-findings` exits 1
+  where the report used to say nothing looks wrong. A finished gateway
+  teardown (`deleted`) counts as healthy, in `gco stacks addons status` too.
+
 Prompts, namespaces, Regions and permissions:
+
+- **A value with a trailing newline is refused.** The CLI's checks of Region
+  names, cluster names, instance, VPC, subnet, security group and AMI IDs,
+  instance types, image references and similar single values matched with a
+  pattern whose `$` also accepts one trailing newline, so `"us-east-1\n"`
+  passed and reached an AWS CLI or kubectl argument. They now match the whole
+  value. Values typed on a command line are unaffected; values read from files
+  or other programs' output with their newline kept are refused, so strip
+  them.
 
 - **BREAKING: `gco jobs submit-queue` is `gco queue submit` under a second
   name.** It goes through the global API (a Region's bridge only with
@@ -1476,6 +1646,31 @@ Prompts, namespaces, Regions and permissions:
 - **`gco upgrade` checks the preserved `cdk.json` before its teardown** from
   the next upgrade on, and stops when the check cannot run
   ([step 4](#how-an-upgrade-works)).
+
+### Errors the CLI's Python modules raise
+
+For code that imports the CLI's modules instead of running `gco`:
+
+- **`APIRequestError` is also a `requests.HTTPError`, and carries the API's
+  message.** Every `cli.aws_client.GCOAWSClient` method that reads a JSON
+  answer raises it for a non-2xx response. Apart from `call_api`, they raised
+  the `requests.HTTPError` of `raise_for_status()`, whose message
+  (`403 Client Error: Forbidden for url: ...`) ignored the body. The message
+  is now `API request failed: <message>`, the message being the body's
+  `error`, `message`, `detail` or API Gateway's `Message`, without the request
+  material API Gateway quotes. `response` and `request` are set, so
+  `except requests.HTTPError` and `e.response.status_code` keep working.
+  `ManifestSubmissionError` reads the same keys.
+- **BREAKING (narrow): an `except requests.HTTPError` clause now catches
+  `call_api`'s errors too**, as does `except OSError`, the base class of
+  `requests` exceptions. Where such a clause comes before
+  `except APIRequestError`, move the `APIRequestError` clause first.
+- **BREAKING: `StackManager.get_stack_status` raises unless the stack does not
+  exist.** It returned `None` for every failed read (access denied,
+  throttling, missing credentials, the network). `None` now means
+  CloudFormation reported that the stack does not exist; catch
+  `botocore.exceptions.ClientError` and `BotoCoreError` where you handled a
+  read that failed.
 
 ### MCP server tools
 

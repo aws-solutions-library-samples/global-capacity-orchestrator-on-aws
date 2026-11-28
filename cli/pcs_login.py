@@ -38,6 +38,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from gco.aws_names import is_aws_region_name
 from gco.pcs_config import (
     PCS_NODE_GROUP_INSTANCE_TAG,
     PCS_OUTPUT_CLUSTER_ID,
@@ -54,7 +55,6 @@ RUN_SHELL_DOCUMENT = "AWS-RunShellScript"
 OUTPUT_TRUNCATED_MARKER = "---Output truncated---"
 _TERMINAL_STATUSES = frozenset({"Success", "Failed", "Cancelled", "TimedOut", "Cancelling"})
 _INSTANCE_RE = re.compile(r"^i-[0-9a-f]{8}([0-9a-f]{9})?$")
-_REGION_RE = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 
 ClientFactory = Callable[..., Any]
 
@@ -118,7 +118,7 @@ def find_login_node(
     manages no login node), when the login node group is disabled, or when
     its instance is not running yet (PCS launches it right after the deploy).
     """
-    if not _REGION_RE.match(region):
+    if not is_aws_region_name(region):
         raise PcsLoginError(f"invalid AWS region {region!r}")
     outputs = stack_outputs(region, stack_name, client_factory=client_factory)
     cluster_id = outputs.get(PCS_OUTPUT_CLUSTER_ID)
@@ -160,7 +160,7 @@ def find_login_node(
     # rolls it with its drain strategy): the one that will stay.
     instances.sort(key=lambda item: str(item.get("LaunchTime") or ""), reverse=True)
     instance_id = str(instances[0].get("InstanceId") or "")
-    if not _INSTANCE_RE.match(instance_id):
+    if not _INSTANCE_RE.fullmatch(instance_id):
         raise PcsLoginError(f"PCS reported an unexpected login instance id {instance_id!r}")
     return LoginNode(
         region=region, cluster_id=cluster_id, node_group_id=node_group_id, instance_id=instance_id
@@ -196,7 +196,7 @@ def shell_command(node: LoginNode, *, user: str) -> list[str]:
     the API's Slurm identity, whose home the lifecycle action created on the
     shared ``/home``, so ``sbatch`` and ``squeue`` act as it.
     """
-    if not POSIX_NAME_PATTERN.match(user):
+    if not POSIX_NAME_PATTERN.fullmatch(user):
         raise PcsLoginError(f"refusing to open a shell as {user!r}: not a POSIX user name")
     return _session_command(node, f"sudo -iu {shlex.quote(user)}")
 

@@ -867,6 +867,10 @@ def _health_stability_samples(
     return samples
 
 
+#: ``gpu_percent`` is served rounded to two decimals.
+_GPU_PERCENT_TOLERANCE = 0.01
+
+
 def _validate_metrics_payload(
     ctx: RunContext,
     payload: Any,
@@ -877,7 +881,11 @@ def _validate_metrics_payload(
 
     The shape is checked strictly enough that only ``health_api.get_metrics``
     satisfies it: a bare 200 from any other service (or a proxy default page)
-    fails here rather than passing as "reachable".
+    fails here rather than passing as "reachable". The payload must hold a
+    cluster reading (a monitor whose reads fail serves every value null), and
+    ``gpu_percent`` must be the share its GPU counts give, which proves the
+    deployed monitor serves the counts that tell a cluster without GPU nodes
+    from one with idle GPUs.
     """
     if not isinstance(payload, dict):
         raise RuntimeError("metrics response is not a JSON object")
@@ -897,13 +905,30 @@ def _validate_metrics_payload(
     utilization = payload.get("resource_utilization")
     if not isinstance(utilization, dict):
         raise RuntimeError("metrics response has no resource_utilization object")
-    for key in ("cpu_percent", "memory_percent", "gpu_percent"):
+    percents = ("cpu_percent", "memory_percent", "gpu_percent")
+    if all(utilization.get(key) is None for key in percents):
+        raise RuntimeError(f"metrics response holds no cluster reading: {payload.get('message')!r}")
+    for key in percents:
         value = utilization.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
             raise RuntimeError(
                 f"metrics response resource_utilization.{key} is not a "
                 f"non-negative number: {value!r}"
             )
+    for key in ("gpu_allocatable", "gpu_requested"):
+        value = utilization.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError(
+                f"metrics response resource_utilization.{key} is not a "
+                f"non-negative integer: {value!r}"
+            )
+    allocatable, requested = utilization["gpu_allocatable"], utilization["gpu_requested"]
+    expected_gpu = round(requested / allocatable * 100, 2) if allocatable else 0.0
+    if abs(utilization["gpu_percent"] - expected_gpu) > _GPU_PERCENT_TOLERANCE:
+        raise RuntimeError(
+            f"metrics response gpu_percent {utilization['gpu_percent']!r} is not the share "
+            f"its counts give ({requested} of {allocatable} GPUs requested: {expected_gpu})"
+        )
     thresholds = payload.get("thresholds")
     if not isinstance(thresholds, dict):
         raise RuntimeError("metrics response has no thresholds object")

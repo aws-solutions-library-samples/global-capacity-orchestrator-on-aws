@@ -474,7 +474,16 @@ class TestLoginPodCommands:
         ]
 
     @pytest.mark.parametrize(
-        "path", ["relative/out", "/home/../etc/passwd", "/home/a;rm", "", "/x y"]
+        "path",
+        [
+            "relative/out",
+            "/home/../etc/passwd",
+            "/home/a;rm",
+            "",
+            "/x y",
+            # ``$`` also matches before a final newline; the check is a fullmatch.
+            "/home/slurm/slurm-42.out\n",
+        ],
     )
     def test_remote_path_validation(self, path):
         with pytest.raises(SlurmCliError, match="refusing to read"):

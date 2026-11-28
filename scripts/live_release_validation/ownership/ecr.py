@@ -413,6 +413,35 @@ def _merge_expected_ecr_target(
         target["sources"].append(source)
 
 
+#: A placeholder cdk-assets resolves in an asset destination before publishing.
+_ASSET_DESTINATION_PLACEHOLDER = re.compile(r"\$\{[^}]*\}")
+
+
+def _resolved_destination_field(value: str, *, account: str, region: str | None, where: str) -> str:
+    """``value`` with the placeholders cdk-assets resolves when it publishes.
+
+    A stack synthesized without an account (the upgrade harness synthesizes
+    this checkout's app that way) names its image repository
+    ``cdk-hnb659fds-container-assets-${AWS::AccountId}-<region>``, and
+    cdk-assets puts the publishing account there. The harness puts the account
+    it verified, so the target names the repository the image reaches. Any
+    other placeholder is refused rather than kept: a target that names no real
+    repository would turn the run's own image into an unexplained baseline
+    change at final-inventory. ``region`` is None for the region field
+    itself, which cannot name its own value.
+    """
+    resolved = value.replace("${AWS::AccountId}", account)
+    if region is not None:
+        resolved = resolved.replace("${AWS::Region}", region)
+    leftover = _ASSET_DESTINATION_PLACEHOLDER.findall(resolved)
+    if leftover:
+        raise RuntimeError(
+            f"Docker asset {where} names {', '.join(sorted(set(leftover)))} in its destination, "
+            "which the harness cannot resolve to the repository cdk-assets publishes to"
+        )
+    return resolved
+
+
 def _expected_ecr_images(
     ctx: RunContext,
     stack_names: list[str],
@@ -424,7 +453,9 @@ def _expected_ecr_images(
     ``root`` is the checkout whose ``cdk.out``, ``cdk.json``, and chart
     catalogue are read; it defaults to the validated checkout. The upgrade
     harness also passes the private checkout of the release it deploys first,
-    whose mirror copies the images its own charts name.
+    whose mirror copies the images its own charts name. A destination's
+    ``${AWS::AccountId}`` and ``${AWS::Region}`` are resolved as cdk-assets
+    resolves them (:func:`_resolved_destination_field`).
     """
     checkout = ctx.settings.repo_root if root is None else root
     targets: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -445,11 +476,28 @@ def _expected_ecr_images(
             for destination in destinations.values():
                 if not isinstance(destination, dict):
                     raise RuntimeError(f"Docker asset {stack_name}:{asset_id} is malformed")
+                where = f"{stack_name}:{asset_id}"
+                region = _resolved_destination_field(
+                    str(destination.get("region") or ""),
+                    account=ctx.settings.expected_account,
+                    region=None,
+                    where=where,
+                )
                 _merge_expected_ecr_target(
                     targets,
-                    region=str(destination.get("region") or ""),
-                    repository=str(destination.get("repositoryName") or ""),
-                    tag=str(destination.get("imageTag") or ""),
+                    region=region,
+                    repository=_resolved_destination_field(
+                        str(destination.get("repositoryName") or ""),
+                        account=ctx.settings.expected_account,
+                        region=region,
+                        where=where,
+                    ),
+                    tag=_resolved_destination_field(
+                        str(destination.get("imageTag") or ""),
+                        account=ctx.settings.expected_account,
+                        region=region,
+                        where=where,
+                    ),
                     source={"kind": "cdk-asset", "stack": stack_name, "asset_id": str(asset_id)},
                 )
 

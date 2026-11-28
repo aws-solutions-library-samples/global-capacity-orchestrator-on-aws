@@ -360,6 +360,20 @@ def test_resolve_tag_rejects_a_response_without_a_sha(monkeypatch: pytest.Monkey
     )
 
 
+def test_resolve_tag_rejects_a_sha_with_a_trailing_newline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The sha check is a fullmatch: ``$`` alone also matches before a final newline.
+    monkeypatch.setattr(
+        verifier.urllib.request,
+        "urlopen",
+        lambda request, timeout=None: _Response({"sha": f"{SHA_A}\n"}),
+    )
+    assert verifier.resolve_tag("actions/checkout", "v7.0.1").error == (
+        "response carried no commit sha"
+    )
+
+
 # ── This repository ──────────────────────────────────────────────────────────
 
 
@@ -467,6 +481,8 @@ def test_no_fallback_is_attempted_when_there_was_no_token(
         "own er/repo",
         "user:pass@host/repo",
         "",
+        # ``$`` also matches before a final newline; the check is a fullmatch.
+        "actions/checkout\n",
     ],
 )
 def test_a_malformed_repository_is_refused_without_a_request(
@@ -481,7 +497,8 @@ def test_a_malformed_repository_is_refused_without_a_request(
     assert "malformed repository" in (resolution.error or "")
 
 
-@pytest.mark.parametrize("version", ["v1", "main", "../../v1.0.0", "v1.0.0 v2.0.0", ""])
+# "v1.0.0\n": ``$`` also matches before a final newline; the check is a fullmatch.
+@pytest.mark.parametrize("version", ["v1", "main", "../../v1.0.0", "v1.0.0 v2.0.0", "", "v1.0.0\n"])
 def test_a_malformed_version_is_refused_without_a_request(
     monkeypatch: pytest.MonkeyPatch, version: str
 ) -> None:

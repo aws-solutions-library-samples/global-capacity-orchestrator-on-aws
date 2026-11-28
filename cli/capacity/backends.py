@@ -204,7 +204,7 @@ def hyperpod_capacity(
                 status=str(group.get("Status") or ""),
                 gpus_per_instance=(
                     gpus_per_instance(instance_type)
-                    if INSTANCE_TYPE_PATTERN.match(instance_type)
+                    if INSTANCE_TYPE_PATTERN.fullmatch(instance_type)
                     else None
                 ),
             )

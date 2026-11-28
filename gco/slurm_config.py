@@ -462,7 +462,7 @@ def _validate_conf_map(raw: object, path: str, owned: frozenset[str]) -> dict[st
     normalized: dict[str, list[str]] = {}
     for key, value in block.items():
         key_text = str(key)
-        if not CONF_KEY_PATTERN.match(key_text):
+        if not CONF_KEY_PATTERN.fullmatch(key_text):
             raise SlurmConfigError(
                 f"{path} key {key_text!r} is not a Slurm configuration parameter name"
             )
@@ -491,7 +491,7 @@ def _validate_conf_map(raw: object, path: str, owned: frozenset[str]) -> dict[st
 
 def _validate_partition(name: str, raw: object) -> dict[str, Any]:
     path = f"helm.slurm.partitions.{name}"
-    if not PARTITION_NAME_PATTERN.match(name):
+    if not PARTITION_NAME_PATTERN.fullmatch(name):
         raise SlurmConfigError(
             f"helm.slurm.partitions has an invalid partition name {name!r}: use a lowercase "
             "DNS label of at most 32 characters (it names the NodeSet and its pods)"
@@ -557,7 +557,7 @@ def _validate_partition(name: str, raw: object) -> dict[str, Any]:
             f"{path}.min_nodes must not exceed max_nodes, got {min_nodes} > {max_nodes}"
         )
     max_time = partition["max_time"]
-    if not isinstance(max_time, str) or not SLURM_TIME_PATTERN.match(max_time.strip()):
+    if not isinstance(max_time, str) or not SLURM_TIME_PATTERN.fullmatch(max_time.strip()):
         raise SlurmConfigError(
             f"{path}.max_time must be a Slurm time limit (minutes, HH:MM:SS, D-HH:MM:SS or "
             f"UNLIMITED), got {max_time!r}"
@@ -565,7 +565,7 @@ def _validate_partition(name: str, raw: object) -> dict[str, Any]:
     partition["max_time"] = max_time.strip()
     features = partition["features"]
     if not isinstance(features, list) or not all(
-        isinstance(item, str) and FEATURE_PATTERN.match(item) for item in features
+        isinstance(item, str) and FEATURE_PATTERN.fullmatch(item) for item in features
     ):
         raise SlurmConfigError(
             f"{path}.features must be a list of Slurm feature names (letters, digits, _ . -), "
@@ -618,7 +618,8 @@ def _validate_quota_fit(
     """Fail when the declared partitions can never fit the gco-jobs quota.
 
     Slurm worker pods live in ``gco-jobs`` and count against its
-    ``ResourceQuota`` and ``LimitRange`` (04-resource-quotas.yaml). A partition
+    ``ResourceQuota``, its ``LimitRange`` (CPU, memory) and the GPU cap
+    admission policy (04-resource-quotas.yaml). A partition
     whose node is larger than the per-container ceiling, or whose
     ``max_nodes`` worth of nodes exceeds the namespace ceiling on its own,
     would deploy fine and then sit PENDING forever with the reason visible only
@@ -648,8 +649,8 @@ def _validate_quota_fit(
         if container_gpu is not None and spec["gpus"] > container_gpu:
             raise SlurmConfigError(
                 f"{path}.gpus={spec['gpus']} exceeds resource_quota.container_max_gpu="
-                f"{resource_quota['container_max_gpu']!r}: the LimitRange would reject every "
-                "worker pod"
+                f"{resource_quota['container_max_gpu']!r}: the GPU cap admission policy would "
+                "reject every worker pod"
             )
     totals = {
         "max_cpu": sum(p["_cpu_cores"] * p["max_nodes"] for p in enabled.values()),
@@ -740,7 +741,7 @@ def validate_slurm_config(
 
     _require_bool(config["enabled"], "helm.slurm.enabled")
     cluster_name = _require_nonempty_string(config["cluster_name"], "helm.slurm.cluster_name")
-    if not CLUSTER_NAME_PATTERN.match(cluster_name):
+    if not CLUSTER_NAME_PATTERN.fullmatch(cluster_name):
         raise SlurmConfigError(
             f"helm.slurm.cluster_name must be a Slurm ClusterName (letters, digits, _ -), "
             f"got {cluster_name!r}"
@@ -841,7 +842,7 @@ _CRON_PATTERN = re.compile(rf"^{_CRON_FIELD}(\s+{_CRON_FIELD}){{4}}$")
 
 
 def _validate_cron(value: object, path: str) -> None:
-    if not isinstance(value, str) or not _CRON_PATTERN.match(value.strip()):
+    if not isinstance(value, str) or not _CRON_PATTERN.fullmatch(value.strip()):
         raise SlurmConfigError(
             f"{path} must be a five-field cron expression (e.g. '0 3 * * *'), got {value!r}"
         )
@@ -993,13 +994,17 @@ def _conf_map(*layers: Mapping[str, list[str]]) -> dict[str, list[str]]:
 #: slurmdbd, slurmrestd, the login pod (chart values) and the MariaDB /
 #: backup pods (post-Helm manifests mirror it verbatim). On-demand only (a
 #: Spot reclaim of the controller is a cluster outage), amd64 (the Slinky
-#: images are built for it), and never on an accelerator pool: the gco-jobs
-#: LimitRange defaults every container to ``nvidia.com/gpu: 0``, which the
-#: ExtendedResourceToleration admission plugin turns into a toleration of the
-#: ``nvidia.com/gpu`` taint, and Karpenter then provisioned a g4dn for the
-#: controller (observed live, 2026-10-27) and ``do-not-disrupt`` pinned it
-#: there. Every GCO accelerator and job pool labels its nodes with
-#: ``workload-type``; the Auto Mode general-purpose pool does not.
+#: images are built for it), and never on an accelerator pool, whatever the
+#: pod tolerates. A pod that tolerates the ``nvidia.com/gpu`` taint can land
+#: on a GPU node and make Karpenter provision one: the gco-jobs LimitRange once
+#: defaulted every container to ``nvidia.com/gpu: 0``, which the
+#: ExtendedResourceToleration admission plugin turned into that toleration,
+#: and Karpenter provisioned a g4dn for the controller (observed live,
+#: 2026-10-27) and ``do-not-disrupt`` pinned it there. The LimitRange no longer
+#: names GPUs (04-resource-quotas.yaml); this rule keeps these pods off the
+#: accelerator pools should anything else give them such a toleration. Every
+#: GCO accelerator and job pool labels its nodes with ``workload-type``; the
+#: Auto Mode general-purpose pool does not.
 PLATFORM_POD_NODE_SELECTOR: dict[str, str] = {
     "kubernetes.io/os": "linux",
     "kubernetes.io/arch": "amd64",

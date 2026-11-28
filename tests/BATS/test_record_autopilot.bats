@@ -216,7 +216,7 @@ run_recorder() {
     grep -q 'GCO Autopilot' "$FIXTURE/demo/autopilot-claude-code.cast"
     grep -q 'submit-sqs' "$FIXTURE/demo/autopilot-claude-code.cast"
     grep -q $'\u25cf gco - find_docs' "$FIXTURE/demo/autopilot-claude-code.cast"
-    ! grep -q $'\u23fa' "$FIXTURE/demo/autopilot-claude-code.cast"
+    [ "$(grep -c $'\u23fa' "$FIXTURE/demo/autopilot-claude-code.cast")" -eq 0 ]
     [ "$(cat "$FIXTURE/demo/autopilot-claude-code.gif")" = "rendered gif" ]
     # The recording exercised this checkout's CLI, never an installed gco.
     grep -qx -- '--version' "$CLI_CALLS"
@@ -263,8 +263,8 @@ run_recorder() {
     # the matching ASCII phase and the block-spinner idle cell becomes ▪.
     grep -q '| Thinking' "$FIXTURE/demo/autopilot-opencode.cast"
     grep -q $'\u25a0 \u25aa \u25aa build' "$FIXTURE/demo/autopilot-opencode.cast"
-    ! grep -q $'\u280b' "$FIXTURE/demo/autopilot-opencode.cast"
-    ! grep -q $'\u2b1d' "$FIXTURE/demo/autopilot-opencode.cast"
+    [ "$(grep -c $'\u280b' "$FIXTURE/demo/autopilot-opencode.cast")" -eq 0 ]
+    [ "$(grep -c $'\u2b1d' "$FIXTURE/demo/autopilot-opencode.cast")" -eq 0 ]
     [ "$(cat "$FIXTURE/demo/autopilot-opencode.gif")" = "rendered gif" ]
 }
 

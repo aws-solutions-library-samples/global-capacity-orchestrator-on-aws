@@ -10,8 +10,11 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import os
 import re
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1155,3 +1158,125 @@ def test_pre_rendered_invalid_json_falls_back_to_raw_text(
     module._emit_json_text("not-json")
 
     assert capsys.readouterr().out == "not-json\n"
+
+
+# ---------------------------------------------------------------------------
+# gco_mcp/ joins sys.path only when a Mission or Swarm command needs it
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_package_helper_puts_gco_mcp_first_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mcp_dir = mission_cmd_mod._GCO_MCP_DIR
+    assert Path(mcp_dir) == (ROOT / "gco_mcp").resolve()
+    # Swarm uses the Mission helper rather than a copy of it.
+    assert swarm_cmd_mod.ensure_mcp_package_importable is (
+        mission_cmd_mod.ensure_mcp_package_importable
+    )
+    without = [entry for entry in sys.path if entry != mcp_dir]
+    monkeypatch.setattr(sys, "path", list(without))
+
+    mission_cmd_mod.ensure_mcp_package_importable()
+    mission_cmd_mod.ensure_mcp_package_importable()
+
+    assert sys.path == [mcp_dir, *without]
+
+
+#: Run by a fresh interpreter: ``import cli.main``, then ``gco config-cmd show``,
+#: then ``gco <argv[1]> list``, printing sys.path after each step as one JSON line.
+_SYS_PATH_PROBE = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    from click.testing import CliRunner
+
+    group = sys.argv[1]
+    before = list(sys.path)
+    import cli.main
+
+    paths = {"import": list(sys.path)}
+    results = {}
+    for name, args in (("config", ["config-cmd", "show"]), (group, [group, "list"])):
+        result = CliRunner().invoke(cli.main.cli, args)
+        results[name] = {
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "output": result.output,
+        }
+        paths[name] = list(sys.path)
+    print(
+        json.dumps(
+            {
+                "before": before,
+                "paths": paths,
+                "results": results,
+                "mcp_dir": sys.modules["cli.commands.mission_cmd"]._GCO_MCP_DIR,
+                "mission_path": list(getattr(sys.modules.get("mission"), "__path__", [])),
+            }
+        )
+    )
+    """
+)
+
+
+def _probe_sys_path(tmp_path: Path, group: str) -> dict[str, Any]:
+    """Run the probe for ``gco GROUP list`` and check what both groups share.
+
+    The probe needs a fresh interpreter because this process already has
+    gco_mcp/ on sys.path (tests/conftest.py and this module put it there),
+    which would hide both an import-time insert and a lazy import that runs
+    without the helper. HOME points at ``tmp_path``, so the filesystem state
+    backend reads an empty directory.
+    """
+    # A developer's PYTHONPATH could put gco_mcp/ on the path up front, and
+    # their GCO_* settings (GCO_OUTPUT_FORMAT, the state backend) would change
+    # what the commands print, so the child inherits neither.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key != "PYTHONPATH" and not key.startswith("GCO_")
+    }
+    env.update(
+        HOME=str(tmp_path),
+        GCO_ENABLE_MISSION="true",
+        GCO_ENABLE_SWARM="true",
+        GCO_MISSION_STATE_BACKEND="filesystem",
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", _SYS_PATH_PROBE, group],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    report: dict[str, Any] = json.loads(completed.stdout.splitlines()[-1])
+    for name, result in report["results"].items():
+        assert result["exit_code"] == 0, (name, result["output"])
+    # Neither importing the CLI nor running a command outside Mission and
+    # Swarm changes sys.path.
+    assert report["paths"]["import"] == report["before"]
+    assert report["paths"]["config"] == report["before"]
+    # The command found the bare ``mission`` name in gco_mcp/.
+    assert Path(report["mcp_dir"]) == (ROOT / "gco_mcp").resolve()
+    assert report["mission_path"] == [str(Path(report["mcp_dir"]) / "mission")]
+    return report
+
+
+def test_gco_mcp_joins_sys_path_only_when_a_mission_command_runs(tmp_path: Path) -> None:
+    report = _probe_sys_path(tmp_path, "mission")
+
+    assert json.loads(report["results"]["mission"]["stdout"]) == {"sessions": []}
+    assert report["paths"]["mission"] == [report["mcp_dir"], *report["before"]]
+
+
+def test_swarm_command_imports_mission_in_a_fresh_interpreter(tmp_path: Path) -> None:
+    report = _probe_sys_path(tmp_path, "swarm")
+
+    assert json.loads(report["results"]["swarm"]["stdout"]) == {"swarms": []}
+    # No exact sys.path check here: mission/swarm_runner.py and the gco_mcp
+    # modules it imports insert entries of their own when they load.

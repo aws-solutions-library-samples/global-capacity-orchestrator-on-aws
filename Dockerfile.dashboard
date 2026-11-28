@@ -1,0 +1,106 @@
+# Dockerfile for the GCO dashboard (`gco dashboard start`)
+#
+# Runs the Streamlit dashboard (cli/dashboard/) on a workstation; it is never
+# deployed to a cluster. `gco dashboard start` builds this image from the
+# checkout, publishes its port on 127.0.0.1 only, and mounts ~/.aws and the
+# checkout (for cdk.json and examples/) read-only. See docs/DASHBOARD.md.
+#
+# The same two-stage distroless build as the service images in dockerfiles/:
+# the pinned python slim builder installs the locked dependency set and
+# applies Debian security patches, then dockerfiles/build_scratch_rootfs.py
+# stages a minimal root filesystem (interpreter, site-packages, the gco and
+# cli trees, the exact ELF closure, CA trust, zoneinfo, dpkg scanner metadata)
+# that the FROM scratch runtime stage copies wholesale. The image contains no
+# shell, package manager or coreutils.
+FROM python:3.14.9-slim AS builder
+
+WORKDIR /app
+
+# Apply Debian security patches at build time. APT_SECURITY_EPOCH busts the
+# layer cache so a freshly published trixie-security fix is not masked by a
+# stale cached upgrade layer; it moves with the service images' epoch. The
+# patched libraries are exactly what build_scratch_rootfs.py copies into the
+# runtime rootfs.
+ARG APT_SECURITY_EPOCH=2026-11-25
+RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
+    && apt-get update \
+    && apt-get upgrade -y \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install the CLI's runtime roots plus the dashboard extra (Streamlit). Python
+# 3.14's tomllib writes a temporary requirements file so pyproject.toml stays
+# the sole direct-pin source; requirements-lock.txt constrains the complete
+# transitive graph, as for every image in the repository. The project itself
+# is not installed: its trees are copied below and found through PYTHONPATH.
+#
+# pip flags + bash retry loop guard against transient PyPI/CDN drops (see
+# Dockerfile.dev for the rationale; same pattern across every image build).
+COPY pyproject.toml requirements-lock.txt ./
+RUN python -c 'import pathlib, tomllib; config = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8")); project = config["project"]; dependencies = project["dependencies"] + project["optional-dependencies"]["dashboard"]; pathlib.Path("requirements-runtime.txt").write_text("-c requirements-lock.txt\n" + "\n".join(dependencies) + "\n", encoding="utf-8")' \
+    && for attempt in 1 2 3; do \
+        if pip install --no-cache-dir \
+            --retries 10 --timeout 120 --resume-retries 5 \
+            -r requirements-runtime.txt; then \
+            break; \
+        fi; \
+        if [ "${attempt}" -eq 3 ]; then \
+            echo "pip install failed after ${attempt} attempts" >&2; \
+            exit 1; \
+        fi; \
+        echo "pip install attempt ${attempt} failed; retrying in 10s..."; \
+        sleep 10; \
+    done \
+    && rm requirements-runtime.txt \
+    && python -m pip uninstall -y pip
+
+# Source last, so a code edit does not invalidate the dependency layer.
+# Precompiled because the container runs with a read-only root filesystem.
+COPY gco/ ./gco/
+COPY cli/ ./cli/
+RUN python -m compileall -q ./gco ./cli
+
+# Assemble the minimal runtime rootfs under /rootfs with both trees. Fails the
+# build on any unresolved shared library, unattributed file or missing trust
+# anchor, and writes the runtime smoke manifest next to runtime_smoke.py.
+COPY dockerfiles/build_scratch_rootfs.py dockerfiles/runtime_smoke.py /opt/build/
+RUN python /opt/build/build_scratch_rootfs.py /app/gco /app/cli
+
+# ---------------------------------------------------------------------------
+# Runtime stage: distroless. Only the staged rootfs ships.
+FROM scratch
+
+COPY --from=builder /rootfs/ /
+
+# scratch provides no environment, so PATH is explicit. HOME matches the
+# synthesized passwd entry for uid 1000; `gco dashboard start` runs the
+# container as the caller's uid and passes HOME again, so ~/.aws resolves to
+# the read-only mount either way.
+ENV PATH=/usr/local/bin:/usr/bin:/bin \
+    HOME=/home/gco \
+    PYTHONPATH=/app \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# The checkout is mounted here: the dashboard reads its cdk.json and examples/.
+WORKDIR /workspace
+
+USER gco
+
+# Build-time runtime smoke as the runtime user: every builder-importable stdlib
+# extension plus every dashboard page module (cli.dashboard.views imports them
+# all, with Streamlit, pandas, Altair and pydeck), NSS identity, CA trust and
+# tzdata. The bind mount exists only for this RUN, so no build tooling ships.
+RUN --mount=type=bind,from=builder,source=/opt/build,target=/opt/build \
+    ["python", "/opt/build/runtime_smoke.py", "cli.dashboard.views"]
+
+EXPOSE 8501
+
+# Streamlit's own health endpoint, read with the image's Python (there is no
+# shell or curl to run anything else).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["python", "-m", "cli.dashboard.server", "--check"]
+
+# Listens on every interface inside the container; `gco dashboard start`
+# publishes the port on the host's loopback address only.
+CMD ["python", "-m", "cli.dashboard.server", "--address", "0.0.0.0"]

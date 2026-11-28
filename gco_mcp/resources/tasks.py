@@ -67,7 +67,7 @@ def _coerce_to_dict(record: object) -> dict[str, Any]:
 
 async def _task_resource(task_id: str) -> str:
     """Return the current status of ``task_id`` as JSON."""
-    if not _TASK_ID_RE.match(task_id):
+    if not _TASK_ID_RE.fullmatch(task_id):
         return json.dumps({"error": "invalid task_id", "value": task_id})
     try:
         state = await _lookup_task_state(task_id)

@@ -85,13 +85,32 @@ from gco.stacks.control_plane_alarms import add_api_alarms, create_alert_topic
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-24T14:05:08Z
-# Generated from Git commit: 9d3160a1b68d2fdc13355b73df0e30f2af4bc047
+# Generated at (UTC): 2026-11-27T20:35:51Z
+# Generated from Git commit: 6749b1664ca1bc124f3bebe6b36dfb3cd00ba0ef
 # Flowchart(s) generated from this file:
 #   * ``GCOApiGatewayGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/api_gateway_global_stack.GCOApiGatewayGlobalStack___init__.png``)
 # Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
 # <pyflowchart-code-diagram> END
+
+
+#: What the TLS certificate manager image is built from, relative to the
+#: repository root. Its build context is the repository root, as the service
+#: images' is, so its pip install can be constrained by requirements-lock.txt.
+_TLS_CERTIFICATE_MANAGER_IMAGE_INPUTS = (
+    "lambda/tls-certificate-manager/Dockerfile",
+    "lambda/tls-certificate-manager/handler.py",
+    "lambda/tls-certificate-manager/requirements.txt",
+    "requirements-lock.txt",
+)
+#: The image asset's exclude patterns, in .dockerignore syntax: leave out
+#: everything, then keep only the inputs, so an edit to any other file leaves
+#: the asset hash unchanged. CDK applies the repository's .dockerignore
+#: patterns before these and always keeps .dockerignore itself.
+_TLS_CERTIFICATE_MANAGER_IMAGE_EXCLUDES = (
+    "*",
+    *(f"!{path}" for path in _TLS_CERTIFICATE_MANAGER_IMAGE_INPUTS),
+)
 
 
 @dataclass(frozen=True)
@@ -401,7 +420,9 @@ class GCOApiGatewayGlobalStack(Stack):
             "BackendTlsCertificateManager",
             function_name=f"{project_name}-backend-tls-manager",
             code=lambda_.DockerImageCode.from_image_asset(
-                directory="lambda/tls-certificate-manager",
+                directory=".",
+                file="lambda/tls-certificate-manager/Dockerfile",
+                exclude=list(_TLS_CERTIFICATE_MANAGER_IMAGE_EXCLUDES),
                 platform=ecr_assets.Platform.LINUX_AMD64,
             ),
             architecture=lambda_.Architecture.X86_64,

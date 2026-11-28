@@ -174,10 +174,7 @@ Proxy roles cannot read the root secret or use its KMS key; they can read only t
 
 ## Packaging
 
-`Dockerfile` builds from the AWS Lambda Python 3.14 base image, applies current Amazon Linux security updates, and installs exact dependency versions from `requirements.txt`:
-
-- `boto3==1.43.62`
-- `cryptography==49.0.0`
+`Dockerfile` builds from the AWS Lambda Python 3.14 base image, applies current Amazon Linux security updates, and installs the direct dependencies pinned in `requirements.txt` (`boto3` and `cryptography`), constrained by the repository's `requirements-lock.txt` so every indirect dependency is at its locked version too. The build context is the repository root, as for the service images: the image asset in `gco/stacks/api_gateway_global_stack.py` keeps only this directory's `Dockerfile`, `handler.py` and `requirements.txt` and the lock, so an edit anywhere else leaves the asset hash unchanged.
 
 The container entry point is `handler.lambda_handler`. A container image is required because the Lambda managed runtime does not provide the pinned `cryptography` package.
 

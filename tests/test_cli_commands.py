@@ -284,11 +284,20 @@ class TestCapacityCommands:
     @patch("cli.commands.capacity_cmd.get_output_formatter")
     def test_capacity_spot_prices(self, mock_formatter, mock_checker):
         """Test capacity spot-prices command."""
+        from cli.capacity.models import SpotPriceInfo
         from cli.main import cli
 
         mock_cap_checker = MagicMock()
         mock_cap_checker.get_spot_price_history.return_value = [
-            {"availability_zone": "us-east-1a", "current_price": 0.50}
+            SpotPriceInfo(
+                instance_type="g4dn.xlarge",
+                availability_zone="us-east-1a",
+                current_price=0.50,
+                avg_price_7d=0.45,
+                min_price_7d=0.40,
+                max_price_7d=0.55,
+                price_stability=0.9,
+            )
         ]
         mock_checker.return_value = mock_cap_checker
 
@@ -301,6 +310,9 @@ class TestCapacityCommands:
             ["capacity", "spot-prices", "--instance-type", "g4dn.xlarge", "--region", "us-east-1"],
         )
         assert result.exit_code == 0
+        [row] = mock_output.print.call_args.args[0]
+        assert row["availability_zone"] == "us-east-1a"
+        assert row["avg_price_7d"] == 0.45
 
     @patch("cli.commands.capacity_cmd.get_capacity_checker")
     @patch("cli.commands.capacity_cmd.get_output_formatter")

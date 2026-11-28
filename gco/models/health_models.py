@@ -2,7 +2,7 @@
 Health monitoring data models for GCO (Global Capacity Orchestrator on AWS).
 
 This module defines dataclasses for health monitoring including:
-- ResourceUtilization: Current CPU/memory/GPU utilization percentages
+- ResourceUtilization: Current CPU/memory/GPU utilization percentages and GPU counts
 - HealthStatus: Complete health status report with utilization and thresholds
 
 These models are used by the health monitor service to track and report
@@ -57,15 +57,23 @@ class ResourceUtilization:
     over-commit is a real cluster state, so it is accepted and compared with
     the thresholds like any other value rather than rejected as invalid.
 
+    The GPU percentage is 0.0 both when no node has GPUs and when no GPU is
+    requested; the GPU counts tell the two apart.
+
     Attributes:
         cpu: CPU utilization percentage (0.0 or more)
         memory: Memory utilization percentage (0.0 or more)
         gpu: GPU utilization percentage (0.0 or more)
+        gpu_allocatable: GPUs the nodes report as allocatable, or None when
+            not counted
+        gpu_requested: GPUs requested by running pods, or None when not counted
     """
 
     cpu: float
     memory: float
     gpu: float
+    gpu_allocatable: int | None = None
+    gpu_requested: int | None = None
 
     def __post_init__(self) -> None:
         """Validate utilization values"""
@@ -74,20 +82,35 @@ class ResourceUtilization:
                 raise ValueError(
                     f"{field_name} must be a finite, non-negative percentage, got {value}"
                 )
+        for field_name, count in [
+            ("gpu_allocatable", self.gpu_allocatable),
+            ("gpu_requested", self.gpu_requested),
+        ]:
+            if count is not None and (not isinstance(count, int) or count < 0):
+                raise ValueError(
+                    f"{field_name} must be a non-negative integer or None, got {count}"
+                )
 
 
 @dataclass
 class HealthStatus:
-    """Health status report for a cluster"""
+    """Health status report for a cluster.
+
+    ``resource_utilization``, ``active_jobs`` and ``pending_pods`` come from one
+    cluster reading, so they are set together or not at all. A status without
+    a reading (the ``unhealthy`` one reported when a read failed and no recent
+    reading could stand in) leaves all three None, with ``message`` naming the
+    failed read: zeros there would describe an idle cluster nobody measured.
+    """
 
     cluster_id: str
     region: str
     timestamp: datetime
     status: Literal["healthy", "unhealthy"]
-    resource_utilization: ResourceUtilization
+    resource_utilization: ResourceUtilization | None
     thresholds: ResourceThresholds  # Forward reference to avoid circular import
-    active_jobs: int
-    pending_pods: int = 0
+    active_jobs: int | None
+    pending_pods: int | None = 0
     pending_requested: RequestedResources | None = None
     message: str | None = None
 
@@ -99,29 +122,46 @@ class HealthStatus:
         if not self.region:
             raise ValueError("Region cannot be empty")
 
-        if self.active_jobs < 0:
+        reading = (self.resource_utilization, self.active_jobs, self.pending_pods)
+        if any(part is None for part in reading) and any(part is not None for part in reading):
+            raise ValueError(
+                "resource_utilization, active_jobs and pending_pods are one cluster "
+                "reading: set all three or none"
+            )
+
+        if self.active_jobs is not None and self.active_jobs < 0:
             raise ValueError("Active jobs count cannot be negative")
 
-        if self.pending_pods < 0:
+        if self.pending_pods is not None and self.pending_pods < 0:
             raise ValueError("Pending pods count cannot be negative")
 
         if self.status not in ["healthy", "unhealthy"]:
             raise ValueError("Status must be 'healthy' or 'unhealthy'")
 
+        if self.resource_utilization is None and self.status != "unhealthy":
+            raise ValueError("A status without a cluster reading must be 'unhealthy'")
+
     def is_healthy(self) -> bool:
-        """Check if the cluster is healthy based on enabled thresholds."""
+        """Check if the cluster is healthy based on enabled thresholds.
+
+        A status without a cluster reading is never healthy.
+        """
+        utilization, pending_pods = self.resource_utilization, self.pending_pods
+        if utilization is None or pending_pods is None:
+            return False
+
         utilization_ok = all(
             self.thresholds.is_disabled(name) or value <= getattr(self.thresholds, name)
             for name, value in (
-                ("cpu_threshold", self.resource_utilization.cpu),
-                ("memory_threshold", self.resource_utilization.memory),
-                ("gpu_threshold", self.resource_utilization.gpu),
+                ("cpu_threshold", utilization.cpu),
+                ("memory_threshold", utilization.memory),
+                ("gpu_threshold", utilization.gpu),
             )
         )
 
         pending_ok = (
             self.thresholds.is_disabled("pending_pods_threshold")
-            or self.pending_pods <= self.thresholds.pending_pods_threshold
+            or pending_pods <= self.thresholds.pending_pods_threshold
         )
 
         pending_resources_ok = True
@@ -144,39 +184,43 @@ class HealthStatus:
         return utilization_ok and pending_ok and pending_resources_ok
 
     def get_threshold_violations(self) -> list[str]:
-        """Get violations for enabled thresholds only."""
+        """Get violations for enabled thresholds only.
+
+        A status without a cluster reading has none: nothing was measured
+        against the thresholds (its ``message`` names the failed read).
+        """
+        utilization, pending_pods = self.resource_utilization, self.pending_pods
+        if utilization is None or pending_pods is None:
+            return []
+
         violations = []
 
         if (
             not self.thresholds.is_disabled("cpu_threshold")
-            and self.resource_utilization.cpu > self.thresholds.cpu_threshold
+            and utilization.cpu > self.thresholds.cpu_threshold
         ):
-            violations.append(
-                f"CPU: {self.resource_utilization.cpu:.1f}% > {self.thresholds.cpu_threshold}%"
-            )
+            violations.append(f"CPU: {utilization.cpu:.1f}% > {self.thresholds.cpu_threshold}%")
 
         if (
             not self.thresholds.is_disabled("memory_threshold")
-            and self.resource_utilization.memory > self.thresholds.memory_threshold
+            and utilization.memory > self.thresholds.memory_threshold
         ):
             violations.append(
-                f"Memory: {self.resource_utilization.memory:.1f}% > {self.thresholds.memory_threshold}%"
+                f"Memory: {utilization.memory:.1f}% > {self.thresholds.memory_threshold}%"
             )
 
         if (
             not self.thresholds.is_disabled("gpu_threshold")
-            and self.resource_utilization.gpu > self.thresholds.gpu_threshold
+            and utilization.gpu > self.thresholds.gpu_threshold
         ):
-            violations.append(
-                f"GPU: {self.resource_utilization.gpu:.1f}% > {self.thresholds.gpu_threshold}%"
-            )
+            violations.append(f"GPU: {utilization.gpu:.1f}% > {self.thresholds.gpu_threshold}%")
 
         if (
             not self.thresholds.is_disabled("pending_pods_threshold")
-            and self.pending_pods > self.thresholds.pending_pods_threshold
+            and pending_pods > self.thresholds.pending_pods_threshold
         ):
             violations.append(
-                f"Pending Pods: {self.pending_pods} > {self.thresholds.pending_pods_threshold}"
+                f"Pending Pods: {pending_pods} > {self.thresholds.pending_pods_threshold}"
             )
 
         if self.pending_requested:

@@ -801,25 +801,16 @@ def test_manifest_processor_environment_accepts_nonempty_trust_lists(
     assert config["trusted_dockerhub_orgs"] == ["trustedorg"]
 
 
-def test_queue_processor_helpers_cover_suffixes_tolerations_and_ephemeral() -> None:
-    import gco.services.queue_processor as queue
+def _use_sqs_policy(monkeypatch: pytest.MonkeyPatch, queue: Any, **changes: Any) -> None:
+    """Have the SQS consumer judge under the shipped policy with *changes*.
 
-    assert queue._parse_memory_string("2k") == 2_000
-    assert queue._parse_memory_string("3M") == 3_000_000
-    assert queue._positive_quantity("not-a-number") is True
-    assert queue._toleration_matches(
-        [
-            "bad",
-            {"key": "other"},
-            {"key": "nvidia.com/gpu", "operator": "Equal", "value": "false"},
-            {"key": "nvidia.com/gpu", "operator": "Equal", "value": "true"},
-        ],
-        "nvidia.com/gpu",
-    )
-    assert queue._iter_containers({"ephemeralContainers": [{"name": "debug"}]}) == [
-        ("ephemeralContainer", {"name": "debug"})
-    ]
-    assert queue._is_image_trusted("") is True
+    The consumer reads its policy once, at import, so a test that does not
+    reload it would otherwise inherit whatever environment the last reload saw.
+    """
+    from gco.job_admission import JobValidationPolicy
+
+    policy = JobValidationPolicy.from_cdk_context({})._replace(**changes)
+    monkeypatch.setattr(queue, "JOB_VALIDATION_POLICY", policy)
 
 
 def test_queue_processor_validation_shape_toggle_and_memory_paths(
@@ -827,8 +818,9 @@ def test_queue_processor_validation_shape_toggle_and_memory_paths(
 ) -> None:
     import gco.services.queue_processor as queue
 
-    monkeypatch.setattr(queue, "REQUIRE_ACCELERATOR_TOLERATION", False)
-    monkeypatch.setattr(queue, "MAX_MEMORY", 10**15)
+    _use_sqs_policy(
+        monkeypatch, queue, require_accelerator_toleration=False, max_memory_bytes=10**15
+    )
     trainjob = {
         "apiVersion": "trainer.kubeflow.org/v1alpha1",
         "kind": "TrainJob",
@@ -861,9 +853,9 @@ def test_queue_processor_validation_shape_toggle_and_memory_paths(
         },
     }
     valid, error = queue.validate_manifest(trainjob)
-    assert valid is True and error == ""
+    assert valid is True and error is None
 
-    monkeypatch.setattr(queue, "MAX_MEMORY", 1)
+    _use_sqs_policy(monkeypatch, queue, require_accelerator_toleration=False, max_memory_bytes=1)
     valid, error = queue.validate_manifest(trainjob)
     assert valid is False and "Memory" in error
 
@@ -875,6 +867,8 @@ def test_queue_processor_validation_shape_toggle_and_memory_paths(
         {"kind": "Job", "spec": {"template": {"spec": None}}},
         {"kind": "CronJob", "spec": {"jobTemplate": None}},
         {"kind": "CronJob", "spec": {"jobTemplate": {"spec": None}}},
+        {"kind": "CronJob", "spec": {"jobTemplate": {"spec": {"template": None}}}},
+        {"kind": "CronJob", "spec": {"jobTemplate": {"spec": {"template": {"spec": []}}}}},
         {"kind": "Pod", "spec": {}},
     ],
 )
@@ -2938,9 +2932,9 @@ def test_queue_processor_uses_kubernetes_memory_parser_and_retains_bad_workload(
     manifest["spec"]["template"]["spec"]["containers"][0]["resources"] = {
         "requests": {"memory": "2M"}
     }
-    monkeypatch.setattr(queue, "MAX_MEMORY", 2_000_000)
-    assert queue.validate_manifest(manifest) == (True, "")
-    monkeypatch.setattr(queue, "MAX_MEMORY", 1_999_999)
+    _use_sqs_policy(monkeypatch, queue, max_memory_bytes=2_000_000)
+    assert queue.validate_manifest(manifest) == (True, None)
+    _use_sqs_policy(monkeypatch, queue, max_memory_bytes=1_999_999)
     valid, error = queue.validate_manifest(manifest)
     assert valid is False and "Memory" in error
 
@@ -3243,8 +3237,14 @@ def test_queue_processor_accepts_multiple_explicitly_non_root_containers(
         }
         for name in ("trainer", "sidecar")
     ]
-    monkeypatch.setattr(queue, "BLOCK_RUN_AS_ROOT", True)
-    assert queue.validate_manifest(manifest) == (True, "")
+    from gco.manifest_security_policy import MANIFEST_SECURITY_POLICY_DEFAULTS
+
+    _use_sqs_policy(
+        monkeypatch,
+        queue,
+        security={**MANIFEST_SECURITY_POLICY_DEFAULTS, "block_run_as_root": True},
+    )
+    assert queue.validate_manifest(manifest) == (True, None)
 
 
 @pytest.mark.asyncio

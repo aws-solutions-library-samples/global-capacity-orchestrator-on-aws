@@ -10,11 +10,13 @@ from typing import Any
 import click
 from botocore.exceptions import ClientError
 
+from gco.aws_names import is_aws_region_name
 from gco.bedrock import BEDROCK_FTU_REMEDIATION, is_bedrock_ftu_form_error
 
 from ..capacity import get_capacity_checker
 from ..capacity.blocks import group_rejections
 from ..capacity.history import METRIC_FIELDS
+from ..capacity.multi_region import NO_GPU_NODES_REASON
 from ..config import GCOConfig
 from ..output import confirm, format_capacity_table, get_output_formatter, interactive_echo
 
@@ -227,16 +229,25 @@ def spot_prices(config: Any, instance_type: Any, region: Any, days: Any) -> None
                 return
             # JSON/YAML keep the list shape: an empty result is `[]`.
 
+        if config.output_format != "table":
+            # The `*_7d` field names stay for JSON/YAML readers; `window_days`
+            # says what they cover.
+            formatter.print(prices)
+            return
+        # The table's headers name the window the figures cover.
+        window = prices[0].window_days
         formatter.print(
-            prices,
-            columns=[
-                "availability_zone",
-                "current_price",
-                "avg_price_7d",
-                "min_price_7d",
-                "max_price_7d",
-                "price_stability",
-            ],
+            [
+                {
+                    "availability_zone": price.availability_zone,
+                    "current_price": price.current_price,
+                    f"avg_price_{window}d": price.avg_price_7d,
+                    f"min_price_{window}d": price.min_price_7d,
+                    f"max_price_{window}d": price.max_price_7d,
+                    "price_stability": price.price_stability,
+                }
+                for price in prices
+            ]
         )
 
     except Exception as e:
@@ -424,7 +435,7 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
                     missing = set(c.unavailable_signals)
                     queue = "-" if "queue" in missing else str(c.queue_depth)
                     running = "-" if "jobs" in missing else str(c.running_jobs)
-                    gpu = "-" if "gpu" in missing else f"{c.gpu_utilization:.0f}%"
+                    gpu = _gpu_cell(c.gpu_utilization, c.total_gpus, measured="gpu" not in missing)
                     cpu = "-" if "cpu" in missing else f"{c.cpu_utilization:.0f}%"
                     print(
                         f"  {c.region:<15} {queue:>5}  {running:>7}  {gpu:>4}  {cpu:>5}  "
@@ -432,6 +443,8 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
                     )
 
                 print()
+                if any(c.without_gpu_nodes for c in capacities):
+                    print(f"  GPU% none: {NO_GPU_NODES_REASON}\n")
                 best = min(capacities, key=lambda x: x.recommendation_score)
                 formatter.print_info(f"Recommended region: {best.region} (lowest score = best)")
             else:
@@ -440,6 +453,16 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
     except Exception as e:
         formatter.print_error(f"Failed to get capacity status: {e}")
         sys.exit(1)
+
+
+def _gpu_cell(utilization: float, total_gpus: int | None, *, measured: bool = True) -> str:
+    """A Region's GPU% cell: ``-`` unmeasured, ``none`` without GPU nodes, else the percent.
+
+    A Region without GPU nodes reads 0%, which is no idle GPU.
+    """
+    if not measured:
+        return "-"
+    return "none" if total_gpus == 0 else f"{utilization:.0f}%"
 
 
 def _ranked_region_line(backend: str, entry: dict[str, Any]) -> str:
@@ -462,7 +485,8 @@ def _ranked_region_line(backend: str, entry: dict[str, Any]) -> str:
             f"pending={'?' if pending is None else pending}, "
             f"headroom={'?' if headroom is None else headroom}"
         )
-    return f"{line}, queue={entry['queue_depth']}, gpu={entry['gpu_utilization']:.0f}%"
+    gpu = _gpu_cell(entry["gpu_utilization"], entry.get("total_gpus"))
+    return f"{line}, queue={entry['queue_depth']}, gpu={gpu}"
 
 
 @capacity.command("recommend-region")
@@ -569,8 +593,6 @@ _AI_DISCLAIMER_LINES = (
     "",
 )
 
-#: An AWS Region name (us-east-1, ap-southeast-5, us-gov-west-1).
-_AWS_REGION_NAME = re.compile(r"^[a-z]{2,4}(?:-[a-z0-9]+)+-[0-9]+$")
 #: An EC2 instance type once aliases are expanded (g5.xlarge, p6-b200.48xlarge).
 _EC2_INSTANCE_TYPE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9-]+$")
 
@@ -587,7 +609,7 @@ def _ai_instance_types(ctx: click.Context, param: click.Parameter, value: Any) -
     for item in value or ():
         canonical, note = normalize_instance_type(item)
         canonical = canonical.strip().lower()
-        if not _EC2_INSTANCE_TYPE.match(canonical):
+        if not _EC2_INSTANCE_TYPE.fullmatch(canonical):
             raise click.BadParameter(
                 f"{item!r} is not an EC2 instance type" + (f" ({note})" if note else ""),
                 ctx=ctx,
@@ -605,7 +627,7 @@ def _aws_region_names(ctx: click.Context, param: click.Parameter, value: Any) ->
     regions: list[str] = []
     for item in value if isinstance(value, tuple) else (value,):
         name = item.strip().lower()
-        if not _AWS_REGION_NAME.match(name):
+        if not is_aws_region_name(name):
             raise click.BadParameter(f"{item!r} is not an AWS Region name", ctx=ctx, param=param)
         if name not in regions:
             regions.append(name)

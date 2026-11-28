@@ -12,7 +12,10 @@ What lands in the block:
 * ``regions``: sorted list of deployed regions.
 * ``cluster_metrics``: per-region snapshot keyed by region. Each entry
   carries ``queue_depth``, ``running_jobs``, ``pending_jobs``,
-  ``gpu_utilization``, ``cpu_utilization``, ``recommendation_score``.
+  ``gpu_utilization``, ``cpu_utilization``, ``recommendation_score``, and
+  the health monitor's GPU counts ``total_gpus`` and ``available_gpus``
+  (None when not published; a ``total_gpus`` of 0 is a Region without GPU
+  nodes, whose 0% ``gpu_utilization`` is no idle GPU).
   The keys mirror the fields :class:`cli.capacity.multi_region.RegionCapacity`
   exposes — the reuse keeps the gather path fast (one CloudWatch +
   one SQS roundtrip per region) and the data shape consistent with
@@ -57,6 +60,11 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = ["gather_session_environment"]
+
+
+def _gpu_count(value: object) -> int | None:
+    """A GPU count the capacity checker read, or None when it read none."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _safe_get_checker() -> MultiRegionCapacityChecker | None:
@@ -177,6 +185,8 @@ def gather_session_environment(
             "gpu_utilization": float(cap.gpu_utilization),
             "cpu_utilization": float(cap.cpu_utilization),
             "recommendation_score": float(cap.recommendation_score),
+            "total_gpus": _gpu_count(cap.total_gpus),
+            "available_gpus": _gpu_count(cap.available_gpus),
         }
 
     sorted_regions = sorted(cluster_metrics.keys())

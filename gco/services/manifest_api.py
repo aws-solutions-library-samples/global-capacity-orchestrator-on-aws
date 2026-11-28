@@ -52,8 +52,8 @@ from gco.services.template_store import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-18T16:59:04Z
-# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
+# Generated at (UTC): 2026-11-26T07:28:09Z
+# Generated from Git commit: 30e51b52aa66343af9e39715ecf06f6ef43d9100
 # Flowchart(s) generated from this file:
 #   * ``lifespan`` -> ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.png``)
@@ -454,7 +454,9 @@ async def get_job_validation_policy() -> dict[str, Any]:
     1. ``policy`` — the front-door checks the manifest processor and the SQS
        queue processor both apply (they read the same env vars, so neither
        submission path is a bypass).
-    2. ``cluster_enforcement.limit_ranges`` — per-container ceilings.
+    2. ``cluster_enforcement.limit_ranges`` (CPU, memory) and
+       ``cluster_enforcement.admission_policies`` (GPUs) — per-container
+       ceilings.
     3. ``cluster_enforcement.resource_quotas`` — namespace aggregate ceilings.
 
     A manifest must clear all three. Layers 2 and 3 are read live from the

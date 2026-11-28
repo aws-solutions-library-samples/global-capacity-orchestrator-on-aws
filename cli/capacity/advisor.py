@@ -269,12 +269,17 @@ def _cluster_metrics(region: str, capacity: Any) -> dict[str, Any]:
 
     Reporting an unread signal as 0 told the model an unmeasured cluster was
     idle. ``pending_jobs`` (never populated) and the internal
-    ``recommendation_score`` are left out.
+    ``recommendation_score`` are left out. ``total_gpus`` and
+    ``available_gpus`` are the health monitor's GPU counts, None when not
+    read; a ``total_gpus`` of 0 is a Region without GPU nodes, whose 0% GPU
+    utilization is no idle GPU.
     """
     unavailable = {
         signal for signal in (capacity.unavailable_signals or []) if isinstance(signal, str)
     }
     status = capacity.telemetry_status
+    total_gpus = getattr(capacity, "total_gpus", None)
+    available_gpus = getattr(capacity, "available_gpus", None)
     return {
         "region": region,
         "telemetry_status": status if isinstance(status, str) else "unknown",
@@ -283,7 +288,22 @@ def _cluster_metrics(region: str, capacity: Any) -> dict[str, Any]:
         "running_jobs": None if "jobs" in unavailable else capacity.running_jobs,
         "gpu_utilization": None if "gpu" in unavailable else capacity.gpu_utilization,
         "cpu_utilization": None if "cpu" in unavailable else capacity.cpu_utilization,
+        "total_gpus": total_gpus if isinstance(total_gpus, int) else None,
+        "available_gpus": available_gpus if isinstance(available_gpus, int) else None,
     }
+
+
+def _gpu_count_line(metrics: Mapping[str, Any]) -> str:
+    """The cluster section's line for a Region's GPU counts; empty when none were read."""
+    total, available = metrics.get("total_gpus"), metrics.get("available_gpus")
+    if not isinstance(total, int):
+        return ""
+    if total == 0:
+        return (
+            "    - GPUs: none allocatable (no GPU nodes running; EKS Auto Mode "
+            "launches them on demand)\n"
+        )
+    return f"    - GPUs: {available} of {total} allocatable free\n"
 
 
 def _format_metric(value: Any, suffix: str = "", spec: str = "") -> str:
@@ -1242,6 +1262,7 @@ Respond ONLY with the JSON object, no additional text."""
             section += (
                 f"    - GPU Utilization: {_format_metric(m.get('gpu_utilization'), '%', '.1f')}\n"
             )
+            section += _gpu_count_line(m)
             section += (
                 f"    - CPU Utilization: {_format_metric(m.get('cpu_utilization'), '%', '.1f')}\n"
             )
@@ -1327,7 +1348,9 @@ Respond ONLY with the JSON object, no additional text."""
                 details.append(f"block trend {entry['capacity_block_trend']:+.2f}")
             details.append(f"queue depth {entry.get('queue_depth', 'N/A')}")
             gpu_util = entry.get("gpu_utilization")
-            if gpu_util is not None:
+            if entry.get("total_gpus") == 0:
+                details.append("no GPU nodes")
+            elif gpu_util is not None:
                 details.append(f"GPU util {gpu_util:.0f}%")
             section += f" ({', '.join(details)})\n"
         return section + "\n"

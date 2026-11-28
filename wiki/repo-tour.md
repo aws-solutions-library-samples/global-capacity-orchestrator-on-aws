@@ -26,6 +26,10 @@ door to open. Descriptions below are the packages' own words, condensed.
   — the `gco` command-line interface for managing infrastructure, jobs,
   inference endpoints, and operations. Reference:
   [docs/CLI.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/CLI.md).
+- [`cli/dashboard/`](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/tree/main/cli/dashboard)
+  — the local web dashboard `gco dashboard` serves, a Streamlit app on the
+  same managers and API client as the CLI. Guide:
+  [docs/DASHBOARD.md](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/DASHBOARD.md).
 - [`gco_mcp/`](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/gco_mcp/README.md)
   — an MCP server exposing the CLI and the whole project (docs, examples,
   source, manifests) as tools for LLM interaction. Some tool groups are

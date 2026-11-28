@@ -46,9 +46,9 @@
 
 **In production:** Manifold Bio held **4,540 GPUs at once across nine AWS Regions** through GCO, and its protein design campaigns now finish in about a week instead of a month. [See the numbers](#in-production-at-manifold-bio).
 
-![A recorded gco session: fleet status, capacity discovery, four schedulers, shared storage, a vector search and live LLM inference](demo/live_demo.gif)
+![The GCO dashboard's Fleet page: every workload Region on a world map with its health and load, the fleet's headline numbers, and each Region's GPU, CPU and memory utilization](images/gco_dashboard_fleet.png)
 
-<sub>A real `gco` session, reproducible from [`demo/live_demo.sh`](demo/live_demo.sh): fleet status, capacity discovery, four schedulers plus KEDA, shared storage, a globally replicated vector store and live LLM inference. More recordings are under [See it running](#see-it-running).</sub>
+<sub>The [GCO dashboard](docs/DASHBOARD.md) (`gco dashboard start`) on a live three-Region deployment: the whole fleet on one map, with pages for Jobs, the central queue, inference endpoints and a chat playground, capacity and prices, costs and the platform. It runs on your machine with your AWS credentials. The live demo and the other terminal recordings are under [See it running](#see-it-running).</sub>
 
 ## In production at Manifold Bio
 
@@ -228,7 +228,7 @@ A host install additionally needs:
 
 <!-- -->
 
-> **The whole fleet in one view.** `gco status` gathers the stacks, queue depth, jobs, capacity and inference endpoints of every Region into one report. Each section reports its own status, so one failed read doesn't hide the rest. Add `--watch 10` to keep it refreshing, or `--fail-on-findings` to make it exit non-zero when it finds an error. See [Status Commands](docs/CLI.md#status-commands).
+> **The whole fleet in one view.** `gco status` gathers the stacks, add-on convergence, queue depth, jobs, capacity and inference endpoints of every Region into one report. Each section reports its own status, so one failed read doesn't hide the rest. Add `--watch 10` to keep it refreshing, or `--fail-on-findings` to make it exit non-zero when it finds an error. See [Status Commands](docs/CLI.md#status-commands).
 
 <!-- -->
 
@@ -290,7 +290,16 @@ The [Quick Start Guide](QUICKSTART.md) walks through every step with the output 
 
 ## See it running
 
-Real terminal recordings, not mock-ups. Each one is reproducible from the script linked beneath it; the live demo itself plays at the top of this page.
+Real terminal recordings, not mock-ups. Each one is reproducible from the script linked beneath it.
+
+<details>
+<summary>🎬 Live demo recording — fleet status, capacity discovery, four schedulers, shared storage, vector search and live LLM inference</summary>
+
+![A recorded gco session: fleet status, capacity discovery, four schedulers, shared storage, a vector search and live LLM inference](demo/live_demo.gif)
+
+*A real `gco` session, reproducible from [`demo/live_demo.sh`](demo/live_demo.sh): fleet status, capacity discovery, four schedulers plus KEDA, shared storage, a globally replicated vector store and live LLM inference ([walkthrough](demo/LIVE_DEMO.md) · [re-record](demo/record_demo.sh))*
+
+</details>
 
 <details>
 <summary>📦 Deploy recording</summary>

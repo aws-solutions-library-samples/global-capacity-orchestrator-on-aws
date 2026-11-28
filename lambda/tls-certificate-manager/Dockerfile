@@ -16,11 +16,16 @@ RUN echo "dnf security epoch ${DNF_SECURITY_EPOCH}" \
     && dnf upgrade -y --releasever=latest \
     && dnf clean all
 
-COPY requirements.txt .
+# The build context is the repository root (see the image asset in
+# gco/stacks/api_gateway_global_stack.py), so requirements-lock.txt can
+# constrain the complete transitive graph, as it does for the service images;
+# requirements.txt pins the direct dependencies.
+COPY lambda/tls-certificate-manager/requirements.txt requirements-lock.txt ./
 RUN for attempt in 1 2 3; do \
         if pip install --no-cache-dir \
             --retries 10 --timeout 120 --resume-retries 5 \
             --requirement requirements.txt \
+            --constraint requirements-lock.txt \
             --target "${LAMBDA_TASK_ROOT}"; then \
             break; \
         fi; \
@@ -35,7 +40,7 @@ RUN for attempt in 1 2 3; do \
 # the base image ships and no pin of ours controls) stop reaching the
 # image's vulnerability scan.
 
-COPY handler.py .
+COPY lambda/tls-certificate-manager/handler.py .
 
 # Lambda normally supplies a least-privileged runtime user; declare one
 # explicitly so the image remains non-root in generic container runtimes too.

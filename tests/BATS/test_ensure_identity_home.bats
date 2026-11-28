@@ -151,8 +151,8 @@ FAKE
     run_script --home-base "$HOME_BASE" --name hpc --uid 2000 --gid 3000
 
     [ "$status" -eq 0 ]
-    ! grep -q '^getent' "$CALLS"
-    ! grep -q '^useradd' "$CALLS"
+    [ "$(grep -c '^getent' "$CALLS")" -eq 0 ]
+    [ "$(grep -c '^useradd' "$CALLS")" -eq 0 ]
 }
 
 @test "--create-user adds the group and the user, then the home" {
@@ -177,7 +177,7 @@ FAKE
     run_script --home-base "$HOME_BASE" --name hpc --uid 2000 --gid 3000 --create-user
 
     [ "$status" -eq 0 ]
-    ! grep -q '^groupadd' "$CALLS"
+    [ "$(grep -c '^groupadd' "$CALLS")" -eq 0 ]
     grep -qx -- "useradd --uid 2000 --gid 3000 --home-dir $HOME_BASE/hpc --no-create-home --shell /bin/bash --comment GCO Slurm identity hpc" "$CALLS"
 }
 
@@ -187,8 +187,8 @@ FAKE
 
     [ "$status" -eq 0 ]
     [[ "${lines[0]}" == "user hpc (uid=2000) already exists" ]]
-    ! grep -q '^useradd' "$CALLS"
-    ! grep -q '^groupadd' "$CALLS"
+    [ "$(grep -c '^useradd' "$CALLS")" -eq 0 ]
+    [ "$(grep -c '^groupadd' "$CALLS")" -eq 0 ]
     [ -d "$HOME_BASE/hpc" ]
 }
 
@@ -198,7 +198,7 @@ FAKE
 
     [ "$status" -eq 1 ]
     [[ "$output" == *"uid 2000 already belongs to user ec2-user, not hpc"* ]]
-    ! grep -q '^useradd' "$CALLS"
+    [ "$(grep -c '^useradd' "$CALLS")" -eq 0 ]
     [ ! -d "$HOME_BASE/hpc" ]
 }
 
@@ -217,8 +217,8 @@ FAKE
 
     [ "$status" -eq 1 ]
     [[ "$output" == *"group hpc already exists with another gid; cannot create gid 3000"* ]]
-    ! grep -q '^groupadd' "$CALLS"
-    ! grep -q '^useradd' "$CALLS"
+    [ "$(grep -c '^groupadd' "$CALLS")" -eq 0 ]
+    [ "$(grep -c '^useradd' "$CALLS")" -eq 0 ]
 }
 
 @test "a relative shell and a GECOS with a colon are refused" {

@@ -111,22 +111,7 @@ from gco.job_admission import (
     _untrusted_container_in_pod_spec as _untrusted_container_in_pod_spec,
 )
 from gco.job_admission import (
-    check_keep_warm as check_keep_warm,
-)
-from gco.job_admission import (
-    check_resource_caps as check_resource_caps,
-)
-from gco.job_admission import (
-    check_sandbox as check_sandbox,
-)
-from gco.job_admission import (
-    check_sandbox_runtime_class as check_sandbox_runtime_class,
-)
-from gco.job_admission import (
-    check_security_context as check_security_context,
-)
-from gco.job_admission import (
-    check_tolerations as check_tolerations,
+    admit_manifest,
 )
 from gco.job_admission import (
     extract_pod_spec as extract_pod_spec,
@@ -147,12 +132,6 @@ from gco.job_admission import (
     trainjob_validation_pod_specs as trainjob_validation_pod_specs,
 )
 from gco.job_admission import (
-    validate_image_sources as validate_image_sources,
-)
-from gco.job_admission import (
-    validate_resource_kind as validate_resource_kind,
-)
-from gco.job_admission import (
     weighted_pod_specs as weighted_pod_specs,
 )
 from gco.job_admission import (
@@ -169,13 +148,18 @@ from gco.models import (
     ManifestSubmissionResponse,
     ResourceStatus,
 )
-from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
+from gco.resource_governance import (
+    CONTAINER_GPU_LIMIT_POLICY,
+    CONTAINER_MAX_GPU_ANNOTATION,
+    DEFAULT_MANIFEST_RESOURCE_CAPS,
+    GOVERNED_NAMESPACE,
+)
 from gco.services.k8s_client import BoundedApiClient, k8s_api_timeout_from_env
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-21T20:42:53Z
-# Generated from Git commit: 1d908f3fa649c16f69e32c2af36f5992f62d94d7
+# Generated at (UTC): 2026-11-27T20:56:38Z
+# Generated from Git commit: 3bf3e3df42d9444e91f323e5aeeee6b0f0185c33
 # Flowchart(s) generated from this file:
 #   * ``ManifestProcessor.apply_queued_job`` -> ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.png``)
@@ -468,6 +452,8 @@ class ManifestProcessor:
         self.batch_v1 = client.BatchV1Api(self.api_client)
         self.networking_v1 = client.NetworkingV1Api(self.api_client)
         self.custom_objects = client.CustomObjectsApi(self.api_client)
+        # The GPU cap policy cluster_resource_governance reports.
+        self.admission_v1 = client.AdmissionregistrationV1Api(self.api_client)
 
         # Dynamic client for CRDs - lazy initialized to avoid cluster connection
         # during init, and built once under a lock because requests reach it
@@ -484,7 +470,7 @@ class ManifestProcessor:
         # Resource quotas and limits. Defaults come from the shared source of
         # truth (gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS): two
         # full accelerator-node slices, validated at synth against the
-        # LimitRange / namespace-quota layering invariant.
+        # per-container / namespace-quota layering invariant.
         self.max_cpu_per_manifest = self._parse_cpu_string(
             config_dict.get(
                 "max_cpu_per_manifest",
@@ -646,15 +632,16 @@ class ManifestProcessor:
         }
 
     def cluster_resource_governance(self) -> dict[str, Any]:
-        """Return the live ResourceQuota / LimitRange ceilings per namespace.
+        """Return the live per-container and namespace ceilings per namespace.
 
         The per-manifest caps in
         :meth:`effective_job_validation_policy` are only the **first** of three
         layers. A manifest that clears the front door can still be rejected by
-        the namespace's LimitRange (per-container ceiling) or its ResourceQuota
-        (aggregate ceiling). Reporting only the first layer would let a caller
-        conclude a job is admissible when it is not, so this reads the other
-        two straight from the Kubernetes API.
+        a per-container ceiling (the namespace's LimitRange for CPU and
+        memory, GCO's GPU cap admission policy for GPUs) or by the namespace's
+        ResourceQuota (aggregate ceiling). Reporting only the first layer would
+        let a caller conclude a job is admissible when it is not, so this reads
+        the other two straight from the Kubernetes API.
 
         Fail-soft by design: a Kubernetes read failure yields
         ``status="unavailable"`` with the reason attached rather than raising,
@@ -694,6 +681,7 @@ class ManifestProcessor:
                     ]
                     for item in limit_ranges.items
                 }
+                entry["admission_policies"] = self._container_admission_policies(namespace)
                 entry["status"] = "ok"
             except ApiException as e:
                 logger.warning(
@@ -711,6 +699,35 @@ class ManifestProcessor:
                 entry = {"status": "unavailable", "reason": str(e)}
             namespaces[namespace] = entry
         return namespaces
+
+    def _container_admission_policies(self, namespace: str) -> dict[str, Any]:
+        """The per-container caps GCO's admission policies enforce in ``namespace``.
+
+        One policy so far: the cluster-scoped GPU cap on gco-jobs
+        (04-resource-quotas.yaml), which carries its cap in an annotation. A
+        GPU cap cannot be a LimitRange entry, which would make every pod
+        tolerate the GPU node taint. An absent policy caps nothing, as an
+        absent LimitRange does; any other read failure is raised for
+        :meth:`cluster_resource_governance` to report the namespace
+        unavailable.
+        """
+        if namespace != GOVERNED_NAMESPACE:
+            return {}
+        try:
+            policy = self.admission_v1.read_validating_admission_policy(
+                CONTAINER_GPU_LIMIT_POLICY, _request_timeout=self._k8s_timeout
+            )
+        except ApiException as e:
+            if e.status == 404:
+                return {}
+            raise
+        metadata = present(policy.metadata, "validatingadmissionpolicy.metadata")
+        cap = (metadata.annotations or {}).get(CONTAINER_MAX_GPU_ANNOTATION)
+        return {
+            CONTAINER_GPU_LIMIT_POLICY: {
+                "container_max": {} if cap is None else {"nvidia.com/gpu": cap},
+            }
+        }
 
     def _resource_access_error(self, api_version: str, kind: str, namespace: str) -> str | None:
         """Return an authorization error for a CRUD resource identifier."""
@@ -851,109 +868,25 @@ class ManifestProcessor:
         same effective namespace or the request default could bypass the
         namespace allowlist.
 
+        The checks are :func:`gco.job_admission.admit_manifest`, which the SQS
+        queue processor runs too, against this instance's
+        :meth:`job_validation_policy` and this cluster's sandbox RuntimeClasses.
+
         Returns: ``(is_valid, error_message)``.
         """
         if not self.validation_enabled:
             return True, None
 
         try:
-            # YAML depth check — reject excessively nested documents
-            if not self._check_yaml_depth(manifest):
-                return (
-                    False,
-                    f"Manifest exceeds maximum nesting depth of {self.yaml_max_depth} levels",
-                )
-
-            # Basic structure validation
-            required_fields = ["apiVersion", "kind", "metadata"]
-            for field in required_fields:
-                if field not in manifest:
-                    return False, f"Missing required field: {field}"
-
-            # Validate metadata
-            metadata = manifest.get("metadata", {})
-            if "name" not in metadata:
-                return False, "Missing metadata.name field"
-
-            # Validate namespace
-            namespace = metadata.get("namespace", default_namespace or "gco-jobs")
-            if namespace not in self.allowed_namespaces:
-                return (
-                    False,
-                    f"Namespace '{namespace}' not allowed. Allowed namespaces: {list(self.allowed_namespaces)}",
-                )
-
-            # Validate resource kind using the policy shared with the SQS path.
-            kind_valid, kind_error = validate_resource_kind(manifest, self.allowed_kinds)
-            if not kind_valid:
-                return False, kind_error
-
-            # Every manifest is held to the caps, whatever its kind: a bare Pod
-            # runs on the same nodes as a Job's template, and a manifest with
-            # no pod spec sums to zero. The SQS consumer gates the same way.
-            resource_valid, resource_error = self._validate_resource_limits(manifest)
-            if not resource_valid:
-                return False, resource_error
-
-            # Require accelerator jobs to carry a matching toleration.
-            if self.require_accelerator_toleration:
-                tol_valid, tol_error = self._validate_tolerations(manifest)
-                if not tol_valid:
-                    return False, tol_error
-
-            # Security validations
-            sec_valid, sec_error = self._validate_security_context(manifest)
-            if not sec_valid:
-                return False, f"Security context validation failed: {sec_error}"
-
-            # AWS Nitro Sandbox constraints, then whether this cluster has the
-            # sandbox RuntimeClass at all (gco.job_admission).
-            sandbox_valid, sandbox_error = check_sandbox(manifest)
-            if sandbox_valid:
-                sandbox_valid, sandbox_error = check_sandbox_runtime_class(
-                    manifest, self.runtime_class_exists
-                )
-            if not sandbox_valid:
-                return False, f"Nitro Sandbox validation failed: {sandbox_error}"
-
-            # The keep-warm GPU pool takes only GPU pods that finish (gco.keep_warm).
-            keep_warm_valid, keep_warm_error = check_keep_warm(manifest)
-            if not keep_warm_valid:
-                return False, f"Keep-warm validation failed: {keep_warm_error}"
-
-            # Validate image sources (prevent pulling from untrusted registries)
-            img_valid, img_error = self._validate_image_sources(manifest)
-            if not img_valid:
-                return False, img_error or "Untrusted image sources detected"
-
-            return True, None
-
+            return admit_manifest(
+                manifest,
+                self.job_validation_policy(),
+                runtime_class_exists=self.runtime_class_exists,
+                default_namespace=default_namespace,
+            )
         except Exception as e:
             logger.error(f"Error validating manifest: {e}")
             return False, f"Validation error: {e!s}"
-
-    def _validate_resource_limits(self, manifest: dict[str, Any]) -> tuple[bool, str]:
-        """Validate resource limits in manifest.
-
-        Delegates to :func:`gco.job_admission.check_resource_caps` so the
-        offline and multi-region pre-checks judge a manifest with the same code
-        that gates it here.
-
-        Returns:
-            Tuple of (is_valid, error_message). error_message is empty if valid.
-        """
-        return check_resource_caps(manifest, self.job_validation_policy())
-
-    def _validate_tolerations(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
-        """Require accelerator jobs to carry a matching node toleration.
-
-        Delegates to :func:`gco.job_admission.check_tolerations`; see there for
-        why TrainJob needs every pod-spec view unioned before matching.
-
-        Returns:
-            Tuple of (is_valid, error_message). error_message is None if valid.
-        """
-        return check_tolerations(manifest)
 
     def _requested_accelerators(self, pod_spec: dict[str, Any]) -> set[str]:
         """Return the set of accelerator taint keys any container requests
@@ -969,17 +902,6 @@ class ManifestProcessor:
         """
         return _iter_all_containers(pod_spec)
 
-    def _validate_security_context(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
-        """Validate security context settings.
-
-        Delegates to :func:`gco.job_admission.check_security_context`, which
-        reads the same eight toggles off a policy object instead of ``self``.
-
-        Returns:
-            Tuple of (is_valid, error_message). error_message is None if valid.
-        """
-        return check_security_context(manifest, self.job_validation_policy())
-
     @staticmethod
     def _is_registry_domain(entry: str) -> bool:
         """Check if a registry entry is a proper domain (contains dot or colon).
@@ -989,18 +911,6 @@ class ManifestProcessor:
         organization names (e.g., 'nvidia', 'gco').
         """
         return "." in entry or ":" in entry
-
-    def _validate_image_sources(self, manifest: dict[str, Any]) -> tuple[bool, str | None]:
-        """Validate container image sources against this deployment's allowlists.
-
-        Delegates to the module-level :func:`validate_image_sources` so the
-        REST/SQS services and offline validators share one implementation.
-        """
-        return validate_image_sources(
-            manifest,
-            trusted_registries=self.trusted_registries,
-            trusted_dockerhub_orgs=self.trusted_dockerhub_orgs,
-        )
 
     async def process_manifest_submission(
         self, request: ManifestSubmissionRequest
@@ -1622,6 +1532,7 @@ class ManifestProcessor:
         metadata = present(job.metadata, "job.metadata")
         status = present(job.status, "job.status")
         spec = present(job.spec, "job.spec")
+        verdict = self._get_job_status(job)
 
         return {
             "metadata": {
@@ -1646,16 +1557,27 @@ class ManifestProcessor:
                 "completionTime": (
                     status.completion_time.isoformat() if status.completion_time else None
                 ),
+                # lastTransitionTime is when a Job failed: Kubernetes sets
+                # completionTime only for Jobs that succeed. The detail route
+                # (api_shared._parse_job_to_dict) reports it the same way.
                 "conditions": [
                     {
                         "type": c.type,
                         "status": c.status,
                         "reason": c.reason,
                         "message": c.message,
+                        "lastTransitionTime": (
+                            c.last_transition_time.isoformat() if c.last_transition_time else None
+                        ),
                     }
                     for c in (status.conditions or [])
                 ],
             },
+            # The same verdict GET /api/v1/jobs/{namespace}/{name} reports, in
+            # the job responses' vocabulary (a finished Job "succeeded"), so
+            # list and detail records read alike and the cross-Region
+            # aggregator can pass the field through.
+            "computed_status": "succeeded" if verdict == "completed" else verdict,
         }
 
     def _get_job_status(self, job: V1Job) -> str:

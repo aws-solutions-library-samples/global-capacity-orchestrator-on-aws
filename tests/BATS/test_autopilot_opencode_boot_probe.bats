@@ -94,7 +94,7 @@ probe() {
     [[ "$output" == *"── mcp list output (${FAKE_RUNNER_TEMP}/autopilot-opencode-boot-probe/mcp-list.log) ──"* ]]
     [[ "$output" == *"✗ opencode mcp list did not report every planned server connected: mcp-list:memory mcp-list:count"* ]]
     # The session phase never ran: the MCP proof is a precondition for it.
-    ! grep -q -- '-- run' "$GCO_CALLS"
+    [ "$(grep -c -- '-- run' "$GCO_CALLS")" -eq 0 ]
 
     make_probe_fixture
     probe FAKE_MCP_LIST=unhealthy

@@ -12,7 +12,10 @@ Three image families are discovered, each from the tree rather than listed:
 * **platform services** — ``dockerfiles/Dockerfile.<service>``, built with
   the repository root as context (they ``COPY`` shared ``gco/`` code);
 * **container Lambdas** — ``lambda/<name>/Dockerfile``, built with the
-  Lambda's own directory as context (``*-build`` staging dirs are skipped);
+  Lambda's own directory as context, or with the repository root when the
+  Dockerfile copies repository paths (``COPY lambda/<name>/...``), as the TLS
+  certificate manager's does to read ``requirements-lock.txt``
+  (``*-build`` staging dirs are skipped);
 * **root images** — ``Dockerfile.<name>`` at the repository root (today the
   contributor dev container), built from the root.
 
@@ -86,6 +89,28 @@ def _validated_name(name: str, source: Path) -> str:
     return name
 
 
+#: A ``COPY``/``ADD`` instruction's arguments, after any ``--flag`` options.
+_COPY_INSTRUCTION_RE = re.compile(r"(?:COPY|ADD)\s+(?:--\S+\s+)*(.+)", re.IGNORECASE)
+
+
+def _lambda_build_context(lambda_dir: Path) -> str:
+    """The build context of ``lambda/<name>/Dockerfile``, read from the Dockerfile.
+
+    The repository root when any ``COPY`` or ``ADD`` source is a repository
+    path under ``lambda/``, which only a root-context build can reach; the
+    Lambda's own directory otherwise. Deriving it keeps the CI matrix building
+    each image the way its CDK asset does, with no list to keep.
+    """
+    for line in (lambda_dir / "Dockerfile").read_text(encoding="utf-8").splitlines():
+        match = _COPY_INSTRUCTION_RE.fullmatch(line.strip())
+        if match is None:
+            continue
+        sources = match.group(1).split()[:-1]
+        if any(source.startswith("lambda/") for source in sources):
+            return "."
+    return f"lambda/{lambda_dir.name}"
+
+
 def _image_name(dockerfile: Path) -> str:
     """Derive the image name from a ``Dockerfile.<name>`` filename, validating it."""
     return _validated_name(dockerfile.name[len(_DOCKERFILE_PREFIX) :], dockerfile)
@@ -128,7 +153,7 @@ def discover_image_builds(repo_root: Path = REPO_ROOT) -> list[ImageBuild]:
             ImageBuild(
                 image=_validated_name(lambda_dir.name, lambda_dir),
                 dockerfile=f"lambda/{lambda_dir.name}/Dockerfile",
-                context=f"lambda/{lambda_dir.name}",
+                context=_lambda_build_context(lambda_dir),
             )
         )
     for dockerfile in sorted(repo_root.glob(f"{_DOCKERFILE_PREFIX}*")):

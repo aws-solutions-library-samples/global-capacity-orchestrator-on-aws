@@ -698,6 +698,10 @@ class TestSubmit:
             ({"script": SCRIPT, "working_directory": "relative"}, "absolute path"),
             ({"script": SCRIPT, "working_directory": "/a\n/b"}, "absolute path"),
             ({"script": SCRIPT, "environment": {"1BAD": "x"}}, "is not valid"),
+            # ``$`` also matches before a final newline; these checks are fullmatches.
+            ({"script": SCRIPT, "name": "train.v2\n"}, "name must be"),
+            ({"script": SCRIPT, "partition": "gpu\n"}, "lowercase partition"),
+            ({"script": SCRIPT, "environment": {"OMP_NUM_THREADS\n": "4"}}, "is not valid"),
             ({"script": SCRIPT, "environment": {"OK": "a\nb"}}, "single-line"),
             ({"script": SCRIPT, "environment": {f"V{i}": "x" for i in range(65)}}, "at most 64"),
             ({"script": SCRIPT, "nodes": 0}, "greater than or equal to 1"),

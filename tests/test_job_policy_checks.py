@@ -344,6 +344,8 @@ class TestRegistryDrift:
             "1111222233334444.dkr.ecr.us-east-1.amazonaws.com",
             "evil.dkr.ecr.us-east-1.amazonaws.com",
             "111122223333.dkr.ecr.us-east-1.amazonaws.com.evil.io",
+            # ``$`` also matches before a final newline; the check is a fullmatch.
+            "111122223333.dkr.ecr.us-east-1.amazonaws.com\n",
         ],
     )
     def test_near_miss_hostnames_are_not_treated_as_ecr(self, host: str) -> None:
