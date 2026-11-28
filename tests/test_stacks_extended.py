@@ -2129,13 +2129,13 @@ class TestInferenceStreamingProxyBuild:
         source_inputs: tuple[str, ...] | None,
         project_inputs: tuple[str, ...] = (),
     ) -> None:
-        from cli.stacks import _asset_source_digest, _write_build_manifest
+        from cli.stacks import _asset_input_digests, _write_build_manifest
 
-        source_digest = _asset_source_digest(
+        inputs = _asset_input_digests(
             source, source_inputs=source_inputs, project_inputs=project_inputs
         )
-        assert source_digest is not None
-        _write_build_manifest(build, source_digest)
+        assert inputs is not None
+        _write_build_manifest(build, inputs.source, inputs.project)
 
     @pytest.mark.parametrize(
         "relative_path",

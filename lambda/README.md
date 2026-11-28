@@ -72,8 +72,12 @@ same version (`tests/test_dependency_pin_consistency.py`). The lock is an input
 of all three builds, and a change to it rebuilds them:
 
 - `kubectl-applier-simple`: pip reads the lock from the repository root (it is
-  not copied into the package), and the CLI's build manifest records it with
-  the package's own inputs.
+  not copied into the package), and the CLI's build manifest records the
+  lock's digest (`project_digest`) beside the package's own inputs
+  (`source_digest`). Keeping them apart keeps a build current for an earlier
+  release's CLI, which reads only `source_digest`: during `gco upgrade` that
+  CLI and this release's CDK app both prepare the packages, and they must
+  agree on which build is current.
 - `helm-installer`: the CLI copies the lock into `helm-installer-build`, the
   Docker context the regional stack builds the image from.
 - `tls-certificate-manager`: the image builds from the repository root, like

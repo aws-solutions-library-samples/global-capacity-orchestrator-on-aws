@@ -43,6 +43,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import signal
 import site
@@ -61,7 +62,7 @@ from functools import lru_cache
 from pathlib import Path
 from threading import Event, Lock, RLock, Thread, current_thread, local, main_thread
 from types import FrameType
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, NamedTuple, TypedDict
 
 from botocore.exceptions import ClientError
 
@@ -132,6 +133,9 @@ _KUBECTL_PACKAGE_INPUTS = ("handler.py", "requirements.txt", "manifests")
 _REQUIREMENTS_LOCK = "requirements-lock.txt"
 _LAMBDA_BUILD_MANIFEST = ".gco-build-manifest.json"
 _LAMBDA_BUILD_MANIFEST_VERSION = 1
+#: A CloudFormation stack name: a letter, then letters, digits and hyphens, at
+#: most 128 characters in all. Every line ``cdk list`` prints must be one.
+_CLOUDFORMATION_STACK_NAME = re.compile(r"[A-Za-z][-A-Za-z0-9]{0,127}")
 _LAMBDA_SOURCE_IGNORED_DIRECTORIES = frozenset({"__pycache__", ".mypy_cache", ".pytest_cache"})
 _LAMBDA_SOURCE_IGNORED_FILES = frozenset({".DS_Store"})
 #: The caches the stacks leave out of every zipped Lambda source directory,
@@ -345,27 +349,48 @@ def _asset_tree_digest(
     return digest.hexdigest()
 
 
-def _asset_source_digest(
+class _AssetInputDigests(NamedTuple):
+    """What one asset build was made from, as its completion manifest records it.
+
+    ``source`` digests the asset's own source selection and is recorded as
+    ``source_digest``, exactly as earlier releases record and compare it.
+    ``project`` digests the files outside the source directory that the build
+    also reads (``_CdkAssetSpec.project_inputs``) and is recorded as
+    ``project_digest``; it is None for an asset that reads none.
+
+    Keeping the two apart keeps a build this release publishes current for an
+    earlier release's CLI, which reads only ``source_digest``. ``gco upgrade``
+    needs that: the earlier release's CLI prepares the packages before each CDK
+    command, then this release's app prepares them again while it synthesizes.
+    Had the two disagreed about which build is current, each would rebuild the
+    other's build on every command.
+    """
+
+    source: str
+    project: str | None
+
+
+def _asset_input_digests(
     source_dir: Path,
     *,
     source_inputs: tuple[str, ...] | None,
     project_inputs: tuple[str, ...] = (),
-) -> str | None:
+) -> _AssetInputDigests | None:
     """Hash everything one asset is built from: its source selection and project inputs.
 
     ``source_dir`` is ``<project root>/lambda/<name>`` (``_CdkAssetSpec.paths``),
-    and ``project_inputs`` are relative to that project root. An asset with no
-    project inputs keeps its source selection's own digest, so the manifests
-    already recorded for it stay valid. A missing or unreadable input gives
-    ``None``, like a missing source file.
+    and ``project_inputs`` are relative to that project root. A missing or
+    unreadable input gives ``None``, like a missing source file.
     """
     source_digest = _asset_tree_digest(source_dir, source_inputs=source_inputs)
-    if source_digest is None or not project_inputs:
-        return source_digest
+    if source_digest is None:
+        return None
+    if not project_inputs:
+        return _AssetInputDigests(source_digest, None)
     project_digest = _asset_tree_digest(source_dir.parent.parent, source_inputs=project_inputs)
     if project_digest is None:
         return None
-    return hashlib.sha256(f"{source_digest}\n{project_digest}".encode()).hexdigest()
+    return _AssetInputDigests(source_digest, project_digest)
 
 
 def _read_build_manifest(build_dir: Path) -> dict[str, Any] | None:
@@ -571,8 +596,14 @@ def normalize_staged_asset_modes(assembly_directory: str | Path) -> list[str]:
     return corrected
 
 
-def _write_build_manifest(build_dir: Path, source_digest: str) -> None:
-    """Write the completion marker only after the staged build is complete."""
+def _write_build_manifest(
+    build_dir: Path, source_digest: str, project_digest: str | None = None
+) -> None:
+    """Write the completion marker only after the staged build is complete.
+
+    ``project_digest`` is written only for an asset with project inputs (see
+    :class:`_AssetInputDigests`).
+    """
     build_digest = _asset_tree_digest(build_dir)
     if build_digest is None:
         raise RuntimeError(f"Unable to hash completed Lambda asset {build_dir.name}")
@@ -581,6 +612,8 @@ def _write_build_manifest(build_dir: Path, source_digest: str) -> None:
         "source_digest": source_digest,
         "build_digest": build_digest,
     }
+    if project_digest is not None:
+        manifest["project_digest"] = project_digest
     manifest_path = build_dir / _LAMBDA_BUILD_MANIFEST
     with manifest_path.open("x", encoding="utf-8") as handle:
         json.dump(manifest, handle, sort_keys=True, separators=(",", ":"))
@@ -603,14 +636,18 @@ def _asset_build_is_fresh_unlocked(
     manifest = _read_build_manifest(build_dir)
     if manifest is None or manifest.get("schema_version") != _LAMBDA_BUILD_MANIFEST_VERSION:
         return False
-    source_digest = _asset_source_digest(
+    inputs = _asset_input_digests(
         source_dir, source_inputs=source_inputs, project_inputs=project_inputs
     )
     build_digest = _asset_tree_digest(build_dir)
+    # A manifest without project_digest (an earlier release's build of an
+    # asset that now has project inputs) is stale; one for an asset without
+    # project inputs has none and needs none.
     return (
-        source_digest is not None
+        inputs is not None
         and build_digest is not None
-        and manifest.get("source_digest") == source_digest
+        and manifest.get("source_digest") == inputs.source
+        and manifest.get("project_digest") == inputs.project
         and manifest.get("build_digest") == build_digest
         and _asset_tree_is_world_readable(build_dir)
     )
@@ -1077,10 +1114,10 @@ def _prepare_lambda_asset(
         if not locked:
             return False
         _recover_interrupted_asset_publish(build_dir)
-        source_digest = _asset_source_digest(
+        inputs = _asset_input_digests(
             source_dir, source_inputs=source_inputs, project_inputs=project_inputs
         )
-        if source_digest is None:
+        if inputs is None:
             raise RuntimeError(f"{display_name} source inputs are incomplete or unreadable")
         if _asset_build_is_fresh_unlocked(
             source_dir,
@@ -1090,7 +1127,9 @@ def _prepare_lambda_asset(
         ):
             return False
 
-        print(f"  Building {display_name}...")
+        # Progress goes to stderr: this runs inside the CDK app too, whose
+        # stdout `cdk list` reports as one stack name per line.
+        print(f"  Building {display_name}...", file=sys.stderr)
         staging_dir = Path(
             tempfile.mkdtemp(prefix=f".{build_dir.name}.staging-", dir=build_dir.parent)
         )
@@ -1098,13 +1137,13 @@ def _prepare_lambda_asset(
             builder(staging_dir)
             _normalize_asset_modes(staging_dir)
             if (
-                _asset_source_digest(
+                _asset_input_digests(
                     source_dir, source_inputs=source_inputs, project_inputs=project_inputs
                 )
-                != source_digest
+                != inputs
             ):
                 raise RuntimeError(f"{display_name} sources changed while packaging")
-            _write_build_manifest(staging_dir, source_digest)
+            _write_build_manifest(staging_dir, inputs.source, inputs.project)
             if not _asset_build_is_fresh_unlocked(
                 source_dir,
                 staging_dir,
@@ -1115,7 +1154,7 @@ def _prepare_lambda_asset(
             _publish_staged_asset(staging_dir, build_dir)
         finally:
             _remove_asset_tree(staging_dir)
-        print(f"  {display_name} built successfully")
+        print(f"  {display_name} built successfully", file=sys.stderr)
         return True
 
 
@@ -1174,7 +1213,8 @@ def _check_lambda_zip_size(root: Path, *, display_name: str, remedy: str) -> Non
     )
     if total > limit:
         raise RuntimeError(f"{measurement} Lambda rejects a larger package: {remedy}.")
-    print(f"  Warning: {measurement}")
+    # stderr, like the build progress: this runs inside the CDK app too.
+    print(f"  Warning: {measurement}", file=sys.stderr)
 
 
 def _stderr_tail(stderr: str | bytes | None) -> str:
@@ -2839,7 +2879,18 @@ class StackManager:
         result = self._run_cdk(["list", "--no-ci"], capture_output=True)
         if result.returncode != 0:
             raise RuntimeError(f"Failed to list stacks: {result.stderr}")
-        return [s.strip() for s in result.stdout.strip().split("\n") if s.strip()]
+        names = [s.strip() for s in result.stdout.strip().split("\n") if s.strip()]
+        # The CDK app shares that stdout, so a line it printed would be taken
+        # for a stack and deployed, destroyed or described. Refuse it here,
+        # before any of that starts.
+        stray = [name for name in names if not _CLOUDFORMATION_STACK_NAME.fullmatch(name)]
+        if stray:
+            raise RuntimeError(
+                "cdk list printed lines that are not CloudFormation stack names, so the CDK "
+                f"app wrote them to its stdout: {', '.join(repr(line) for line in stray[:5])}. "
+                "Send the app's own output to stderr."
+            )
+        return names
 
     def synth(self, stack_name: str | None = None, quiet: bool = True) -> str:
         """Synthesize CloudFormation templates from source-current assets."""

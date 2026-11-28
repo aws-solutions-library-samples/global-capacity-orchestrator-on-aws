@@ -1213,8 +1213,10 @@ def test_asset_tree_digest_handles_entries_and_failures(tmp_path: Path) -> None:
     assert stacks._asset_tree_digest(tmp_path / "absent") is None
 
 
-def test_asset_source_digest_adds_project_inputs_to_the_source_selection(tmp_path: Path) -> None:
-    """Project-root inputs join the digest; an asset without any keeps its own digest."""
+def test_asset_input_digests_keep_the_source_digest_and_add_a_project_digest(
+    tmp_path: Path,
+) -> None:
+    """The source selection keeps its own digest; project-root inputs get a second one."""
     import cli.stacks as stacks
 
     source = tmp_path / "lambda" / "demo"
@@ -1225,25 +1227,141 @@ def test_asset_source_digest_adds_project_inputs_to_the_source_selection(tmp_pat
     selection = ("handler.py",)
     project = ("requirements-lock.txt",)
 
-    def digest() -> str | None:
-        return stacks._asset_source_digest(source, source_inputs=selection, project_inputs=project)
+    def digests() -> Any:
+        return stacks._asset_input_digests(source, source_inputs=selection, project_inputs=project)
 
     own = stacks._asset_tree_digest(source, source_inputs=selection)
     assert own is not None
-    assert stacks._asset_source_digest(source, source_inputs=selection) == own
-    combined = digest()
-    assert combined is not None
-    assert combined != own
-    assert digest() == combined
-
+    assert stacks._asset_input_digests(source, source_inputs=selection) == (own, None)
+    first = digests()
+    assert first is not None
+    # The source digest is the one an earlier release computes and records.
+    assert first.source == own
+    assert first.project is not None
+    assert digests() == first
     lock.write_text("pyyaml==6.0.3\nsix==1.17.0\n", encoding="utf-8")
-    assert digest() not in {combined, None}
+    changed = digests()
+    assert changed is not None
+    assert changed.source == own
+    assert changed.project not in {first.project, None}
     lock.unlink()
-    assert digest() is None
+    assert digests() is None
     # A missing source selection gives None before the project inputs are read.
     lock.write_text("pyyaml==6.0.3\n", encoding="utf-8")
     (source / "handler.py").unlink()
-    assert digest() is None
+    assert digests() is None
+
+
+def _earlier_release_finds_fresh(source: Path, build: Path) -> bool:
+    """The completion check of a CLI from before project inputs existed (v9.3.0).
+
+    It knows no ``project_digest``: a build is current when its manifest's
+    ``source_digest`` is the source selection's digest and its ``build_digest``
+    the build tree's.
+    """
+    import cli.stacks as stacks
+
+    manifest = stacks._read_build_manifest(build)
+    return (
+        manifest is not None
+        and manifest.get("schema_version") == 1
+        and manifest.get("source_digest") == stacks._asset_tree_digest(source)
+        and manifest.get("build_digest") == stacks._asset_tree_digest(build)
+        and stacks._asset_tree_is_world_readable(build)
+    )
+
+
+def _prepare_with_lock(tmp_path: Path) -> tuple[Path, Path, Any]:
+    """A demo asset whose build also reads the project's lock file, and its preparer."""
+    import cli.stacks as stacks
+
+    source = tmp_path / "lambda" / "demo"
+    build = tmp_path / "lambda" / "demo-build"
+    source.mkdir(parents=True)
+    (source / "handler.py").write_text("handler = 1\n", encoding="utf-8")
+    (tmp_path / "requirements-lock.txt").write_text("pyyaml==6.0.3\n", encoding="utf-8")
+
+    def builder(staging: Path) -> None:
+        (staging / "handler.py").write_text("handler = 1\n", encoding="utf-8")
+
+    def prepare() -> bool:
+        return stacks._prepare_lambda_asset(
+            source,
+            build,
+            source_inputs=None,
+            display_name="demo Lambda package",
+            builder=builder,
+            project_inputs=("requirements-lock.txt",),
+        )
+
+    return source, build, prepare
+
+
+def test_a_build_with_project_inputs_is_current_for_an_earlier_release_too(
+    tmp_path: Path,
+) -> None:
+    """gco upgrade runs the earlier release's CLI before this release's app.
+
+    Both prepare the packages, so each must find the other's builds current;
+    otherwise every CDK command rebuilt them, and the app printed its progress
+    into the ``cdk list`` output the earlier CLI took for stack names.
+    """
+    import cli.stacks as stacks
+
+    source, build, prepare = _prepare_with_lock(tmp_path)
+    assert prepare() is True
+    manifest = stacks._read_build_manifest(build)
+    assert manifest is not None
+    assert manifest.get("project_digest")
+    assert _earlier_release_finds_fresh(source, build)
+    assert prepare() is False
+    # A lock change makes the build stale here, and the rebuild is still
+    # current for the earlier release.
+    (tmp_path / "requirements-lock.txt").write_text(
+        "pyyaml==6.0.3\nsix==1.17.0\n", encoding="utf-8"
+    )
+    assert prepare() is True
+    assert _earlier_release_finds_fresh(source, build)
+    assert prepare() is False
+
+
+def test_an_earlier_release_build_is_rebuilt_once_and_then_current_for_both(
+    tmp_path: Path,
+) -> None:
+    """A build the earlier CLI published records no project_digest: the lock never shaped it."""
+    import cli.stacks as stacks
+
+    source, build, prepare = _prepare_with_lock(tmp_path)
+    assert prepare() is True
+    # Publish it again as the earlier release does: the same trees, no project_digest.
+    (build / stacks._LAMBDA_BUILD_MANIFEST).unlink()
+    source_digest = stacks._asset_tree_digest(source)
+    assert source_digest is not None
+    stacks._write_build_manifest(build, source_digest)
+    assert _earlier_release_finds_fresh(source, build)
+    assert (
+        stacks._asset_build_is_fresh_unlocked(
+            source, build, source_inputs=None, project_inputs=("requirements-lock.txt",)
+        )
+        is False
+    )
+    assert prepare() is True
+    assert _earlier_release_finds_fresh(source, build)
+    assert prepare() is False
+
+
+def test_asset_preparation_reports_progress_on_stderr_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The CDK app prepares assets too, and cdk list reads its stdout as stack names."""
+    _source, _build, prepare = _prepare_with_lock(tmp_path)
+
+    assert prepare() is True
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "Building demo Lambda package..." in output.err
+    assert "demo Lambda package built successfully" in output.err
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO requires POSIX")
@@ -2765,7 +2883,10 @@ def test_build_kubectl_lambda_warns_near_lambda_unzipped_limit(
     }
     _build_kubectl_lambda_with_installed_tree(stack_manager, tmp_path, installed)
 
-    output = capsys.readouterr().out
+    captured = capsys.readouterr()
+    # stderr: the CDK app builds this package too, and its stdout is cdk list's.
+    assert captured.out == ""
+    output = captured.err
     assert "Warning: kubectl-applier-simple Lambda package unzips to 230.0 MiB" in output
     assert "92% of Lambda's 250 MiB (262,144,000 bytes) limit" in output
     assert "kubernetes/ 200.0 MiB, botocore/ 30.0 MiB" in output

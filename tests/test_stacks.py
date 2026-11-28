@@ -336,11 +336,11 @@ class TestCdkAssetConsumerLocking:
         (root / "requirements-lock.txt").write_text("pyyaml==6.0.3\n", encoding="utf-8")
         (source_dir / "handler.py").write_text(content, encoding="utf-8")
         (build_dir / "handler.py").write_text(content, encoding="utf-8")
-        source_digest = stacks_module._asset_source_digest(
+        inputs = stacks_module._asset_input_digests(
             source_dir, source_inputs=None, project_inputs=HELM_PROJECT_INPUTS
         )
-        assert source_digest is not None
-        stacks_module._write_build_manifest(build_dir, source_digest)
+        assert inputs is not None
+        stacks_module._write_build_manifest(build_dir, inputs.source, inputs.project)
         assert stacks_module._asset_build_is_fresh_unlocked(
             source_dir,
             build_dir,
@@ -363,11 +363,11 @@ class TestCdkAssetConsumerLocking:
         staging_dir = build_dir.with_name(f".{build_dir.name}.staging-test")
         staging_dir.mkdir()
         (staging_dir / "handler.py").write_text(content, encoding="utf-8")
-        source_digest = stacks_module._asset_source_digest(
+        inputs = stacks_module._asset_input_digests(
             source_dir, source_inputs=None, project_inputs=HELM_PROJECT_INPUTS
         )
-        assert source_digest is not None
-        stacks_module._write_build_manifest(staging_dir, source_digest)
+        assert inputs is not None
+        stacks_module._write_build_manifest(staging_dir, inputs.source, inputs.project)
         return staging_dir
 
     def test_consumer_waits_through_publish_rename_gap(self, tmp_path):
@@ -1340,6 +1340,36 @@ class TestStackManagerOperations:
             mock_run.assert_not_called()
             manager.set_stack_list(None)
             assert manager.list_stacks() == ["from-cdk"]
+
+    @pytest.mark.parametrize(
+        "stray",
+        [
+            "  Building helm-installer Lambda package...",
+            "helm-installer Lambda package built successfully",
+            "Stage/gco-us-east-1",
+            "x" * 129,
+        ],
+    )
+    def test_list_stacks_refuses_a_line_that_is_no_stack_name(self, stray):
+        """The CDK app shares cdk list's stdout; a line it printed is no stack to act on."""
+        from cli.stacks import StackManager
+
+        with patch.object(StackManager, "_run_cdk") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout=f"gco-global\n{stray}\ngco-us-east-1\n", stderr=""
+            )
+            with pytest.raises(RuntimeError, match="not CloudFormation stack names") as refused:
+                StackManager(MagicMock()).list_stacks()
+        assert repr(stray.strip()) in str(refused.value)
+        assert "gco-global" not in str(refused.value)
+
+    def test_list_stacks_takes_names_of_any_valid_length(self):
+        from cli.stacks import StackManager
+
+        longest = "g" + "-" * 126 + "1"
+        with patch.object(StackManager, "_run_cdk") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=f"a\n{longest}\n", stderr="")
+            assert StackManager(MagicMock()).list_stacks() == ["a", longest]
 
     def test_list_stacks_error(self):
         """Test error handling when listing stacks fails."""
