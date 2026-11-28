@@ -4313,6 +4313,60 @@ class TestExpectedEcrImages:
             for region in sorted((_REGION, _OTHER_REGION))
         ]
 
+    def test_an_account_agnostic_destination_names_the_verified_account(
+        self, tmp_path: Path
+    ) -> None:
+        """The upgrade harness synthesizes this checkout without an account.
+
+        cdk-assets publishes such an image to the account it runs in, so the
+        target must name that account's bootstrap repository; left as the
+        placeholder it matched no repository, and the run's own image read as
+        an unexplained baseline change at final-inventory.
+        """
+        ctx = self._ctx(tmp_path)
+        ctx.settings.expected_account = _ACCOUNT
+        self._write_assets(
+            tmp_path,
+            _STACK,
+            {
+                "dockerImages": {
+                    "asset-a": self._asset(
+                        _REGION,
+                        "cdk-hnb659fds-container-assets-${AWS::AccountId}-${AWS::Region}",
+                        "tag-a",
+                    )
+                }
+            },
+        )
+
+        (target,) = self._expected(ctx, [_STACK])
+
+        assert (target["region"], target["repository"], target["tag"]) == (
+            _REGION,
+            f"cdk-hnb659fds-container-assets-{_ACCOUNT}-{_REGION}",
+            "tag-a",
+        )
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("repositoryName", "cdk-assets-${AWS::Partition}"),
+            ("imageTag", "${Token[TOKEN.12]}"),
+            ("region", "${AWS::Region}"),
+        ],
+    )
+    def test_a_destination_placeholder_the_harness_cannot_resolve_fails_closed(
+        self, tmp_path: Path, field: str, value: str
+    ) -> None:
+        ctx = self._ctx(tmp_path)
+        ctx.settings.expected_account = _ACCOUNT
+        asset = self._asset(_REGION, "cdk-assets", "tag-a")
+        asset["destinations"]["current_account-current_region"][field] = value
+        self._write_assets(tmp_path, _STACK, {"dockerImages": {"asset-a": asset}})
+
+        with pytest.raises(RuntimeError, match=r"cannot resolve to the repository"):
+            self._expected(ctx, [_STACK])
+
     @pytest.mark.parametrize(
         ("document", "match"),
         [
